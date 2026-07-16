@@ -346,6 +346,29 @@ page of results.
   record, so you can build links or badges from any field (e.g. `row.id`). The returned string is
   inserted verbatim — **escape untrusted content yourself**.
 
+### `Admin` — a whole admin in one component
+
+`alpine::Admin` composes many `Table`s plus a **side-panel** into one fragment: pick a model to
+view/edit (switching is client-side, no reload). You choose the order and interleave **group
+headings**, **separators**, and **custom links**:
+
+```rust
+let html = autocrud::alpine::Admin::new(&engine)
+    .title("Admin")
+    .group("Content")
+    .entity_with("post", |t| t.per_page(10).format("title", "…"))  // configure the Table
+    .entity("tag")                                                 // or defaults
+    .separator()
+    .group("People")
+    .entity_with("user", |t| t.read_only(true))
+    .link("API docs", "/docs")                                     // static link (navigates)
+    .render()?;
+```
+
+`.entities()` appends every registered entity with default config (the quick "just show everything"
+path). Each entity is a full `Table`, so per-row edit, bulk delete, CSV, pickers, and formatters all
+work per model. It's still a fragment — drop it into your shell. See `examples/adminpanel`.
+
 ## OpenAPI
 
 Feature `openapi`. Routes are per-entity and known only at runtime, so the document is built at

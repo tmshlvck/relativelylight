@@ -1,4 +1,4 @@
-<div x-data="ruTable()" x-init="load()">
+<div x-data="ruTable_{{ id }}()" x-init="load()">
   <div class="d-flex justify-content-between align-items-center mb-2">
     <h5 class="mb-0 text-capitalize">{{ title }}</h5>
     <div class="d-flex gap-2">
@@ -247,7 +247,7 @@
   {% endif %}
 
   <script>
-    function ruTable() {
+    function ruTable_{{ id }}() {
       return {
         dataUrl: "{{ data_url }}",
         columns: {{ columns_json|safe }},

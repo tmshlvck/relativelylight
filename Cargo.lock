@@ -3,6 +3,19 @@
 version = 4
 
 [[package]]
+name = "adminpanel-example"
+version = "0.0.0"
+dependencies = [
+ "askama",
+ "autocrud",
+ "axum",
+ "model",
+ "serde_json",
+ "tokio",
+ "utoipa",
+]
+
+[[package]]
 name = "ahash"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"

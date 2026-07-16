@@ -1,0 +1,38 @@
+<div class="d-flex align-items-start gap-4" x-data="ruAdmin('{{ first }}')">
+  <!-- Side panel: model list + group headings + separators + custom links. -->
+  <nav class="flex-shrink-0" style="width: 210px;">
+    {% if has_title %}
+    <h6 class="text-uppercase text-muted fw-semibold px-2 mb-2">{{ title }}</h6>
+    {% endif %}
+    <ul class="nav nav-pills flex-column">
+      {% for e in nav %}
+        {% if e.kind == "entity" %}
+        <li class="nav-item">
+          <a class="nav-link py-1 text-capitalize" href="#"
+             :class="{ active: active === '{{ e.slug }}' }"
+             @click.prevent="active = '{{ e.slug }}'">{{ e.label }}</a>
+        </li>
+        {% else if e.kind == "group" %}
+        <li class="nav-item">
+          <span class="d-block px-2 mt-3 mb-1 small text-uppercase text-muted fw-semibold">{{ e.label }}</span>
+        </li>
+        {% else if e.kind == "separator" %}
+        <li><hr class="my-2"></li>
+        {% else if e.kind == "link" %}
+        <li class="nav-item"><a class="nav-link py-1" href="{{ e.href }}">{{ e.label }}</a></li>
+        {% endif %}
+      {% endfor %}
+    </ul>
+  </nav>
+
+  <!-- Content: every model's table is rendered; only the active one is shown. -->
+  <main class="flex-grow-1" style="min-width: 0;">
+    {% for p in panels %}
+    <div x-show="active === '{{ p.slug }}'" x-cloak>{{ p.html|safe }}</div>
+    {% endfor %}
+  </main>
+
+  <script>
+    function ruAdmin(first) { return { active: first }; }
+  </script>
+</div>
