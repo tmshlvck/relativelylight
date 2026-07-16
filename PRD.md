@@ -7,15 +7,14 @@ code**. It's built from composable components; take the pieces you need.
 | Component | What | Status |
 |---|---|---|
 | **autocrud** (§1) | SeaORM entities → JSON CRUD + machine-readable metadata API | ✅ implemented |
-| **Rune Admin** (§2) | auto-generated web admin: table, create/edit form, bulk + CSV, Swagger | 🟡 in progress |
+| **Rune Admin** (§2) | auto-generated web admin: table, create/edit form, admin side-panel, bulk + CSV | ✅ implemented |
 | **Auth** (§3) | user + group model, TOTP 2FA, PassKeys, OIDC | ⛔ planned |
 | **Files** (§4) | multi-file upload / display / download / camera capture | ⛔ planned |
 
 > ✅ implemented & verified · 🟡 partial · ⛔ future.
 
-The engine crate is **`autocrud`**; the SeaORM backend is **`autocrud::seaorm`**. This document is the
-product spec and roadmap. For the full API, usage, and design, see
-**[docs/AUTOCRUD.md](docs/AUTOCRUD.md)**.
+This document is the product overview and roadmap. For **how to use it** — the full API, formats,
+and design — see **[docs/AUTOCRUD.md](docs/AUTOCRUD.md)**; for a lead-in, **[README.md](README.md)**.
 
 ## Vision: one API, many backends and frontends
 
@@ -23,59 +22,50 @@ Rune is an **umbrella**. A *backend flavor* turns some data source into a stable
 API (§1); a *frontend flavor* consumes that API to render an admin UI (§2). The API is the fixed
 contract in the middle, so backends and frontends vary independently. Today there is one backend
 (SeaORM) and one frontend (`alpine`); the seam is designed so a second of either drops in without a
-core change.
+core change. The library is always **part of** a larger app — the app owns its axum router, its page
+shell, and its OpenAPI document; autocrud contributes routes, HTML fragments, and API schemas into
+them.
 
 ---
 
 ## 1. autocrud — CRUD + metadata API ✅
 
-Introspects SeaORM entities at runtime and serves, with no per-model code:
+Introspects SeaORM entities at runtime and serves, with no per-model code: full CRUD (with
+relations), search / sort / paginate, bulk delete, CSV import/export, and a machine-readable,
+structural `columns` description that drives the UI and OpenAPI. One `MetaModel` per entity is
+auto-generated and lightly tweakable (labels, visibility, defaults, validators, N:M).
 
-1. a **`MetaModel` builder** — auto-generated from an entity, lightly tweakable;
-2. a **structural, ordered `columns`** metadata description (fields + relations, FK in place);
-3. a coherent **HTTP API** — full CRUD (with relations), search/sort/paginate, and bulk delete.
+The metadata is the backend-agnostic contract every backend satisfies and every frontend consumes;
+the backend returns finished JSON and the engine forwards it.
 
-The metadata is **purely structural** (types, keys, relations) plus optional presentation hints
-(label / help / default) a UI may use. It's the backend-agnostic contract every backend satisfies
-and every frontend consumes.
+**Public API and full behavior:** [docs/AUTOCRUD.md](docs/AUTOCRUD.md).
 
-**Locked design decisions:**
-- **Metadata shape** — one ordered `columns` list; a to-one relation appears in place of its FK
-  column; inverse/N:M appended.
-- **Relations by name** — raw FK columns are hidden from the wire; you write `"author": 1`.
-- **Finished JSON at the seam** — the backend returns ready-to-send rows (visibility + `on_read`
-  applied, relations embedded as `{id, label}`); the engine forwards them. No URLs in the data plane;
-  relation metadata carries only `list_url` (for form pickers).
-- **Single-column PK + single-column to-one FK** on registered entities (any URL-safe scalar). N:M
-  junction tables are internal and never registered.
-- **Facade** — `autocrud::seaorm::Crud::new(db, base_path)` → `.register(mm)` → `.into_router()`.
-
-**Full API and usage:** [docs/AUTOCRUD.md](docs/AUTOCRUD.md) — registration, `MetaModel`/`MetaField`/
-`MetaRelation`, routes, read/write formats, query params, validation & transforms, metadata, CSV,
-OpenAPI.
-
-**Deferred / open:**
-- Second backend (`autocrud::memory`, …) — the seam is ORM-neutral, no refactor needed.
-- Relation reads are per-target queries (N+1) — batch/join later, backend-internal.
-- Composite-PK URL token + `row_key` escape hatch; **409** constraint mapping (currently 500).
-- Enum `options`, nullable/`required` extraction, richer field metadata.
+**Roadmap / deferred:**
+- A second backend (`autocrud::memory`, another ORM) — the `Accessor` seam is ORM-neutral, so this
+  needs no core change.
+- Relation reads are per-target queries (N+1) — batch/join inside the backend later.
+- Composite-PK URL token + a `row_key` escape hatch; map constraint violations to **409** (now 500).
+- Richer field metadata (enum `options`, nullable/`required`).
 
 ---
 
-## 2. Rune Admin — auto-generated web admin (`autocrud::alpine`) 🟡
+## 2. Rune Admin — auto-generated web admin (`autocrud::alpine`) ✅
 
-A slightly-customizable admin UI generated from the model, composed of reusable components. Rendering
-is hybrid: the **shape** (columns) is read from the `Engine` in-process and embedded into a
-server-rendered HTML fragment; the **data** is fetched client-side from the JSON API. The app
-provides the shell (loads Bootstrap 5 + Alpine.js, drops in the fragment).
+A customizable admin UI generated from the model. Rendering is hybrid: the column **shape** is read
+from the engine in-process and embedded in a server-rendered HTML **fragment**; **data** is fetched
+client-side from the JSON API. The app supplies the shell (Bootstrap 5 + Alpine.js) and drops the
+fragment in.
 
-**Done:** `alpine::Table` — search, the `|< << … >> >|` pager, a create/edit modal form (typed
-inputs, relation dropdown or search→select picker, inline validation), per-row + bulk delete, CSV
-import/export; plus runtime OpenAPI + Swagger in the example. Usage:
-[docs/AUTOCRUD.md → Web admin](docs/AUTOCRUD.md#web-admin-alpine).
+- **`Table`** — one entity: search, windowed pager, a create/edit modal form (typed inputs, boolean
+  switch, relation dropdown or search→select picker, inline validation), per-row + bulk delete, CSV
+  import/export, boolean/relation badges, and custom per-column cell renderers.
+- **`Admin`** — a model side-panel over many `Table`s (configurable order, group headings,
+  separators, custom links); client-side model switching.
 
-**Deferred:** standalone `alpine::Form`, an `alpine::Admin` shell/orchestrator, per-field widgets,
-transactional CSV import. A future server-rendered `HtmxAdmin` frontend is possible on the same seam.
+**Public API and full behavior:** [docs/AUTOCRUD.md → Web admin](docs/AUTOCRUD.md#web-admin-alpine).
+
+**Roadmap / deferred:** a standalone `alpine::Form`, per-field widget overrides, transactional CSV
+import, and (further out) a server-rendered `HtmxAdmin` frontend on the same seam.
 
 ---
 

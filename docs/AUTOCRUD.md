@@ -12,7 +12,7 @@ thing you declare by hand is many-to-many (SeaORM can't enumerate it).
 - [Validation & transforms](#validation--transforms)
 - [Metadata](#metadata) — for building UIs
 - [CSV import/export](#csv-importexport)
-- [Web admin](#web-admin-alpine) — `alpine::Table`
+- [Web admin](#web-admin-alpine) — `alpine::Table` and `alpine::Admin`
 - [OpenAPI](#openapi)
 - [Composing with your app](#composing-with-your-app) — you own the roots
 - [Architecture & extending](#architecture--extending)
@@ -305,7 +305,8 @@ failed row is reported with its line number and the rest continue.
 
 ## Web admin (`alpine`)
 
-Feature `alpine`. `alpine::Table` renders a Bootstrap-5 + Alpine.js **HTML fragment** for one
+Feature `alpine`. Two components — `Table` (one entity) and `Admin` (a side-panel over many). Both
+render Bootstrap-5 + Alpine.js **HTML fragments**; you own the shell. `alpine::Table` renders one
 entity. The *shape* (columns) is read from the `Engine` in-process and embedded; *data* is fetched
 client-side from the JSON API. You provide a shell page that loads Bootstrap 5.3 CSS/JS and Alpine 3
 (both via CDN) and drops the fragment into a `<div>`.
@@ -365,9 +366,26 @@ let html = autocrud::alpine::Admin::new(&engine)
     .render()?;
 ```
 
-`.entities()` appends every registered entity with default config (the quick "just show everything"
-path). Each entity is a full `Table`, so per-row edit, bulk delete, CSV, pickers, and formatters all
-work per model. It's still a fragment — drop it into your shell. See `examples/adminpanel`.
+Each entity is a full `Table`, so per-row edit, bulk delete, CSV, pickers, and formatters all work
+per model. Switching happens in the browser (all tables render into the page; the side-panel toggles
+which is visible), so it's a single fragment you drop into your shell — no extra routes. See
+`examples/adminpanel`.
+
+Builder methods:
+
+| Method | Effect |
+|---|---|
+| `.title(name)` | heading above the side-panel |
+| `.entity(slug)` | add a model with default `Table` config |
+| `.entity_with(slug, \|t\| …)` | add a model, configuring its `Table` |
+| `.entities()` | append every registered model (default config) — quick "show everything" |
+| `.group(name)` | a group heading in the side-panel |
+| `.separator()` | an `<hr>` |
+| `.link(label, href)` | a custom static link (navigates normally) |
+| `.render()` | the HTML fragment (`Result<String>`) |
+
+Items appear in call order, so you control the layout by interleaving `entity*`, `group`,
+`separator`, and `link`.
 
 ## OpenAPI
 
