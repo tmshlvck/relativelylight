@@ -1,0 +1,24 @@
+[package]
+name = "relativelylight"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+sea-orm = { workspace = true, optional = true }
+axum = { version = "0.8", optional = true }
+askama = { version = "0.13", optional = true }
+utoipa = { version = "5", optional = true }
+csv = { version = "1", optional = true }
+
+[features]
+default = ["crud", "axum"]
+crud = ["dep:sea-orm"]        # the CRUD engine + SeaORM backend (the `crud` module)
+axum = ["dep:axum"]           # the HTTP router/handlers
+ui = ["dep:askama", "crud"]   # the Bootstrap/Alpine admin components (Table, Admin)
+openapi = ["dep:utoipa", "crud"]
+csv = ["dep:csv", "crud"]

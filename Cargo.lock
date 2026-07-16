@@ -7,9 +7,9 @@ name = "adminpanel-example"
 version = "0.0.0"
 dependencies = [
  "askama",
- "autocrud",
  "axum",
  "model",
+ "relativelylight",
  "serde_json",
  "tokio",
  "utoipa",
@@ -156,33 +156,6 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
-
-[[package]]
-name = "autocrud"
-version = "0.0.0"
-dependencies = [
- "askama",
- "async-trait",
- "axum",
- "csv",
- "sea-orm",
- "serde",
- "serde_json",
- "utoipa",
-]
-
-[[package]]
-name = "autocrud-example"
-version = "0.0.0"
-dependencies = [
- "askama",
- "autocrud",
- "axum",
- "model",
- "serde_json",
- "tokio",
- "utoipa",
-]
 
 [[package]]
 name = "axum"
@@ -458,6 +431,19 @@ name = "crossbeam-utils"
 version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
+
+[[package]]
+name = "crud-example"
+version = "0.0.0"
+dependencies = [
+ "askama",
+ "axum",
+ "model",
+ "relativelylight",
+ "serde_json",
+ "tokio",
+ "utoipa",
+]
 
 [[package]]
 name = "crypto-common"
@@ -1550,6 +1536,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c5102a6aaa05aa011a238e178e6bca86d2cb56fc9f586d37cb80f5bca6e07759"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "relativelylight"
+version = "0.0.0"
+dependencies = [
+ "askama",
+ "async-trait",
+ "axum",
+ "csv",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "utoipa",
 ]
 
 [[package]]

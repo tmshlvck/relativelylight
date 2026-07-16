@@ -1,27 +1,30 @@
-# Rune — `autocrud`
+# relativelylight
 
-Turn your **SeaORM entities into a JSON CRUD + metadata API and an auto-generated web admin — with
-no per-model code.** `autocrud` introspects your entities at runtime: every column becomes a field,
-primary/foreign keys are detected, FK relations are discovered. The only thing you declare by hand is
-many-to-many. It's built to be *part of* a larger app: your app keeps its own router, page shell, and
-OpenAPI document; autocrud plugs into them.
+A web back-office toolkit for Rust. **Auto-generate a JSON CRUD + metadata API and an admin UI from
+your ORM entities — with no per-model code**, and (soon) gate them with built-in auth. It composes
+*into* your app: you keep your own router, page shell, and OpenAPI document; `relativelylight` plugs
+into them.
 
-> Status: `autocrud` (the API) and the `alpine` web admin are implemented and used in the examples.
-> Auth and file-handling are planned. See [PRD.md](PRD.md) for the roadmap.
+The crate is **`relativelylight`**, organized into feature-gated modules:
+- **`crud`** (default) — the CRUD engine, SeaORM backend, admin UI (`ui`), OpenAPI, CSV.
+- **`auth`** (planned) — sessions, login, and an authorization gate. See [docs/AUTH.md](docs/AUTH.md).
+
+> Status: the `crud` API + `ui` web admin are implemented and used by the examples. Auth and
+> file-handling are planned — see [PRD.md](PRD.md).
 
 ## What you get
 
-- **Full CRUD JSON API** per entity — list/get/create/update/delete, with relations written by name
+- **Full CRUD JSON API** per entity — list/get/create/update/delete, relations written by name
   (`"author": 1`, `"tag": [1,3]`).
 - **Search, sort, pagination**, and **set-based bulk delete** (`DELETE …?q=…` / `?ids=…` / `?all=true`).
 - **Machine-readable metadata** (ordered fields + relations, logical types) that drives the UI and
   OpenAPI — no per-model schema code.
-- **Validation & transforms** — per-field validators, cross-field row validators, `on_read`/`on_write`
-  hooks (redact, hash), typed coercion.
-- **CSV import/export** that reuses the same validation pipeline.
-- **A web admin** (`alpine`): tables with a create/edit modal form, relation pickers (dropdown or
-  live search→select), boolean switches, bulk actions, CSV, custom cell renderers — and an `Admin`
-  side-panel that composes many models into one page.
+- **Validation & transforms** — field + cross-field validators, `on_read`/`on_write` hooks (redact,
+  hash), typed coercion.
+- **CSV import/export** reusing the same validation pipeline.
+- **A web admin** (`ui`): tables with a create/edit modal form, relation pickers (dropdown or live
+  search→select), boolean switches, bulk actions, CSV, custom cell renderers — plus an `Admin`
+  side-panel composing many models into one page.
 - **Runtime OpenAPI 3.1** (`openapi`) with request/response schemas, mergeable into your own document.
 
 The core is backend- and transport-agnostic; SeaORM is one backend behind a small `Accessor` seam.
@@ -31,12 +34,12 @@ The core is backend- and transport-agnostic; SeaORM is one backend behind a smal
 ```toml
 # Cargo.toml  (not yet on crates.io — use a path or git dependency)
 [dependencies]
-autocrud = { path = "autocrud", features = ["alpine", "openapi", "csv"] }
-sea-orm  = { version = "1.1", features = ["macros", "with-json"] }
+relativelylight = { path = "relativelylight", features = ["ui", "openapi", "csv"] }
+sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 ```
 
 ```rust
-use autocrud::seaorm::{Crud, MetaModel};
+use relativelylight::crud::seaorm::{Crud, MetaModel};
 
 // Auto-build a model per entity; only N:M is declared by hand.
 let author = MetaModel::new(author::Entity);
@@ -49,10 +52,10 @@ crud.register(author);
 crud.register(post);
 crud.register(tag);
 
-// Optional: an admin UI fragment (needs the `alpine` feature). Build it before into_router().
-let admin_html = autocrud::alpine::Admin::new(crud.engine()).entities().render()?;
+// Optional admin UI fragment (needs the `ui` feature). Build it before into_router().
+let admin_html = relativelylight::crud::ui::Admin::new(crud.engine()).entities().render()?;
 
-// autocrud's routes as an axum Router — merge into your own app.
+// The CRUD routes as an axum Router — merge into your own app.
 let app = axum::Router::new()
     .route("/", axum::routing::get(|| async { /* serve admin_html in your shell */ }))
     .merge(crud.into_router());
@@ -74,21 +77,26 @@ post.field("title").validate = Some(Box::new(|v| {
 
 | Feature | Default | Adds |
 |---|---|---|
+| `crud` | ✅ | the CRUD engine + SeaORM backend (the `crud` module) |
 | `axum` | ✅ | the HTTP router (`Crud::into_router`) |
-| `alpine` | | the web admin components (`alpine::Table`, `alpine::Admin`) |
+| `ui` | | the web admin components (`crud::ui::Table`, `crud::ui::Admin`) |
 | `openapi` | | runtime OpenAPI 3.1 generation |
 | `csv` | | CSV import/export endpoints |
+| `auth` | | *(planned)* sessions, login, authorization gate |
+
+Enable only what you use — an unused feature pulls no dependencies.
 
 ## Examples
 
-Two runnable examples share one seeded in-memory SQLite model (`examples/model`):
+Three runnable examples share one seeded in-memory SQLite model (`examples/model`):
 
 ```bash
-cargo run -p autocrud-example      # per-entity pages (MPA), CSV, Swagger UI
-cargo run -p adminpanel-example    # the alpine::Admin side-panel — many models in one page
+cargo run -p crud-example          # per-entity pages (MPA), CSV, Swagger UI
+cargo run -p adminpanel-example    # the crud::ui::Admin side-panel — many models in one page
+cargo run -p auth-example          # auth playground (see docs/AUTH.md); static page for now
 ```
 
-Both serve on <http://127.0.0.1:3000/> with the JSON API under `/api/v1` and Swagger UI at `/docs`.
+The first two serve on <http://127.0.0.1:3000/> (JSON API under `/api/v1`, Swagger at `/docs`).
 
 ## Requirements
 
@@ -98,9 +106,10 @@ Both serve on <http://127.0.0.1:3000/> with the JSON API under `/api/v1` and Swa
 
 ## Documentation
 
-- **[docs/AUTOCRUD.md](docs/AUTOCRUD.md)** — the full guide: `MetaModel`/`MetaField`/`MetaRelation`,
+- **[docs/CRUD.md](docs/CRUD.md)** — the full `crud` guide: `MetaModel`/`MetaField`/`MetaRelation`,
   the HTTP API and formats, query params, validation, metadata, CSV, the web admin, OpenAPI, and how
   to compose with your app.
+- **[docs/AUTH.md](docs/AUTH.md)** — the auth design (draft).
 - **[PRD.md](PRD.md)** — product overview and roadmap.
 
 ## License

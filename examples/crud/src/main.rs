@@ -1,12 +1,12 @@
-//! autocrud example — registers the model, serves the JSON API under /api/v1 (CRUD + metadata +
-//! CSV import/export), a Rune Admin UI (one page per entity, linked MPA-style from the navbar), and
+//! crud example — registers the model, serves the JSON API under /api/v1 (CRUD + metadata +
+//! CSV import/export), a relativelylight UI (one page per entity, linked MPA-style from the navbar), and
 //! Swagger UI at /docs over the generated OpenAPI.
 //!
 //! Try:  open http://127.0.0.1:3000/   ·   Swagger at /docs   ·   spec at /openapi.json
 
 use askama::Template;
-use autocrud::alpine::Table;
-use autocrud::seaorm::{Crud, MetaModel};
+use relativelylight::crud::ui::Table;
+use relativelylight::crud::seaorm::{Crud, MetaModel};
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse};
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
     post_mm.validate_row = Some(Box::new(|fields| {
         let get = |k: &str| fields.get(k).and_then(|v| v.as_str()).unwrap_or("");
-        let mut errs = autocrud::ValidationErrors::new();
+        let mut errs = relativelylight::crud::ValidationErrors::new();
         if !get("title").is_empty() && get("title") == get("body") {
             errs.general("Title and body must differ.");
         }
@@ -89,18 +89,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pre-render one shell page per entity (shape read in-process; data is fetched client-side).
     let engine = crud.engine();
     let entities = engine.tables();
-    // The app owns the OpenAPI document root (its own info/servers/version); autocrud's entity
-    // endpoints + schemas are merged in. A real app would also add its own non-autocrud paths here.
+    // The app owns the OpenAPI document root (its own info/servers/version); the crud entity
+    // endpoints + schemas are merged in. A real app would also add its own your own paths here.
     let app_doc = OpenApiBuilder::new()
         .info(
             InfoBuilder::new()
-                .title("Rune Admin API")
+                .title("relativelylight API")
                 .version("1.0.0")
-                .description(Some("Example app — the app owns the OpenAPI root; autocrud contributes the entity endpoints."))
+                .description(Some("Example app — the app owns the OpenAPI root; crud contributes the entity endpoints."))
                 .build(),
         )
         .build();
-    let openapi = autocrud::openapi::merge_into(app_doc, engine)
+    let openapi = relativelylight::crud::openapi::merge_into(app_doc, engine)
         .to_pretty_json()
         .unwrap_or_default();
     let mut pages = HashMap::new();
@@ -121,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let table = table.render()?;
         let page = Shell {
-            title: "Rune Admin".into(),
+            title: "relativelylight".into(),
             entities: entities.clone(),
             current: slug.clone(),
             table,
@@ -143,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(app);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
-    println!("Rune Admin on   http://127.0.0.1:3000/");
+    println!("relativelylight on   http://127.0.0.1:3000/");
     println!("Swagger UI on   http://127.0.0.1:3000/docs");
     println!("JSON API under  http://127.0.0.1:3000/api/v1");
     axum::serve(listener, ui.merge(crud.into_router())).await?;

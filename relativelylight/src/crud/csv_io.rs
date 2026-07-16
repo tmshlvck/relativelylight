@@ -1,4 +1,4 @@
-//! `autocrud::csv_io` — CSV import/export over the JSON API (feature `csv`).
+//! `relativelylight::crud::csv_io` — CSV import/export over the JSON API (feature `csv`).
 //!
 //! CSV is the one exchange format the JSON API doesn't cover, so it lives here as a thin layer over
 //! the backend-agnostic `Engine`: export reads via `Engine::list`, import writes via
@@ -12,7 +12,7 @@
 //! - On import, a row carrying a primary-key value **updates** that row; a row with a blank/absent
 //!   PK **creates** one. Read-only columns (PK, inverse relations) are ignored on import.
 
-use crate::engine::{Engine, Error, ListQuery, Result};
+use crate::crud::engine::{Engine, Error, ListQuery, Result};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 

@@ -1,16 +1,16 @@
-//! adminpanel example — the `autocrud::alpine::Admin` component.
+//! adminpanel example — the `relativelylight::crud::ui::Admin` component.
 //!
 //! One page: a model side-panel (with group headings, a separator, and custom links) beside the
 //! selected model's table + edit form. This replaces the hand-written per-entity page loop of the
-//! `autocrud` example. The app still owns the three roots: the axum router (`/` is ours; autocrud is
+//! `relativelylight` example. The app still owns the three roots: the axum router (`/` is ours; crud is
 //! merged under `/api/v1`), the askama shell (chrome + Bootstrap/Alpine), and the OpenAPI document
-//! (our info; autocrud's entity endpoints merged in — no UI/docs routes leak into it).
+//! (our info; the crud entity endpoints merged in — no UI/docs routes leak into it).
 //!
 //! Try:  open http://127.0.0.1:3000/   ·   Swagger at /docs   ·   spec at /openapi.json
 
 use askama::Template;
-use autocrud::alpine::Admin;
-use autocrud::seaorm::{Crud, MetaModel};
+use relativelylight::crud::ui::Admin;
+use relativelylight::crud::seaorm::{Crud, MetaModel};
 use axum::extract::State;
 use axum::http::header;
 use axum::response::{Html, IntoResponse};
@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The Admin component: choose the order, group the models, drop in separators and custom links.
     // `user` is read-only; `post`'s title links to its record. Everything else uses defaults.
     let admin = Admin::new(engine)
-        .title("Rune Admin")
+        .title("relativelylight")
         .group("Content")
         .entity_with("post", |t| {
             t.per_page(10).format(
@@ -92,13 +92,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .link("OpenAPI JSON", "/openapi.json")
         .render()?;
 
-    let page = Shell { title: "Rune Admin".into(), body: admin }.render()?;
+    let page = Shell { title: "relativelylight".into(), body: admin }.render()?;
 
-    // The app owns the OpenAPI root; autocrud's entity endpoints + schemas are merged in.
+    // The app owns the OpenAPI root; the crud entity endpoints + schemas are merged in.
     let app_doc = OpenApiBuilder::new()
-        .info(InfoBuilder::new().title("Rune Admin API").version("1.0.0").build())
+        .info(InfoBuilder::new().title("relativelylight API").version("1.0.0").build())
         .build();
-    let openapi = autocrud::openapi::merge_into(app_doc, engine)
+    let openapi = relativelylight::crud::openapi::merge_into(app_doc, engine)
         .to_pretty_json()
         .unwrap_or_default();
 

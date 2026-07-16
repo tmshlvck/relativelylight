@@ -1,5 +1,5 @@
 //! Example domain model + a helper to spin up a seeded in-memory SQLite database.
-//! The `autocrud` library knows nothing about any of this.
+//! The `relativelylight` library knows nothing about any of this.
 
 pub mod entities {
     pub mod author;

@@ -5,7 +5,7 @@
 //! body** (`{slug}_write`) — derived from the column metadata (logical types + relations), and the
 //! operations reference them so the spec (and Swagger UI) describes the actual payloads.
 
-use crate::engine::{Cardinality, ColumnMeta, Engine, LogicalType};
+use crate::crud::engine::{Cardinality, ColumnMeta, Engine, LogicalType};
 use utoipa::openapi::content::{Content, ContentBuilder};
 use utoipa::openapi::path::{
     HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn, PathItem, PathsBuilder,
@@ -259,16 +259,16 @@ pub fn build(engine: &Engine, title: &str) -> OpenApi {
         .build()
 }
 
-/// Merge autocrud's entity endpoints + component schemas into **your app's** OpenAPI document, so
+/// Merge the crud entity endpoints + component schemas into **your app's** OpenAPI document, so
 /// the app owns the document root. `OpenApi::merge` keeps the receiver's `info` / `servers` /
-/// `security` and appends autocrud's paths and schemas:
+/// `security` and appends the crud paths and schemas:
 ///
 /// ```ignore
 /// let app_doc = OpenApiBuilder::new().info(my_info).paths(my_paths).build();
-/// let combined = autocrud::openapi::merge_into(app_doc, &engine);
+/// let combined = relativelylight::crud::openapi::merge_into(app_doc, &engine);
 /// ```
 pub fn merge_into(doc: OpenApi, engine: &Engine) -> OpenApi {
-    doc.merge_from(build(engine, "autocrud")) // the throwaway title is ignored by `merge`
+    doc.merge_from(build(engine, "relativelylight")) // the throwaway title is ignored by `merge`
 }
 
 /// Pretty-printed OpenAPI JSON for the registered entities (standalone; use [`merge_into`] to
@@ -282,7 +282,7 @@ pub fn json(engine: &Engine, title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::scalar;
-    use crate::engine::LogicalType;
+    use crate::crud::engine::LogicalType;
 
     fn format_of(ty: LogicalType) -> Option<String> {
         let v = serde_json::to_value(scalar(ty)).unwrap();

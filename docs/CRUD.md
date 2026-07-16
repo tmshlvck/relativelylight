@@ -1,9 +1,9 @@
-# autocrud
+# `relativelylight::crud`
 
 Turn SeaORM entities into a JSON CRUD + metadata HTTP API — and an optional auto-generated web
-admin — with **no per-model code**. `autocrud` introspects your entities at runtime: every column
-becomes a field, primary/foreign keys are detected, and FK-backed relations are discovered. The only
-thing you declare by hand is many-to-many (SeaORM can't enumerate it).
+admin — with **no per-model code**. The `crud` module introspects your entities at runtime: every
+column becomes a field, primary/foreign keys are detected, and FK-backed relations are discovered.
+The only thing you declare by hand is many-to-many (SeaORM can't enumerate it).
 
 - [Install & features](#install--features)
 - [Quick start](#quick-start)
@@ -12,7 +12,7 @@ thing you declare by hand is many-to-many (SeaORM can't enumerate it).
 - [Validation & transforms](#validation--transforms)
 - [Metadata](#metadata) — for building UIs
 - [CSV import/export](#csv-importexport)
-- [Web admin](#web-admin-alpine) — `alpine::Table` and `alpine::Admin`
+- [Web admin](#web-admin-ui) — `ui::Table` and `ui::Admin`
 - [OpenAPI](#openapi)
 - [Composing with your app](#composing-with-your-app) — you own the roots
 - [Architecture & extending](#architecture--extending)
@@ -23,16 +23,19 @@ thing you declare by hand is many-to-many (SeaORM can't enumerate it).
 
 ```toml
 [dependencies]
-autocrud = { version = "*", features = ["alpine", "openapi", "csv"] }
-sea-orm  = { version = "1.1", features = ["macros", "with-json"] }
+relativelylight = { version = "*", features = ["ui", "openapi", "csv"] }
+sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 ```
 
 | Feature | Default | Pulls | Gives you |
 |---|---|---|---|
+| `crud` | ✅ | `sea-orm` | the CRUD engine + SeaORM backend (this module) |
 | `axum` | ✅ | `axum` | the HTTP router (`Crud::into_router`, `Engine::router`) |
-| `alpine` | | `askama` | the server-rendered admin table/form (`alpine::Table`) |
-| `openapi` | | `utoipa` | runtime OpenAPI 3.1 generation (`openapi::json`) |
-| `csv` | | `csv` | CSV import/export routes + `csv_io` |
+| `ui` | | `askama` | the server-rendered admin components (`crud::ui::Table`, `::Admin`) |
+| `openapi` | | `utoipa` | runtime OpenAPI 3.1 generation (`crud::openapi::json`) |
+| `csv` | | `csv` | CSV import/export routes + `crud::csv_io` |
+
+Enable only what you use — an unused feature pulls no dependencies.
 
 Entities must serialize to JSON — derive `Serialize` (SeaORM's `with-json` feature enables it on
 generated models). **Requirements:** a single-column primary key and single-column to-one foreign
@@ -42,7 +45,7 @@ so their composite keys are fine.
 ## Quick start
 
 ```rust
-use autocrud::seaorm::{Crud, MetaModel};
+use relativelylight::crud::seaorm::{Crud, MetaModel};
 
 let db = /* sea_orm::DatabaseConnection */;
 
@@ -65,7 +68,7 @@ That serves full CRUD for `author`, `post`, `tag` under `/api/v1` (see [routes](
 `crud.engine()` / `crud.into_engine()` give the transport-agnostic `Engine` if you want to drive it
 without axum.
 
-A runnable example lives in `examples/autocrud` (`cargo run -p autocrud-example`): five related
+A runnable example lives in `examples/crud` (`cargo run -p crud-example`): five related
 entities, the admin UI, Swagger, and seed data.
 
 ## Configuring a model
@@ -167,7 +170,7 @@ Mounted under `base_path`.
 A row is a **flat object keyed by column name**. Hidden fields, write-only fields, and raw FK
 columns are omitted. Relations embed `{id, label}` — just the identity and a display label, **no
 URLs**. (The admin UI shows relations as text/badges, not links; if you want a row to link
-somewhere, use a [custom formatter](#web-admin-alpine).)
+somewhere, use a [custom formatter](#web-admin-ui).)
 
 ```jsonc
 GET /api/v1/post/1
@@ -255,7 +258,7 @@ post.field("title").validate = Some(Box::new(|v| {
     else { Ok(()) }
 }));
 post.validate_row = Some(Box::new(|fields| {
-    let mut errs = autocrud::ValidationErrors::new();
+    let mut errs = relativelylight::crud::ValidationErrors::new();
     if fields.get("title") == fields.get("body") { errs.general("Title and body must differ."); }
     if errs.is_empty() { Ok(()) } else { Err(errs) }
 }));
@@ -303,16 +306,16 @@ target id (blank if none); N:M → ids joined with `|` (e.g. `1|3`). On import a
 updates that row, **without** creates one; read-only columns are ignored. Import is best-effort — a
 failed row is reported with its line number and the rest continue.
 
-## Web admin (`alpine`)
+## Web admin (`ui`)
 
-Feature `alpine`. Two components — `Table` (one entity) and `Admin` (a side-panel over many). Both
-render Bootstrap-5 + Alpine.js **HTML fragments**; you own the shell. `alpine::Table` renders one
+Feature `ui`. Two components — `Table` (one entity) and `Admin` (a side-panel over many). Both
+render Bootstrap-5 + Alpine.js **HTML fragments**; you own the shell. `ui::Table` renders one
 entity. The *shape* (columns) is read from the `Engine` in-process and embedded; *data* is fetched
 client-side from the JSON API. You provide a shell page that loads Bootstrap 5.3 CSS/JS and Alpine 3
 (both via CDN) and drops the fragment into a `<div>`.
 
 ```rust
-let html: String = autocrud::alpine::Table::new(&engine, "post")
+let html: String = relativelylight::crud::ui::Table::new(&engine, "post")
     .title("Post")          // heading + form header; default: the slug
     .read_only(false)       // true → display only (no create/edit/delete, no form)
     .search(true)           // search box → ?q=
@@ -349,12 +352,12 @@ page of results.
 
 ### `Admin` — a whole admin in one component
 
-`alpine::Admin` composes many `Table`s plus a **side-panel** into one fragment: pick a model to
+`ui::Admin` composes many `Table`s plus a **side-panel** into one fragment: pick a model to
 view/edit (switching is client-side, no reload). You choose the order and interleave **group
 headings**, **separators**, and **custom links**:
 
 ```rust
-let html = autocrud::alpine::Admin::new(&engine)
+let html = relativelylight::crud::ui::Admin::new(&engine)
     .title("Admin")
     .group("Content")
     .entity_with("post", |t| t.per_page(10).format("title", "…"))  // configure the Table
@@ -393,8 +396,8 @@ Feature `openapi`. Routes are per-entity and known only at runtime, so the docum
 runtime from the `Engine`:
 
 ```rust
-let spec: String = autocrud::openapi::json(&engine, "My API");   // serve at /openapi.json
-// or: autocrud::openapi::build(&engine, "My API") -> utoipa::openapi::OpenApi
+let spec: String = relativelylight::crud::openapi::json(&engine, "My API");   // serve at /openapi.json
+// or: relativelylight::crud::openapi::build(&engine, "My API") -> utoipa::openapi::OpenApi
 ```
 
 Emits the CRUD + bulk-delete operations per entity (tagged by slug, with query/path params) **and
@@ -410,25 +413,25 @@ document instead of serving a standalone one.
 
 ## Composing with your app
 
-autocrud is meant to be **part of** a larger app, not the whole thing. Your app owns the three roots;
-autocrud contributes into them:
+relativelylight is meant to be **part of** a larger app, not the whole thing. Your app owns the three roots;
+relativelylight contributes into them:
 
-- **axum router** — `Crud::into_router()` (or `Engine::router()`) returns a `Router` with autocrud's
-  routes under `base_path`. Your app owns `/` and merges autocrud in:
+- **axum router** — `Crud::into_router()` (or `Engine::router()`) returns a `Router` with crud's
+  routes under `base_path`. Your app owns `/` and merges crud in:
   ```rust
   let app = Router::new()
       .route("/", get(home))
       .route("/ui/{slug}", get(ui_page))    // your own routes
-      .merge(crud.into_router());           // autocrud under /api/v1
+      .merge(crud.into_router());           // crud under /api/v1
   ```
-  Keep a non-empty `base_path` (e.g. `/api/v1`) so autocrud's `/{entity}` routes stay under a prefix
+  Keep a non-empty `base_path` (e.g. `/api/v1`) so crud's `/{entity}` routes stay under a prefix
   and can't shadow yours.
-- **askama shell** — `alpine::Table::render()` returns an **HTML fragment**, never a full page. Your
+- **askama shell** — `ui::Table::render()` returns an **HTML fragment**, never a full page. Your
   app owns the chrome (the `<html>`/navbar/footer, and the Bootstrap + Alpine `<script>`/`<link>`
-  tags) and drops the fragment into a `<div>`. autocrud ships no page and imposes no layout. Your
-  askama templates and autocrud's live in separate crates, so they don't collide.
+  tags) and drops the fragment into a `<div>`. the library ships no page and imposes no layout. Your
+  askama templates and the library's live in a separate crate, so they don't collide.
 - **utoipa document** — build your own `OpenApi` (your `info`, `servers`, `security`, and any of your
-  own non-autocrud paths), then merge autocrud's endpoints + schemas in. `merge` keeps *your*
+  own non-crud paths), then merge the crud endpoints + schemas in. `merge` keeps *your*
   `info`/`servers`; it only appends paths and component schemas:
   ```rust
   use utoipa::openapi::{InfoBuilder, OpenApiBuilder};
@@ -436,11 +439,11 @@ autocrud contributes into them:
       .info(InfoBuilder::new().title("My App API").version("1.0.0").build())
       // .paths(my_own_paths) …
       .build();
-  let doc = autocrud::openapi::merge_into(app_doc, &engine);   // your root, autocrud's entities
+  let doc = relativelylight::crud::openapi::merge_into(app_doc, &engine);   // your root, the crud entities
   ```
 
-The example (`examples/autocrud`) does all three: it owns `/`, `/ui/{slug}`, `/openapi.json`, `/docs`
-and its Bootstrap/Alpine shell, and merges autocrud's router and OpenAPI into them.
+The example (`examples/crud`) does all three: it owns `/`, `/ui/{slug}`, `/openapi.json`, `/docs`
+and its Bootstrap/Alpine shell, and merges the crud router and OpenAPI into them.
 
 ## Architecture & extending
 
@@ -449,7 +452,7 @@ transform, wires routes, and **forwards finished JSON**. Every backend implement
 **`Accessor`** trait — `slug` / `pk` / `columns` + `list` / `get` / `create` / `update` / `delete` /
 `delete_many`, each data method returning ready-to-send JSON. The trait names no ORM types.
 
-SeaORM is one backend (`autocrud::seaorm`); it does the heavy lifting (introspection, projection,
+SeaORM is one backend (`relativelylight::crud::seaorm`); it does the heavy lifting (introspection, projection,
 validation, relation resolution, set-based bulk delete). A different backend (in-memory, another ORM)
 is just another `Accessor` implementation reusing the whole engine + router unchanged.
 

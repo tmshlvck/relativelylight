@@ -276,7 +276,7 @@ impl Engine {
     pub fn add(&mut self, acc: Arc<dyn Accessor>) {
         let slug = acc.slug().to_string();
         if self.accessors.contains_key(&slug) {
-            panic!("autocrud: duplicate slug '{slug}' — set a distinct MetaModel.slug");
+            panic!("relativelylight: duplicate slug '{slug}' — set a distinct MetaModel.slug");
         }
         self.accessors.insert(slug, acc);
     }
@@ -537,7 +537,7 @@ mod http {
     ) -> std::result::Result<Response, Error> {
         #[cfg(feature = "csv")]
         if params.get("format").map(|v| v == "csv").unwrap_or(false) {
-            let body = crate::csv_io::export(&e, &entity, &parse_list_query(params)).await?;
+            let body = crate::crud::csv_io::export(&e, &entity, &parse_list_query(params)).await?;
             let disposition = format!("attachment; filename=\"{entity}.csv\"");
             return Ok((
                 [
@@ -598,7 +598,7 @@ mod http {
         Path(entity): Path<String>,
         body: String,
     ) -> std::result::Result<Json<Value>, Error> {
-        let report = crate::csv_io::import(&e, &entity, &body).await?;
+        let report = crate::crud::csv_io::import(&e, &entity, &body).await?;
         Ok(Json(serde_json::to_value(report).unwrap_or_else(|_| json!({}))))
     }
 }

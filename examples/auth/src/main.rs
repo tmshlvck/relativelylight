@@ -1,8 +1,8 @@
-//! examples/auth — playground for the standalone `auth` crate (no autocrud). See `docs/AUTH.md`.
+//! examples/auth — playground for `relativelylight`'s `auth` module (feature `auth`), used without
+//! the `crud` feature to show `auth` stands on its own. See `docs/AUTH.md`.
 //!
 //! Current state: a public page and a "protected" page that is **not yet gated**. Gating (a login
-//! page, a session cookie, and an `Authz` check) arrives with the `auth` crate; this example is
-//! deliberately autocrud-free to show that `auth` stands on its own.
+//! page, a session cookie, and an `Authz` check) arrives with the `auth` implementation.
 
 use axum::response::Html;
 use axum::routing::get;
@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn public() -> Html<&'static str> {
     Html(r#"<!doctype html><meta charset="utf-8"><title>Auth playground</title>
 <h1>Public page</h1>
-<p>Rune auth playground (see <code>docs/AUTH.md</code>).
+<p>relativelylight auth playground (see <code>docs/AUTH.md</code>).
 Try <a href="/secret">/secret</a> — soon it will require a login.</p>"#)
 }
 

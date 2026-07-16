@@ -1,4 +1,4 @@
-//! `autocrud::alpine` — server-rendered admin components (Bootstrap 5 + Alpine.js fragments).
+//! `relativelylight::crud::ui` — server-rendered admin components (Bootstrap 5 + Alpine.js fragments).
 //!
 //! `Table` renders a table for one entity: read-only, or read-write with a Create button, per-row
 //! Edit/Delete, and a modal create/update form (validation errors shown inline). `Admin` composes
@@ -6,7 +6,7 @@
 //! ordering, group headings, separators, and custom links. Both are **fragments** — the app owns
 //! the shell (chrome + Bootstrap/Alpine tags); data + writes go through the JSON API.
 
-use crate::engine::{Engine, Error, Result};
+use crate::crud::engine::{Engine, Error, Result};
 use askama::Template;
 use serde_json::Value;
 
@@ -169,7 +169,7 @@ enum AdminItem<'a> {
 /// loads Bootstrap 5 + Alpine.js. Switching models is client-side (no reload).
 ///
 /// ```ignore
-/// let html = autocrud::alpine::Admin::new(&engine)
+/// let html = relativelylight::crud::ui::Admin::new(&engine)
 ///     .title("Admin")
 ///     .group("Content")
 ///     .entity_with("post", |t| t.per_page(10))

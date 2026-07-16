@@ -1,7 +1,7 @@
 //! SeaORM backend flavor: introspection + the `MetaModel` builder + an `Accessor` implementation.
 //! This is the only module that depends on SeaORM.
 
-use crate::engine::{
+use crate::crud::engine::{
     coerce, default_label, slugify, value_key, Accessor, Cardinality, ColumnMeta, Engine, Error,
     ListQuery, LogicalType, Page, Result, RowItem, ValidationErrors,
 };
