@@ -355,8 +355,12 @@ let spec: String = autocrud::openapi::json(&engine, "My API");   // serve at /op
 // or: autocrud::openapi::build(&engine, "My API") -> utoipa::openapi::OpenApi
 ```
 
-Emits the CRUD + bulk-delete operations per entity (tagged by slug, with query/path params). Point
-Swagger UI at the served JSON. Per-field response schemas are future work.
+Emits the CRUD + bulk-delete operations per entity (tagged by slug, with query/path params) **and
+component schemas derived from the column metadata**: a read record `{slug}` (typed fields; relations
+as `{id, label}`) and a write body `{slug}_write` (writable fields; relations by id). Operations
+`$ref` these — request bodies use `{slug}_write`, single-row responses use `{slug}`, and the list
+response is the page envelope wrapping `{slug}`. Point Swagger UI at the served JSON and the models
+render. (Field `format`s cover int/float/bool/string; date/uuid/enum are typed as `string`.)
 
 ## Architecture & extending
 

@@ -318,6 +318,11 @@ impl Engine {
         }))
     }
 
+    /// Typed column metadata for one entity (fields + relations) — for schema / OpenAPI generation.
+    pub fn columns(&self, slug: &str) -> Result<Vec<ColumnMeta>> {
+        Ok(self.accessor(slug)?.columns())
+    }
+
     fn column_json(&self, e: ColumnMeta) -> Value {
         match e {
             ColumnMeta::Field {
@@ -446,7 +451,7 @@ mod http {
     use axum::extract::{Path, Query, State};
     use axum::http::StatusCode;
     use axum::response::{IntoResponse, Response};
-    use axum::routing::{get, post};
+    use axum::routing::get;
     use axum::{Json, Router};
     use serde_json::{json, Value};
     use std::collections::HashMap;
@@ -486,7 +491,7 @@ mod http {
                 .route("/{entity}/{pk}", get(get_one).patch(update).delete(delete_one));
             #[cfg(feature = "csv")]
             {
-                inner = inner.route("/{entity}/_import", post(import));
+                inner = inner.route("/{entity}/_import", axum::routing::post(import));
             }
             let inner = inner.with_state(self);
             if base.is_empty() {
