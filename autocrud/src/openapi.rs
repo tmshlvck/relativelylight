@@ -11,7 +11,9 @@ use utoipa::openapi::path::{
     HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn, PathItem, PathsBuilder,
 };
 use utoipa::openapi::request_body::{RequestBody, RequestBodyBuilder};
-use utoipa::openapi::schema::{ArrayBuilder, ComponentsBuilder, ObjectBuilder, Ref};
+use utoipa::openapi::schema::{
+    ArrayBuilder, ComponentsBuilder, ObjectBuilder, Ref, SchemaFormat, Type,
+};
 use utoipa::openapi::{
     InfoBuilder, OpenApi, OpenApiBuilder, RefOr, Required, ResponseBuilder, Responses,
     ResponsesBuilder, Schema,
@@ -24,14 +26,27 @@ fn str_schema() -> RefOr<Schema> {
     String::schema()
 }
 
+/// A `string` schema with an OpenAPI `format` (e.g. `date`, `date-time`, `uuid`).
+fn string_fmt(fmt: &str) -> RefOr<Schema> {
+    RefOr::T(Schema::Object(
+        ObjectBuilder::new()
+            .schema_type(Type::String)
+            .format(Some(SchemaFormat::Custom(fmt.to_string())))
+            .build(),
+    ))
+}
+
 /// JSON Schema for a scalar field, by logical type.
 fn scalar(ty: LogicalType) -> RefOr<Schema> {
     match ty {
         LogicalType::Int => i64::schema(),
         LogicalType::Float => f64::schema(),
         LogicalType::Bool => bool::schema(),
+        LogicalType::Date => string_fmt("date"),
+        LogicalType::DateTime => string_fmt("date-time"),
+        LogicalType::Uuid => string_fmt("uuid"),
         LogicalType::Json => RefOr::T(Schema::Object(ObjectBuilder::new().build())), // any
-        // Text / Uuid / Date / DateTime / Enum / Other → string
+        // Text / Enum / Other → plain string
         _ => String::schema(),
     }
 }
@@ -244,9 +259,41 @@ pub fn build(engine: &Engine, title: &str) -> OpenApi {
         .build()
 }
 
-/// Pretty-printed OpenAPI JSON for the registered entities.
+/// Merge autocrud's entity endpoints + component schemas into **your app's** OpenAPI document, so
+/// the app owns the document root. `OpenApi::merge` keeps the receiver's `info` / `servers` /
+/// `security` and appends autocrud's paths and schemas:
+///
+/// ```ignore
+/// let app_doc = OpenApiBuilder::new().info(my_info).paths(my_paths).build();
+/// let combined = autocrud::openapi::merge_into(app_doc, &engine);
+/// ```
+pub fn merge_into(doc: OpenApi, engine: &Engine) -> OpenApi {
+    doc.merge_from(build(engine, "autocrud")) // the throwaway title is ignored by `merge`
+}
+
+/// Pretty-printed OpenAPI JSON for the registered entities (standalone; use [`merge_into`] to
+/// combine with an app-owned document).
 pub fn json(engine: &Engine, title: &str) -> String {
     build(engine, title)
         .to_pretty_json()
         .unwrap_or_else(|e| format!("{{\"error\":\"openapi: {e}\"}}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scalar;
+    use crate::engine::LogicalType;
+
+    fn format_of(ty: LogicalType) -> Option<String> {
+        let v = serde_json::to_value(scalar(ty)).unwrap();
+        v.get("format").and_then(|f| f.as_str()).map(String::from)
+    }
+
+    #[test]
+    fn scalar_string_formats() {
+        assert_eq!(format_of(LogicalType::Date).as_deref(), Some("date"));
+        assert_eq!(format_of(LogicalType::DateTime).as_deref(), Some("date-time"));
+        assert_eq!(format_of(LogicalType::Uuid).as_deref(), Some("uuid"));
+        assert_eq!(format_of(LogicalType::Text), None); // plain string, no format
+    }
 }

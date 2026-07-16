@@ -15,6 +15,7 @@ use axum::Router;
 use model::{author, post, profile, tag, user};
 use std::collections::HashMap;
 use std::sync::Arc;
+use utoipa::openapi::{InfoBuilder, OpenApiBuilder};
 
 #[derive(Template)]
 #[template(path = "shell.html")]
@@ -88,7 +89,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pre-render one shell page per entity (shape read in-process; data is fetched client-side).
     let engine = crud.engine();
     let entities = engine.tables();
-    let openapi = autocrud::openapi::json(engine, "Rune autocrud API");
+    // The app owns the OpenAPI document root (its own info/servers/version); autocrud's entity
+    // endpoints + schemas are merged in. A real app would also add its own non-autocrud paths here.
+    let app_doc = OpenApiBuilder::new()
+        .info(
+            InfoBuilder::new()
+                .title("Rune Admin API")
+                .version("1.0.0")
+                .description(Some("Example app — the app owns the OpenAPI root; autocrud contributes the entity endpoints."))
+                .build(),
+        )
+        .build();
+    let openapi = autocrud::openapi::merge_into(app_doc, engine)
+        .to_pretty_json()
+        .unwrap_or_default();
     let mut pages = HashMap::new();
     for slug in &entities {
         // `user` is a read-only table (display only); the rest are read-write with a form.

@@ -9,5 +9,6 @@ autocrud = { path = "../../autocrud", features = ["alpine", "openapi", "csv"] }
 model = { path = "../model" }
 axum = "0.8"
 askama = "0.13"
+utoipa = "5" # the app owns its OpenAPI document and merges autocrud's endpoints in
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["net"] }

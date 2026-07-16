@@ -14,6 +14,7 @@ thing you declare by hand is many-to-many (SeaORM can't enumerate it).
 - [CSV import/export](#csv-importexport)
 - [Web admin](#web-admin-alpine) — `alpine::Table`
 - [OpenAPI](#openapi)
+- [Composing with your app](#composing-with-your-app) — you own the roots
 - [Architecture & extending](#architecture--extending)
 
 ---
@@ -360,7 +361,45 @@ component schemas derived from the column metadata**: a read record `{slug}` (ty
 as `{id, label}`) and a write body `{slug}_write` (writable fields; relations by id). Operations
 `$ref` these — request bodies use `{slug}_write`, single-row responses use `{slug}`, and the list
 response is the page envelope wrapping `{slug}`. Point Swagger UI at the served JSON and the models
-render. (Field `format`s cover int/float/bool/string; date/uuid/enum are typed as `string`.)
+render. Field types carry `format` where useful — `int64`/`double`, and `date` / `date-time` /
+`uuid` for those logical types; enum/other are plain `string`.
+
+Use [`merge_into`](#composing-with-your-app) to fold these paths + schemas into your app's own
+document instead of serving a standalone one.
+
+## Composing with your app
+
+autocrud is meant to be **part of** a larger app, not the whole thing. Your app owns the three roots;
+autocrud contributes into them:
+
+- **axum router** — `Crud::into_router()` (or `Engine::router()`) returns a `Router` with autocrud's
+  routes under `base_path`. Your app owns `/` and merges autocrud in:
+  ```rust
+  let app = Router::new()
+      .route("/", get(home))
+      .route("/ui/{slug}", get(ui_page))    // your own routes
+      .merge(crud.into_router());           // autocrud under /api/v1
+  ```
+  Keep a non-empty `base_path` (e.g. `/api/v1`) so autocrud's `/{entity}` routes stay under a prefix
+  and can't shadow yours.
+- **askama shell** — `alpine::Table::render()` returns an **HTML fragment**, never a full page. Your
+  app owns the chrome (the `<html>`/navbar/footer, and the Bootstrap + Alpine `<script>`/`<link>`
+  tags) and drops the fragment into a `<div>`. autocrud ships no page and imposes no layout. Your
+  askama templates and autocrud's live in separate crates, so they don't collide.
+- **utoipa document** — build your own `OpenApi` (your `info`, `servers`, `security`, and any of your
+  own non-autocrud paths), then merge autocrud's endpoints + schemas in. `merge` keeps *your*
+  `info`/`servers`; it only appends paths and component schemas:
+  ```rust
+  use utoipa::openapi::{InfoBuilder, OpenApiBuilder};
+  let app_doc = OpenApiBuilder::new()
+      .info(InfoBuilder::new().title("My App API").version("1.0.0").build())
+      // .paths(my_own_paths) …
+      .build();
+  let doc = autocrud::openapi::merge_into(app_doc, &engine);   // your root, autocrud's entities
+  ```
+
+The example (`examples/autocrud`) does all three: it owns `/`, `/ui/{slug}`, `/openapi.json`, `/docs`
+and its Bootstrap/Alpine shell, and merges autocrud's router and OpenAPI into them.
 
 ## Architecture & extending
 
