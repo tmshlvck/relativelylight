@@ -21,6 +21,7 @@ struct TableTemplate {
     editable: bool,
     confirm: bool,
     picker_threshold: u64,
+    formatters: String, // JS object literal: { "col": (value, row) => htmlString, … }
 }
 
 /// A table for one registered entity, rendered as an HTML fragment for the app shell.
@@ -34,6 +35,7 @@ pub struct Table<'a> {
     read_only: bool,
     confirm: bool,
     picker_threshold: u64,
+    formatters: Vec<(String, String)>,
 }
 
 impl<'a> Table<'a> {
@@ -48,6 +50,7 @@ impl<'a> Table<'a> {
             read_only: false,
             confirm: true,
             picker_threshold: 25,
+            formatters: Vec::new(),
         }
     }
 
@@ -85,6 +88,15 @@ impl<'a> Table<'a> {
         self
     }
 
+    /// Custom cell renderer for a column, as a JS arrow function `(value, row) => htmlString`
+    /// (the returned HTML is inserted verbatim, so escape any untrusted content yourself). Overrides
+    /// the default rendering for that column — e.g. turn a name into a link:
+    /// `.format("name", "(v, row) => `<a href=\"/things/${row.id}\">${v}</a>`")`.
+    pub fn format(mut self, column: impl Into<String>, js: impl Into<String>) -> Self {
+        self.formatters.push((column.into(), js.into()));
+        self
+    }
+
     /// Render the table fragment. Errors if the entity isn't registered.
     pub fn render(&self) -> Result<String> {
         let desc = self.engine.meta_one(&self.slug)?;
@@ -93,6 +105,13 @@ impl<'a> Table<'a> {
             .cloned()
             .unwrap_or(Value::Array(vec![]))
             .to_string();
+        // Build a JS object literal { "col": (value,row)=>…, … } from the configured formatters.
+        let entries: Vec<String> = self
+            .formatters
+            .iter()
+            .map(|(col, js)| format!("{}: ({})", Value::String(col.clone()), js))
+            .collect();
+        let formatters = format!("{{{}}}", entries.join(", "));
         let tmpl = TableTemplate {
             data_url: self.engine.entity_url(&self.slug),
             title: self.title.clone().unwrap_or_else(|| self.slug.clone()),
@@ -103,6 +122,7 @@ impl<'a> Table<'a> {
             editable: !self.read_only,
             confirm: self.confirm,
             picker_threshold: self.picker_threshold,
+            formatters,
         };
         tmpl.render().map_err(|e| Error::Backend(e.to_string()))
     }

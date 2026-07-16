@@ -80,6 +80,7 @@ async fn seed(db: &DatabaseConnection) -> Result<(), DbErr> {
             title: Set(format!("{topic} deep dive #{i}")),
             body: Set(format!("Notes about {} — part {i}.", topic.to_lowercase())),
             views: Set((i * 37) % 500),
+            published: Set(i % 4 != 0), // a mix of published / draft for the Yes/No badge
             author_id: Set((i - 1) % authors.len() as i32 + 1),
         }
         .insert(db)

@@ -164,8 +164,9 @@ Mounted under `base_path`.
 ### Read format
 
 A row is a **flat object keyed by column name**. Hidden fields, write-only fields, and raw FK
-columns are omitted. Relations embed `{id, label}` (**no URLs** — build them from the relation
-metadata's `item_url` template).
+columns are omitted. Relations embed `{id, label}` — just the identity and a display label, **no
+URLs**. (The admin UI shows relations as text/badges, not links; if you want a row to link
+somewhere, use a [custom formatter](#web-admin-alpine).)
 
 ```jsonc
 GET /api/v1/post/1
@@ -276,17 +277,16 @@ The structural description a UI needs is available **in-process** (there is no `
     { "kind": "field", "name": "title", "type": "Text", "read_only": false, "write_only": false,
       "label": "Title", "description": "The post headline." },
     { "kind": "relation", "name": "author", "target": "author", "cardinality": "ToOne",
-      "fk_column": "author_id", "read_only": false,
-      "list_url": "/api/v1/author", "item_url": "/api/v1/author/{id}" },
+      "fk_column": "author_id", "read_only": false, "list_url": "/api/v1/author" },
     { "kind": "relation", "name": "tag", "target": "tag", "cardinality": "ToMany", "read_only": false,
-      "list_url": "/api/v1/tag", "item_url": "/api/v1/tag/{id}" }
+      "list_url": "/api/v1/tag" }
   ]
 }
 ```
 
 Columns are **ordered**: a to-one relation appears in place of its FK column; inverse/N:M relations
-are appended; hidden columns are omitted. `list_url` fills pickers (`GET {list_url}?q=…&view=terse`);
-`item_url` is the link template a consumer expands with a row's id.
+are appended; hidden columns are omitted. `list_url` is the target's list endpoint — the one URL a
+consumer needs, to fill relation pickers (`GET {list_url}?q=…&view=terse`).
 
 ## CSV import/export
 
@@ -318,14 +318,25 @@ let html: String = autocrud::alpine::Table::new(&engine, "post")
     .per_page(30)
     .confirm(true)          // confirm before delete
     .picker_threshold(25)   // relations with > N target rows use a search→select picker
+    // custom cell renderer — turn the title into a link built from the row:
+    .format("title", r#"(v, row) => `<a href="/posts/${row.id}">${v}</a>`"#)
     .render()?;
 ```
 
 Gives you: search, a `|< << N-3…N…N+3 >> >|` pager, a create/edit **modal form** (typed inputs;
 relation dropdown for small targets or live search→select for large ones; inline field + row
 validation errors), per-row and bulk delete (delete-selected / delete-all-matching), and CSV
-import/export buttons. Field labels/help/defaults and validators come from the `MetaModel` you
-registered.
+import/export (tucked into a `⋮` overflow menu). Field labels/help/defaults and validators come from
+the `MetaModel` you registered.
+
+**Cell rendering:**
+- Fields show their value; **booleans** render as green **Yes** / red **No** badges by default.
+- Relations show labels, not links into the API — a to-one as text, a to-many/N:M as a row of
+  badges.
+- **`.format(column, js)`** overrides a column's cell with your own renderer: a JS arrow function
+  `(value, row) => htmlString`, inserted as HTML. `value` is the raw cell value and `row` is the full
+  record, so you can build links or badges from any field (e.g. `row.id`). The returned string is
+  inserted verbatim — **escape untrusted content yourself**.
 
 ## OpenAPI
 

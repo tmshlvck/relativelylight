@@ -44,8 +44,8 @@ and every frontend consumes.
   column; inverse/N:M appended.
 - **Relations by name** — raw FK columns are hidden from the wire; you write `"author": 1`.
 - **Finished JSON at the seam** — the backend returns ready-to-send rows (visibility + `on_read`
-  applied, relations embedded as `{id, label}`); the engine forwards them. No URLs in the data plane
-  (the consumer builds them from the metadata `item_url` template).
+  applied, relations embedded as `{id, label}`); the engine forwards them. No URLs in the data plane;
+  relation metadata carries only `list_url` (for form pickers).
 - **Single-column PK + single-column to-one FK** on registered entities (any URL-safe scalar). N:M
   junction tables are internal and never registered.
 - **Facade** — `autocrud::seaorm::Crud::new(db, base_path)` → `.register(mm)` → `.into_router()`.

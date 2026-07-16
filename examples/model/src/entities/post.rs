@@ -8,6 +8,7 @@ pub struct Model {
     pub title: String,
     pub body: String,
     pub views: i32,
+    pub published: bool,
     pub author_id: i32,
 }
 

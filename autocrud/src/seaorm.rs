@@ -263,8 +263,7 @@ impl SeaRegistry {
     }
 }
 
-/// Build a `{id, label}` relation link from a raw target row. URLs are *not* embedded — the consumer
-/// builds them from the relation metadata's `item_url` template.
+/// Build a `{id, label}` relation link from a raw target row. Just identity + label — no URL.
 fn link(target: Option<&dyn SeaRow>, raw: &Value) -> Value {
     match target {
         Some(t) => {

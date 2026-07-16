@@ -49,6 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     post_mm.field("body").description = Some("Full text of the post.".into());
     post_mm.field("views").default = Some(serde_json::json!(0));
     post_mm.field("views").description = Some("View counter — defaults to 0 on create.".into());
+    post_mm.field("published").label = Some("Published".into());
+    post_mm.field("published").default = Some(serde_json::json!(true));
     post_mm.relation("author").label = Some("Author".into());
     post_mm.relation("tag").label = Some("Tags".into());
 
@@ -90,14 +92,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pages = HashMap::new();
     for slug in &entities {
         // `user` is a read-only table (display only); the rest are read-write with a form.
-        let table = Table::new(engine, slug)
+        let mut table = Table::new(engine, slug)
             .title(capitalize(slug))
             .read_only(slug == "user")
             .per_page(5) // small so the example exercises the pager (post → 9 pages)
             // Low threshold to demo both relation widgets: on the post form the author (6 rows)
             // stays a plain dropdown, while tags (8 rows) crosses over to the search→select picker.
-            .picker_threshold(7)
-            .render()?;
+            .picker_threshold(7);
+        if slug == "post" {
+            // Custom cell renderer: link the title to the row's JSON record (demo of Table::format).
+            table = table.format(
+                "title",
+                r#"(v, row) => `<a href="/api/v1/post/${row.id}" target="_blank">${v}</a>`"#,
+            );
+        }
+        let table = table.render()?;
         let page = Shell {
             title: "Rune Admin".into(),
             entities: entities.clone(),

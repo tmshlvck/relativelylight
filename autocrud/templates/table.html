@@ -6,16 +6,31 @@
       <input type="search" class="form-control form-control-sm w-auto"
              placeholder="Search…" x-model="q" @input.debounce.300ms="onSearch()">
       {% endif %}
-      <a class="btn btn-outline-secondary btn-sm" :href="exportUrl()">Export CSV</a>
       {% if editable %}
-      <button class="btn btn-outline-danger btn-sm" x-show="selected.length"
+      <button class="btn btn-outline-danger btn-sm" x-show="selected.length" x-cloak
               @click="deleteSelected()">Delete selected (<span x-text="selected.length"></span>)</button>
-      <button class="btn btn-outline-danger btn-sm" x-show="!selected.length && total"
-              @click="deleteAllMatching()"
-              x-text="(q ? 'Delete all matching (' : 'Delete all (') + total + ')'"></button>
-      <label class="btn btn-outline-secondary btn-sm mb-0">Import CSV
-        <input type="file" accept=".csv,text/csv" hidden @change="importCsv($event)">
-      </label>
+      {% endif %}
+      <!-- Overflow menu (⋮): CSV export/import + delete-all. -->
+      <div class="dropdown">
+        <button class="btn btn-outline-secondary btn-sm" type="button"
+                data-bs-toggle="dropdown" aria-expanded="false" aria-label="More actions">&#8942;</button>
+        <ul class="dropdown-menu dropdown-menu-end">
+          <li><a class="dropdown-item" :href="exportUrl()">Export CSV</a></li>
+          {% if editable %}
+          <li>
+            <label class="dropdown-item mb-0" style="cursor:pointer">Import CSV
+              <input type="file" accept=".csv,text/csv" hidden @change="importCsv($event)">
+            </label>
+          </li>
+          <li><hr class="dropdown-divider"></li>
+          <li x-show="total">
+            <a class="dropdown-item text-danger" href="#" @click.prevent="deleteAllMatching()"
+               x-text="(q ? 'Delete all matching (' : 'Delete all (') + total + ')'"></a>
+          </li>
+          {% endif %}
+        </ul>
+      </div>
+      {% if editable %}
       <button class="btn btn-primary btn-sm" @click="openCreate()">+ New</button>
       {% endif %}
     </div>
@@ -44,13 +59,31 @@
             {% endif %}
             <template x-for="c in columns" :key="c.name">
               <td>
-                <template x-if="c.kind === 'field'"><span x-text="cellVal(item, c)"></span></template>
+                <template x-if="c.kind === 'field'">
+                  <span>
+                    <!-- custom formatter → default bool badge → plain text -->
+                    <template x-if="hasFmt(c)"><span x-html="fmt(c, item)"></span></template>
+                    <template x-if="!hasFmt(c) && c.type === 'Bool'">
+                      <span>
+                        <template x-if="cellRaw(item, c) === true"><span class="badge text-bg-success">Yes</span></template>
+                        <template x-if="cellRaw(item, c) === false"><span class="badge text-bg-danger">No</span></template>
+                        <template x-if="cellRaw(item, c) === null || cellRaw(item, c) === undefined"><span class="text-muted">—</span></template>
+                      </span>
+                    </template>
+                    <template x-if="!hasFmt(c) && c.type !== 'Bool'"><span x-text="cellVal(item, c)"></span></template>
+                  </span>
+                </template>
                 <template x-if="c.kind === 'relation'">
                   <span>
-                    <template x-for="(lnk, i) in links(item, c)" :key="i">
-                      <span>
-                        <a :href="relHref(c, lnk)" x-text="lnk.label"></a>
-                        <span x-show="i < links(item, c).length - 1">, </span>
+                    <!-- to-one → label text; to-many/N:M → badges -->
+                    <template x-if="c.cardinality === 'ToOne'">
+                      <span x-text="(links(item, c)[0] || {}).label || ''"></span>
+                    </template>
+                    <template x-if="c.cardinality === 'ToMany'">
+                      <span class="d-inline-flex flex-wrap gap-1">
+                        <template x-for="(lnk, i) in links(item, c)" :key="i">
+                          <span class="badge text-bg-secondary" x-text="lnk.label"></span>
+                        </template>
                       </span>
                     </template>
                   </span>
@@ -217,6 +250,7 @@
       return {
         dataUrl: "{{ data_url }}",
         columns: {{ columns_json|safe }},
+        formatters: {{ formatters|safe }},
         perPage: {{ per_page }},
         confirmDelete: {{ confirm }},
         pickerThreshold: {{ picker_threshold }},
@@ -238,10 +272,6 @@
           this.total = d.total || 0;
           this.page = d.page || 1;
           this.loading = false;
-        },
-        // Build a relation link's URL from the column's item_url template ({id} placeholder).
-        relHref(c, lnk) {
-          return c.item_url ? c.item_url.replace("{id}", encodeURIComponent(lnk.id)) : "#";
         },
 
         // ---- row selection + bulk delete ----
@@ -294,14 +324,21 @@
           for (let i = start; i <= end; i++) list.push(i);
           return list;
         },
+        cellRaw(item, c) { return item.row ? item.row[c.name] : undefined; },
         cellVal(item, c) {
-          const v = item.row ? item.row[c.name] : undefined;
+          const v = this.cellRaw(item, c);
           return (v === null || v === undefined) ? "" : v;
         },
         links(item, c) {
-          const v = item.row ? item.row[c.name] : null;
+          const v = this.cellRaw(item, c);
           if (Array.isArray(v)) return v;
           return v ? [v] : [];
+        },
+        // Custom per-column cell renderer (from Table::format), inserted via x-html.
+        hasFmt(c) { return typeof this.formatters[c.name] === "function"; },
+        fmt(c, item) {
+          try { return this.formatters[c.name](this.cellRaw(item, c), item.row || {}); }
+          catch (e) { return ""; }
         },
 
         formCols() { return this.columns.filter(c => !c.read_only); },

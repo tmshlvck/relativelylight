@@ -294,9 +294,6 @@ impl Engine {
     pub fn entity_url(&self, slug: &str) -> String {
         format!("{}/{}", self.base_path, slug)
     }
-    pub fn item_url(&self, slug: &str, id: &str) -> String {
-        format!("{}/{}/{}", self.base_path, slug, id)
-    }
 
     // ---- Metadata ----
 
@@ -356,14 +353,13 @@ impl Engine {
                 label,
                 description,
             } => {
-                // A picker searches the target via its list in terse mode:
-                //   GET {list_url}?q=…&view=terse  → [{id,label}]
-                let list_url = self.entity_url(&target);
-                let item_url = format!("{list_url}/{{id}}");
+                // `list_url` lets a form picker search the target in terse mode:
+                //   GET {list_url}?q=…&view=terse  → [{id,label}]. No per-row item link is emitted
+                //   — the table shows relation labels/badges, not links into the JSON API.
                 let mut o = json!({
                     "kind": "relation", "name": name, "target": target,
                     "cardinality": cardinality, "read_only": read_only,
-                    "list_url": list_url, "item_url": item_url,
+                    "list_url": self.entity_url(&target),
                 });
                 if let Some(fk) = fk_column {
                     o["fk_column"] = json!(fk);
