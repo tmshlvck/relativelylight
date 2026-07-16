@@ -1,0 +1,11 @@
+[package]
+name = "auth-example"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Playground for the standalone `auth` crate (see docs/AUTH.md), deliberately without autocrud. For
+# now it just serves a public page and a page to be gated; gating lands with the `auth` crate.
+[dependencies]
+axum = "0.8"
+tokio = { workspace = true, features = ["net"] }

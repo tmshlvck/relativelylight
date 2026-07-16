@@ -8,7 +8,7 @@ code**. It's built from composable components; take the pieces you need.
 |---|---|---|
 | **autocrud** (§1) | SeaORM entities → JSON CRUD + machine-readable metadata API | ✅ implemented |
 | **Rune Admin** (§2) | auto-generated web admin: table, create/edit form, admin side-panel, bulk + CSV | ✅ implemented |
-| **Auth** (§3) | user + group model, TOTP 2FA, PassKeys, OIDC | ⛔ planned |
+| **`auth`** (§3) | standalone crate: user + group model, sessions, TOTP 2FA, PassKeys, OIDC, `Authz` gate | ⛔ planned (draft spec) |
 | **Files** (§4) | multi-file upload / display / download / camera capture | ⛔ planned |
 
 > ✅ implemented & verified · 🟡 partial · ⛔ future.
@@ -69,11 +69,14 @@ import, and (further out) a server-rendered `HtmxAdmin` frontend on the same sea
 
 ---
 
-## 3. Auth — authentication & authorization ⛔ (planned)
+## 3. Auth — authentication & authorization ⛔ (planned; **draft spec**)
 
-A package providing a **user + group** model (SeaORM entities) and authentication via **TOTP 2FA**,
-**PassKeys** (WebAuthn), and **OIDC**, plus authorization gating for the API and admin (per-entity /
-per-operation policy, row-level filters). Not specified yet.
+A **standalone `auth` crate** (usable without autocrud) providing a **user + group** model (SeaORM)
+and authentication via **TOTP 2FA**, **PassKeys** (WebAuthn), and **OIDC**, plus authorization gating
+for the API and admin (per-operation policy; row-level later). `autocrud` optionally depends on it to
+gate its endpoints. The core design is drafted in **[docs/AUTH.md](docs/AUTH.md)**: cookie +
+server-side session, argon2id, an `Authz` gate (`can_list`/`can_read`/`can_write`) with presets, and
+a middleware stack (real-ip, logging, CORS, CSRF). Playground: `examples/auth`.
 
 ## 4. Files — file handling ⛔ (planned)
 
