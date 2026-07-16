@@ -317,17 +317,24 @@ let html: String = autocrud::alpine::Table::new(&engine, "post")
     .pagination(true)
     .per_page(30)
     .confirm(true)          // confirm before delete
-    .picker_threshold(25)   // relations with > N target rows use a search→select picker
+    .picker_threshold(20)   // relations with > N target rows use a search→select picker (default 20)
     // custom cell renderer — turn the title into a link built from the row:
     .format("title", r#"(v, row) => `<a href="/posts/${row.id}">${v}</a>`"#)
     .render()?;
 ```
 
-Gives you: search, a `|< << N-3…N…N+3 >> >|` pager, a create/edit **modal form** (typed inputs;
-relation dropdown for small targets or live search→select for large ones; inline field + row
+Gives you: search, a `|< << N-3…N…N+3 >> >|` pager, a create/edit **modal form** (inline field + row
 validation errors), per-row and bulk delete (delete-selected / delete-all-matching), and CSV
 import/export (tucked into a `⋮` overflow menu). Field labels/help/defaults and validators come from
 the `MetaModel` you registered.
+
+**Form inputs:** numbers/text as typed inputs, **booleans as a toggle switch**. Relations pick a
+widget by the target's size (from a `total` probe): **≤ `picker_threshold`** rows → a plain
+`<select>` (to-one) / multi-`<select>` (N:M) with all options preloaded; **more** → a live
+search→select combobox that queries the target (`GET {list_url}?q=…&view=terse`) with a
+`Search N items…` prompt — a single input for to-one, removable chips + an add-search for N:M. The
+current selection is seeded from the row, so it stays visible on edit even when it's not in the first
+page of results.
 
 **Cell rendering:**
 - Fields show their value; **booleans** render as green **Yes** / red **No** badges by default.

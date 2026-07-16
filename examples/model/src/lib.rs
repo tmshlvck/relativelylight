@@ -56,8 +56,15 @@ async fn seed(db: &DatabaseConnection) -> Result<(), DbErr> {
         .await?;
     }
 
+    // A biggish tag list (40) so the N:M form widget crosses the default picker threshold (20)
+    // and demonstrates the live search→select combobox.
     let tags = [
         "rust", "systems", "beginner", "async", "web", "database", "testing", "performance",
+        "macros", "traits", "lifetimes", "ownership", "borrowing", "concurrency", "wasm", "cli",
+        "embedded", "networking", "security", "serialization", "parsing", "graphics", "gamedev",
+        "ml", "data-science", "devops", "cloud", "docker", "kubernetes", "ffi", "unsafe", "generics",
+        "iterators", "closures", "error-handling", "logging", "tracing", "benchmarking", "tooling",
+        "cargo",
     ];
     for (i, name) in tags.iter().enumerate() {
         tag::ActiveModel {

@@ -157,8 +157,9 @@
               <label class="form-label text-capitalize" x-text="c.label || c.name"></label>
 
               <template x-if="c.kind === 'field' && c.type === 'Bool'">
-                <div class="form-check">
-                  <input type="checkbox" class="form-check-input" x-model="form[c.name]">
+                <div class="form-check form-switch">
+                  <input type="checkbox" role="switch" class="form-check-input" x-model="form[c.name]">
+                  <span class="form-check-label small text-muted" x-text="form[c.name] ? 'Yes' : 'No'"></span>
                 </div>
               </template>
               <template x-if="c.kind === 'field' && (c.type === 'Int' || c.type === 'Float')">
@@ -192,7 +193,7 @@
                 <div class="position-relative" @click.away="pOpen[c.name] = false">
                   <div class="input-group">
                     <input type="text" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
-                           :placeholder="form[c.name] ? selLabel(c) : 'Search…'"
+                           :placeholder="form[c.name] ? selLabel(c) : searchHint(c)"
                            x-model="pQuery[c.name]" @focus="pSearch(c)" @input.debounce.250ms="pSearch(c)">
                     <button class="btn btn-outline-secondary" type="button"
                             x-show="form[c.name]" @click="pClear(c)" title="Clear">&times;</button>
@@ -218,7 +219,7 @@
                       </span>
                     </template>
                   </div>
-                  <input type="text" class="form-control" placeholder="Search to add…"
+                  <input type="text" class="form-control" :placeholder="searchHint(c)"
                          x-model="pQuery[c.name]" @focus="pSearch(c)" @input.debounce.250ms="pSearch(c)">
                   <ul class="list-group position-absolute w-100 shadow" style="z-index:1060; max-height:220px; overflow:auto"
                       x-show="pOpen[c.name] && (pResults[c.name] || []).length">
@@ -258,7 +259,7 @@
         modalOpen: false, mode: "create", editId: null,
         form: {}, options: {}, fieldErrors: {}, rowErrors: [], saving: false,
         // search→select picker state, keyed by column name:
-        pBig: {}, pLabels: {}, pQuery: {}, pResults: {}, pOpen: {},
+        pBig: {}, pTotal: {}, pLabels: {}, pQuery: {}, pResults: {}, pOpen: {},
 
         async load() {
           this.loading = true;
@@ -350,7 +351,8 @@
               // Fetch one threshold-sized page; `total` decides plain <select> vs search picker.
               const res = await fetch(c.list_url + "?view=terse&per_page=" + this.pickerThreshold);
               const d = await res.json();
-              if ((d.total || 0) > this.pickerThreshold) {
+              this.pTotal[c.name] = d.total || 0;
+              if (this.pTotal[c.name] > this.pickerThreshold) {
                 this.pBig[c.name] = true;                        // large → search→select
               } else {
                 this.pBig[c.name] = false;                       // small → plain dropdown
@@ -360,6 +362,8 @@
           }
         },
         isBig(c) { return !!this.pBig[c.name]; },
+        // Placeholder for a big-target search box: "Search 12,345 items…".
+        searchHint(c) { return "Search " + (this.pTotal[c.name] || 0).toLocaleString() + " items…"; },
         // Labels shown by the picker: current selection (seeded from the row on edit) + search hits.
         labelFor(c, id) { return (this.pLabels[c.name] || {})[String(id)] || ("#" + id); },
         selLabel(c) { return this.form[c.name] ? this.labelFor(c, this.form[c.name]) : ""; },

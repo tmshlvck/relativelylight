@@ -49,7 +49,7 @@ impl<'a> Table<'a> {
             per_page: 30,
             read_only: false,
             confirm: true,
-            picker_threshold: 25,
+            picker_threshold: 20,
             formatters: Vec::new(),
         }
     }
@@ -82,7 +82,7 @@ impl<'a> Table<'a> {
         self
     }
     /// Relation form widget cutover: targets with more rows than this use a live search→select
-    /// combobox instead of a plain `<select>`. Default: 25.
+    /// combobox instead of a plain `<select>`. Default: 20.
     pub fn picker_threshold(mut self, n: u64) -> Self {
         self.picker_threshold = n;
         self

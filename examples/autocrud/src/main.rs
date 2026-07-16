@@ -95,10 +95,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut table = Table::new(engine, slug)
             .title(capitalize(slug))
             .read_only(slug == "user")
-            .per_page(5) // small so the example exercises the pager (post → 9 pages)
-            // Low threshold to demo both relation widgets: on the post form the author (6 rows)
-            // stays a plain dropdown, while tags (8 rows) crosses over to the search→select picker.
-            .picker_threshold(7);
+            .per_page(5); // small so the example exercises the pager (post → 9 pages)
+        // Default picker_threshold (20) demos both widgets on the post form: author (6 rows) stays a
+        // plain dropdown, while tags (40 rows) crosses over to the search→select combobox.
         if slug == "post" {
             // Custom cell renderer: link the title to the row's JSON record (demo of Table::format).
             table = table.format(
