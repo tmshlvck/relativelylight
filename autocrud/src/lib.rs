@@ -16,7 +16,7 @@
 //! let app = crud.into_router();               // axum Router
 //! ```
 //!
-//! See `PRD.md` / `ARCHITECTURE.md`.
+//! See `docs/AUTOCRUD.md` for the full guide and `PRD.md` for the product spec.
 
 pub mod engine;
 pub mod seaorm;

@@ -349,5 +349,10 @@ transform, wires routes, and **forwards finished JSON**. Every backend implement
 
 SeaORM is one backend (`autocrud::seaorm`); it does the heavy lifting (introspection, projection,
 validation, relation resolution, set-based bulk delete). A different backend (in-memory, another ORM)
-is just another `Accessor` implementation reusing the whole engine + router unchanged. See
-`../ARCHITECTURE.md` for the design and rationale.
+is just another `Accessor` implementation reusing the whole engine + router unchanged.
+
+Why the seam sits here: relation resolution and field projection are *database* concerns — they run
+queries and encode per-model visibility policy — so keeping them behind the accessor lets the engine
+stay a pure pass-through. In the SeaORM backend, siblings are resolved through a `Weak`-keyed registry
+(no reference cycle; the strong `Arc`s live in the `Engine`), which preserves zero-config
+auto-discovery — nothing needs declaring beyond N:M.

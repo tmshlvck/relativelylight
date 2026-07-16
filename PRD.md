@@ -14,8 +14,8 @@ code**. It's built from composable components; take the pieces you need.
 > ✅ implemented & verified · 🟡 partial · ⛔ future.
 
 The engine crate is **`autocrud`**; the SeaORM backend is **`autocrud::seaorm`**. This document is the
-product spec and roadmap. For the full API and usage, see **[docs/AUTOCRUD.md](docs/AUTOCRUD.md)**;
-for the internal design, **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+product spec and roadmap. For the full API, usage, and design, see
+**[docs/AUTOCRUD.md](docs/AUTOCRUD.md)**.
 
 ## Vision: one API, many backends and frontends
 
@@ -23,7 +23,7 @@ Rune is an **umbrella**. A *backend flavor* turns some data source into a stable
 API (§1); a *frontend flavor* consumes that API to render an admin UI (§2). The API is the fixed
 contract in the middle, so backends and frontends vary independently. Today there is one backend
 (SeaORM) and one frontend (`alpine`); the seam is designed so a second of either drops in without a
-core change (see ARCHITECTURE.md).
+core change.
 
 ---
 
