@@ -19,3 +19,6 @@
 
 #[cfg(feature = "crud")]
 pub mod crud;
+
+#[cfg(feature = "auth")]
+pub mod auth;

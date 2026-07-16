@@ -4,9 +4,10 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
-# Playground for relativelylight's `auth` module (see docs/AUTH.md), deliberately without `crud`.
-# For now it just serves a public page and a page to be gated; gating lands with `auth`.
-# (Will later depend on `relativelylight` with features = ["auth"].)
+# Playground for relativelylight's `auth` module — deliberately WITHOUT `crud` to show it stands on
+# its own (default-features off + only the `auth` feature). See docs/AUTH.md.
 [dependencies]
+relativelylight = { path = "../../relativelylight", default-features = false, features = ["auth"] }
+sea-orm = { workspace = true, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 axum = "0.8"
 tokio = { workspace = true, features = ["net"] }

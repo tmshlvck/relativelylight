@@ -8,7 +8,7 @@ per-model code**. It's one crate of composable, feature-gated modules; take the 
 |---|---|---|
 | **`crud`** (§1) | SeaORM entities → JSON CRUD + machine-readable metadata API | ✅ implemented |
 | **`crud::ui`** (§2) | auto-generated web admin: table, create/edit form, admin side-panel, bulk + CSV | ✅ implemented |
-| **`auth`** (§3) | user + group model, sessions, TOTP 2FA, PassKeys, OIDC, `Authz` gate | ⛔ planned (draft spec) |
+| **`auth`** (§3) | user + group model, sessions, login, `Authz` gate (+ planned TOTP 2FA, PassKeys, OIDC) | 🟡 first slice done |
 | **Files** (§4) | multi-file upload / display / download / camera capture | ⛔ planned |
 
 > ✅ implemented & verified · 🟡 partial · ⛔ future.
@@ -73,11 +73,12 @@ import, and (further out) a server-rendered `htmx` frontend on the same seam.
 ## 3. `auth` — authentication & authorization ⛔ (planned; **draft spec**)
 
 A feature-gated module (usable without `crud`) providing a **user + group** model (SeaORM) and
-authentication via **TOTP 2FA**, **PassKeys** (WebAuthn), and **OIDC**, plus authorization gating for
-the API and admin (per-operation policy; row-level later). The `crud` API optionally consults it to
-gate its endpoints. The core design is drafted in **[docs/AUTH.md](docs/AUTH.md)**: cookie +
-server-side session, argon2id, an `Authz` gate (`can_list`/`can_read`/`can_write`) with presets, and
-a middleware stack (real-ip, logging, CORS, CSRF). Playground: `examples/auth`.
+authentication, plus authorization gating for the API and admin (per-operation policy; row-level
+later). **First slice implemented:** argon2id login/logout with a server-side session cookie, a
+session middleware + `CurrentUser` extractor, the `Authz` gate (`can_list`/`can_read`/`can_write`)
+with presets, and admin helpers (`make_admin`, `set_password`, …) — see `examples/auth`. **Planned:**
+wiring the gate into `crud`, password-change UI, CSRF/CORS/real-ip middleware, **TOTP 2FA**,
+**PassKeys**, **OIDC**. Design: **[docs/AUTH.md](docs/AUTH.md)**.
 
 ## 4. Files — file handling ⛔ (planned)
 

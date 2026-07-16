@@ -7,10 +7,12 @@ into them.
 
 The crate is **`relativelylight`**, organized into feature-gated modules:
 - **`crud`** (default) — the CRUD engine, SeaORM backend, admin UI (`ui`), OpenAPI, CSV.
-- **`auth`** (planned) — sessions, login, and an authorization gate. See [docs/AUTH.md](docs/AUTH.md).
+- **`auth`** — sessions, login, and an authorization gate (usable without `crud`). First slice
+  implemented; see [docs/AUTH.md](docs/AUTH.md).
 
-> Status: the `crud` API + `ui` web admin are implemented and used by the examples. Auth and
-> file-handling are planned — see [PRD.md](PRD.md).
+> Status: the `crud` API + `ui` web admin are implemented and used by the examples; `auth` has a
+> working first slice (argon2 login/session + `Authz` gate). File-handling is planned — see
+> [PRD.md](PRD.md).
 
 ## What you get
 
@@ -93,7 +95,7 @@ Three runnable examples share one seeded in-memory SQLite model (`examples/model
 ```bash
 cargo run -p crud-example          # per-entity pages (MPA), CSV, Swagger UI
 cargo run -p adminpanel-example    # the crud::ui::Admin side-panel — many models in one page
-cargo run -p auth-example          # auth playground (see docs/AUTH.md); static page for now
+cargo run -p auth-example          # auth: argon2 login/session gating a page (log in admin/password)
 ```
 
 The first two serve on <http://127.0.0.1:3000/> (JSON API under `/api/v1`, Swagger at `/docs`).

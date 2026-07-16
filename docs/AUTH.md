@@ -1,8 +1,15 @@
 # relativelylight — the `auth` module (authn + authz) — DRAFT SPEC
 
-Status: **draft / not implemented.** `auth` is a **feature-gated module** of the `relativelylight`
-crate — authentication (users, sessions, login, password hashing) *and* authorization (a small gate
-trait + presets) together. It's usable **on its own** (enable only `features = ["auth"]` to gate any
+Status: **first slice implemented** (feature `auth`, usable without `crud`): `user`/`session`/`group`/
+`user_group` SeaORM models, argon2id hashing, login/logout with an opaque server-side session
+cookie, a session-resolving middleware ([`Auth::wrap`]), the [`CurrentUser`] extractor, the [`Authz`]
+trait + presets (`Open`/`ValidUsers`/`UsersReadGroupWrite`), and admin helpers
+(`migrate`, `create_user`, `set_password`, `ensure_group`, `add_to_group`, `make_admin`). **Not yet:**
+wiring the gate into `crud` handlers, password-change UI, CSRF/CORS/real-ip middleware, 2FA/OIDC.
+The rest of this doc is the design these grow into.
+
+`auth` is a **feature-gated module** of the `relativelylight` crate — authentication (users,
+sessions, login, password hashing) *and* authorization (a small gate trait + presets) together. It's usable **on its own** (enable only `features = ["auth"]` to gate any
 axum app), and the `crud` module *optionally* consults it to gate the generated API + admin. It also
 keeps the door open for 2FA (TOTP / PassKeys), OIDC SSO, and app-defined API tokens.
 
@@ -179,10 +186,10 @@ let crud = Crud::new(db, "/api/v1").authz(gate.clone());
 
 // 4. compose — the app owns the root router.
 let app = axum::Router::new()
-    .merge(auth.routes())              // GET/POST /login, /logout, /password …
+    .merge(auth.routes())              // GET/POST /login, /logout, (/password …)
     .route("/", get(admin_page))       // the app's own (gated) pages/handlers
-    .merge(crud.into_router())         // the gated JSON API
-    .layer(auth.layer());              // real-ip · logging · CORS · session · resolve Principal · CSRF
+    .merge(crud.into_router());        // the gated JSON API
+let app = auth.wrap(app);              // session → Principal (later: real-ip · logging · CORS · CSRF)
 
 // The app's own handler uses the same identity + gate:
 async fn my_handler(user: CurrentUser, State(gate): State<Arc<dyn Authz>>) -> impl IntoResponse {
