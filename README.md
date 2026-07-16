@@ -98,7 +98,8 @@ cargo run -p adminpanel-example    # the crud::ui::Admin side-panel — many mod
 cargo run -p auth-example          # auth: argon2 login/session gating a page (log in admin/password)
 ```
 
-The first two serve on <http://127.0.0.1:3000/> (JSON API under `/api/v1`, Swagger at `/docs`).
+Each serves on <http://127.0.0.1:3000/> (run one at a time). The first two put the JSON API under
+`/api/v1` with Swagger at `/docs`.
 
 ## Requirements
 

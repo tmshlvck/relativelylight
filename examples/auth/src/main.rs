@@ -40,8 +40,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(auth.routes()); // /login, /logout
     let app = auth.wrap(app); // resolve the session cookie → Principal for every request
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3001").await?;
-    println!("auth playground on http://127.0.0.1:3001/   (log in as admin / password)");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
+    println!("auth playground on http://127.0.0.1:3000/   (log in as admin / password)");
     axum::serve(listener, app).await?;
     Ok(())
 }
