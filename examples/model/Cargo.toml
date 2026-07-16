@@ -1,0 +1,9 @@
+[package]
+name = "model"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+sea-orm = { workspace = true, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+serde = { workspace = true }

@@ -1,0 +1,477 @@
+<div x-data="ruTable()" x-init="load()">
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <h5 class="mb-0 text-capitalize">{{ title }}</h5>
+    <div class="d-flex gap-2">
+      {% if search %}
+      <input type="search" class="form-control form-control-sm w-auto"
+             placeholder="Search…" x-model="q" @input.debounce.300ms="onSearch()">
+      {% endif %}
+      <a class="btn btn-outline-secondary btn-sm" :href="exportUrl()">Export CSV</a>
+      {% if editable %}
+      <button class="btn btn-outline-danger btn-sm" x-show="selected.length"
+              @click="deleteSelected()">Delete selected (<span x-text="selected.length"></span>)</button>
+      <button class="btn btn-outline-danger btn-sm" x-show="!selected.length && total"
+              @click="deleteAllMatching()"
+              x-text="(q ? 'Delete all matching (' : 'Delete all (') + total + ')'"></button>
+      <label class="btn btn-outline-secondary btn-sm mb-0">Import CSV
+        <input type="file" accept=".csv,text/csv" hidden @change="importCsv($event)">
+      </label>
+      <button class="btn btn-primary btn-sm" @click="openCreate()">+ New</button>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-striped table-hover align-middle">
+      <thead>
+        <tr>
+          {% if editable %}
+          <th style="width:1%"><input type="checkbox" class="form-check-input"
+                 :checked="pageAllSelected()" @change="togglePage($event.target.checked)"></th>
+          {% endif %}
+          <template x-for="c in columns" :key="c.name">
+            <th class="text-capitalize" x-text="c.label || c.name"></th>
+          </template>
+          {% if editable %}<th class="text-end">Actions</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="item in rows" :key="item.id">
+          <tr :class="{ 'table-active': selected.includes(item.id) }">
+            {% if editable %}
+            <td><input type="checkbox" class="form-check-input"
+                   :checked="selected.includes(item.id)" @change="toggleRow(item.id)"></td>
+            {% endif %}
+            <template x-for="c in columns" :key="c.name">
+              <td>
+                <template x-if="c.kind === 'field'"><span x-text="cellVal(item, c)"></span></template>
+                <template x-if="c.kind === 'relation'">
+                  <span>
+                    <template x-for="(lnk, i) in links(item, c)" :key="i">
+                      <span>
+                        <a :href="relHref(c, lnk)" x-text="lnk.label"></a>
+                        <span x-show="i < links(item, c).length - 1">, </span>
+                      </span>
+                    </template>
+                  </span>
+                </template>
+              </td>
+            </template>
+            {% if editable %}
+            <td class="text-end text-nowrap">
+              <button class="btn btn-outline-secondary btn-sm" @click="openEdit(item)">Edit</button>
+              <button class="btn btn-outline-danger btn-sm" @click="del(item)">Delete</button>
+            </td>
+            {% endif %}
+          </tr>
+        </template>
+        <tr x-show="!loading && rows.length === 0">
+          <td :colspan="columns.length + {{ editable }} * 2" class="text-center text-muted">No rows</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  {% if pagination %}
+  <div class="d-flex justify-content-between align-items-center">
+    <small class="text-muted">
+      Total: <span x-text="total"></span> · Page <span x-text="page"></span> / <span x-text="pages"></span>
+    </small>
+    <nav>
+      <!-- |<  <<  N-3 … N … N+3  >>  >|   (<< / >> step by jump(); window clamped to [1, pages]) -->
+      <ul class="pagination pagination-sm mb-0">
+        <li class="page-item" :class="{ disabled: page <= 1 }">
+          <a class="page-link" href="#" title="First page" @click.prevent="goto(1)">|&lt;</a>
+        </li>
+        <li class="page-item" :class="{ disabled: page <= 1 }">
+          <a class="page-link" href="#" :title="'Back ' + jump() + ' pages'" @click.prevent="goto(page - jump())">&lt;&lt;</a>
+        </li>
+        <template x-for="p in pageWindow()" :key="p">
+          <li class="page-item" :class="{ active: p === page }">
+            <a class="page-link" href="#" @click.prevent="goto(p)" x-text="p"></a>
+          </li>
+        </template>
+        <li class="page-item" :class="{ disabled: page >= pages }">
+          <a class="page-link" href="#" :title="'Forward ' + jump() + ' pages'" @click.prevent="goto(page + jump())">&gt;&gt;</a>
+        </li>
+        <li class="page-item" :class="{ disabled: page >= pages }">
+          <a class="page-link" href="#" title="Last page" @click.prevent="goto(pages)">&gt;|</a>
+        </li>
+      </ul>
+    </nav>
+  </div>
+  {% endif %}
+
+  {% if editable %}
+  <!-- Create / edit overlay: a plain block div toggled by Alpine x-show (no Bootstrap .modal class,
+       whose display:none would fight x-show). Bootstrap classes used only for styling. -->
+  <div x-show="modalOpen" x-cloak
+       style="position:fixed; inset:0; z-index:1050; overflow-y:auto; background:rgba(0,0,0,.5);">
+    <div class="card shadow-lg" style="max-width:720px; margin:3rem auto;">
+      <div class="card-content">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <h5 class="mb-0 text-capitalize">
+            <span x-text="mode === 'create' ? 'New' : 'Edit'"></span> {{ title }}
+          </h5>
+          <button type="button" class="btn-close" @click="modalOpen = false"></button>
+        </div>
+        <div class="card-body">
+          <div class="alert alert-danger" x-show="rowErrors.length">
+            <template x-for="e in rowErrors" :key="e"><div x-text="e"></div></template>
+          </div>
+          <template x-for="c in formCols()" :key="c.name">
+            <div class="mb-3">
+              <label class="form-label text-capitalize" x-text="c.label || c.name"></label>
+
+              <template x-if="c.kind === 'field' && c.type === 'Bool'">
+                <div class="form-check">
+                  <input type="checkbox" class="form-check-input" x-model="form[c.name]">
+                </div>
+              </template>
+              <template x-if="c.kind === 'field' && (c.type === 'Int' || c.type === 'Float')">
+                <input type="number" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
+                       :step="c.type === 'Float' ? 'any' : '1'" x-model.number="form[c.name]">
+              </template>
+              <template x-if="c.kind === 'field' && !['Bool','Int','Float'].includes(c.type)">
+                <input type="text" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
+                       x-model="form[c.name]">
+              </template>
+
+              <!-- Small target: plain dropdown. Options are fetched whole. -->
+              <template x-if="c.kind === 'relation' && c.cardinality === 'ToOne' && !isBig(c)">
+                <select class="form-select" x-model="form[c.name]">
+                  <option value="">—</option>
+                  <template x-for="o in (options[c.name] || [])" :key="o.id">
+                    <option :value="o.id" x-text="o.label"></option>
+                  </template>
+                </select>
+              </template>
+              <template x-if="c.kind === 'relation' && c.cardinality === 'ToMany' && !isBig(c)">
+                <select class="form-select" multiple size="4" x-model="form[c.name]">
+                  <template x-for="o in (options[c.name] || [])" :key="o.id">
+                    <option :value="o.id" x-text="o.label"></option>
+                  </template>
+                </select>
+              </template>
+
+              <!-- Large target: search→select combobox (queries the target's list with ?q=…). -->
+              <template x-if="c.kind === 'relation' && c.cardinality === 'ToOne' && isBig(c)">
+                <div class="position-relative" @click.away="pOpen[c.name] = false">
+                  <div class="input-group">
+                    <input type="text" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
+                           :placeholder="form[c.name] ? selLabel(c) : 'Search…'"
+                           x-model="pQuery[c.name]" @focus="pSearch(c)" @input.debounce.250ms="pSearch(c)">
+                    <button class="btn btn-outline-secondary" type="button"
+                            x-show="form[c.name]" @click="pClear(c)" title="Clear">&times;</button>
+                  </div>
+                  <div class="form-text" x-show="form[c.name]">Selected: <span x-text="selLabel(c)"></span></div>
+                  <ul class="list-group position-absolute w-100 shadow" style="z-index:1060; max-height:220px; overflow:auto"
+                      x-show="pOpen[c.name] && (pResults[c.name] || []).length">
+                    <template x-for="o in (pResults[c.name] || [])" :key="o.id">
+                      <li class="list-group-item list-group-item-action" style="cursor:pointer"
+                          @click="pPickOne(c, o)" x-text="o.label"></li>
+                    </template>
+                  </ul>
+                </div>
+              </template>
+              <template x-if="c.kind === 'relation' && c.cardinality === 'ToMany' && isBig(c)">
+                <div class="position-relative" @click.away="pOpen[c.name] = false">
+                  <div class="d-flex flex-wrap gap-1 mb-1" x-show="(form[c.name] || []).length">
+                    <template x-for="id in form[c.name]" :key="id">
+                      <span class="badge text-bg-secondary d-inline-flex align-items-center">
+                        <span x-text="labelFor(c, id)"></span>
+                        <a href="#" class="text-white ms-1 text-decoration-none"
+                           @click.prevent="pRemove(c, id)">&times;</a>
+                      </span>
+                    </template>
+                  </div>
+                  <input type="text" class="form-control" placeholder="Search to add…"
+                         x-model="pQuery[c.name]" @focus="pSearch(c)" @input.debounce.250ms="pSearch(c)">
+                  <ul class="list-group position-absolute w-100 shadow" style="z-index:1060; max-height:220px; overflow:auto"
+                      x-show="pOpen[c.name] && (pResults[c.name] || []).length">
+                    <template x-for="o in (pResults[c.name] || [])" :key="o.id">
+                      <li class="list-group-item list-group-item-action" style="cursor:pointer"
+                          :class="{'active': (form[c.name] || []).includes(String(o.id))}"
+                          @click="pAddMany(c, o)" x-text="o.label"></li>
+                    </template>
+                  </ul>
+                </div>
+              </template>
+
+              <div class="invalid-feedback d-block" x-show="fieldErrors[c.name]" x-text="fieldErrors[c.name]"></div>
+              <div class="form-text" x-show="c.description" x-text="c.description"></div>
+            </div>
+          </template>
+        </div>
+        <div class="card-footer text-end">
+          <button class="btn btn-secondary" @click="modalOpen = false">Cancel</button>
+          <button class="btn btn-primary" @click="save()" :disabled="saving">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <script>
+    function ruTable() {
+      return {
+        dataUrl: "{{ data_url }}",
+        columns: {{ columns_json|safe }},
+        perPage: {{ per_page }},
+        confirmDelete: {{ confirm }},
+        pickerThreshold: {{ picker_threshold }},
+        q: "", page: 1, total: 0, rows: [], loading: false, selected: [],
+        modalOpen: false, mode: "create", editId: null,
+        form: {}, options: {}, fieldErrors: {}, rowErrors: [], saving: false,
+        // search→select picker state, keyed by column name:
+        pBig: {}, pLabels: {}, pQuery: {}, pResults: {}, pOpen: {},
+
+        async load() {
+          this.loading = true;
+          const p = new URLSearchParams();
+          p.set("page", this.page);
+          p.set("per_page", this.perPage);
+          if (this.q) p.set("q", this.q);
+          const res = await fetch(this.dataUrl + "?" + p.toString());
+          const d = await res.json();
+          this.rows = d.data || [];
+          this.total = d.total || 0;
+          this.page = d.page || 1;
+          this.loading = false;
+        },
+        // Build a relation link's URL from the column's item_url template ({id} placeholder).
+        relHref(c, lnk) {
+          return c.item_url ? c.item_url.replace("{id}", encodeURIComponent(lnk.id)) : "#";
+        },
+
+        // ---- row selection + bulk delete ----
+        toggleRow(id) {
+          const i = this.selected.indexOf(id);
+          if (i === -1) this.selected.push(id); else this.selected.splice(i, 1);
+        },
+        pageAllSelected() {
+          return this.rows.length > 0 && this.rows.every(r => this.selected.includes(r.id));
+        },
+        togglePage(on) {
+          const ids = this.rows.map(r => r.id);
+          if (on) this.selected = [...new Set([...this.selected, ...ids])];
+          else this.selected = this.selected.filter(id => !ids.includes(id));
+        },
+        async deleteSelected() {
+          const n = this.selected.length;
+          if (!n) return;
+          if (this.confirmDelete && !confirm(`Delete ${n} selected {{ title }}?`)) return;
+          const p = new URLSearchParams({ ids: this.selected.join(",") });
+          const res = await fetch(this.dataUrl + "?" + p.toString(), { method: "DELETE" });
+          const r = await res.json();
+          this.selected = [];
+          if (r.deleted != null) { await this.load(); } else { alert(r.error || "delete failed"); }
+        },
+        async deleteAllMatching() {
+          const scope = this.q ? `all ${this.total} rows matching "${this.q}"` : `ALL ${this.total} rows`;
+          if (this.confirmDelete && !confirm(`Delete ${scope}? This cannot be undone.`)) return;
+          const p = new URLSearchParams();
+          if (this.q) p.set("q", this.q); else p.set("all", "true"); // whole-table wipe needs all=true
+          const res = await fetch(this.dataUrl + "?" + p.toString(), { method: "DELETE" });
+          const r = await res.json();
+          if (r.deleted != null) { this.page = 1; await this.load(); } else { alert(r.error || "delete failed"); }
+        },
+        get pages() { return Math.max(1, Math.ceil(this.total / this.perPage)); },
+        onSearch() { this.page = 1; this.load(); },
+        // Go to page `p`, clamped to [1, pages]; reload only if it actually changed.
+        goto(p) {
+          const t = Math.min(this.pages, Math.max(1, p));
+          if (t !== this.page) { this.page = t; this.load(); }
+        },
+        // << / >> step: ±10 pages normally, ±100 once there are more than 1000 pages.
+        jump() { return this.pages > 1000 ? 100 : 10; },
+        // The N-3 … N … N+3 window, clamped to the available range (fewer near the edges).
+        pageWindow() {
+          const r = 3;
+          const start = Math.max(1, this.page - r);
+          const end = Math.min(this.pages, this.page + r);
+          const list = [];
+          for (let i = start; i <= end; i++) list.push(i);
+          return list;
+        },
+        cellVal(item, c) {
+          const v = item.row ? item.row[c.name] : undefined;
+          return (v === null || v === undefined) ? "" : v;
+        },
+        links(item, c) {
+          const v = item.row ? item.row[c.name] : null;
+          if (Array.isArray(v)) return v;
+          return v ? [v] : [];
+        },
+
+        formCols() { return this.columns.filter(c => !c.read_only); },
+        toNum(v) { const n = Number(v); return (v === "" || Number.isNaN(n)) ? v : n; },
+
+        async fetchOptions() {
+          for (const c of this.formCols()) {
+            if (c.kind === "relation" && c.list_url) {
+              // Fetch one threshold-sized page; `total` decides plain <select> vs search picker.
+              const res = await fetch(c.list_url + "?view=terse&per_page=" + this.pickerThreshold);
+              const d = await res.json();
+              if ((d.total || 0) > this.pickerThreshold) {
+                this.pBig[c.name] = true;                        // large → search→select
+              } else {
+                this.pBig[c.name] = false;                       // small → plain dropdown
+                this.options[c.name] = (d.data || []).map(x => ({ id: x.id, label: x.label }));
+              }
+            }
+          }
+        },
+        isBig(c) { return !!this.pBig[c.name]; },
+        // Labels shown by the picker: current selection (seeded from the row on edit) + search hits.
+        labelFor(c, id) { return (this.pLabels[c.name] || {})[String(id)] || ("#" + id); },
+        selLabel(c) { return this.form[c.name] ? this.labelFor(c, this.form[c.name]) : ""; },
+        async pSearch(c) {
+          if (!this.pLabels[c.name]) this.pLabels[c.name] = {};
+          const term = this.pQuery[c.name] ? "&q=" + encodeURIComponent(this.pQuery[c.name]) : "";
+          const res = await fetch(c.list_url + "?view=terse&per_page=20" + term);
+          const d = await res.json();
+          const rows = (d.data || []).map(x => ({ id: String(x.id), label: x.label }));
+          rows.forEach(o => (this.pLabels[c.name][o.id] = o.label));
+          this.pResults[c.name] = rows;
+          this.pOpen[c.name] = true;
+        },
+        pPickOne(c, o) {
+          this.form[c.name] = String(o.id);
+          this.pLabels[c.name][String(o.id)] = o.label;
+          this.pQuery[c.name] = ""; this.pOpen[c.name] = false;
+        },
+        pClear(c) { this.form[c.name] = ""; },
+        pAddMany(c, o) {
+          const id = String(o.id);
+          if (!this.form[c.name].includes(id)) this.form[c.name].push(id);
+          this.pLabels[c.name][id] = o.label;
+          this.pQuery[c.name] = ""; this.pResults[c.name] = []; this.pOpen[c.name] = false;
+        },
+        pRemove(c, id) {
+          this.form[c.name] = (this.form[c.name] || []).filter(x => x !== String(id));
+        },
+        blankForm() {
+          const f = {};
+          for (const c of this.formCols()) {
+            if (c.kind === "relation") f[c.name] = c.cardinality === "ToMany" ? [] : "";
+            else if (c.type === "Bool") f[c.name] = c.default ?? false;
+            else f[c.name] = c.default ?? "";
+          }
+          return f;
+        },
+        fromRow(row) {
+          const f = {};
+          for (const c of this.formCols()) {
+            const v = row ? row[c.name] : undefined;
+            if (c.kind === "relation") {
+              // Seed the picker's label map from the row so the current selection stays visible
+              // even when it isn't in the first search page (large targets).
+              if (!this.pLabels[c.name]) this.pLabels[c.name] = {};
+              if (c.cardinality === "ToMany") {
+                const arr = v || [];
+                f[c.name] = arr.map(l => String(l.id));
+                arr.forEach(l => (this.pLabels[c.name][String(l.id)] = l.label));
+              } else {
+                f[c.name] = v ? String(v.id) : "";
+                if (v) this.pLabels[c.name][String(v.id)] = v.label;
+              }
+            } else {
+              f[c.name] = (v === null || v === undefined) ? "" : v;
+            }
+          }
+          return f;
+        },
+        resetPicker() { this.pQuery = {}; this.pResults = {}; this.pOpen = {}; this.pLabels = {}; },
+        async openCreate() {
+          this.mode = "create"; this.editId = null;
+          this.fieldErrors = {}; this.rowErrors = [];
+          this.resetPicker();
+          await this.fetchOptions();
+          await this.$nextTick();          // let relation <option>s render…
+          this.form = this.blankForm();
+          this.modalOpen = true;
+        },
+        async openEdit(item) {
+          this.mode = "edit"; this.editId = item.id;
+          this.fieldErrors = {}; this.rowErrors = [];
+          this.resetPicker();
+          await this.fetchOptions();
+          await this.$nextTick();          // …before setting form values, so x-model can
+          this.form = this.fromRow(item.row); // select options that now exist in the DOM.
+          this.modalOpen = true;
+        },
+        payload() {
+          const p = {};
+          for (const c of this.formCols()) {
+            let v = this.form[c.name];
+            if (c.kind === "relation") {
+              if (c.cardinality === "ToMany") p[c.name] = (v || []).map(x => this.toNum(x));
+              else p[c.name] = (v === "" || v == null) ? null : this.toNum(v);
+            } else {
+              // Empty numbers are omitted (server default / unchanged); text is sent as-is
+              // (including "") so field validators can run.
+              const empty = v === "" || v === null || v === undefined;
+              if ((c.type === "Int" || c.type === "Float") && empty) continue;
+              p[c.name] = v === undefined ? "" : v;
+            }
+          }
+          return p;
+        },
+        async save() {
+          this.saving = true;
+          this.fieldErrors = {}; this.rowErrors = [];
+          const url = this.mode === "create" ? this.dataUrl : this.dataUrl + "/" + this.editId;
+          const method = this.mode === "create" ? "POST" : "PATCH";
+          const res = await fetch(url, {
+            method, headers: { "content-type": "application/json" },
+            body: JSON.stringify(this.payload()),
+          });
+          this.saving = false;
+          if (res.status === 422) {
+            const b = await res.json();
+            this.fieldErrors = b.fields || {};
+            this.rowErrors = b.errors || [];
+            return; // stay open
+          }
+          if (!res.ok) {
+            let msg = "request failed";
+            try { msg = (await res.json()).error || msg; } catch (e) {}
+            this.rowErrors = [msg];
+            return;
+          }
+          this.modalOpen = false;
+          await this.load();
+        },
+        async del(item) {
+          if (this.confirmDelete && !confirm("Delete this {{ title }} (#" + item.id + ")?")) return;
+          await fetch(this.dataUrl + "/" + item.id, { method: "DELETE" });
+          await this.load();
+        },
+
+        exportUrl() {
+          const p = new URLSearchParams();
+          p.set("format", "csv");
+          if (this.q) p.set("q", this.q);       // export respects the current search
+          return this.dataUrl + "?" + p.toString();
+        },
+        async importCsv(ev) {
+          const file = ev.target.files[0];
+          if (!file) return;
+          const text = await file.text();
+          const res = await fetch(this.dataUrl + "/_import", {
+            method: "POST", headers: { "content-type": "text/csv" }, body: text,
+          });
+          ev.target.value = "";              // allow re-importing the same file
+          const r = await res.json();
+          let msg = `Imported: ${r.created} created, ${r.updated} updated, ${r.failed} failed.`;
+          if (r.errors && r.errors.length) {
+            msg += "\n\n" + r.errors.slice(0, 10).map(e => `row ${e.row}: ${e.message}`).join("\n");
+          }
+          alert(msg);
+          await this.load();
+        },
+      };
+    }
+  </script>
+</div>

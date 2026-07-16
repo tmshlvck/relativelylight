@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Local databases / dumps created by examples
+*.sqlite
+*.sqlite3
+*.db
+
+# Playwright / MCP scratch output
+.playwright-mcp/
+*.png
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local tool settings
+.claude/settings.local.json
