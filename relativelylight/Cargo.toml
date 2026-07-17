@@ -19,6 +19,7 @@ argon2 = { version = "0.5", optional = true }
 rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 axum-extra = { version = "0.10", features = ["cookie"], optional = true }
 time = { version = "0.3", optional = true }
+totp-rs = { version = "5.7", features = ["qr", "gen_secret"], optional = true } # TOTP 2FA: secret, otpauth URL, QR
 
 [features]
 default = ["crud", "axum"]
@@ -27,4 +28,4 @@ axum = ["dep:axum"]           # the HTTP router/handlers
 ui = ["dep:askama", "crud"]   # the Bootstrap/Alpine admin components (Table, Admin)
 openapi = ["dep:utoipa", "crud"]
 csv = ["dep:csv", "crud"]
-auth = ["dep:sea-orm", "dep:axum", "dep:axum-extra", "dep:argon2", "dep:rand_core", "dep:time"] # sessions/login + Authz gate
+auth = ["dep:sea-orm", "dep:axum", "dep:axum-extra", "dep:argon2", "dep:rand_core", "dep:time", "dep:totp-rs"] # sessions/login + TOTP 2FA + Authz gate

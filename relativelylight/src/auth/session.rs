@@ -1,5 +1,9 @@
 //! `session` — a server-side session. Table `rl_session`. `id` is an opaque random token carried in
 //! the session cookie; `expires_at` is a Unix timestamp (seconds). Deleting the row revokes it.
+//!
+//! `awaiting_totp` marks a **half-authenticated** session: the password was verified but the TOTP
+//! second factor hasn't been yet. `Auth::identify` treats such a session as anonymous, so the user
+//! isn't logged in until the code is confirmed (which clears the flag).
 
 use sea_orm::entity::prelude::*;
 
@@ -10,6 +14,7 @@ pub struct Model {
     pub id: String,
     pub user_id: i32,
     pub expires_at: i64,
+    pub awaiting_totp: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

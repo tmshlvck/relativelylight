@@ -5,14 +5,16 @@
 //!   cargo run -p auth-example                            # serve; log in as admin / password
 //!   cargo run -p auth-example -- --set-admin-pw s3cret   # (re)set admin pw + admin-group membership
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::HeaderMap;
+use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
 use axum_extra::extract::CookieJar;
 use relativelylight::auth::{self, Auth, Identity};
 use sea_orm::Database;
+use std::net::SocketAddr;
 
 // The superadmin group name is the app's choice — a constant here, but it could come from config.
 const ADMIN_GROUP: &str = "superadmin";
@@ -38,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth = Auth::new(db)
         .secure_cookies(false) // local http, so no `Secure` attribute
         .admin_group(ADMIN_GROUP)
+        .totp_issuer("relativelylight auth demo") // shown in authenticator apps for 2FA
         // The library renders the login *form* and the profile/password page; the app styles both.
         .login_shell(bootstrap_login)
         .profile_shell(bootstrap_profile);
@@ -48,12 +51,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/", get(public))
         .route("/secret", get(secret)) // gated on demand (see `secret`)
         .with_state(auth.clone())
-        .merge(auth.routes()); // /login, /logout
+        .merge(auth.routes()) // /login, /logout, /profile (password + 2FA), /login/totp
+        .layer(axum::middleware::from_fn(access_log));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     println!("auth playground on http://127.0.0.1:3000/   (log in as admin / password)");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
+}
+
+/// Access log: one line per request — source IP, method, URI, and HTTP status.
+async fn access_log(ConnectInfo(addr): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let res = next.run(req).await;
+    println!("{} {} {} -> {}", addr.ip(), method, uri, res.status().as_u16());
+    res
 }
 
 async fn public() -> Html<String> {

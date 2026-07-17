@@ -11,11 +11,13 @@
 //! Try:  open http://127.0.0.1:3000/   ·   Swagger at /docs   ·   spec at /openapi.json
 
 use askama::Template;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
+use std::net::SocketAddr;
 use model::{author, post, profile, tag, user};
 use relativelylight::auth::{self, AdminOnly, Auth, Identity, UsersReadGroupWrite};
 use relativelylight::crud::engine::Engine;
@@ -98,6 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth = Auth::new(db.clone())
         .secure_cookies(false) // local http
         .admin_group(ADMIN_GROUP)
+        .totp_issuer("relativelylight admin") // shown in authenticator apps for 2FA
         .login_shell(login_shell)
         .profile_shell(profile_shell); // the app's chrome around the library's profile page
 
@@ -120,6 +123,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
          On edit, blank keeps the current password."
             .into(),
     );
+    // The TOTP secret columns are secrets — never expose them in reads/writes/metadata. (2FA is
+    // managed from the profile page, not the crud form.)
+    auth_user_mm.field("totp_secret").hidden = true;
+    auth_user_mm.field("totp_pending").hidden = true;
     // New accounts are active by default (so a freshly created user with a password can log in).
     auth_user_mm.field("is_active").default = Some(serde_json::json!(true));
     let auth_group_mm = MetaModel::new(auth::group::Entity);
@@ -177,14 +184,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Merge our pages, the login routes, and the gated API. No middleware: each handler/gate does
     // its own on-demand session lookup.
-    let app_router = ui.merge(auth.routes()).merge(engine.router());
+    let app_router = ui
+        .merge(auth.routes())
+        .merge(engine.router())
+        .layer(axum::middleware::from_fn(access_log));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     println!("Admin panel on  http://127.0.0.1:3000/   (admin/password = read-write · editor/password = read-only)");
     println!("Swagger UI on   http://127.0.0.1:3000/docs");
     println!("JSON API under  http://127.0.0.1:3000/api/v1");
-    axum::serve(listener, app_router).await?;
+    // ConnectInfo gives the middleware the peer socket address for the access log.
+    axum::serve(listener, app_router.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
+}
+
+/// Access log: one line per request — source IP, method, URI, and HTTP status.
+async fn access_log(ConnectInfo(addr): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let res = next.run(req).await;
+    println!("{} {} {} -> {}", addr.ip(), method, uri, res.status().as_u16());
+    res
 }
 
 // Requires a logged-in user: resolve the session on demand, redirect anonymous visitors to the login

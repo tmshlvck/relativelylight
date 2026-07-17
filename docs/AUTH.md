@@ -1,22 +1,24 @@
 # relativelylight — the `auth` module (authn + authz) — DRAFT SPEC
 
-Status: **first slice implemented** (feature `auth`, usable without `crud`): `user`/`session`/`group`/
+Status: **implemented** (feature `auth`, usable without `crud`): `user`/`session`/`group`/
 `user_group` SeaORM models, argon2id hashing, login/logout with an opaque server-side session cookie
 (via `axum-extra`'s `CookieJar`; cookie name configurable, default `rl_session`), **on-demand session
 resolution** ([`Auth::identify`] → `Option<Identity>`; **no middleware, nothing injected into the
 request**), the always-compiled `authz` gate trait + presets (`authz::Open`,
 `auth::ValidUsers::new(&auth)`, `auth::UsersReadGroupWrite::new(&auth, [..])`,
 `auth::AdminOnly::new(&auth, [..])`), a self-service **profile / password-change page** plus a
-manager-only reset for other users (`GET/POST /profile`, `GET/POST /profile/{id}`), admin helpers
-(`migrate`, `create_user`, `set_password`, `ensure_group`, `add_to_group`, `make_admin`), and
+manager-only reset for other users (`GET/POST /profile`, `GET/POST /profile/{id}`), **TOTP two-factor
+authentication** (login second factor + self-service enrol/disable + manager disable — see §5a), admin
+helpers (`migrate`, `create_user`, `set_password`, `ensure_group`, `add_to_group`, `make_admin`), and
 **per-model enforcement in the `crud` HTTP handlers** via `crud::seaorm::Crud::register(model, gate)`,
 mapping the gate's `Decision` to 401/403, plus per-request UI control-hiding via
-`Admin`/`Table::render_for`. **Not yet:** CSRF/CORS/real-ip/logging middleware, 2FA/OIDC. The rest of
-this doc is the design these grow into.
+`Admin`/`Table::render_for`. **Not yet:** CSRF/CORS/real-ip/logging middleware, PassKeys/OIDC. The rest
+of this doc is the design these grow into.
 
-The login and password-change pages are plain **MPA `<form>` posts** — no JS. The library renders the
-form fragment (Bootstrap-friendly classes); the app wraps + styles it via `Auth::login_shell` /
-`Auth::profile_shell`. General rule: keep security features as simple as possible.
+The login, password-change, and 2FA pages are plain **MPA `<form>` posts** — no JS (the enrolment QR
+is a server-rendered inline PNG). The library renders the form fragment (Bootstrap-friendly classes);
+the app wraps + styles it via `Auth::login_shell` / `Auth::profile_shell`. General rule: keep security
+features as simple as possible.
 
 `auth` is a **feature-gated module** of the `relativelylight` crate — authentication (users,
 sessions, login, password hashing) *and* authorization (a small gate trait + presets) together. It's usable **on its own** (enable only `features = ["auth"]` to gate any
@@ -118,11 +120,12 @@ All optional, all applied by the app; defaults chosen for "safe but works out of
 
 SeaORM models (the app runs the migration / `create_table_from_entity`):
 
-- **`user`** — `id`, `username` (unique), `password_hash`, `is_active`, timestamps. (2FA columns and
-  OIDC-subject added later, additively.)
+- **`user`** — `id`, `username` (unique), `password_hash`, `is_active`, and the TOTP 2FA columns
+  `totp_secret` / `totp_pending` (nullable base32; §5a). (An OIDC-subject column can be added later,
+  additively.)
 - **`group`** + **`user_group`** (N:M) — group membership drives authz.
-- **`session`** — `id` (opaque token), `user_id`, `created_at`, `expires_at` (+ later assurance
-  level, ip, user_agent).
+- **`session`** — `id` (opaque token), `user_id`, `expires_at`, and `awaiting_totp` (a
+  half-authenticated session — password ok, second factor pending; §5a).
 
 These are ordinary `crud`-registerable entities (so the admin can manage users/groups), with
 `password_hash` marked `write_only` + hashed via `on_write`, and never emitted in reads.
@@ -143,6 +146,40 @@ These are ordinary `crud`-registerable entities (so the admin can manage users/g
   their own, and `/profile/{self}` redirects to `/profile`. `Auth::can_manage_others(&who)` tells the
   app whether to surface an admin-only "reset password" link. The **admin group name is configurable**
   (default `"admin"`).
+
+## 5a. TOTP two-factor authentication — implemented
+
+A second factor (RFC 6238 TOTP, via the `totp-rs` crate) on top of username + password. When a user
+has 2FA enabled, a correct password isn't enough — they must also enter the 6-digit code from their
+authenticator app. Defaults are the widely-compatible SHA1 / 6 digits / 30s step / ±1 skew.
+
+**Data.** Two nullable base32 columns on `user`: `totp_secret` (the **active** secret — its presence
+means 2FA is on) and `totp_pending` (a secret mid-enrolment, not yet confirmed). One flag on
+`session`: `awaiting_totp` — a session created after a correct password but before the second factor.
+`Auth::identify` treats an `awaiting_totp` session as **anonymous**, so the user is not logged in until
+the code is confirmed.
+
+**Login flow.** `POST /login` verifies the password, then:
+- no 2FA → create a normal session, redirect `/`.
+- 2FA on → create an `awaiting_totp` session (cookie set, but grants nothing), redirect `/login/totp`.
+  `GET /login/totp` shows the code form; `POST /login/totp` verifies the code against the pending
+  session's user and, on success, clears `awaiting_totp` (the session becomes a real login) → `/`. A
+  wrong code → 401, re-render.
+
+**Enrolment (self-service, verify-before-activate).** `GET /profile/totp` mints a fresh secret, stores
+it as `totp_pending`, and shows **both** a QR code (a server-rendered inline PNG — no JS) **and** the
+`otpauth://…` URL as copyable text. `POST /profile/totp` checks the entered code against the pending
+secret; only on success is it promoted to `totp_secret` (2FA now required at login). A wrong code
+re-shows the same QR. `Auth::totp_issuer(name)` sets the issuer label authenticator apps display
+(default `"relativelylight"`).
+
+**Disable.** `POST /profile/totp/disable` turns off the caller's own 2FA. A **manager** (a
+profile-manager group, §5) can disable *another* user's 2FA via `POST /profile/{id}/totp/disable`
+(shown on the `/profile/{id}` page) — but managers can never *set up* 2FA for someone else, since
+enrolment needs that user's device. Disabling clears both `totp_secret` and `totp_pending`.
+
+The profile page (`GET /profile`) shows a 2FA section reflecting the current state: a "Set up 2FA"
+link when off, or a "Disable 2FA" button when on.
 
 ## 6. authz — the gate
 
@@ -265,8 +302,9 @@ cookie-authenticated client just reads the `csrf` cookie and sets the header.
 
 ## 8. Future-proofing (not in v1, but designed for)
 
-- **2FA (TOTP, PassKeys/WebAuthn):** the `session` row carries an assurance level; a second-factor
-  step upgrades it; `Authz` impls (or a policy) can require a level for sensitive models.
+- **TOTP 2FA — done (§5a).** Implemented as an `awaiting_totp` session flag + `totp_secret` on the
+  user. **PassKeys/WebAuthn** would slot in similarly (a session assurance level a policy can require
+  for sensitive models).
 - **OIDC SSO:** a callback creates a `session` for the mapped user — same session model.
 - **App API tokens:** the app issues tokens and adds an **identity source** that maps a Bearer token →
   `Identity` (a gate that checks the header instead of the cookie); the gate contract and all call
@@ -296,8 +334,8 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
 - **`examples/auth`** — uses **`auth` alone (no `crud`)** to prove it stands on its own: a login
   page, a session cookie, and a `/secret` page gated by an on-demand `auth.identify(&headers)` check
   (redirect to `login_path` when anonymous). The `/secret` page shows the signed-in user and links to
-  the self-service **`/profile`** password page (wrapped in the app's chrome via `profile_shell`),
-  plus the `--set-admin-pw` startup path.
+  the self-service **`/profile`** page — password change **and TOTP 2FA** enrolment/disable — wrapped
+  in the app's chrome via `profile_shell`, plus the `--set-admin-pw` startup path.
 - **`examples/adminpanel`** — **login-gated** `crud::ui::Admin`: the page calls
   `auth.identify(&headers)` (→ redirect to `/login` when anonymous), the content models are registered
   with a shared `UsersReadGroupWrite::new(&auth, ["admin"])` gate (any logged-in user reads; the admin
@@ -314,8 +352,14 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   anonymous → 303; `admin` → reads + writes, creates accounts with/without a password, resets
   `editor`'s password via `/profile/2`; `editor` → read-only panel with no Accounts section, own
   `/profile` works, `/profile/1` and the `rl_user` API both 403. Empty-password accounts cannot log in
-  with any password (`verify_password` fails against the empty hash).
+  with any password (`verify_password` fails against the empty hash). **TOTP 2FA** verified
+  end-to-end: enrol (QR + otpauth URL, wrong code rejected, correct code activates); login then
+  requires the second factor (`/login/totp`, awaiting session can't reach `/profile`); self-disable
+  and admin-disable-for-`editor` both work; a non-manager gets 403 disabling someone else's.
 - **`examples/crud`** — the ungated counterpart (`Open`), so there's a no-login demo.
+
+All three examples print an **access log** line per request (source IP · method · URI · HTTP status)
+via a small `axum::middleware::from_fn` layer + `into_make_service_with_connect_info`.
 
 > **Note — UI vs API enforcement.** The adminpanel renders the panel *per request* via
 > `Admin::render_for(&headers)`, which hides each model's Create/Edit/Delete controls when its gate
@@ -335,10 +379,14 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
    the identity itself → a `Decision`. The trait lives in the always-on `authz` module (`Open` for
    ungated). **No middleware**: authn is on-demand `Auth::identify(&headers)`.
 5. **Defaults** — ✅ hashing **argon2id**, admin group **`"admin"`** (configurable); presets
-   `authz::Open` / `ValidUsers::new(&auth)` / `UsersReadGroupWrite::new(&auth, [..])` / custom.
+   `authz::Open` / `ValidUsers::new(&auth)` / `UsersReadGroupWrite::new(&auth, [..])` /
+   `AdminOnly::new(&auth, [..])` / custom.
+6. **2FA** — ✅ **TOTP** (RFC 6238) as a login second factor with self-service enrolment/disable and
+   manager disable (§5a); PassKeys/WebAuthn remain future.
 
 ## 12. Open (later)
 
 - Row-level authorization (per-row read checks / list filters — the gate seeing the row/query).
-- 2FA (TOTP, PassKeys), OIDC SSO, app-issued API tokens (extra principal source) — §8.
+- PassKeys/WebAuthn, OIDC SSO, app-issued API tokens (extra principal source) — §8.
 - Session store scaling (shared store) if the app runs multiple instances.
+- TOTP hardening: rate-limiting code attempts, recovery/backup codes, and re-auth before disabling.

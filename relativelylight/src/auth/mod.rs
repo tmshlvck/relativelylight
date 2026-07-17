@@ -11,12 +11,13 @@
 //!
 //! Implemented: the `user`/`session`/`group`/`user_group` SeaORM models, argon2id hashing, a
 //! login/logout flow with an opaque server-side session cookie (via `axum-extra`'s `CookieJar`),
-//! on-demand [`Auth::identify`], the gate presets ([`ValidUsers`], [`UsersReadGroupWrite`],
-//! [`AdminOnly`]), a self-service **profile / password-change** page plus a manager reset
-//! (`GET/POST /profile`, `GET/POST /profile/{id}` — see [`Auth::routes`]), admin helpers
-//! (`make_admin`, `set_password`, `add_to_group`, …), and per-model enforcement in the `crud` HTTP
-//! handlers via `crud::seaorm::Crud::register`. Not yet: the CSRF/CORS/real-ip/logging middleware and
-//! 2FA/OIDC.
+//! **TOTP two-factor authentication** (a second-factor step at login, plus self-service enrolment /
+//! disable on the profile page and a manager disable for other users), on-demand [`Auth::identify`],
+//! the gate presets ([`ValidUsers`], [`UsersReadGroupWrite`], [`AdminOnly`]), a self-service
+//! **profile / password-change** page plus a manager reset (`GET/POST /profile`,
+//! `GET/POST /profile/{id}` — see [`Auth::routes`]), admin helpers (`make_admin`, `set_password`,
+//! `add_to_group`, …), and per-model enforcement in the `crud` HTTP handlers via
+//! `crud::seaorm::Crud::register`. Not yet: the CSRF/CORS/real-ip/logging middleware and OIDC.
 //!
 //! The session cookie (name configurable, default `rl_session`) carries only an **opaque token** —
 //! the id of a row in the session table; the identity is rebuilt server-side from the DB on each
@@ -24,6 +25,7 @@
 
 pub mod group;
 pub mod session;
+mod totp;
 pub mod user;
 pub mod user_group;
 
@@ -36,7 +38,7 @@ use async_trait::async_trait;
 use axum::extract::{Form, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use crate::authz::{Authz, Decision, Operation};
@@ -313,6 +315,8 @@ struct Inner {
     profile_shell: ProfileShell,
     /// Groups whose members may reset *other* users' passwords. `None` → fall back to `[admin_group]`.
     profile_managers: Option<Vec<String>>,
+    /// Issuer label shown in authenticator apps for TOTP enrolment (the `otpauth://` URL / QR).
+    totp_issuer: String,
 }
 
 impl Inner {
@@ -351,6 +355,7 @@ impl Auth {
                 login_shell: Arc::new(default_login_shell),
                 profile_shell: Arc::new(default_profile_shell),
                 profile_managers: None,
+                totp_issuer: "relativelylight".into(),
             }),
         }
     }
@@ -390,6 +395,13 @@ impl Auth {
     {
         Arc::get_mut(&mut self.inner).unwrap().profile_managers =
             Some(groups.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// The issuer label authenticator apps show for TOTP 2FA (default `"relativelylight"`). Usually
+    /// your app/product name.
+    pub fn totp_issuer(mut self, name: impl Into<String>) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().totp_issuer = name.into();
         self
     }
 
@@ -440,15 +452,24 @@ impl Auth {
         self.inner.can_manage_others(who)
     }
 
-    /// `GET/POST /login`, `GET /logout`, and the profile/password pages: `GET/POST /profile` (change
-    /// your own password) and `GET/POST /profile/{id}` (a manager resets another user's). Merge into
-    /// your router.
+    /// The auth pages, to merge into your router:
+    /// - `GET/POST /login` and `GET/POST /login/totp` — password, then the TOTP second factor when the
+    ///   user has 2FA enabled.
+    /// - `GET /logout`.
+    /// - `GET/POST /profile` — change your own password + manage your own 2FA.
+    /// - `GET/POST /profile/totp` + `POST /profile/totp/disable` — enrol in / disable your own 2FA.
+    /// - `GET/POST /profile/{id}` — a manager resets another user's password.
+    /// - `POST /profile/{id}/totp/disable` — a manager disables another user's 2FA.
     pub fn routes(&self) -> Router {
         Router::new()
             .route("/login", get(login_form).post(login_submit))
+            .route("/login/totp", get(login_totp_form).post(login_totp_submit))
             .route("/logout", get(logout))
             .route("/profile", get(profile_form).post(profile_submit))
+            .route("/profile/totp", get(totp_setup_form).post(totp_setup_submit))
+            .route("/profile/totp/disable", post(totp_self_disable))
             .route("/profile/{id}", get(manage_form).post(manage_submit))
+            .route("/profile/{id}/totp/disable", post(totp_manage_disable))
             .with_state(self.inner.clone())
     }
 
@@ -466,8 +487,8 @@ impl Auth {
 
 async fn identity_from(inner: &Inner, token: &str) -> Option<Identity> {
     let session = session::Entity::find_by_id(token.to_string()).one(&inner.db).await.ok()??;
-    if session.expires_at < now_secs() {
-        return None;
+    if session.expires_at < now_secs() || session.awaiting_totp {
+        return None; // expired, or password-verified but the TOTP second factor is still pending
     }
     let user = user::Entity::find_by_id(session.user_id).one(&inner.db).await.ok()??;
     if !user.is_active {
@@ -477,20 +498,26 @@ async fn identity_from(inner: &Inner, token: &str) -> Option<Identity> {
     Some(Identity { id: user.id.to_string(), username: user.username, groups })
 }
 
-async fn authenticate(inner: &Inner, username: &str, password: &str) -> Option<String> {
+/// Verify username + password. Returns the user on success (regardless of 2FA) — the caller decides
+/// whether a second factor is still required (`user.totp_secret.is_some()`).
+async fn verify_credentials(inner: &Inner, username: &str, password: &str) -> Option<user::Model> {
     let user = user::Entity::find()
         .filter(user::Column::Username.eq(username))
         .one(&inner.db)
         .await
         .ok()??;
-    if !user.is_active || !verify_password(&user.password_hash, password) {
-        return None;
-    }
+    (user.is_active && verify_password(&user.password_hash, password)).then_some(user)
+}
+
+/// Create a session row and return its token. `awaiting_totp` marks it half-authenticated (password
+/// ok, TOTP pending) — [`identity_from`] rejects such sessions until the code is confirmed.
+async fn create_session(inner: &Inner, user_id: i32, awaiting_totp: bool) -> Option<String> {
     let token = new_token();
     session::ActiveModel {
         id: Set(token.clone()),
-        user_id: Set(user.id),
+        user_id: Set(user_id),
         expires_at: Set(now_secs() + inner.ttl_secs),
+        awaiting_totp: Set(awaiting_totp),
     }
     .insert(&inner.db)
     .await
@@ -513,14 +540,72 @@ async fn login_submit(
     jar: CookieJar,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    match authenticate(&inner, &form.username, &form.password).await {
-        Some(token) => (jar.add(session_cookie(&inner, token)), Redirect::to("/")).into_response(),
-        None => (
+    let Some(user) = verify_credentials(&inner, &form.username, &form.password).await else {
+        return (
             StatusCode::UNAUTHORIZED,
             Html((inner.login_shell)(&login_form_html(Some("Invalid username or password.")))),
         )
-            .into_response(),
+            .into_response();
+    };
+    let needs_totp = user.totp_secret.is_some();
+    let Some(token) = create_session(&inner, user.id, needs_totp).await else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
+    };
+    // The session cookie is set either way; while `awaiting_totp` it grants nothing until the second
+    // factor is confirmed at /login/totp.
+    let jar = jar.add(session_cookie(&inner, token));
+    let dest = if needs_totp { "/login/totp" } else { "/" };
+    (jar, Redirect::to(dest)).into_response()
+}
+
+/// `GET /login/totp` — the second-factor form, reached after a correct password when 2FA is on. Reads
+/// the pending session; if there isn't one, sends the visitor back to /login.
+async fn login_totp_form(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Response {
+    match pending_totp_user(&inner, &headers).await {
+        Some(_) => Html((inner.login_shell)(&totp_login_html(None))).into_response(),
+        None => Redirect::to(&inner.login_path).into_response(),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct TotpForm {
+    code: String,
+}
+
+/// `POST /login/totp` — verify the code against the pending session's user; on success clear
+/// `awaiting_totp` (the session becomes a real login) and land on `/`.
+async fn login_totp_submit(
+    State(inner): State<Arc<Inner>>,
+    headers: HeaderMap,
+    Form(form): Form<TotpForm>,
+) -> Response {
+    let Some((session, user)) = pending_totp_user(&inner, &headers).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let ok = user.totp_secret.as_deref().is_some_and(|s| totp::verify(s, &form.code));
+    if !ok {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Html((inner.login_shell)(&totp_login_html(Some("Invalid code. Try again.")))),
+        )
+            .into_response();
+    }
+    let mut am: session::ActiveModel = session.into();
+    am.awaiting_totp = Set(false);
+    let _ = am.update(&inner.db).await;
+    Redirect::to("/").into_response()
+}
+
+/// Resolve the half-authenticated session (password ok, TOTP pending) and its user from the cookie.
+async fn pending_totp_user(inner: &Inner, headers: &HeaderMap) -> Option<(session::Model, user::Model)> {
+    let jar = CookieJar::from_headers(headers);
+    let token = jar.get(&inner.cookie_name)?.value().to_string();
+    let session = session::Entity::find_by_id(token).one(&inner.db).await.ok()??;
+    if !session.awaiting_totp || session.expires_at < now_secs() {
+        return None;
+    }
+    let user = user::Entity::find_by_id(session.user_id).one(&inner.db).await.ok()??;
+    Some((session, user))
 }
 
 async fn logout(State(inner): State<Arc<Inner>>, jar: CookieJar) -> Response {
@@ -557,12 +642,21 @@ async fn user_by_id(db: &DatabaseConnection, id: i32) -> Option<user::Model> {
     user::Entity::find_by_id(id).one(db).await.ok().flatten()
 }
 
-/// `GET /profile` — the self-service change-password form (anonymous → login).
+/// Whether the caller (by string id) currently has an active TOTP secret.
+async fn totp_active(inner: &Inner, id_str: &str) -> bool {
+    match id_str.parse::<i32>() {
+        Ok(id) => user_by_id(&inner.db, id).await.is_some_and(|u| u.totp_secret.is_some()),
+        Err(_) => false,
+    }
+}
+
+/// `GET /profile` — the self-service change-password form + 2FA status (anonymous → login).
 async fn profile_form(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Response {
     let Some(who) = identity_of(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
-    let frag = change_form_html(&who, None, None);
+    let totp_on = totp_active(&inner, &who.id).await;
+    let frag = change_form_html(&who, totp_on, None, None);
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
@@ -582,6 +676,7 @@ async fn profile_submit(
     let Some(user) = user else {
         return Redirect::to(&inner.login_path).into_response();
     };
+    let totp_on = user.totp_secret.is_some();
 
     let error = if !verify_password(&user.password_hash, &form.current_password) {
         Some("Current password is incorrect.")
@@ -589,16 +684,16 @@ async fn profile_submit(
         password_pair_error(&form.new_password, &form.confirm_password)
     };
     if let Some(msg) = error {
-        let frag = change_form_html(&who, Some(msg), None);
+        let frag = change_form_html(&who, totp_on, Some(msg), None);
         return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
     }
 
     if set_password(&inner.db, &who.username, &form.new_password).await.is_err() {
-        let frag = change_form_html(&who, Some("Could not change the password."), None);
+        let frag = change_form_html(&who, totp_on, Some("Could not change the password."), None);
         return (StatusCode::INTERNAL_SERVER_ERROR, Html((inner.profile_shell)(&frag, &who)))
             .into_response();
     }
-    let frag = change_form_html(&who, None, Some("Your password has been changed."));
+    let frag = change_form_html(&who, totp_on, None, Some("Your password has been changed."));
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
@@ -621,7 +716,7 @@ async fn manage_form(
     let Some(target) = target_user(&inner, &id).await else {
         return (StatusCode::NOT_FOUND, "No such user").into_response();
     };
-    let frag = reset_form_html(&id, &target.username, None, None);
+    let frag = reset_form_html(&id, &target.username, target.totp_secret.is_some(), None, None);
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
@@ -644,19 +739,132 @@ async fn manage_submit(
     let Some(target) = target_user(&inner, &id).await else {
         return (StatusCode::NOT_FOUND, "No such user").into_response();
     };
+    let totp_on = target.totp_secret.is_some();
 
     if let Some(msg) = password_pair_error(&form.new_password, &form.confirm_password) {
-        let frag = reset_form_html(&id, &target.username, Some(msg), None);
+        let frag = reset_form_html(&id, &target.username, totp_on, Some(msg), None);
         return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
     }
     if set_password(&inner.db, &target.username, &form.new_password).await.is_err() {
-        let frag = reset_form_html(&id, &target.username, Some("Could not set the password."), None);
+        let frag =
+            reset_form_html(&id, &target.username, totp_on, Some("Could not set the password."), None);
         return (StatusCode::INTERNAL_SERVER_ERROR, Html((inner.profile_shell)(&frag, &who)))
             .into_response();
     }
     let msg = format!("Password reset for {}.", target.username);
-    let frag = reset_form_html(&id, &target.username, None, Some(&msg));
+    let frag = reset_form_html(&id, &target.username, totp_on, None, Some(&msg));
     Html((inner.profile_shell)(&frag, &who)).into_response()
+}
+
+// ---- TOTP 2FA (setup / verify / disable) ----
+
+/// `GET /profile/totp` — begin enrolment: mint a fresh pending secret, store it on the user, and show
+/// the QR + `otpauth://` URL with a verify form. A new secret is generated on each visit.
+async fn totp_setup_form(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Response {
+    let Some(who) = identity_of(&inner, &headers).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let Some(user) = current_user(&inner, &who).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let secret = totp::generate_secret();
+    let mut am: user::ActiveModel = user.into();
+    am.totp_pending = Set(Some(secret.clone()));
+    if am.update(&inner.db).await.is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not start 2FA setup").into_response();
+    }
+    render_totp_setup(&inner, &who, &secret, None)
+}
+
+/// `POST /profile/totp` — confirm enrolment: verify the code against the pending secret, then promote
+/// it to the active secret (2FA now required at login). On a bad code, re-show the *same* QR.
+async fn totp_setup_submit(
+    State(inner): State<Arc<Inner>>,
+    headers: HeaderMap,
+    Form(form): Form<TotpForm>,
+) -> Response {
+    let Some(who) = identity_of(&inner, &headers).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let Some(user) = current_user(&inner, &who).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let Some(pending) = user.totp_pending.clone() else {
+        return Redirect::to(&inner.profile_path).into_response(); // nothing in progress
+    };
+    if !totp::verify(&pending, &form.code) {
+        return render_totp_setup(&inner, &who, &pending, Some("That code didn't match. Try again."));
+    }
+    let mut am: user::ActiveModel = user.into();
+    am.totp_secret = Set(Some(pending));
+    am.totp_pending = Set(None);
+    if am.update(&inner.db).await.is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not enable 2FA").into_response();
+    }
+    let frag = change_form_html(&who, true, None, Some("Two-factor authentication is now enabled."));
+    Html((inner.profile_shell)(&frag, &who)).into_response()
+}
+
+/// `POST /profile/totp/disable` — the caller turns off their own 2FA.
+async fn totp_self_disable(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Response {
+    let Some(who) = identity_of(&inner, &headers).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let Some(user) = current_user(&inner, &who).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    clear_totp(&inner, user).await;
+    let frag = change_form_html(&who, false, None, Some("Two-factor authentication disabled."));
+    Html((inner.profile_shell)(&frag, &who)).into_response()
+}
+
+/// `POST /profile/{id}/totp/disable` — a manager turns off *another* user's 2FA (they can re-enrol).
+/// Managers can disable but never set up 2FA for someone else (enrolment needs the user's device).
+async fn totp_manage_disable(
+    State(inner): State<Arc<Inner>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(who) = identity_of(&inner, &headers).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    if who.id == id {
+        return Redirect::to(&inner.profile_path).into_response();
+    }
+    if !inner.can_manage_others(&who) {
+        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+    }
+    let Some(target) = target_user(&inner, &id).await else {
+        return (StatusCode::NOT_FOUND, "No such user").into_response();
+    };
+    let username = target.username.clone();
+    clear_totp(&inner, target).await;
+    let msg = format!("Two-factor authentication disabled for {username}.");
+    let frag = reset_form_html(&id, &username, false, None, Some(&msg));
+    Html((inner.profile_shell)(&frag, &who)).into_response()
+}
+
+/// The caller's own user row.
+async fn current_user(inner: &Inner, who: &Identity) -> Option<user::Model> {
+    let id = who.id.parse::<i32>().ok()?;
+    user_by_id(&inner.db, id).await
+}
+
+/// Clear both the active and pending TOTP secrets on a user (best-effort).
+async fn clear_totp(inner: &Inner, user: user::Model) {
+    let mut am: user::ActiveModel = user.into();
+    am.totp_secret = Set(None);
+    am.totp_pending = Set(None);
+    let _ = am.update(&inner.db).await;
+}
+
+/// Render the 2FA enrolment page (QR + otpauth URL + verify form) for a pending secret.
+fn render_totp_setup(inner: &Inner, who: &Identity, secret: &str, error: Option<&str>) -> Response {
+    let Some(prov) = totp::provisioning(&inner.totp_issuer, &who.username, secret) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not build QR code").into_response();
+    };
+    let frag = totp_setup_html(&prov, error);
+    Html((inner.profile_shell)(&frag, who)).into_response()
 }
 
 /// Look up the target user by the (string) id from the URL. `None` if the id isn't an integer or no
@@ -741,10 +949,17 @@ fn alert_html(error: Option<&str>, success: Option<&str>) -> String {
     }
 }
 
-/// The self-service change-password `<form>` fragment (Bootstrap-friendly classes; no page chrome —
-/// the app's [`Auth::profile_shell`] wraps + styles it).
-fn change_form_html(who: &Identity, error: Option<&str>, success: Option<&str>) -> String {
+/// The self-service change-password `<form>` fragment plus a two-factor section (Bootstrap-friendly
+/// classes; no page chrome — the app's [`Auth::profile_shell`] wraps + styles it). `totp_on` is
+/// whether the caller already has 2FA enabled.
+fn change_form_html(
+    who: &Identity,
+    totp_on: bool,
+    error: Option<&str>,
+    success: Option<&str>,
+) -> String {
     let alert = alert_html(error, success);
+    let twofa = twofa_self_section(totp_on);
     format!(
         r#"<h1 class="h5 mb-3">Change your password</h1>
 <p class="text-muted small">Signed in as <strong>{user}</strong>.</p>
@@ -763,15 +978,41 @@ fn change_form_html(who: &Identity, error: Option<&str>, success: Option<&str>) 
     <input class="form-control" id="rl-confirm" name="confirm_password" type="password" autocomplete="new-password">
   </div>
   <button class="btn btn-primary" type="submit">Change password</button>
-</form>"#,
+</form>
+<hr class="my-4">
+{twofa}"#,
         user = esc(&who.username),
     )
 }
 
+/// The self two-factor section: current state + a link to set up, or a button to disable.
+fn twofa_self_section(on: bool) -> String {
+    if on {
+        r#"<h2 class="h6">Two-factor authentication</h2>
+<p class="text-muted small mb-2">Enabled — a code from your authenticator app is required at login.</p>
+<form method="post" action="/profile/totp/disable">
+  <button class="btn btn-outline-danger btn-sm" type="submit">Disable 2FA</button>
+</form>"#
+            .to_string()
+    } else {
+        r#"<h2 class="h6">Two-factor authentication</h2>
+<p class="text-muted small mb-2">Off. Add a second factor with an authenticator app (TOTP).</p>
+<a class="btn btn-outline-primary btn-sm" href="/profile/totp">Set up 2FA</a>"#
+            .to_string()
+    }
+}
+
 /// The manager reset-password `<form>` fragment: sets another user's password with no current-password
-/// check. `id` is the target user id (used in the form action).
-fn reset_form_html(id: &str, username: &str, error: Option<&str>, success: Option<&str>) -> String {
+/// check, plus a section to disable their 2FA. `id` is the target user id (used in the form actions).
+fn reset_form_html(
+    id: &str,
+    username: &str,
+    totp_on: bool,
+    error: Option<&str>,
+    success: Option<&str>,
+) -> String {
     let alert = alert_html(error, success);
+    let twofa = twofa_manage_section(id, username, totp_on);
     format!(
         r#"<h1 class="h5 mb-3">Reset password</h1>
 <p class="text-muted">Set a new password for <strong>{user}</strong> (no current password required).</p>
@@ -786,9 +1027,73 @@ fn reset_form_html(id: &str, username: &str, error: Option<&str>, success: Optio
     <input class="form-control" id="rl-confirm" name="confirm_password" type="password" autocomplete="new-password">
   </div>
   <button class="btn btn-primary" type="submit">Reset password</button>
-</form>"#,
+</form>
+<hr class="my-4">
+{twofa}"#,
         user = esc(username),
         id = esc(id),
+    )
+}
+
+/// The manager two-factor section: disable the target's 2FA (managers can't set it up for others).
+fn twofa_manage_section(id: &str, username: &str, on: bool) -> String {
+    if on {
+        format!(
+            r#"<h2 class="h6">Two-factor authentication</h2>
+<p class="text-muted small mb-2">This user has 2FA enabled. Disabling it lets them log in with just a password until they set it up again.</p>
+<form method="post" action="/profile/{id}/totp/disable">
+  <button class="btn btn-outline-danger btn-sm" type="submit">Disable 2FA for {user}</button>
+</form>"#,
+            id = esc(id),
+            user = esc(username),
+        )
+    } else {
+        r#"<h2 class="h6">Two-factor authentication</h2>
+<p class="text-muted small mb-0">This user has no two-factor authentication set up.</p>"#
+            .to_string()
+    }
+}
+
+/// The login second-factor `<form>` fragment (shown at `/login/totp` after a correct password).
+fn totp_login_html(error: Option<&str>) -> String {
+    let alert = alert_html(error, None);
+    format!(
+        r#"<h1 class="h5 mb-3">Two-factor authentication</h1>
+<p class="text-muted small">Enter the 6-digit code from your authenticator app.</p>
+<form method="post" action="/login/totp">
+  {alert}
+  <div class="mb-3">
+    <label class="form-label" for="rl-totp">Authentication code</label>
+    <input class="form-control" id="rl-totp" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus>
+  </div>
+  <button class="btn btn-primary" type="submit">Verify</button>
+</form>"#
+    )
+}
+
+/// The 2FA enrolment `<form>` fragment: the QR image, the `otpauth://` URL as copyable text, and a
+/// code field to confirm before activation.
+fn totp_setup_html(prov: &totp::Provisioning, error: Option<&str>) -> String {
+    let alert = alert_html(error, None);
+    format!(
+        r#"<h1 class="h5 mb-3">Set up two-factor authentication</h1>
+<p class="text-muted small">Scan this QR code with an authenticator app (or add the setup URL by hand), then enter the 6-digit code it shows to confirm.</p>
+{alert}
+<div class="text-center mb-3">
+  <img src="{qr}" alt="TOTP QR code" width="200" height="200" style="image-rendering:pixelated">
+</div>
+<p class="small text-muted mb-1">Setup URL (otpauth)</p>
+<pre class="bg-body-secondary p-2 rounded" style="white-space:pre-wrap;word-break:break-all"><code>{url}</code></pre>
+<form method="post" action="/profile/totp">
+  <div class="mb-3">
+    <label class="form-label" for="rl-totp">Authentication code</label>
+    <input class="form-control" id="rl-totp" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus>
+  </div>
+  <button class="btn btn-primary" type="submit">Verify &amp; enable</button>
+  <a class="btn btn-link" href="/profile">Cancel</a>
+</form>"#,
+        qr = esc(&prov.qr_data_uri),
+        url = esc(&prov.url),
     )
 }
 
