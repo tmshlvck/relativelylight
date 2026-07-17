@@ -111,13 +111,13 @@
       Total: <span x-text="total"></span> · Page <span x-text="page"></span> / <span x-text="pages"></span>
     </small>
     <nav>
-      <!-- |<  <<  N-3 … N … N+3  >>  >|   (<< / >> step by jump(); window clamped to [1, pages]) -->
+      <!-- First  «  N-3 … N … N+3  »  Last   (« / » step by jump(); window clamped to [1, pages]) -->
       <ul class="pagination pagination-sm mb-0">
         <li class="page-item" :class="{ disabled: page <= 1 }">
-          <a class="page-link" href="#" title="First page" @click.prevent="goto(1)">|&lt;</a>
+          <a class="page-link" href="#" title="First page" @click.prevent="goto(1)">First</a>
         </li>
         <li class="page-item" :class="{ disabled: page <= 1 }">
-          <a class="page-link" href="#" :title="'Back ' + jump() + ' pages'" @click.prevent="goto(page - jump())">&lt;&lt;</a>
+          <a class="page-link" href="#" :title="'Back ' + jump() + ' pages'" @click.prevent="goto(page - jump())">&laquo;</a>
         </li>
         <template x-for="p in pageWindow()" :key="p">
           <li class="page-item" :class="{ active: p === page }">
@@ -125,10 +125,10 @@
           </li>
         </template>
         <li class="page-item" :class="{ disabled: page >= pages }">
-          <a class="page-link" href="#" :title="'Forward ' + jump() + ' pages'" @click.prevent="goto(page + jump())">&gt;&gt;</a>
+          <a class="page-link" href="#" :title="'Forward ' + jump() + ' pages'" @click.prevent="goto(page + jump())">&raquo;</a>
         </li>
         <li class="page-item" :class="{ disabled: page >= pages }">
-          <a class="page-link" href="#" title="Last page" @click.prevent="goto(pages)">&gt;|</a>
+          <a class="page-link" href="#" title="Last page" @click.prevent="goto(pages)">Last</a>
         </li>
       </ul>
     </nav>
