@@ -17,7 +17,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
 use model::{author, post, profile, tag, user};
-use relativelylight::auth::{self, Auth, UsersReadGroupWrite};
+use relativelylight::auth::{self, AdminOnly, Auth, Identity, UsersReadGroupWrite};
 use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::crud::ui::Admin;
@@ -31,6 +31,7 @@ const ADMIN_GROUP: &str = "admin";
 #[template(path = "shell.html")]
 struct Shell {
     title: String,
+    user: String, // signed-in username (empty when anonymous) → navbar link to /profile
     body: String,
 }
 
@@ -41,9 +42,11 @@ struct App {
 }
 
 // The admin fragment's structure (nav groups, per-model table config). Built fresh per request so it
-// can be rendered *for the caller* — hiding write controls the gate would reject.
-fn build_admin(engine: &Engine) -> Admin<'_> {
-    Admin::new(engine)
+// can be rendered *for the caller*. `is_manager` marks callers in the admin group: only they get the
+// `AdminOnly`-gated Accounts section (the auth users/groups), where each user-id links to its
+// password-reset page. Non-managers would get 403 reading those models, so we omit the section for them.
+fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
+    let mut admin = Admin::new(engine)
         .title("relativelylight")
         .group("Content")
         .entity_with("post", |t| {
@@ -57,7 +60,22 @@ fn build_admin(engine: &Engine) -> Admin<'_> {
         .group("People")
         .entity("author")
         .entity_with("user", |t| t.read_only(true))
-        .entity("profile")
+        .entity("profile");
+    if is_manager {
+        admin = admin
+            .separator()
+            .group("Accounts (auth)")
+            // Login accounts: password hidden on the model, table read-only (accounts are reset via
+            // the profile page, not edited inline). The id links to /profile/{id} — the reset page.
+            .entity_with("rl_user", |t| {
+                t.title("Login accounts").read_only(true).format(
+                    "id",
+                    r#"(v, row) => `<a href="/profile/${row.id}" title="Reset password">${v}</a>`"#,
+                )
+            })
+            .entity_with("rl_group", |t| t.title("Groups"));
+    }
+    admin
         .separator()
         .group("Reference")
         .link("API docs (Swagger)", "/docs")
@@ -80,7 +98,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth = Auth::new(db.clone())
         .secure_cookies(false) // local http
         .admin_group(ADMIN_GROUP)
-        .login_shell(login_shell);
+        .login_shell(login_shell)
+        .profile_shell(profile_shell); // the app's chrome around the library's profile page
 
     let author_mm = MetaModel::new(author::Entity);
     let user_mm = MetaModel::new(user::Entity);
@@ -89,6 +108,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tag_mm = MetaModel::new(tag::Entity);
     post_mm.relate(&tag_mm);
     tag_mm.relate(&post_mm);
+
+    // The auth login accounts + groups, surfaced in the admin. Never expose the password hash.
+    let mut auth_user_mm = MetaModel::new(auth::user::Entity);
+    auth_user_mm.field("password_hash").hidden = true;
+    let auth_group_mm = MetaModel::new(auth::group::Entity);
 
     // Per-field presentation + validation (drives the labels / help / defaults / errors in the form).
     post_mm.field("title").label = Some("Title".into());
@@ -116,6 +140,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.register(user_mm, gate.clone());
     crud.register(profile_mm, gate.clone());
     crud.register(tag_mm, gate.clone());
+    // The auth accounts/groups are admin-only, read included (the new `AdminOnly` preset).
+    let admin_gate = Arc::new(AdminOnly::new(&auth, [ADMIN_GROUP]));
+    crud.register(auth_user_mm, admin_gate.clone());
+    crud.register(auth_group_mm, admin_gate.clone());
 
     // One shared engine: the router serves the API from it, and the page handler renders the admin
     // fragment from it *per request* (so write controls hide for users who can't write).
@@ -153,14 +181,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // page, then render the admin *for this caller* — non-admins get a read-only panel (no Create/Edit/
 // Delete), while the API enforces the same rule. No middleware, no extractor.
 async fn home(headers: HeaderMap, State(app): State<Arc<App>>) -> Response {
-    if app.auth.identify(&headers).await.is_none() {
+    let Some(who) = app.auth.identify(&headers).await else {
         return Redirect::to(app.auth.login_path()).into_response();
-    }
-    let body = match build_admin(&app.engine).render_for(&headers).await {
+    };
+    // Managers (members of the admin group) get the accounts section + user-id → reset links.
+    let is_manager = app.auth.can_manage_others(&who);
+    let body = match build_admin(&app.engine, is_manager).render_for(&headers).await {
         Ok(html) => html,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let page = Shell { title: "relativelylight".into(), body }.render().unwrap_or_default();
+    let page = Shell { title: "relativelylight".into(), user: who.username, body }
+        .render()
+        .unwrap_or_default();
     Html(page).into_response()
 }
 
@@ -179,7 +211,8 @@ async fn docs() -> Html<&'static str> {
     )
 }
 
-// The app styles the library's login form: drop it into our shell as a centered card.
+// The app styles the library's login form: drop it into our shell as a centered card. Anonymous, so
+// the navbar shows no user link.
 fn login_shell(form: &str) -> String {
     let body = format!(
         r#"<div class="card shadow-sm mx-auto" style="max-width:24rem"><div class="card-body">
@@ -187,5 +220,15 @@ fn login_shell(form: &str) -> String {
 <p class="text-muted small mt-2 mb-0">Demo: <code>admin</code> / <code>password</code></p>
 </div></div>"#
     );
-    Shell { title: "Log in".into(), body }.render().unwrap_or_default()
+    Shell { title: "Log in".into(), user: String::new(), body }.render().unwrap_or_default()
+}
+
+// The app styles the library's profile/password page the same way. The library hands us the caller's
+// identity, so the navbar shows their username (and Log out) just like the admin page.
+fn profile_shell(fragment: &str, who: &Identity) -> String {
+    let body = format!(
+        r#"<div class="card shadow-sm mx-auto" style="max-width:32rem"><div class="card-body">{fragment}
+<a class="d-inline-block mt-3" href="/">&larr; Back to admin</a></div></div>"#
+    );
+    Shell { title: "Profile".into(), user: who.username.clone(), body }.render().unwrap_or_default()
 }

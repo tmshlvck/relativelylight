@@ -5,16 +5,18 @@ Status: **first slice implemented** (feature `auth`, usable without `crud`): `us
 (via `axum-extra`'s `CookieJar`; cookie name configurable, default `rl_session`), **on-demand session
 resolution** ([`Auth::identify`] → `Option<Identity>`; **no middleware, nothing injected into the
 request**), the always-compiled `authz` gate trait + presets (`authz::Open`,
-`auth::ValidUsers::new(&auth)`, `auth::UsersReadGroupWrite::new(&auth, [..])`), admin helpers
+`auth::ValidUsers::new(&auth)`, `auth::UsersReadGroupWrite::new(&auth, [..])`,
+`auth::AdminOnly::new(&auth, [..])`), a self-service **profile / password-change page** plus a
+manager-only reset for other users (`GET/POST /profile`, `GET/POST /profile/{id}`), admin helpers
 (`migrate`, `create_user`, `set_password`, `ensure_group`, `add_to_group`, `make_admin`), and
 **per-model enforcement in the `crud` HTTP handlers** via `crud::seaorm::Crud::register(model, gate)`,
 mapping the gate's `Decision` to 401/403, plus per-request UI control-hiding via
-`Admin`/`Table::render_for`. **Not yet:** password-change UI, CSRF/CORS/real-ip/logging middleware,
-2FA/OIDC. The rest of this doc is the design these grow into.
+`Admin`/`Table::render_for`. **Not yet:** CSRF/CORS/real-ip/logging middleware, 2FA/OIDC. The rest of
+this doc is the design these grow into.
 
-The login (and later password-change) pages are plain **MPA `<form>` posts** — no JS. The library
-renders the form fragment (Bootstrap-friendly classes); the app wraps + styles it via
-`Auth::login_shell`. General rule: keep security features as simple as possible.
+The login and password-change pages are plain **MPA `<form>` posts** — no JS. The library renders the
+form fragment (Bootstrap-friendly classes); the app wraps + styles it via `Auth::login_shell` /
+`Auth::profile_shell`. General rule: keep security features as simple as possible.
 
 `auth` is a **feature-gated module** of the `relativelylight` crate — authentication (users,
 sessions, login, password hashing) *and* authorization (a small gate trait + presets) together. It's usable **on its own** (enable only `features = ["auth"]` to gate any
@@ -131,10 +133,16 @@ These are ordinary `crud`-registerable entities (so the admin can manage users/g
   `crud::ui` components) posting to a built-in login handler that verifies the hash, creates a
   `session` row, and sets the cookie. On success → redirect; on failure → re-render with an error.
 - **Logout:** deletes the session row + clears the cookie.
-- **Password change:** a self-service component (verify current password → set new hash), easy to
-  link from the app shell so any signed-in user can change their own password. When rendered for an
-  **admin-group** user it can target *another* user (reset without the current password), so admins
-  can change anyone's password. The **admin group name is configurable** (default `"admin"`).
+- **Password change / profile — implemented.** `Auth::routes()` serves a self-service page at
+  `GET/POST /profile` (verify current password → set new hash; any signed-in user changes their own)
+  and a manager reset at `GET/POST /profile/{id}` (set another user's password with **no** current
+  password). The library renders the `<form>` fragment; the app wraps it via `Auth::profile_shell`
+  (like `login_shell`, but also handed the resolved `Identity`, so the app's chrome can show the
+  signed-in user). Managing *another* user requires membership in a **profile-manager group**
+  (default `[admin_group]`, override with `Auth::profile_managers([..])`); a caller may always manage
+  their own, and `/profile/{self}` redirects to `/profile`. `Auth::can_manage_others(&who)` tells the
+  app whether to surface an admin-only "reset password" link. The **admin group name is configurable**
+  (default `"admin"`).
 
 ## 6. authz — the gate
 
@@ -170,8 +178,16 @@ checks — per-row read/filter — are a future extension; out of scope for v1.)
 - **`auth::ValidUsers::new(&auth)`** — any authenticated user may do anything; anonymous → `NeedsLogin`.
 - **`auth::UsersReadGroupWrite::new(&auth, ["admin"])`** — any authenticated user may list/read; a
   write needs membership in one of the groups (else `Denied`); anonymous → `NeedsLogin`.
+- **`auth::AdminOnly::new(&auth, ["admin"])`** — the stricter sibling: *only* members of one of the
+  groups may do anything (read **or** write); anonymous → `NeedsLogin`, any other logged-in user →
+  `Denied`. Use it to keep whole models admin-only (e.g. the `rl_user` / `rl_group` tables). Its
+  `admits(&Identity)` method is a header-free membership check for deciding admin-only UI.
 - **Custom** — implement `authz::Authz` (full RBAC over users/groups, an app's own API tokens, IP
   allow-lists — anything, since you get the headers and can call `auth.identify`).
+
+> The profile page's "manage another user" rule is **not** an `Authz` gate — the header-only trait
+> can't see *which* user is targeted. That row-aware self-or-manager check lives in the `/profile/{id}`
+> handler (configured by `Auth::profile_managers`), not in a model gate.
 
 **Configuration — one gate per model, at registration.** `Crud::register(model, gate)` takes the gate
 alongside the model. Pass `Open` for an ungated model, a preset, or a shared `Arc<dyn Authz>` (it
@@ -279,14 +295,21 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
 
 - **`examples/auth`** — uses **`auth` alone (no `crud`)** to prove it stands on its own: a login
   page, a session cookie, and a `/secret` page gated by an on-demand `auth.identify(&headers)` check
-  (redirect to `login_path` when anonymous), plus the `--set-admin-pw` startup path.
+  (redirect to `login_path` when anonymous). The `/secret` page shows the signed-in user and links to
+  the self-service **`/profile`** password page (wrapped in the app's chrome via `profile_shell`),
+  plus the `--set-admin-pw` startup path.
 - **`examples/adminpanel`** — **login-gated** `crud::ui::Admin`: the page calls
-  `auth.identify(&headers)` (→ redirect to `/login` when anonymous), each model is registered with a
-  shared `UsersReadGroupWrite::new(&auth, ["admin"])` gate (any logged-in user reads; the admin group
-  writes), and the panel is rendered per request with `render_for` so write controls hide for
-  non-writers. Two logins: `admin` (read-write) and `editor` (read-only). Verified end-to-end:
-  anonymous → 303 / 401; `admin` → 200 reads + 201/200 writes, 4 write controls; `editor` → 200 read
-  page with 0 write controls, API read 200 / write 403.
+  `auth.identify(&headers)` (→ redirect to `/login` when anonymous), the content models are registered
+  with a shared `UsersReadGroupWrite::new(&auth, ["admin"])` gate (any logged-in user reads; the admin
+  group writes), and the panel is rendered per request with `render_for` so write controls hide for
+  non-writers. The navbar shows the signed-in user, linking to **`/profile`** (self password change).
+  The auth **`rl_user` / `rl_group`** tables are also surfaced — gated `AdminOnly::new(&auth, ["admin"])`
+  (admin-only, read included), with the password hidden and each user id linking to `/profile/{id}`
+  (a manager reset); the whole "Accounts" section is shown only to managers. Two logins: `admin`
+  (read-write, manager) and `editor` (read-only). Verified end-to-end: anonymous → 303; `admin` →
+  reads + writes, sees the Accounts section, resets `editor`'s password via `/profile/2`; `editor` →
+  read-only panel with no Accounts section, own `/profile` works, `/profile/1` and the `rl_user` API
+  both 403.
 - **`examples/crud`** — the ungated counterpart (`Open`), so there's a no-login demo.
 
 > **Note — UI vs API enforcement.** The adminpanel renders the panel *per request* via

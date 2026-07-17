@@ -11,7 +11,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
 use axum_extra::extract::CookieJar;
-use relativelylight::auth::{self, Auth};
+use relativelylight::auth::{self, Auth, Identity};
 use sea_orm::Database;
 
 // The superadmin group name is the app's choice — a constant here, but it could come from config.
@@ -38,8 +38,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth = Auth::new(db)
         .secure_cookies(false) // local http, so no `Secure` attribute
         .admin_group(ADMIN_GROUP)
-        // The library renders the login *form*; the app styles it. Here: a Bootstrap page.
-        .login_shell(bootstrap_login);
+        // The library renders the login *form* and the profile/password page; the app styles both.
+        .login_shell(bootstrap_login)
+        .profile_shell(bootstrap_profile);
 
     // No middleware: `secret` resolves the session itself via `auth.identify`. The app router carries
     // the `Auth` handle as state so handlers can reach it; the login/logout routes bring their own.
@@ -77,6 +78,7 @@ async fn secret(State(auth): State<Auth>, headers: HeaderMap, jar: CookieJar) ->
             r#"<p>Signed in as <b>{}</b> — groups: [{}].</p>
 <p class="small text-muted mb-1">session cookie</p>
 <pre class="bg-body-secondary p-2 rounded"><code>{name}={}</code></pre>
+<a class="btn btn-primary btn-sm" href="/profile">Change password</a>
 <a class="btn btn-outline-secondary btn-sm" href="/logout">Log out</a>"#,
             who.username,
             who.groups.join(", "),
@@ -94,6 +96,18 @@ fn page(title: &str, body: &str) -> String {
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"></head>
 <body class="bg-body-tertiary"><main class="container py-4" style="max-width:40rem">
 <h1 class="h4 mb-3">{title}</h1>{body}</main></body></html>"#
+    )
+}
+
+/// The app's shell for the library's profile/password page. The library hands us the caller's
+/// identity so the page can greet them; we wrap the change-password form in our Bootstrap chrome.
+fn bootstrap_profile(fragment: &str, who: &Identity) -> String {
+    page(
+        &format!("Profile — {}", who.username),
+        &format!(
+            r#"<div class="card shadow-sm"><div class="card-body">{fragment}</div></div>
+<a class="d-inline-block mt-3" href="/secret">&larr; Back to /secret</a>"#
+        ),
     )
 }
 

@@ -11,10 +11,12 @@
 //!
 //! Implemented: the `user`/`session`/`group`/`user_group` SeaORM models, argon2id hashing, a
 //! login/logout flow with an opaque server-side session cookie (via `axum-extra`'s `CookieJar`),
-//! on-demand [`Auth::identify`], the gate presets, admin helpers (`make_admin`, `set_password`,
-//! `add_to_group`, …), and per-model enforcement in the `crud` HTTP handlers via
-//! `crud::seaorm::Crud::register`. Not yet: a password-change UI, the CSRF/CORS/real-ip/logging
-//! middleware, and 2FA/OIDC.
+//! on-demand [`Auth::identify`], the gate presets ([`ValidUsers`], [`UsersReadGroupWrite`],
+//! [`AdminOnly`]), a self-service **profile / password-change** page plus a manager reset
+//! (`GET/POST /profile`, `GET/POST /profile/{id}` — see [`Auth::routes`]), admin helpers
+//! (`make_admin`, `set_password`, `add_to_group`, …), and per-model enforcement in the `crud` HTTP
+//! handlers via `crud::seaorm::Crud::register`. Not yet: the CSRF/CORS/real-ip/logging middleware and
+//! 2FA/OIDC.
 //!
 //! The session cookie (name configurable, default `rl_session`) carries only an **opaque token** —
 //! the id of a row in the session table; the identity is rebuilt server-side from the DB on each
@@ -31,7 +33,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use async_trait::async_trait;
-use axum::extract::{Form, State};
+use axum::extract::{Form, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
@@ -61,6 +63,11 @@ impl Identity {
     /// Whether this identity belongs to the named group.
     pub fn in_group(&self, group: &str) -> bool {
         self.groups.iter().any(|g| g == group)
+    }
+
+    /// Whether this identity belongs to any of the given groups.
+    pub fn in_any_group(&self, groups: &[String]) -> bool {
+        self.groups.iter().any(|g| groups.contains(g))
     }
 }
 
@@ -118,6 +125,46 @@ impl Authz for UsersReadGroupWrite {
                     Decision::Denied
                 }
             }
+        }
+    }
+}
+
+/// Gate: only members of one of `admin_groups` may do anything (read *or* write); anonymous →
+/// `NeedsLogin`, any other logged-in user → `Denied`. Construct with `AdminOnly::new(&auth,
+/// ["admin"])` — the stricter sibling of [`UsersReadGroupWrite`] (which lets any logged-in user read).
+/// Use it to keep whole models (e.g. the user/group tables) admin-only, and its [`admits`](AdminOnly::admits)
+/// helper to decide admin-only UI from an already-resolved [`Identity`].
+pub struct AdminOnly {
+    auth: Auth,
+    admin_groups: Vec<String>,
+}
+
+impl AdminOnly {
+    pub fn new<I, S>(auth: &Auth, admin_groups: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            auth: auth.clone(),
+            admin_groups: admin_groups.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Whether an already-resolved identity is in one of the admin groups (a header-free check, e.g.
+    /// for hiding admin-only links without a second session lookup).
+    pub fn admits(&self, who: &Identity) -> bool {
+        who.in_any_group(&self.admin_groups)
+    }
+}
+
+#[async_trait]
+impl Authz for AdminOnly {
+    async fn authorize(&self, _: Operation, headers: &HeaderMap) -> Decision {
+        match self.auth.identify(headers).await {
+            None => Decision::NeedsLogin,
+            Some(who) if self.admits(&who) => Decision::Allow,
+            Some(_) => Decision::Denied,
         }
     }
 }
@@ -247,17 +294,38 @@ async fn groups_of(db: &DatabaseConnection, user_id: i32) -> Vec<String> {
 // ===================== The Auth builder =====================
 
 type LoginShell = Arc<dyn Fn(&str) -> String + Send + Sync>;
+/// Wraps the profile/password fragment into a full page. Also handed the resolved [`Identity`] so the
+/// app can render its chrome (e.g. the signed-in username in the navbar).
+type ProfileShell = Arc<dyn Fn(&str, &Identity) -> String + Send + Sync>;
 
 struct Inner {
     db: DatabaseConnection,
     admin_group: String,
     cookie_name: String,
     login_path: String,
+    profile_path: String,
     secure_cookies: bool,
     ttl_secs: i64,
     /// Wraps the login-form fragment into a full page. Default: a minimal unstyled document; set
     /// [`Auth::login_shell`] to embed it in your Bootstrap (or other) shell so the app styles it.
     login_shell: LoginShell,
+    /// Wraps the profile/password fragment into a full page (see [`Auth::profile_shell`]).
+    profile_shell: ProfileShell,
+    /// Groups whose members may reset *other* users' passwords. `None` → fall back to `[admin_group]`.
+    profile_managers: Option<Vec<String>>,
+}
+
+impl Inner {
+    /// The groups that may reset *other* users' passwords: the configured manager groups, defaulting
+    /// to the admin group.
+    fn manager_groups(&self) -> Vec<String> {
+        self.profile_managers.clone().unwrap_or_else(|| vec![self.admin_group.clone()])
+    }
+
+    /// Whether `who` may manage *someone else's* profile (i.e. is in a manager group).
+    fn can_manage_others(&self, who: &Identity) -> bool {
+        who.in_any_group(&self.manager_groups())
+    }
 }
 
 /// Wires authn into an app: login/logout routes ([`routes`](Auth::routes)) and on-demand session
@@ -277,9 +345,12 @@ impl Auth {
                 admin_group: "admin".into(),
                 cookie_name: DEFAULT_COOKIE.into(),
                 login_path: "/login".into(),
+                profile_path: "/profile".into(),
                 secure_cookies: true,
                 ttl_secs: 7 * 24 * 3600,
                 login_shell: Arc::new(default_login_shell),
+                profile_shell: Arc::new(default_profile_shell),
+                profile_managers: None,
             }),
         }
     }
@@ -292,9 +363,33 @@ impl Auth {
         self
     }
 
+    /// Wrap the profile/password fragment into a full page — as [`login_shell`](Auth::login_shell),
+    /// but the closure also receives the signed-in [`Identity`] so the app can render its chrome (e.g.
+    /// the username in the navbar) around the fragment.
+    pub fn profile_shell(
+        mut self,
+        shell: impl Fn(&str, &Identity) -> String + Send + Sync + 'static,
+    ) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().profile_shell = Arc::new(shell);
+        self
+    }
+
     /// Group whose members may reset other users' passwords (used later). Default `"admin"`.
     pub fn admin_group(mut self, name: impl Into<String>) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().admin_group = name.into();
+        self
+    }
+
+    /// Groups whose members may manage *other* users' profiles (password resets) on the profile page.
+    /// Defaults to `[admin_group]`; set this to broaden or override it. A user can always manage their
+    /// own profile regardless.
+    pub fn profile_managers<I, S>(mut self, groups: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Arc::get_mut(&mut self.inner).unwrap().profile_managers =
+            Some(groups.into_iter().map(Into::into).collect());
         self
     }
 
@@ -332,11 +427,28 @@ impl Auth {
         &self.inner.login_path
     }
 
-    /// `GET/POST /login`, `GET /logout`. Merge into your router.
+    /// The self-service profile/password page (default `"/profile"`). Link to it from the app shell
+    /// (e.g. the signed-in username). Managing another user is `"{profile_path}/{user_id}"`.
+    pub fn profile_path(&self) -> &str {
+        &self.inner.profile_path
+    }
+
+    /// Whether `who` may reset *other* users' passwords — i.e. belongs to a profile-manager group
+    /// (default `[admin_group]`, set with [`profile_managers`](Auth::profile_managers)). Handy for
+    /// deciding whether to show an admin-only "reset password" link.
+    pub fn can_manage_others(&self, who: &Identity) -> bool {
+        self.inner.can_manage_others(who)
+    }
+
+    /// `GET/POST /login`, `GET /logout`, and the profile/password pages: `GET/POST /profile` (change
+    /// your own password) and `GET/POST /profile/{id}` (a manager resets another user's). Merge into
+    /// your router.
     pub fn routes(&self) -> Router {
         Router::new()
             .route("/login", get(login_form).post(login_submit))
             .route("/logout", get(logout))
+            .route("/profile", get(profile_form).post(profile_submit))
+            .route("/profile/{id}", get(manage_form).post(manage_submit))
             .with_state(self.inner.clone())
     }
 
@@ -419,6 +531,152 @@ async fn logout(State(inner): State<Arc<Inner>>, jar: CookieJar) -> Response {
     (jar, Redirect::to("/login")).into_response()
 }
 
+// ---- profile / password change ----
+
+#[derive(serde::Deserialize)]
+struct ChangeForm {
+    current_password: String,
+    new_password: String,
+    confirm_password: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ResetForm {
+    new_password: String,
+    confirm_password: String,
+}
+
+/// Resolve the caller from the request cookie (as [`Auth::identify`], but from `Inner`).
+async fn identity_of(inner: &Inner, headers: &HeaderMap) -> Option<Identity> {
+    let jar = CookieJar::from_headers(headers);
+    let token = jar.get(&inner.cookie_name)?.value().to_string();
+    identity_from(inner, &token).await
+}
+
+async fn user_by_id(db: &DatabaseConnection, id: i32) -> Option<user::Model> {
+    user::Entity::find_by_id(id).one(db).await.ok().flatten()
+}
+
+/// `GET /profile` — the self-service change-password form (anonymous → login).
+async fn profile_form(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Response {
+    let Some(who) = identity_of(&inner, &headers).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let frag = change_form_html(&who, None, None);
+    Html((inner.profile_shell)(&frag, &who)).into_response()
+}
+
+/// `POST /profile` — verify the current password, then set the new one for the caller.
+async fn profile_submit(
+    State(inner): State<Arc<Inner>>,
+    headers: HeaderMap,
+    Form(form): Form<ChangeForm>,
+) -> Response {
+    let Some(who) = identity_of(&inner, &headers).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let user = match who.id.parse::<i32>() {
+        Ok(id) => user_by_id(&inner.db, id).await,
+        Err(_) => None,
+    };
+    let Some(user) = user else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+
+    let error = if !verify_password(&user.password_hash, &form.current_password) {
+        Some("Current password is incorrect.")
+    } else {
+        password_pair_error(&form.new_password, &form.confirm_password)
+    };
+    if let Some(msg) = error {
+        let frag = change_form_html(&who, Some(msg), None);
+        return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
+    }
+
+    if set_password(&inner.db, &who.username, &form.new_password).await.is_err() {
+        let frag = change_form_html(&who, Some("Could not change the password."), None);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Html((inner.profile_shell)(&frag, &who)))
+            .into_response();
+    }
+    let frag = change_form_html(&who, None, Some("Your password has been changed."));
+    Html((inner.profile_shell)(&frag, &who)).into_response()
+}
+
+/// `GET /profile/{id}` — a manager's reset form for another user (self → own page; not a manager →
+/// 403; unknown user → 404).
+async fn manage_form(
+    State(inner): State<Arc<Inner>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(who) = identity_of(&inner, &headers).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    if who.id == id {
+        return Redirect::to(&inner.profile_path).into_response();
+    }
+    if !inner.can_manage_others(&who) {
+        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+    }
+    let Some(target) = target_user(&inner, &id).await else {
+        return (StatusCode::NOT_FOUND, "No such user").into_response();
+    };
+    let frag = reset_form_html(&id, &target.username, None, None);
+    Html((inner.profile_shell)(&frag, &who)).into_response()
+}
+
+/// `POST /profile/{id}` — a manager sets another user's password (no current password required).
+async fn manage_submit(
+    State(inner): State<Arc<Inner>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<ResetForm>,
+) -> Response {
+    let Some(who) = identity_of(&inner, &headers).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    if who.id == id {
+        return Redirect::to(&inner.profile_path).into_response();
+    }
+    if !inner.can_manage_others(&who) {
+        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+    }
+    let Some(target) = target_user(&inner, &id).await else {
+        return (StatusCode::NOT_FOUND, "No such user").into_response();
+    };
+
+    if let Some(msg) = password_pair_error(&form.new_password, &form.confirm_password) {
+        let frag = reset_form_html(&id, &target.username, Some(msg), None);
+        return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
+    }
+    if set_password(&inner.db, &target.username, &form.new_password).await.is_err() {
+        let frag = reset_form_html(&id, &target.username, Some("Could not set the password."), None);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Html((inner.profile_shell)(&frag, &who)))
+            .into_response();
+    }
+    let msg = format!("Password reset for {}.", target.username);
+    let frag = reset_form_html(&id, &target.username, None, Some(&msg));
+    Html((inner.profile_shell)(&frag, &who)).into_response()
+}
+
+/// Look up the target user by the (string) id from the URL. `None` if the id isn't an integer or no
+/// such user exists.
+async fn target_user(inner: &Inner, id: &str) -> Option<user::Model> {
+    let uid = id.parse::<i32>().ok()?;
+    user_by_id(&inner.db, uid).await
+}
+
+/// Shared validation for the new/confirm password pair.
+fn password_pair_error(new: &str, confirm: &str) -> Option<&'static str> {
+    if new.is_empty() {
+        Some("New password cannot be empty.")
+    } else if new != confirm {
+        Some("The new passwords do not match.")
+    } else {
+        None
+    }
+}
+
 /// Build the session cookie (HttpOnly, SameSite=Strict, Path=/, configurable Secure + Max-Age).
 fn session_cookie(inner: &Inner, token: String) -> Cookie<'static> {
     Cookie::build((inner.cookie_name.clone(), token))
@@ -467,6 +725,78 @@ fn default_login_shell(form: &str) -> String {
     format!(r#"<!doctype html><meta charset="utf-8"><title>Log in</title><main>{form}</main>"#)
 }
 
+/// Escape text for interpolation into HTML.
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// A Bootstrap alert for a form error (danger) or success message — empty when neither is set.
+fn alert_html(error: Option<&str>, success: Option<&str>) -> String {
+    if let Some(e) = error {
+        format!(r#"<div class="alert alert-danger" role="alert">{}</div>"#, esc(e))
+    } else if let Some(s) = success {
+        format!(r#"<div class="alert alert-success" role="alert">{}</div>"#, esc(s))
+    } else {
+        String::new()
+    }
+}
+
+/// The self-service change-password `<form>` fragment (Bootstrap-friendly classes; no page chrome —
+/// the app's [`Auth::profile_shell`] wraps + styles it).
+fn change_form_html(who: &Identity, error: Option<&str>, success: Option<&str>) -> String {
+    let alert = alert_html(error, success);
+    format!(
+        r#"<h1 class="h5 mb-3">Change your password</h1>
+<p class="text-muted small">Signed in as <strong>{user}</strong>.</p>
+<form method="post" action="/profile">
+  {alert}
+  <div class="mb-3">
+    <label class="form-label" for="rl-current">Current password</label>
+    <input class="form-control" id="rl-current" name="current_password" type="password" autocomplete="current-password" autofocus>
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="rl-new">New password</label>
+    <input class="form-control" id="rl-new" name="new_password" type="password" autocomplete="new-password">
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="rl-confirm">Confirm new password</label>
+    <input class="form-control" id="rl-confirm" name="confirm_password" type="password" autocomplete="new-password">
+  </div>
+  <button class="btn btn-primary" type="submit">Change password</button>
+</form>"#,
+        user = esc(&who.username),
+    )
+}
+
+/// The manager reset-password `<form>` fragment: sets another user's password with no current-password
+/// check. `id` is the target user id (used in the form action).
+fn reset_form_html(id: &str, username: &str, error: Option<&str>, success: Option<&str>) -> String {
+    let alert = alert_html(error, success);
+    format!(
+        r#"<h1 class="h5 mb-3">Reset password</h1>
+<p class="text-muted">Set a new password for <strong>{user}</strong> (no current password required).</p>
+<form method="post" action="/profile/{id}">
+  {alert}
+  <div class="mb-3">
+    <label class="form-label" for="rl-new">New password</label>
+    <input class="form-control" id="rl-new" name="new_password" type="password" autocomplete="new-password" autofocus>
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="rl-confirm">Confirm new password</label>
+    <input class="form-control" id="rl-confirm" name="confirm_password" type="password" autocomplete="new-password">
+  </div>
+  <button class="btn btn-primary" type="submit">Reset password</button>
+</form>"#,
+        user = esc(username),
+        id = esc(id),
+    )
+}
+
+/// Default profile-page wrapper when the app doesn't provide one: a minimal, unstyled document.
+fn default_profile_shell(fragment: &str, _who: &Identity) -> String {
+    format!(r#"<!doctype html><meta charset="utf-8"><title>Profile</title><main>{fragment}</main>"#)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,5 +822,21 @@ mod tests {
         let hash = hash_password("s3cret");
         assert!(verify_password(&hash, "s3cret"));
         assert!(!verify_password(&hash, "wrong"));
+    }
+
+    #[test]
+    fn identity_in_any_group() {
+        let admin = Identity { id: "1".into(), username: "a".into(), groups: vec!["admin".into()] };
+        let editor = Identity { id: "2".into(), username: "e".into(), groups: vec!["editors".into()] };
+        let managers = vec!["admin".into(), "superadmin".into()];
+        assert!(admin.in_any_group(&managers));
+        assert!(!editor.in_any_group(&managers));
+    }
+
+    #[test]
+    fn password_pair_validation() {
+        assert!(password_pair_error("", "").is_some());
+        assert!(password_pair_error("a", "b").is_some());
+        assert!(password_pair_error("a", "a").is_none());
     }
 }

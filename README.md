@@ -11,8 +11,8 @@ The crate is **`relativelylight`**, organized into feature-gated modules:
   implemented; see [docs/AUTH.md](docs/AUTH.md).
 
 > Status: the `crud` API + `ui` web admin are implemented and used by the examples; `auth` has a
-> working first slice (argon2 login/session + `Authz` gate). File-handling is planned — see
-> [PRD.md](PRD.md).
+> working first slice (argon2 login/session, `Authz` gate presets, and a self-service profile /
+> password-change page). File-handling is planned — see [PRD.md](PRD.md).
 
 ## What you get
 
