@@ -7,7 +7,7 @@ publish = false
 # Playground for relativelylight's `auth` module — deliberately WITHOUT `crud` to show it stands on
 # its own (default-features off + only the `auth` feature). See docs/AUTH.md.
 [dependencies]
-relativelylight = { path = "../../relativelylight", default-features = false, features = ["auth"] }
+relativelylight = { path = "../../relativelylight", default-features = false, features = ["auth", "sso"] }
 sea-orm = { workspace = true, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 axum = "0.8"
 axum-extra = { version = "0.10", features = ["cookie"] }

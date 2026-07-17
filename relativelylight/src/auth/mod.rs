@@ -17,7 +17,9 @@
 //! **profile / password-change** page plus a manager reset (`GET/POST /profile`,
 //! `GET/POST /profile/{id}` — see [`Auth::routes`]), admin helpers (`make_admin`, `set_password`,
 //! `add_to_group`, …), and per-model enforcement in the `crud` HTTP handlers via
-//! `crud::seaorm::Crud::register`. Not yet: the CSRF/CORS/real-ip/logging middleware and OIDC.
+//! `crud::seaorm::Crud::register`, plus **OIDC single sign-on** (feature `sso`, module [`sso`]:
+//! Google / Okta / corporate, with username- and claim-based group mapping and optional
+//! auto-registration). Not yet: the CSRF/CORS/real-ip/logging middleware and PassKeys.
 //!
 //! The session cookie (name configurable, default `rl_session`) carries only an **opaque token** —
 //! the id of a row in the session table; the identity is rebuilt server-side from the DB on each
@@ -25,6 +27,8 @@
 
 pub mod group;
 pub mod session;
+#[cfg(feature = "sso")]
+pub mod sso;
 mod totp;
 pub mod user;
 pub mod user_group;
@@ -260,6 +264,26 @@ pub async fn add_to_group(db: &DatabaseConnection, username: &str, group_name: &
     Ok(())
 }
 
+/// Remove a user (by username) from a group. Idempotent — a missing user, group, or membership is a
+/// no-op; the group itself is left in place. Used by SSO login reconciliation.
+pub async fn remove_from_group(
+    db: &DatabaseConnection,
+    username: &str,
+    group_name: &str,
+) -> Result<(), DbErr> {
+    let Some(user) = user::Entity::find().filter(user::Column::Username.eq(username)).one(db).await?
+    else {
+        return Ok(());
+    };
+    let Some(group) =
+        group::Entity::find().filter(group::Column::Name.eq(group_name)).one(db).await?
+    else {
+        return Ok(());
+    };
+    user_group::Entity::delete_by_id((user.id, group.id)).exec(db).await?;
+    Ok(())
+}
+
 /// Make a user an admin: (re-)set their password *and* ensure they're a member of the (configurable)
 /// admin group, creating both as needed. Handy for an app's `--set-admin-pw` startup path.
 pub async fn make_admin(
@@ -336,6 +360,11 @@ impl Inner {
 /// lookups ([`identify`](Auth::identify)). The app owns the router and merges the routes where it
 /// likes; gates and page handlers call `identify` themselves — there is no middleware. Cheap to
 /// clone (an `Arc` inside), so gates hold their own handle.
+///
+/// **Finish configuring it before cloning it.** The `with_*`/`*_shell` builders need sole ownership
+/// of the inner `Arc`, so call them all first; only then clone it (into gate presets like
+/// `ValidUsers::new(&auth)`, `AdminOnly::new(&auth, …)`, or `Sso::new(&auth)`). A builder call after a
+/// clone exists will panic.
 #[derive(Clone)]
 pub struct Auth {
     inner: Arc<Inner>,
@@ -499,14 +528,16 @@ async fn identity_from(inner: &Inner, token: &str) -> Option<Identity> {
 }
 
 /// Verify username + password. Returns the user on success (regardless of 2FA) — the caller decides
-/// whether a second factor is still required (`user.totp_secret.is_some()`).
+/// whether a second factor is still required (`user.totp_secret.is_some()`). SSO accounts
+/// (`sso_provider` set) never authenticate by password.
 async fn verify_credentials(inner: &Inner, username: &str, password: &str) -> Option<user::Model> {
     let user = user::Entity::find()
         .filter(user::Column::Username.eq(username))
         .one(&inner.db)
         .await
         .ok()??;
-    (user.is_active && verify_password(&user.password_hash, password)).then_some(user)
+    (user.is_active && user.sso_provider.is_none() && verify_password(&user.password_hash, password))
+        .then_some(user)
 }
 
 /// Create a session row and return its token. `awaiting_totp` marks it half-authenticated (password
@@ -642,21 +673,19 @@ async fn user_by_id(db: &DatabaseConnection, id: i32) -> Option<user::Model> {
     user::Entity::find_by_id(id).one(db).await.ok().flatten()
 }
 
-/// Whether the caller (by string id) currently has an active TOTP secret.
-async fn totp_active(inner: &Inner, id_str: &str) -> bool {
-    match id_str.parse::<i32>() {
-        Ok(id) => user_by_id(&inner.db, id).await.is_some_and(|u| u.totp_secret.is_some()),
-        Err(_) => false,
-    }
-}
-
-/// `GET /profile` — the self-service change-password form + 2FA status (anonymous → login).
+/// `GET /profile` — the self-service change-password form + 2FA status (anonymous → login). For an
+/// SSO account it's a read-only notice: password + 2FA are managed by the identity provider.
 async fn profile_form(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Response {
     let Some(who) = identity_of(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
-    let totp_on = totp_active(&inner, &who.id).await;
-    let frag = change_form_html(&who, totp_on, None, None);
+    let Some(user) = current_user(&inner, &who).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let frag = match &user.sso_provider {
+        Some(provider) => sso_profile_html(&who, provider),
+        None => change_form_html(&who, user.totp_secret.is_some(), None, None),
+    };
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
@@ -676,6 +705,9 @@ async fn profile_submit(
     let Some(user) = user else {
         return Redirect::to(&inner.login_path).into_response();
     };
+    if user.is_sso() {
+        return Redirect::to(&inner.profile_path).into_response(); // SSO: password managed by the IdP
+    }
     let totp_on = user.totp_secret.is_some();
 
     let error = if !verify_password(&user.password_hash, &form.current_password) {
@@ -767,6 +799,9 @@ async fn totp_setup_form(State(inner): State<Arc<Inner>>, headers: HeaderMap) ->
     let Some(user) = current_user(&inner, &who).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
+    if user.is_sso() {
+        return Redirect::to(&inner.profile_path).into_response(); // SSO: 2FA managed by the IdP
+    }
     let secret = totp::generate_secret();
     let mut am: user::ActiveModel = user.into();
     am.totp_pending = Set(Some(secret.clone()));
@@ -789,6 +824,9 @@ async fn totp_setup_submit(
     let Some(user) = current_user(&inner, &who).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
+    if user.is_sso() {
+        return Redirect::to(&inner.profile_path).into_response();
+    }
     let Some(pending) = user.totp_pending.clone() else {
         return Redirect::to(&inner.profile_path).into_response(); // nothing in progress
     };
@@ -1000,6 +1038,20 @@ fn twofa_self_section(on: bool) -> String {
 <a class="btn btn-outline-primary btn-sm" href="/profile/totp">Set up 2FA</a>"#
             .to_string()
     }
+}
+
+/// The profile fragment for an SSO account: a read-only notice — password, 2FA, and groups are all
+/// managed by the identity provider, so there's nothing to change locally.
+fn sso_profile_html(who: &Identity, provider: &str) -> String {
+    format!(
+        r#"<h1 class="h5 mb-3">Profile</h1>
+<p class="text-muted small">Signed in as <strong>{user}</strong>.</p>
+<div class="alert alert-info mb-0">This account signs in through <strong>{prov}</strong> (single
+sign-on). Its password, two-factor settings, and group memberships are managed by the identity
+provider — there's nothing to change here.</div>"#,
+        user = esc(&who.username),
+        prov = esc(provider),
+    )
 }
 
 /// The manager reset-password `<form>` fragment: sets another user's password with no current-password

@@ -25,6 +25,7 @@ sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 | `openapi` | | runtime OpenAPI 3.1 (`crud::openapi`) |
 | `csv` | | CSV import/export endpoints |
 | `auth` | | sessions, login, **TOTP 2FA**, profile/password pages, and the identity-resolving gate presets |
+| `sso` | | **OIDC single sign-on** (Google / Okta / corporate) + group mapping (implies `auth`) |
 
 Enable only what you use — an unused feature pulls no dependencies. `auth` works **without** `crud`
 (gate any axum app on its own). The always-on `authz` module (the gate trait + `Open`) is compiled in
@@ -110,6 +111,11 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
 - **TOTP 2FA**: users enrol from `/profile` (QR + `otpauth://` URL, verify-before-activate); once on,
   login requires the code at `/login/totp`. Self-disable, plus manager disable for others. Expose a
   password column as a hashed, write-only field with `MetaField::password()`.
+- **SSO / OIDC** (feature `sso`): `auth::sso::Sso` adds Google / Okta / corporate sign-in
+  (`/sso/{provider}/login` + `/callback`). Local groups come from a **union** of a global
+  username-regexp table and a per-provider claim table, reconciled onto the user each login. Optional
+  per-provider auto-registration; SSO accounts have no local password/2FA. Configure `Auth` **fully
+  before** cloning it into `Sso::new(&auth)`.
 
 Full design + wiring: **[docs/AUTH.md](docs/AUTH.md)**.
 

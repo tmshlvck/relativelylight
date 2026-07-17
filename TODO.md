@@ -30,8 +30,9 @@ Highest priority first.
 
 ## Auth features
 
-- [ ] **SSO / OIDC** (in progress) — Google + Okta/corporate, group mapping, optional
-  auto-registration. See AUTH.md.
+- [x] **SSO / OIDC** — Google + Okta/corporate, username/claim group mapping, optional
+  auto-registration (feature `sso`; see AUTH.md §5b). Remaining: cache provider discovery
+  (currently per-request); verify the callback against a live IdP.
 - [ ] **PassKeys / WebAuthn** as an additional second factor / passwordless.
 - [ ] **App-issued API tokens** — a Bearer identity source resolving the same `Identity`.
 - [ ] **Row-level authorization** — per-row read checks / list filters (the gate seeing the row/query).

@@ -10,9 +10,9 @@ The crate is **`relativelylight`**, organized into feature-gated modules:
 - **`auth`** — sessions, login, and an authorization gate (usable without `crud`). First slice
   implemented; see [docs/AUTH.md](docs/AUTH.md).
 
-> Status: the `crud` API + `ui` web admin are implemented and used by the examples; `auth` has a
-> working first slice (argon2 login/session, `Authz` gate presets, and a self-service profile /
-> password-change page). File-handling is planned — see [PRD.md](PRD.md).
+> Status: the `crud` API + `ui` web admin are implemented and used by the examples; `auth` covers
+> argon2 login/session, `Authz` gate presets, a self-service profile (password + TOTP 2FA), and OIDC
+> single sign-on (feature `sso`). File-handling is planned — see [PRD.md](PRD.md).
 
 ## What you get
 
@@ -85,7 +85,8 @@ post.field("title").validate = Some(Box::new(|v| {
 | `ui` | | the web admin components (`crud::ui::Table`, `crud::ui::Admin`) |
 | `openapi` | | runtime OpenAPI 3.1 generation |
 | `csv` | | CSV import/export endpoints |
-| `auth` | | sessions, on-demand login resolution, a per-model authorization gate |
+| `auth` | | sessions, on-demand login resolution, TOTP 2FA, a per-model authorization gate |
+| `sso` | | OIDC single sign-on (Google / Okta / corporate) + group mapping (implies `auth`) |
 
 Enable only what you use — an unused feature pulls no dependencies.
 

@@ -8,8 +8,10 @@ request**), the always-compiled `authz` gate trait + presets (`authz::Open`,
 `auth::ValidUsers::new(&auth)`, `auth::UsersReadGroupWrite::new(&auth, [..])`,
 `auth::AdminOnly::new(&auth, [..])`), a self-service **profile / password-change page** plus a
 manager-only reset for other users (`GET/POST /profile`, `GET/POST /profile/{id}`), **TOTP two-factor
-authentication** (login second factor + self-service enrol/disable + manager disable — see §5a), admin
-helpers (`migrate`, `create_user`, `set_password`, `ensure_group`, `add_to_group`, `make_admin`), and
+authentication** (login second factor + self-service enrol/disable + manager disable — see §5a),
+**OIDC single sign-on** (feature `sso`: Google / Okta / corporate, with username- and claim-based group
+mapping and optional auto-registration — see §5b), admin helpers (`migrate`, `create_user`,
+`set_password`, `ensure_group`, `add_to_group`, `remove_from_group`, `make_admin`), and
 **per-model enforcement in the `crud` HTTP handlers** via `crud::seaorm::Crud::register(model, gate)`,
 mapping the gate's `Decision` to 401/403, plus per-request UI control-hiding via
 `Admin`/`Table::render_for`. **Not yet:** CSRF/CORS/real-ip/logging middleware, PassKeys/OIDC. The rest
@@ -181,6 +183,64 @@ enrolment needs that user's device. Disabling clears both `totp_secret` and `tot
 The profile page (`GET /profile`) shows a 2FA section reflecting the current state: a "Set up 2FA"
 link when off, or a "Disable 2FA" button when on.
 
+## 5b. SSO / OpenID Connect — implemented (feature `sso`)
+
+Sign users in through an external OIDC identity provider — Google, Okta, or any compliant corporate
+IdP — via the Authorization Code flow with PKCE. Built on the `openidconnect` crate (discovery, PKCE,
+nonce, ID-token signature/aud/iss/exp verification); the QR-free, cookie-carried transaction survives
+the round-trip to the provider. Configured at app start; usable alongside password login + 2FA.
+
+**Accounts.** An SSO login resolves to an `rl_user` whose **`sso_provider`** column marks it external.
+Such accounts have **no local password and no 2FA** — `verify_credentials` refuses a password login,
+and the profile page shows a read-only notice instead of the password / 2FA controls. With a
+provider's **auto-registration** on, an unknown user is created on first login; with it off, an admin
+must pre-create the user and set its `sso_provider` to the provider key first, else the login is
+refused. A local (password) account can't be signed into via SSO, and an account bound to one provider
+can't sign in through another.
+
+**Group mapping — union of two tables, reconciled every login.**
+- A **global username-pattern table** — `regexp → [groups]` (`Sso::username_group_rule`) — matched
+  against the resolved username. This is the fallback for providers with no usable group claim (plain
+  Google OIDC), where the email/username is all you have.
+- A **per-provider claim table** — `claim-value → [groups]` (`SsoProvider::claim_group_rule` +
+  `groups_claim`) — matched against each value of the provider's configured groups claim (Okta / a
+  corporate IdP emitting group names).
+
+The login's groups are the **union** of both. On every login the set is **reconciled** onto the user:
+groups in the set are added, groups the user has that aren't in the set are removed. So an SSO user's
+groups are fully managed by these rules — don't hand-assign groups to an SSO account, they'll be
+stripped on next login.
+
+**Routes & config.** `Sso::new(&auth)` (after `auth` is fully configured — see the `Auth` note about
+cloning) holds the global rules + providers; `Sso::routes()` serves `GET {base}/{key}/login` (redirect
+to the provider) and `GET {base}/{key}/callback` (exchange, verify, map, sign in), default base
+`/sso`. `Sso::buttons()` gives `(label, url)` pairs for the login page. Per provider: issuer,
+client id/secret, redirect URL, scopes, `username_claim` (default `preferred_username`; Google →
+`email`), optional `groups_claim`, the claim table, and `auto_register`.
+
+```rust
+use relativelylight::auth::sso::{Sso, SsoProvider};
+
+let sso = Sso::new(&auth)                                   // build auth fully first
+    .username_group_rule(r"@example\.com$", ["staff"])     // regexp → groups (Google, no claims)
+    .provider(SsoProvider::new("google", "Google",
+        "https://accounts.google.com", client_id, client_secret,
+        "https://app.example.com/sso/google/callback")
+        .username_claim("email").auto_register(true))
+    .provider(SsoProvider::new("okta", "Okta",
+        "https://corp.okta.com", okta_id, okta_secret,
+        "https://app.example.com/sso/okta/callback")
+        .groups_claim("groups")                            // claim table drives groups
+        .claim_group_rule("eng-admins", ["admin"])
+        .claim_group_rule("eng", ["editors"]));
+let app = app.merge(sso.routes());
+```
+
+> **Verification note.** The login→provider redirect (discovery, PKCE, `state`, `nonce`, the
+> transaction cookie) is verified end-to-end against Google's live discovery; the group-mapping and
+> reconciliation logic is unit-tested. The **callback** (code exchange + ID-token verification) can't
+> be exercised here without real provider credentials + user consent — test it against your own IdP.
+
 ## 6. authz — the gate
 
 The gate trait lives in **`relativelylight::authz`** — always compiled, independent of the `auth`
@@ -305,7 +365,8 @@ cookie-authenticated client just reads the `csrf` cookie and sets the header.
 - **TOTP 2FA — done (§5a).** Implemented as an `awaiting_totp` session flag + `totp_secret` on the
   user. **PassKeys/WebAuthn** would slot in similarly (a session assurance level a policy can require
   for sensitive models).
-- **OIDC SSO:** a callback creates a `session` for the mapped user — same session model.
+- **OIDC SSO — done (§5b, feature `sso`).** The callback creates a `session` for the mapped user —
+  the same session model. Group memberships come from the username/claim mapping tables.
 - **App API tokens:** the app issues tokens and adds an **identity source** that maps a Bearer token →
   `Identity` (a gate that checks the header instead of the cookie); the gate contract and all call
   sites are unchanged. The built-in session source ships; token sources are app- or future-provided.
@@ -325,9 +386,11 @@ without `crud`:
 - The **`authz`** module (the `Authz` trait, `Operation`, `Decision`, `Open`) is **always compiled**
   (it only needs `http` + `async-trait`), so `Crud::register(model, gate)` takes a gate in every
   build — pass `Open` when nothing needs gating. The identity-resolving presets live in `auth`.
+- The **`sso`** feature (implies `auth`) adds `auth::sso` — the OIDC relying-party + group mapping
+  (§5b). Pulls `openidconnect` (async `reqwest` + rustls), `regex`, and `base64`.
 
 Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
-`features = ["crud", "auth"]` for a gated CRUD API + admin.
+`features = ["crud", "auth"]` for a gated CRUD API + admin; add `"sso"` for OIDC single sign-on.
 
 ## 10. Examples
 
@@ -335,7 +398,10 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   page, a session cookie, and a `/secret` page gated by an on-demand `auth.identify(&headers)` check
   (redirect to `login_path` when anonymous). The `/secret` page shows the signed-in user and links to
   the self-service **`/profile`** page — password change **and TOTP 2FA** enrolment/disable — wrapped
-  in the app's chrome via `profile_shell`, plus the `--set-admin-pw` startup path.
+  in the app's chrome via `profile_shell`, plus the `--set-admin-pw` startup path. **SSO** is wired in
+  (feature `sso`) and enabled by setting `SSO_GOOGLE_CLIENT_ID` / `SSO_GOOGLE_CLIENT_SECRET` in the
+  env: a "Sign in with Google" button appears and `/sso/google/*` is served (username→group rule for
+  `@example.com`, auto-register on).
 - **`examples/adminpanel`** — **login-gated** `crud::ui::Admin`: the page calls
   `auth.identify(&headers)` (→ redirect to `/login` when anonymous), the content models are registered
   with a shared `UsersReadGroupWrite::new(&auth, ["admin"])` gate (any logged-in user reads; the admin
@@ -383,10 +449,13 @@ via a small `axum::middleware::from_fn` layer + `into_make_service_with_connect_
    `AdminOnly::new(&auth, [..])` / custom.
 6. **2FA** — ✅ **TOTP** (RFC 6238) as a login second factor with self-service enrolment/disable and
    manager disable (§5a); PassKeys/WebAuthn remain future.
+7. **SSO** — ✅ **OIDC** (feature `sso`) for Google / Okta / corporate, with username- and claim-based
+   group mapping (union + reconcile) and optional per-provider auto-registration (§5b).
 
 ## 12. Open (later)
 
 - Row-level authorization (per-row read checks / list filters — the gate seeing the row/query).
-- PassKeys/WebAuthn, OIDC SSO, app-issued API tokens (extra principal source) — §8.
+- PassKeys/WebAuthn, app-issued API tokens (extra principal source) — §8.
 - Session store scaling (shared store) if the app runs multiple instances.
-- TOTP hardening: rate-limiting code attempts, recovery/backup codes, and re-auth before disabling.
+- Security hardening — login attempt rate-limiting/lockout, CSRF, TOTP recovery codes, re-auth before
+  sensitive changes (see `TODO.md`). SSO: cache provider discovery instead of per-request.
