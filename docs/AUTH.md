@@ -304,12 +304,16 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   group writes), and the panel is rendered per request with `render_for` so write controls hide for
   non-writers. The navbar shows the signed-in user, linking to **`/profile`** (self password change).
   The auth **`rl_user` / `rl_group`** tables are also surfaced — gated `AdminOnly::new(&auth, ["admin"])`
-  (admin-only, read included), with the password hidden and each user id linking to `/profile/{id}`
-  (a manager reset); the whole "Accounts" section is shown only to managers. Two logins: `admin`
-  (read-write, manager) and `editor` (read-only). Verified end-to-end: anonymous → 303; `admin` →
-  reads + writes, sees the Accounts section, resets `editor`'s password via `/profile/2`; `editor` →
-  read-only panel with no Accounts section, own `/profile` works, `/profile/1` and the `rl_user` API
-  both 403.
+  (admin-only, read included) and shown only to managers. Accounts are **created/edited inline**: the
+  `password_hash` column is exposed as a write-only **Password** field (masked input) whose plaintext
+  is hashed on write via `on_write` and never returned in reads; an **empty password is allowed** and
+  stored as an empty hash, so password login is simply disabled (a future SSO / PassKey account). New
+  accounts default `is_active = true`, and each user id also links to `/profile/{id}` for a dedicated
+  reset. Two logins: `admin` (read-write, manager) and `editor` (read-only). Verified end-to-end:
+  anonymous → 303; `admin` → reads + writes, creates accounts with/without a password, resets
+  `editor`'s password via `/profile/2`; `editor` → read-only panel with no Accounts section, own
+  `/profile` works, `/profile/1` and the `rl_user` API both 403. Empty-password accounts cannot log in
+  with any password (`verify_password` fails against the empty hash).
 - **`examples/crud`** — the ungated counterpart (`Open`), so there's a no-login demo.
 
 > **Note — UI vs API enforcement.** The adminpanel renders the panel *per request* via

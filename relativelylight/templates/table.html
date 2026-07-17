@@ -166,8 +166,13 @@
                 <input type="number" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
                        :step="c.type === 'Float' ? 'any' : '1'" x-model.number="form[c.name]">
               </template>
+              <!-- Write-only string fields are secrets (e.g. a password) → masked input; on edit
+                   the value isn't loaded (write-only), so blank means "keep current". -->
               <template x-if="c.kind === 'field' && !['Bool','Int','Float'].includes(c.type)">
-                <input type="text" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
+                <input :type="c.write_only ? 'password' : 'text'" class="form-control"
+                       :class="{'is-invalid': fieldErrors[c.name]}"
+                       :autocomplete="c.write_only ? 'new-password' : 'off'"
+                       :placeholder="c.write_only && mode === 'edit' ? 'Leave blank to keep current' : ''"
                        x-model="form[c.name]">
               </template>
 
@@ -454,6 +459,9 @@
               // (including "") so field validators can run.
               const empty = v === "" || v === null || v === undefined;
               if ((c.type === "Int" || c.type === "Float") && empty) continue;
+              // A blank write-only secret on edit means "keep current" — omit it so it isn't cleared.
+              // (On create it's sent through, so an empty password is allowed and stored as such.)
+              if (c.write_only && empty && this.mode === "edit") continue;
               p[c.name] = v === undefined ? "" : v;
             }
           }

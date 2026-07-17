@@ -335,8 +335,12 @@ validation errors), per-row and bulk delete (delete-selected / delete-all-matchi
 import/export (tucked into a `⋮` overflow menu). Field labels/help/defaults and validators come from
 the `MetaModel` you registered.
 
-**Form inputs:** numbers/text as typed inputs, **booleans as a toggle switch**. Relations pick a
-widget by the target's size (from a `total` probe): **≤ `picker_threshold`** rows → a plain
+**Form inputs:** numbers/text as typed inputs, **booleans as a toggle switch**, and **`write_only`
+string fields as a masked password input** (secrets like a password: typed in, hashed by an `on_write`
+hook, never shown in reads). On **edit** a write-only field starts blank and is *omitted* from the
+save when left blank — "leave blank to keep current" — so a blank doesn't clobber the stored secret;
+on **create** it's sent as-is (an empty value is allowed, e.g. an account with no password). Relations
+pick a widget by the target's size (from a `total` probe): **≤ `picker_threshold`** rows → a plain
 `<select>` (to-one) / multi-`<select>` (N:M) with all options preloaded; **more** → a live
 search→select combobox that queries the target (`GET {list_url}?q=…&view=terse`) with a
 `Search N items…` prompt — a single input for to-one, removable chips + an add-search for N:M. The
