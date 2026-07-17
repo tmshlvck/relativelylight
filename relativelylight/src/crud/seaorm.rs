@@ -844,13 +844,18 @@ where
     }
 
     async fn delete(&self, pk: &str) -> Result<Option<Value>> {
-        let txn = self.db.begin().await?;
-        let Some(model) = E::find().filter(pk_condition::<E>(pk)?).one(&txn).await? else {
-            return Ok(None); // txn dropped -> rolled back
+        // Snapshot the finished view *before* the transaction: `finish` resolves relations (a to-one
+        // sibling or an N:M target reads via the pool), and doing that while a write transaction holds
+        // a connection would need a second one — deadlocking a single-connection pool (e.g. in-memory
+        // SQLite). Relations still exist here since nothing's been deleted yet.
+        let Some(model) = E::find().filter(pk_condition::<E>(pk)?).one(&self.db).await? else {
+            return Ok(None);
         };
         let raw = serde_json::to_value(&model).unwrap();
-        // Snapshot the finished view while relations still exist, then clear junctions + the row.
         let finished = self.finish(&raw).await?;
+
+        // Then delete atomically: clear N:M junction rows, then the row itself.
+        let txn = self.db.begin().await?;
         let backend = txn.get_database_backend();
         let src = key_to_db(&json_key(pk));
         for nm in self.model.nm.values() {
@@ -860,8 +865,11 @@ where
                 .to_owned();
             txn.execute(backend.build(&del)).await?;
         }
-        E::delete_many().filter(pk_condition::<E>(pk)?).exec(&txn).await?;
+        let res = E::delete_many().filter(pk_condition::<E>(pk)?).exec(&txn).await?;
         txn.commit().await?;
+        if res.rows_affected == 0 {
+            return Ok(None); // deleted concurrently between the snapshot and the transaction
+        }
         Ok(Some(finished))
     }
 
