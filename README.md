@@ -93,9 +93,9 @@ Enable only what you use — an unused feature pulls no dependencies.
 Three runnable examples share one seeded in-memory SQLite model (`examples/model`):
 
 ```bash
-cargo run -p crud-example          # per-entity pages (MPA), CSV, Swagger UI
-cargo run -p adminpanel-example    # the crud::ui::Admin side-panel — many models in one page
-cargo run -p auth-example          # auth: argon2 login/session gating a page (log in admin/password)
+cargo run -p crud-example          # per-entity pages (MPA), CSV, Swagger UI — open (no auth)
+cargo run -p adminpanel-example    # the crud::ui::Admin side-panel — login-gated (admin / password)
+cargo run -p auth-example          # auth alone: argon2 login/session gating a page (admin / password)
 ```
 
 Each serves on <http://127.0.0.1:3000/> (run one at a time). The first two put the JSON API under

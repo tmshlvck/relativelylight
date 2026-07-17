@@ -1,24 +1,29 @@
-//! adminpanel example — the `relativelylight::crud::ui::Admin` component.
+//! adminpanel example — the `relativelylight::crud::ui::Admin` component, **login-gated** with the
+//! `auth` module. Anonymous requests are redirected to `/login`; the JSON API is gated by an
+//! `Authz` gate (logged-in users may read; only the admin group may write). Log in as
+//! `admin` / `password`.
 //!
-//! One page: a model side-panel (with group headings, a separator, and custom links) beside the
-//! selected model's table + edit form. This replaces the hand-written per-entity page loop of the
-//! `relativelylight` example. The app still owns the three roots: the axum router (`/` is ours; crud is
-//! merged under `/api/v1`), the askama shell (chrome + Bootstrap/Alpine), and the OpenAPI document
-//! (our info; the crud entity endpoints merged in — no UI/docs routes leak into it).
+//! Shows the whole stack composed by the app: the axum router (`/` ours, crud under `/api/v1`,
+//! `auth` routes merged, the session middleware wrapping it all), the askama shell, the OpenAPI
+//! document, and the authn/authz gate. (The `crud-example` is the ungated counterpart.)
 //!
 //! Try:  open http://127.0.0.1:3000/   ·   Swagger at /docs   ·   spec at /openapi.json
 
 use askama::Template;
-use relativelylight::crud::ui::Admin;
-use relativelylight::crud::seaorm::{Crud, MetaModel};
 use axum::extract::State;
 use axum::http::header;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::Router;
 use model::{author, post, profile, tag, user};
+use relativelylight::auth::{self, Auth, CurrentUser, UsersReadGroupWrite};
+use relativelylight::crud::seaorm::{Crud, MetaModel};
+use relativelylight::crud::ui::Admin;
 use std::sync::Arc;
 use utoipa::openapi::{InfoBuilder, OpenApiBuilder};
+
+// The superadmin group (configurable). Its members may write; other logged-in users may only read.
+const ADMIN_GROUP: &str = "admin";
 
 #[derive(Template)]
 #[template(path = "shell.html")]
@@ -35,6 +40,10 @@ struct App {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = model::setup().await?;
+
+    // auth: create the auth tables and seed an admin user in the admin group.
+    auth::migrate(&db).await?;
+    auth::make_admin(&db, ADMIN_GROUP, "admin", "password").await?;
 
     let author_mm = MetaModel::new(author::Entity);
     let user_mm = MetaModel::new(user::Entity);
@@ -60,7 +69,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }));
 
-    let mut crud = Crud::new(db, "/api/v1");
+    // The authorization gate: any logged-in user may list/read; only the admin group may write.
+    let mut crud = Crud::new(db.clone(), "/api/v1")
+        .authz(Arc::new(UsersReadGroupWrite { write_groups: vec![ADMIN_GROUP.into()] }));
     crud.register(author_mm);
     crud.register(post_mm);
     crud.register(user_mm);
@@ -69,8 +80,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let engine = crud.engine();
 
-    // The Admin component: choose the order, group the models, drop in separators and custom links.
-    // `user` is read-only; `post`'s title links to its record. Everything else uses defaults.
     let admin = Admin::new(engine)
         .title("relativelylight")
         .group("Content")
@@ -89,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .separator()
         .group("Reference")
         .link("API docs (Swagger)", "/docs")
-        .link("OpenAPI JSON", "/openapi.json")
+        .link("Log out", "/logout")
         .render()?;
 
     let page = Shell { title: "relativelylight".into(), body: admin }.render()?;
@@ -104,21 +113,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Arc::new(App { page, openapi });
 
+    // authn: session middleware + login/logout routes, with a Bootstrap-styled login page.
+    let auth = Auth::new(db)
+        .secure_cookies(false) // local http
+        .admin_group(ADMIN_GROUP)
+        .login_shell(login_shell);
+
     let ui = Router::new()
-        .route("/", get(home))
+        .route("/", get(home)) // login-gated (CurrentUser)
         .route("/openapi.json", get(openapi_json))
         .route("/docs", get(docs))
         .with_state(app);
 
+    // Merge our pages, the login routes, and the gated API; wrap it all in the session middleware.
+    let app_router = auth.wrap(ui.merge(auth.routes()).merge(crud.into_router()));
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
-    println!("Admin panel on  http://127.0.0.1:3000/");
+    println!("Admin panel on  http://127.0.0.1:3000/   (log in as admin / password)");
     println!("Swagger UI on   http://127.0.0.1:3000/docs");
     println!("JSON API under  http://127.0.0.1:3000/api/v1");
-    axum::serve(listener, ui.merge(crud.into_router())).await?;
+    axum::serve(listener, app_router).await?;
     Ok(())
 }
 
-async fn home(State(app): State<Arc<App>>) -> impl IntoResponse {
+// Requires a logged-in user; `CurrentUser` redirects anonymous visitors to /login.
+async fn home(_user: CurrentUser, State(app): State<Arc<App>>) -> impl IntoResponse {
     Html(app.page.clone())
 }
 
@@ -135,4 +154,15 @@ async fn docs() -> Html<&'static str> {
 <script>window.onload=()=>{SwaggerUIBundle({url:'/openapi.json',dom_id:'#swagger-ui'});};</script>
 </body></html>"#,
     )
+}
+
+// The app styles the library's login form: drop it into our shell as a centered card.
+fn login_shell(form: &str) -> String {
+    let body = format!(
+        r#"<div class="card shadow-sm mx-auto" style="max-width:24rem"><div class="card-body">
+<h1 class="h5 mb-3">Log in</h1>{form}
+<p class="text-muted small mt-2 mb-0">Demo: <code>admin</code> / <code>password</code></p>
+</div></div>"#
+    );
+    Shell { title: "Log in".into(), body }.render().unwrap_or_default()
 }

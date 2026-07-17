@@ -250,13 +250,16 @@ without `crud`:
 Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
 `features = ["crud", "auth"]` for a gated CRUD API + admin.
 
-## 10. Example: `examples/auth`
+## 10. Examples
 
-Deliberately uses **`auth` alone — no `crud`** — to prove it stands on its own. A playground that
-grows with the implementation. **Now:** a public page + a page to be gated (stub, ungated).
-**Next (with `auth`):** a login page, a session cookie, and the "secret" page gated by `ValidUsers`;
-then self-service password change. Gating a `crud` API with the same `auth` is shown by adding a gate
-to the `crud`/`adminpanel` examples.
+- **`examples/auth`** — uses **`auth` alone (no `crud`)** to prove it stands on its own: a login
+  page, a session cookie, and a `/secret` page gated by `CurrentUser`, plus the `--set-admin-pw`
+  startup path.
+- **`examples/adminpanel`** — **login-gated** `crud::ui::Admin`: the page requires a session
+  (`CurrentUser` → redirect to `/login`) and the JSON API is gated by
+  `UsersReadGroupWrite { write_groups: ["admin"] }` (any logged-in user reads; the admin group
+  writes). Verified end-to-end: anonymous → 401 / redirect, admin → reads + writes.
+- **`examples/crud`** — the ungated counterpart (`Open`), so there's a no-login demo.
 
 ## 11. Decisions (confirmed)
 

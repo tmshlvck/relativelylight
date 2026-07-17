@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-relativelylight = { path = "../../relativelylight", features = ["ui", "openapi", "csv"] }
+relativelylight = { path = "../../relativelylight", features = ["ui", "openapi", "csv", "auth"] }
 model = { path = "../model" }
 axum = "0.8"
 askama = "0.13"
