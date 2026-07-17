@@ -55,6 +55,38 @@ pub struct MetaField {
     pub on_read: Option<ReadTransform>,
 }
 
+impl MetaField {
+    /// Configure this field as a **password** (requires the `auth` feature). In one call it becomes
+    /// write-only (accepted on write, never returned in reads), labelled `"Password"` (unless you've
+    /// already set a label), blank by default, and hashed with argon2id via an `on_write` hook — so
+    /// the column stores a hash while the form takes plaintext. In the admin it renders as a masked
+    /// input, and a blank value on *edit* keeps the current hash.
+    ///
+    /// An **empty value is stored as an empty hash**, which [`auth::verify_password`](crate::auth::verify_password)
+    /// can never match — so password login is simply disabled for that account (e.g. an SSO / PassKey
+    /// user). This is the whole setup:
+    ///
+    /// ```ignore
+    /// let mut user = MetaModel::new(auth::user::Entity);
+    /// user.field("password_hash").password();
+    /// ```
+    #[cfg(feature = "auth")]
+    pub fn password(&mut self) -> &mut Self {
+        self.write_only = true;
+        self.label.get_or_insert_with(|| "Password".into());
+        self.default = Some(Value::String(String::new()));
+        self.on_write = Some(Box::new(|v| {
+            let plain = v.as_str().unwrap_or("");
+            if plain.is_empty() {
+                Value::String(String::new()) // no password → empty hash → verify always fails
+            } else {
+                Value::String(crate::auth::hash_password(plain))
+            }
+        }));
+        self
+    }
+}
+
 /// A relation of an entity (config the user may tweak via `MetaModel::relation`).
 pub struct MetaRelation {
     pub name: String,
@@ -971,5 +1003,60 @@ impl Crud {
     #[cfg(feature = "axum")]
     pub fn into_router(self) -> axum::Router {
         Arc::new(self.engine).router()
+    }
+}
+
+#[cfg(all(test, feature = "auth"))]
+mod tests {
+    use super::*;
+    use crate::auth::verify_password;
+
+    fn text_field(name: &str) -> MetaField {
+        MetaField {
+            name: name.into(),
+            logical_type: LogicalType::Text,
+            is_pk: false,
+            is_fk: false,
+            read_only: false,
+            write_only: false,
+            hidden: false,
+            label: None,
+            description: None,
+            default: None,
+            validate: None,
+            on_write: None,
+            on_read: None,
+        }
+    }
+
+    #[test]
+    fn password_helper_hashes_nonempty_and_disables_login_when_empty() {
+        let mut f = text_field("password_hash");
+        f.password();
+
+        assert!(f.write_only, "password field must be write-only");
+        assert_eq!(f.label.as_deref(), Some("Password"));
+        let on_write = f.on_write.as_ref().expect("password() sets on_write");
+
+        // Non-empty plaintext → a verifiable argon2 hash (and the plaintext isn't stored verbatim).
+        let hashed = on_write(Value::String("s3cret".into()));
+        let hash = hashed.as_str().unwrap();
+        assert_ne!(hash, "s3cret");
+        assert!(verify_password(hash, "s3cret"));
+        assert!(!verify_password(hash, "wrong"));
+
+        // Empty plaintext → empty hash, which no password can verify against (login disabled).
+        let empty = on_write(Value::String(String::new()));
+        assert_eq!(empty.as_str(), Some(""));
+        assert!(!verify_password("", ""));
+        assert!(!verify_password("", "anything"));
+    }
+
+    #[test]
+    fn password_helper_keeps_a_preset_label() {
+        let mut f = text_field("secret");
+        f.label = Some("Passphrase".into());
+        f.password();
+        assert_eq!(f.label.as_deref(), Some("Passphrase"));
     }
 }

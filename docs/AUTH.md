@@ -304,10 +304,11 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   group writes), and the panel is rendered per request with `render_for` so write controls hide for
   non-writers. The navbar shows the signed-in user, linking to **`/profile`** (self password change).
   The auth **`rl_user` / `rl_group`** tables are also surfaced — gated `AdminOnly::new(&auth, ["admin"])`
-  (admin-only, read included) and shown only to managers. Accounts are **created/edited inline**: the
-  `password_hash` column is exposed as a write-only **Password** field (masked input) whose plaintext
-  is hashed on write via `on_write` and never returned in reads; an **empty password is allowed** and
-  stored as an empty hash, so password login is simply disabled (a future SSO / PassKey account). New
+  (admin-only, read included) and shown only to managers. Accounts are **created/edited inline**: one
+  `user.field("password_hash").password()` call (the `MetaField::password()` helper, see CRUD.md)
+  exposes it as a write-only **Password** field (masked input) whose plaintext is argon2-hashed on
+  write and never returned in reads; an **empty password is allowed** and stored as an empty hash, so
+  password login is simply disabled (a future SSO / PassKey account). New
   accounts default `is_active = true`, and each user id also links to `/profile/{id}` for a dedicated
   reset. Two logins: `admin` (read-write, manager) and `editor` (read-only). Verified end-to-end:
   anonymous → 303; `admin` → reads + writes, creates accounts with/without a password, resets

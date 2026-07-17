@@ -109,30 +109,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     post_mm.relate(&tag_mm);
     tag_mm.relate(&post_mm);
 
-    // The auth login accounts + groups, surfaced in the admin. The `password_hash` column is shown in
-    // the form as a write-only "Password" field: the plaintext input is hashed on write and never
-    // returned in reads. An empty password is allowed and stored as an empty hash — which no password
-    // can verify against, so password login is simply disabled (e.g. for future SSO / PassKey users).
+    // The auth login accounts + groups, surfaced in the admin. `.password()` turns `password_hash`
+    // into a write-only, argon2-hashed "Password" field in one call: plaintext in the form, a hash in
+    // the column, never returned in reads. An empty password stores an empty hash — no password can
+    // verify against it, so password login is disabled (e.g. for future SSO / PassKey users).
     let mut auth_user_mm = MetaModel::new(auth::user::Entity);
-    {
-        let pw = auth_user_mm.field("password_hash");
-        pw.label = Some("Password".into());
-        pw.description = Some(
-            "Optional. Leave blank to create an account with no password (password login disabled). \
-             On edit, blank keeps the current password."
-                .into(),
-        );
-        pw.write_only = true; // shown in the write form + metadata, never emitted in reads
-        pw.default = Some(serde_json::json!("")); // create form starts blank (no password)
-        pw.on_write = Some(Box::new(|v| {
-            let plain = v.as_str().unwrap_or("");
-            if plain.is_empty() {
-                serde_json::json!("") // no password → empty hash → verify_password always fails
-            } else {
-                serde_json::json!(auth::hash_password(plain))
-            }
-        }));
-    }
+    auth_user_mm.field("password_hash").password();
+    auth_user_mm.field("password_hash").description = Some(
+        "Optional. Leave blank to create an account with no password (password login disabled). \
+         On edit, blank keeps the current password."
+            .into(),
+    );
     // New accounts are active by default (so a freshly created user with a password can log in).
     auth_user_mm.field("is_active").default = Some(serde_json::json!(true));
     let auth_group_mm = MetaModel::new(auth::group::Entity);

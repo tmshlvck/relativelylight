@@ -134,6 +134,20 @@ Defaults tie behavior to structure: **PK → `read_only`**, **FK → `hidden`** 
 relation). The three visibility flags cover both directions — a redacted-but-writable field uses
 `on_read`; a write-only secret uses `write_only = true` + `on_write = hash`.
 
+**Password helper (feature `auth`).** For the common password case, `MetaField::password()` does that
+whole write-only-secret setup in one call — write-only, labelled `"Password"`, argon2id-hashed on
+write, blank by default:
+
+```rust
+let mut user = MetaModel::new(auth::user::Entity);
+user.field("password_hash").password();   // plaintext in the form → hash in the column, never read back
+```
+
+In the admin form it renders as a **masked input**; a blank value on *edit* keeps the current hash
+(so editing other fields doesn't wipe the password). A blank on *create* stores an **empty hash**,
+which [`auth::verify_password`] can never match — so that account simply has no password login (e.g. an
+SSO / PassKey user).
+
 ### `MetaRelation`
 
 Auto-discovered from the entity's relations; you rarely construct one. To-one (owns the FK) and N:M
