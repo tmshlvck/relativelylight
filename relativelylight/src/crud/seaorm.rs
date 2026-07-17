@@ -184,13 +184,49 @@ fn pk_condition<E: EntityTrait>(pk: &str) -> Result<Condition> {
     Ok(cond)
 }
 
+/// An integer → the ORM value variant matching the column's *actual* width/signedness, so a value
+/// written to a `BigInteger`/`Unsigned`/… column has the right `Value` variant (SeaORM type-checks
+/// the variant against the column on `set`). Falls back to `Int` (i32) for non-integer column types.
+fn int_to_db(ct: &ColumnType, n: i64) -> DbValue {
+    match ct {
+        ColumnType::TinyInteger => DbValue::from(n as i8),
+        ColumnType::SmallInteger => DbValue::from(n as i16),
+        ColumnType::Integer => DbValue::from(n as i32),
+        ColumnType::BigInteger => DbValue::from(n),
+        ColumnType::TinyUnsigned => DbValue::from(n as u8),
+        ColumnType::SmallUnsigned => DbValue::from(n as u16),
+        ColumnType::Unsigned => DbValue::from(n as u32),
+        ColumnType::BigUnsigned => DbValue::from(n as u64),
+        _ => DbValue::from(n as i32),
+    }
+}
+
+/// A typed NULL for an integer column (the `Value` variant must still match the column type).
+fn int_null(ct: &ColumnType) -> DbValue {
+    match ct {
+        ColumnType::TinyInteger => DbValue::TinyInt(None),
+        ColumnType::SmallInteger => DbValue::SmallInt(None),
+        ColumnType::BigInteger => DbValue::BigInt(None),
+        ColumnType::TinyUnsigned => DbValue::TinyUnsigned(None),
+        ColumnType::SmallUnsigned => DbValue::SmallUnsigned(None),
+        ColumnType::Unsigned => DbValue::Unsigned(None),
+        ColumnType::BigUnsigned => DbValue::BigUnsigned(None),
+        _ => DbValue::Int(None),
+    }
+}
+
 /// JSON value → ORM value (for writes), by column type.
 fn json_to_db(ct: &ColumnType, v: &Value) -> DbValue {
     if v.is_null() {
-        return DbValue::String(None);
+        return match logical_type(ct) {
+            LogicalType::Int => int_null(ct),
+            LogicalType::Float => DbValue::Double(None),
+            LogicalType::Bool => DbValue::Bool(None),
+            _ => DbValue::String(None),
+        };
     }
     match logical_type(ct) {
-        LogicalType::Int => v.as_i64().map(|n| DbValue::from(n as i32)).unwrap_or(DbValue::Int(None)),
+        LogicalType::Int => v.as_i64().map(|n| int_to_db(ct, n)).unwrap_or_else(|| int_null(ct)),
         LogicalType::Float => v.as_f64().map(DbValue::from).unwrap_or(DbValue::Double(None)),
         LogicalType::Bool => DbValue::from(v.as_bool().unwrap_or(false)),
         _ => DbValue::from(v.as_str().unwrap_or_default().to_string()),
@@ -200,7 +236,7 @@ fn json_to_db(ct: &ColumnType, v: &Value) -> DbValue {
 /// String (URL value) → ORM value, by column type.
 fn str_to_db(ct: &ColumnType, s: &str) -> DbValue {
     match logical_type(ct) {
-        LogicalType::Int => s.parse::<i64>().map(|n| DbValue::from(n as i32)).unwrap_or_else(|_| DbValue::from(s.to_string())),
+        LogicalType::Int => s.parse::<i64>().map(|n| int_to_db(ct, n)).unwrap_or_else(|_| DbValue::from(s.to_string())),
         LogicalType::Float => s.parse::<f64>().map(DbValue::from).unwrap_or_else(|_| DbValue::from(s.to_string())),
         LogicalType::Bool => DbValue::from(matches!(s, "true" | "1")),
         _ => DbValue::from(s.to_string()),
