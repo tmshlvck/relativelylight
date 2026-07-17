@@ -10,4 +10,5 @@ publish = false
 relativelylight = { path = "../../relativelylight", default-features = false, features = ["auth"] }
 sea-orm = { workspace = true, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 axum = "0.8"
+axum-extra = { version = "0.10", features = ["cookie"] }
 tokio = { workspace = true, features = ["net"] }

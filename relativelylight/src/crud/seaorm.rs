@@ -945,6 +945,15 @@ impl Crud {
         self
     }
 
+    /// Set the authorization gate for all models (default `Open`). The HTTP handlers consult it
+    /// against the request's `Principal` (populated by the `auth` middleware) → 401/403. Share the
+    /// same `Arc<dyn Authz>` with your own handlers for consistent rules. Requires feature `auth`.
+    #[cfg(feature = "auth")]
+    pub fn authz(mut self, gate: std::sync::Arc<dyn crate::auth::Authz>) -> Self {
+        self.engine.set_authz(gate);
+        self
+    }
+
     /// The underlying backend-agnostic engine (for direct use or a custom transport).
     pub fn engine(&self) -> &Engine {
         &self.engine

@@ -2,11 +2,16 @@
 //! (a small [`Authz`] gate trait + presets). Usable on its own (feature `auth`, no `crud`): it gates
 //! any axum app. See `docs/AUTH.md` for the full design.
 //!
-//! First slice (implemented): `user`/`session` SeaORM models, argon2id password hashing, a login /
-//! logout flow with an opaque server-side session cookie, a session-resolving middleware
-//! ([`Auth::wrap`]), the [`CurrentUser`] extractor, and the [`Authz`] trait + presets. Not yet:
-//! groups, password change, 2FA/OIDC, and `crud` gating (the gate exists; wiring it into `crud`
-//! handlers comes next).
+//! Implemented: the `user`/`session`/`group`/`user_group` SeaORM models, argon2id hashing, a
+//! login/logout flow with an opaque server-side session cookie (via `axum-extra`'s `CookieJar`), a
+//! session-resolving middleware ([`Auth::wrap`]), the [`CurrentUser`] extractor, the [`Authz`] trait
+//! with its presets, admin helpers (`make_admin`, `set_password`, `add_to_group`, …), and
+//! enforcement in the `crud` HTTP handlers via `crud::seaorm::Crud::authz`. Not yet: a password-change
+//! UI, the CSRF/CORS/real-ip/logging middleware, and 2FA/OIDC.
+//!
+//! The session cookie (name configurable, default `rl_session`) carries only an **opaque token** —
+//! the id of a row in the session table; the `Principal` is rebuilt server-side from the DB on each
+//! request, and deleting the row revokes it.
 
 pub mod group;
 pub mod session;
@@ -20,18 +25,19 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use argon2::Argon2;
 use axum::extract::{Form, FromRequestParts, Request, State};
 use axum::http::request::Parts;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use rand_core::{OsRng, RngCore};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
     IntoActiveModel, QueryFilter, Schema, Set,
 };
 
-const COOKIE: &str = "rl_session";
+const DEFAULT_COOKIE: &str = "rl_session";
 
 // ===================== Authorization =====================
 
@@ -227,11 +233,17 @@ async fn groups_of(db: &DatabaseConnection, user_id: i32) -> Vec<String> {
 
 // ===================== The Auth builder =====================
 
+type LoginShell = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
 struct Inner {
     db: DatabaseConnection,
     admin_group: String,
+    cookie_name: String,
     secure_cookies: bool,
     ttl_secs: i64,
+    /// Wraps the login-form fragment into a full page. Default: a minimal unstyled document; set
+    /// [`Auth::login_shell`] to embed it in your Bootstrap (or other) shell so the app styles it.
+    login_shell: LoginShell,
 }
 
 /// Wires authn into an app: login/logout routes ([`routes`](Auth::routes)) and a session-resolving
@@ -247,10 +259,20 @@ impl Auth {
             inner: Arc::new(Inner {
                 db,
                 admin_group: "admin".into(),
+                cookie_name: DEFAULT_COOKIE.into(),
                 secure_cookies: true,
                 ttl_secs: 7 * 24 * 3600,
+                login_shell: Arc::new(default_login_shell),
             }),
         }
+    }
+
+    /// Wrap the login-form fragment into a full page — embed it in your app's shell so *you* style it
+    /// (e.g. a Bootstrap page). The closure receives the `<form>…</form>` fragment (which carries
+    /// Bootstrap-friendly classes) and returns the full HTML document.
+    pub fn login_shell(mut self, shell: impl Fn(&str) -> String + Send + Sync + 'static) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().login_shell = Arc::new(shell);
+        self
     }
 
     /// Group whose members may reset other users' passwords (used later). Default `"admin"`.
@@ -271,9 +293,20 @@ impl Auth {
         self
     }
 
+    /// Session cookie name (default `"rl_session"`). Set from a constant or config on startup.
+    pub fn cookie_name(mut self, name: impl Into<String>) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().cookie_name = name.into();
+        self
+    }
+
     /// The configured admin group name.
     pub fn admin_group_name(&self) -> &str {
         &self.inner.admin_group
+    }
+
+    /// The configured session cookie name.
+    pub fn session_cookie_name(&self) -> &str {
+        &self.inner.cookie_name
     }
 
     /// `GET/POST /login`, `GET /logout`. Merge into your router.
@@ -315,15 +348,17 @@ where
 // ===================== Internals =====================
 
 async fn resolve_session(State(inner): State<Arc<Inner>>, mut req: Request, next: Next) -> Response {
-    if let Some(principal) = principal_from(&inner, req.headers()).await {
-        req.extensions_mut().insert(principal);
+    let jar = CookieJar::from_headers(req.headers());
+    if let Some(cookie) = jar.get(&inner.cookie_name) {
+        if let Some(principal) = principal_from(&inner, cookie.value()).await {
+            req.extensions_mut().insert(principal);
+        }
     }
     next.run(req).await
 }
 
-async fn principal_from(inner: &Inner, headers: &HeaderMap) -> Option<Principal> {
-    let token = cookie_token(headers)?;
-    let session = session::Entity::find_by_id(token).one(&inner.db).await.ok()??;
+async fn principal_from(inner: &Inner, token: &str) -> Option<Principal> {
+    let session = session::Entity::find_by_id(token.to_string()).one(&inner.db).await.ok()??;
     if session.expires_at < now_secs() {
         return None;
     }
@@ -362,42 +397,42 @@ struct LoginForm {
     password: String,
 }
 
-async fn login_form() -> Html<String> {
-    Html(login_page(None))
+async fn login_form(State(inner): State<Arc<Inner>>) -> Html<String> {
+    Html((inner.login_shell)(&login_form_html(None)))
 }
 
-async fn login_submit(State(inner): State<Arc<Inner>>, Form(form): Form<LoginForm>) -> Response {
+async fn login_submit(
+    State(inner): State<Arc<Inner>>,
+    jar: CookieJar,
+    Form(form): Form<LoginForm>,
+) -> Response {
     match authenticate(&inner, &form.username, &form.password).await {
-        Some(token) => {
-            ([(header::SET_COOKIE, cookie_value(&inner, &token))], Redirect::to("/")).into_response()
-        }
+        Some(token) => (jar.add(session_cookie(&inner, token)), Redirect::to("/")).into_response(),
         None => (
             StatusCode::UNAUTHORIZED,
-            Html(login_page(Some("Invalid username or password."))),
+            Html((inner.login_shell)(&login_form_html(Some("Invalid username or password.")))),
         )
             .into_response(),
     }
 }
 
-async fn logout(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Response {
-    if let Some(token) = cookie_token(&headers) {
-        let _ = session::Entity::delete_by_id(token).exec(&inner.db).await;
+async fn logout(State(inner): State<Arc<Inner>>, jar: CookieJar) -> Response {
+    if let Some(cookie) = jar.get(&inner.cookie_name) {
+        let _ = session::Entity::delete_by_id(cookie.value().to_string()).exec(&inner.db).await;
     }
-    let cleared = format!("{COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
-    ([(header::SET_COOKIE, cleared)], Redirect::to("/login")).into_response()
+    let jar = jar.remove(Cookie::build(inner.cookie_name.clone()).path("/").build());
+    (jar, Redirect::to("/login")).into_response()
 }
 
-fn cookie_token(headers: &HeaderMap) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    let prefix = format!("{COOKIE}=");
-    raw.split(';')
-        .map(str::trim)
-        .find_map(|part| part.strip_prefix(&prefix).map(str::to_string))
-}
-
-fn cookie_value(inner: &Inner, token: &str) -> String {
-    let secure = if inner.secure_cookies { "; Secure" } else { "" };
-    format!("{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{secure}", inner.ttl_secs)
+/// Build the session cookie (HttpOnly, SameSite=Strict, Path=/, configurable Secure + Max-Age).
+fn session_cookie(inner: &Inner, token: String) -> Cookie<'static> {
+    Cookie::build((inner.cookie_name.clone(), token))
+        .http_only(true)
+        .same_site(SameSite::Strict)
+        .path("/")
+        .secure(inner.secure_cookies)
+        .max_age(time::Duration::seconds(inner.ttl_secs))
+        .build()
 }
 
 fn new_token() -> String {
@@ -410,17 +445,71 @@ fn now_secs() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-fn login_page(error: Option<&str>) -> String {
-    let err = error
-        .map(|e| format!(r#"<p style="color:#b00">{e}</p>"#))
+/// The login `<form>` fragment. Semantic HTML with Bootstrap-friendly class hooks — it carries no
+/// page chrome and loads no CSS; the app's [`Auth::login_shell`] wraps + styles it.
+fn login_form_html(error: Option<&str>) -> String {
+    let alert = error
+        .map(|e| format!(r#"<div class="alert alert-danger" role="alert">{e}</div>"#))
         .unwrap_or_default();
     format!(
-        r#"<!doctype html><meta charset="utf-8"><title>Log in</title>
-<h1>Log in</h1>{err}
-<form method="post" action="/login">
-  <p><label>Username <input name="username" autofocus></label></p>
-  <p><label>Password <input name="password" type="password"></label></p>
-  <p><button type="submit">Log in</button></p>
+        r#"<form method="post" action="/login">
+  {alert}
+  <div class="mb-3">
+    <label class="form-label" for="rl-username">Username</label>
+    <input class="form-control" id="rl-username" name="username" autofocus autocomplete="username">
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="rl-password">Password</label>
+    <input class="form-control" id="rl-password" name="password" type="password" autocomplete="current-password">
+  </div>
+  <button class="btn btn-primary" type="submit">Log in</button>
 </form>"#
     )
+}
+
+/// Default page wrapper when the app doesn't provide one: a minimal, unstyled document.
+fn default_login_shell(form: &str) -> String {
+    format!(r#"<!doctype html><meta charset="utf-8"><title>Log in</title><main>{form}</main>"#)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn principal(groups: &[&str]) -> Principal {
+        Principal {
+            id: "1".into(),
+            username: "u".into(),
+            groups: groups.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn authz_presets() {
+        let anon: Option<&Principal> = None;
+        let user = principal(&[]);
+        let admin = principal(&["admin"]);
+
+        // Open: everything, even anonymous.
+        assert!(Open.can_write(anon, "post", WriteOp::Delete));
+
+        // ValidUsers: any authenticated user; anonymous denied.
+        assert!(!ValidUsers.can_read(anon, "post"));
+        assert!(ValidUsers.can_read(Some(&user), "post"));
+        assert!(ValidUsers.can_write(Some(&user), "post", WriteOp::Create));
+
+        // UsersReadGroupWrite: read for any user; write only for a listed group.
+        let gate = UsersReadGroupWrite { write_groups: vec!["admin".into()] };
+        assert!(!gate.can_read(anon, "post"));
+        assert!(gate.can_read(Some(&user), "post"));
+        assert!(!gate.can_write(Some(&user), "post", WriteOp::Update)); // not in group
+        assert!(gate.can_write(Some(&admin), "post", WriteOp::Update)); // in group
+    }
+
+    #[test]
+    fn password_roundtrip() {
+        let hash = hash_password("s3cret");
+        assert!(verify_password(&hash, "s3cret"));
+        assert!(!verify_password(&hash, "wrong"));
+    }
 }

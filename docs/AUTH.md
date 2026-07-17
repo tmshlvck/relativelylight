@@ -1,12 +1,17 @@
 # relativelylight — the `auth` module (authn + authz) — DRAFT SPEC
 
 Status: **first slice implemented** (feature `auth`, usable without `crud`): `user`/`session`/`group`/
-`user_group` SeaORM models, argon2id hashing, login/logout with an opaque server-side session
-cookie, a session-resolving middleware ([`Auth::wrap`]), the [`CurrentUser`] extractor, the [`Authz`]
-trait + presets (`Open`/`ValidUsers`/`UsersReadGroupWrite`), and admin helpers
-(`migrate`, `create_user`, `set_password`, `ensure_group`, `add_to_group`, `make_admin`). **Not yet:**
-wiring the gate into `crud` handlers, password-change UI, CSRF/CORS/real-ip middleware, 2FA/OIDC.
-The rest of this doc is the design these grow into.
+`user_group` SeaORM models, argon2id hashing, login/logout with an opaque server-side session cookie
+(via `axum-extra`'s `CookieJar`; cookie name configurable, default `rl_session`), a session-resolving
+middleware ([`Auth::wrap`]), the [`CurrentUser`] extractor, the [`Authz`] trait + presets
+(`Open`/`ValidUsers`/`UsersReadGroupWrite`), admin helpers (`migrate`, `create_user`, `set_password`,
+`ensure_group`, `add_to_group`, `make_admin`), and **enforcement in the `crud` HTTP handlers** via
+`crud::seaorm::Crud::authz` (401/403). **Not yet:** password-change UI, CSRF/CORS/real-ip/logging
+middleware, 2FA/OIDC. The rest of this doc is the design these grow into.
+
+The login (and later password-change) pages are plain **MPA `<form>` posts** — no JS. The library
+renders the form fragment (Bootstrap-friendly classes); the app wraps + styles it via
+`Auth::login_shell`. General rule: keep security features as simple as possible.
 
 `auth` is a **feature-gated module** of the `relativelylight` crate — authentication (users,
 sessions, login, password hashing) *and* authorization (a small gate trait + presets) together. It's usable **on its own** (enable only `features = ["auth"]` to gate any
