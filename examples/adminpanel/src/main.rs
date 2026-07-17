@@ -1,7 +1,8 @@
 //! adminpanel example — the `relativelylight::crud::ui::Admin` component, **login-gated** with the
 //! `auth` module. Anonymous requests are redirected to `/login`; the JSON API is gated by an
-//! `Authz` gate (logged-in users may read; only the admin group may write). Log in as
-//! `admin` / `password`.
+//! `Authz` gate (logged-in users may read; only the admin group may write) and the panel is rendered
+//! *per request* so write controls hide for users who can't write. Two demo logins:
+//! `admin` / `password` (read-write) and `editor` / `password` (read-only).
 //!
 //! Shows the whole stack composed by the app: the axum router (`/` ours, crud under `/api/v1`,
 //! `auth` routes merged, the session middleware wrapping it all), the askama shell, the OpenAPI
@@ -11,12 +12,13 @@
 
 use askama::Template;
 use axum::extract::State;
-use axum::http::header;
-use axum::response::{Html, IntoResponse};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
 use model::{author, post, profile, tag, user};
-use relativelylight::auth::{self, Auth, CurrentUser, UsersReadGroupWrite};
+use relativelylight::auth::{self, Auth, UsersReadGroupWrite};
+use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::crud::ui::Admin;
 use std::sync::Arc;
@@ -33,8 +35,33 @@ struct Shell {
 }
 
 struct App {
-    page: String,
+    engine: Arc<Engine>,
     openapi: String,
+    auth: Auth,
+}
+
+// The admin fragment's structure (nav groups, per-model table config). Built fresh per request so it
+// can be rendered *for the caller* — hiding write controls the gate would reject.
+fn build_admin(engine: &Engine) -> Admin<'_> {
+    Admin::new(engine)
+        .title("relativelylight")
+        .group("Content")
+        .entity_with("post", |t| {
+            t.per_page(10).format(
+                "title",
+                r#"(v, row) => `<a href="/api/v1/post/${row.id}" target="_blank">${v}</a>`"#,
+            )
+        })
+        .entity("tag")
+        .separator()
+        .group("People")
+        .entity("author")
+        .entity_with("user", |t| t.read_only(true))
+        .entity("profile")
+        .separator()
+        .group("Reference")
+        .link("API docs (Swagger)", "/docs")
+        .link("Log out", "/logout")
 }
 
 #[tokio::main]
@@ -44,6 +71,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // auth: create the auth tables and seed an admin user in the admin group.
     auth::migrate(&db).await?;
     auth::make_admin(&db, ADMIN_GROUP, "admin", "password").await?;
+    // A second, non-admin user to show the gate at work: `editor` may read everything but write
+    // nothing — the panel renders read-only for them (no Create/Edit/Delete) and the API returns 403.
+    auth::create_user(&db, "editor", "password").await?;
+
+    // authn: on-demand session lookups + login/logout routes, Bootstrap-styled login page. No
+    // middleware — gates and page handlers call `auth.identify(&headers)` themselves.
+    let auth = Auth::new(db.clone())
+        .secure_cookies(false) // local http
+        .admin_group(ADMIN_GROUP)
+        .login_shell(login_shell);
 
     let author_mm = MetaModel::new(author::Entity);
     let user_mm = MetaModel::new(user::Entity);
@@ -69,76 +106,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }));
 
-    // The authorization gate: any logged-in user may list/read; only the admin group may write.
-    let mut crud = Crud::new(db.clone(), "/api/v1")
-        .authz(Arc::new(UsersReadGroupWrite { write_groups: vec![ADMIN_GROUP.into()] }));
-    crud.register(author_mm);
-    crud.register(post_mm);
-    crud.register(user_mm);
-    crud.register(profile_mm);
-    crud.register(tag_mm);
+    // One gate for the whole panel: any logged-in user may list/read; only the admin group may write.
+    // A shared `Arc` (it implements `Authz`) guards every model; each gate resolves the caller from
+    // the request itself (via the `auth` handle it holds).
+    let gate = Arc::new(UsersReadGroupWrite::new(&auth, [ADMIN_GROUP]));
+    let mut crud = Crud::new(db.clone(), "/api/v1");
+    crud.register(author_mm, gate.clone());
+    crud.register(post_mm, gate.clone());
+    crud.register(user_mm, gate.clone());
+    crud.register(profile_mm, gate.clone());
+    crud.register(tag_mm, gate.clone());
 
-    let engine = crud.engine();
-
-    let admin = Admin::new(engine)
-        .title("relativelylight")
-        .group("Content")
-        .entity_with("post", |t| {
-            t.per_page(10).format(
-                "title",
-                r#"(v, row) => `<a href="/api/v1/post/${row.id}" target="_blank">${v}</a>`"#,
-            )
-        })
-        .entity("tag")
-        .separator()
-        .group("People")
-        .entity("author")
-        .entity_with("user", |t| t.read_only(true))
-        .entity("profile")
-        .separator()
-        .group("Reference")
-        .link("API docs (Swagger)", "/docs")
-        .link("Log out", "/logout")
-        .render()?;
-
-    let page = Shell { title: "relativelylight".into(), body: admin }.render()?;
+    // One shared engine: the router serves the API from it, and the page handler renders the admin
+    // fragment from it *per request* (so write controls hide for users who can't write).
+    let engine = Arc::new(crud.into_engine());
 
     // The app owns the OpenAPI root; the crud entity endpoints + schemas are merged in.
     let app_doc = OpenApiBuilder::new()
         .info(InfoBuilder::new().title("relativelylight API").version("1.0.0").build())
         .build();
-    let openapi = relativelylight::crud::openapi::merge_into(app_doc, engine)
+    let openapi = relativelylight::crud::openapi::merge_into(app_doc, &engine)
         .to_pretty_json()
         .unwrap_or_default();
 
-    let app = Arc::new(App { page, openapi });
-
-    // authn: session middleware + login/logout routes, with a Bootstrap-styled login page.
-    let auth = Auth::new(db)
-        .secure_cookies(false) // local http
-        .admin_group(ADMIN_GROUP)
-        .login_shell(login_shell);
+    let app = Arc::new(App { engine: engine.clone(), openapi, auth: auth.clone() });
 
     let ui = Router::new()
-        .route("/", get(home)) // login-gated (CurrentUser)
+        .route("/", get(home)) // login-gated (see `home`)
         .route("/openapi.json", get(openapi_json))
         .route("/docs", get(docs))
         .with_state(app);
 
-    // Merge our pages, the login routes, and the gated API; wrap it all in the session middleware.
-    let app_router = auth.wrap(ui.merge(auth.routes()).merge(crud.into_router()));
+    // Merge our pages, the login routes, and the gated API. No middleware: each handler/gate does
+    // its own on-demand session lookup.
+    let app_router = ui.merge(auth.routes()).merge(engine.router());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
-    println!("Admin panel on  http://127.0.0.1:3000/   (log in as admin / password)");
+    println!("Admin panel on  http://127.0.0.1:3000/   (admin/password = read-write · editor/password = read-only)");
     println!("Swagger UI on   http://127.0.0.1:3000/docs");
     println!("JSON API under  http://127.0.0.1:3000/api/v1");
     axum::serve(listener, app_router).await?;
     Ok(())
 }
 
-// Requires a logged-in user; `CurrentUser` redirects anonymous visitors to /login.
-async fn home(_user: CurrentUser, State(app): State<Arc<App>>) -> impl IntoResponse {
-    Html(app.page.clone())
+// Requires a logged-in user: resolve the session on demand, redirect anonymous visitors to the login
+// page, then render the admin *for this caller* — non-admins get a read-only panel (no Create/Edit/
+// Delete), while the API enforces the same rule. No middleware, no extractor.
+async fn home(headers: HeaderMap, State(app): State<Arc<App>>) -> Response {
+    if app.auth.identify(&headers).await.is_none() {
+        return Redirect::to(app.auth.login_path()).into_response();
+    }
+    let body = match build_admin(&app.engine).render_for(&headers).await {
+        Ok(html) => html,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let page = Shell { title: "relativelylight".into(), body }.render().unwrap_or_default();
+    Html(page).into_response()
 }
 
 async fn openapi_json(State(app): State<Arc<App>>) -> impl IntoResponse {

@@ -42,6 +42,7 @@ sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 
 ```rust
 use relativelylight::crud::seaorm::{Crud, MetaModel};
+use relativelylight::authz::Open;           // gate per model; Open = ungated
 
 // Auto-build a model per entity; only N:M is declared by hand.
 let author = MetaModel::new(author::Entity);
@@ -50,9 +51,9 @@ let mut post = MetaModel::new(post::Entity);
 post.relate(&tag);
 
 let mut crud = Crud::new(db, "/api/v1");    // base path ("" for root)
-crud.register(author);
-crud.register(post);
-crud.register(tag);
+crud.register(author, Open);                // pass an auth gate to restrict — see docs/AUTH.md
+crud.register(post, Open);
+crud.register(tag, Open);
 
 // Optional admin UI fragment (needs the `ui` feature). Build it before into_router().
 let admin_html = relativelylight::crud::ui::Admin::new(crud.engine()).entities().render()?;
@@ -84,7 +85,7 @@ post.field("title").validate = Some(Box::new(|v| {
 | `ui` | | the web admin components (`crud::ui::Table`, `crud::ui::Admin`) |
 | `openapi` | | runtime OpenAPI 3.1 generation |
 | `csv` | | CSV import/export endpoints |
-| `auth` | | *(planned)* sessions, login, authorization gate |
+| `auth` | | sessions, on-demand login resolution, a per-model authorization gate |
 
 Enable only what you use — an unused feature pulls no dependencies.
 

@@ -6,8 +6,10 @@
 //! ordering, group headings, separators, and custom links. Both are **fragments** — the app owns
 //! the shell (chrome + Bootstrap/Alpine tags); data + writes go through the JSON API.
 
+use crate::authz::Operation;
 use crate::crud::engine::{Engine, Error, Result};
 use askama::Template;
+use http::HeaderMap;
 use serde_json::Value;
 
 #[derive(Template)]
@@ -99,8 +101,23 @@ impl<'a> Table<'a> {
         self
     }
 
-    /// Render the table fragment. Errors if the entity isn't registered.
+    /// Render the table fragment, showing write controls unless the table is `read_only`. Use this
+    /// for open/pre-rendered pages; for per-request gating use [`render_for`](Table::render_for).
+    /// Errors if the entity isn't registered.
     pub fn render(&self) -> Result<String> {
+        self.render_inner(!self.read_only)
+    }
+
+    /// Render the table fragment for a specific request: the Create/Edit/Delete controls are shown
+    /// only if the table is writable *and* the model's gate permits a write for this caller. Read
+    /// access is unaffected (the API still enforces it). Errors if the entity isn't registered.
+    pub async fn render_for(&self, headers: &HeaderMap) -> Result<String> {
+        let editable = !self.read_only
+            && self.engine.permits(&self.slug, Operation::Create, headers).await;
+        self.render_inner(editable)
+    }
+
+    fn render_inner(&self, editable: bool) -> Result<String> {
         let desc = self.engine.meta_one(&self.slug)?;
         let columns_json = desc
             .get("columns")
@@ -122,7 +139,7 @@ impl<'a> Table<'a> {
             search: self.search,
             pagination: self.pagination,
             per_page: self.per_page,
-            editable: !self.read_only,
+            editable,
             confirm: self.confirm,
             picker_threshold: self.picker_threshold,
             formatters,
@@ -239,11 +256,36 @@ impl<'a> Admin<'a> {
         self
     }
 
-    /// Render the admin fragment. Errors if a referenced entity isn't registered.
+    /// Render the admin fragment, showing each writable table's write controls. Use this for
+    /// open/pre-rendered pages; for per-request gating use [`render_for`](Admin::render_for). Errors
+    /// if a referenced entity isn't registered.
     pub fn render(&self) -> Result<String> {
+        let (nav, first, entities) = self.nav_and_entities();
+        let mut panels = Vec::with_capacity(entities.len());
+        for table in entities {
+            panels.push(AdminPanel { slug: table.slug.clone(), html: table.render()? });
+        }
+        self.assemble(nav, first, panels)
+    }
+
+    /// Render the admin fragment for a specific request: each table hides its Create/Edit/Delete
+    /// controls unless the model's gate permits a write for this caller. Errors if a referenced
+    /// entity isn't registered.
+    pub async fn render_for(&self, headers: &HeaderMap) -> Result<String> {
+        let (nav, first, entities) = self.nav_and_entities();
+        let mut panels = Vec::with_capacity(entities.len());
+        for table in entities {
+            panels.push(AdminPanel { slug: table.slug.clone(), html: table.render_for(headers).await? });
+        }
+        self.assemble(nav, first, panels)
+    }
+
+    /// Build the side-panel nav (in item order), the first entity slug, and the entity tables (in
+    /// order) — everything except the rendered panel HTML, which the caller renders sync or async.
+    fn nav_and_entities(&self) -> (Vec<AdminNav>, String, Vec<&Table<'a>>) {
         let mut nav = Vec::new();
-        let mut panels = Vec::new();
         let mut first = String::new();
+        let mut entities = Vec::new();
         for item in &self.items {
             match item {
                 AdminItem::Entity(table) => {
@@ -252,8 +294,8 @@ impl<'a> Admin<'a> {
                     if first.is_empty() {
                         first = slug.clone();
                     }
-                    panels.push(AdminPanel { slug: slug.clone(), html: table.render()? });
                     nav.push(AdminNav { kind: "entity", slug, label, href: String::new() });
+                    entities.push(table);
                 }
                 AdminItem::Group(name) => nav.push(AdminNav {
                     kind: "group",
@@ -275,6 +317,10 @@ impl<'a> Admin<'a> {
                 }),
             }
         }
+        (nav, first, entities)
+    }
+
+    fn assemble(&self, nav: Vec<AdminNav>, first: String, panels: Vec<AdminPanel>) -> Result<String> {
         AdminTemplate {
             has_title: self.title.is_some(),
             title: self.title.clone().unwrap_or_default(),

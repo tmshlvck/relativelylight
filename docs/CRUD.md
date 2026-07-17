@@ -46,6 +46,7 @@ so their composite keys are fine.
 
 ```rust
 use relativelylight::crud::seaorm::{Crud, MetaModel};
+use relativelylight::authz::Open;                  // per-model auth gate; Open = ungated
 
 let db = /* sea_orm::DatabaseConnection */;
 
@@ -56,9 +57,9 @@ let mut post = MetaModel::new(post::Entity);
 post.relate(&tag);                                 // declare the N:M (FK relations are automatic)
 
 let mut crud = Crud::new(db, "/api/v1");           // base_path ("" for root)
-crud.register(author);
-crud.register(post);
-crud.register(tag);
+crud.register(author, Open);                       // pass an auth gate to restrict — see docs/AUTH.md
+crud.register(post, Open);
+crud.register(tag, Open);
 
 let app = crud.into_router();                       // axum::Router — merge/serve as usual
 // axum::serve(listener, app).await?;
@@ -88,7 +89,8 @@ add labels/help/defaults, attach validators, or declare N:M.
 | `row_label: Box<dyn Fn(&Value) -> String + ...>` | field | Row's display label; default fallback chain (below). |
 | `validate_row: Option<...>` | field | Cross-field validator (see [validation](#validation--transforms)). |
 
-`Crud::register(mm)` consumes the model. FK relations need no `relate`; `relate` exists only because
+`Crud::register(mm, gate)` consumes the model and takes its authorization gate (`authz::Open` for
+ungated — see [docs/AUTH.md](AUTH.md)). FK relations need no `relate`; `relate` exists only because
 SeaORM can't enumerate N:M — it names the target type once.
 
 ```rust
@@ -385,7 +387,8 @@ Builder methods:
 | `.group(name)` | a group heading in the side-panel |
 | `.separator()` | an `<hr>` |
 | `.link(label, href)` | a custom static link (navigates normally) |
-| `.render()` | the HTML fragment (`Result<String>`) |
+| `.render()` | the HTML fragment (`Result<String>`) — all write controls shown |
+| `.render_for(&headers)` | async; per-request fragment that hides a model's write controls when its auth gate denies a write for the caller (see [docs/AUTH.md](AUTH.md)) |
 
 Items appear in call order, so you control the layout by interleaving `entity*`, `group`,
 `separator`, and `link`.

@@ -925,11 +925,18 @@ impl Crud {
         }
     }
 
-    pub fn register<E>(&mut self, model: MetaModel<E>) -> &mut Self
+    /// Register a model behind an authorization gate. Pass [`Open`](crate::authz::Open) for an
+    /// ungated endpoint, or a gate built from your [`Auth`](crate::auth::Auth) — e.g.
+    /// `crud.register(post, UsersReadGroupWrite::new(&auth, ["admin"]))`. Share one gate across models
+    /// by passing an `Arc<dyn Authz>` (it implements the trait). Each gate is handed the request,
+    /// resolves the identity itself, and returns a [`Decision`](crate::authz::Decision) → the handler
+    /// maps it to `200`/`401`/`403`.
+    pub fn register<E, G>(&mut self, model: MetaModel<E>, gate: G) -> &mut Self
     where
         E: EntityTrait + Send + Sync,
         E::Model: Serialize + Sync + IntoActiveModel<E::ActiveModel>,
         E::ActiveModel: ActiveModelTrait<Entity = E> + Default + Send + Sync,
+        G: crate::authz::Authz + 'static,
     {
         let table = model.table.clone();
         let acc = Arc::new(SeaAccessor {
@@ -941,16 +948,7 @@ impl Crud {
         // the engine's accessor (strong, keeps it alive).
         let as_row: Arc<dyn SeaRow> = acc.clone();
         self.registry.insert(&table, Arc::downgrade(&as_row));
-        self.engine.add(acc);
-        self
-    }
-
-    /// Set the authorization gate for all models (default `Open`). The HTTP handlers consult it
-    /// against the request's `Principal` (populated by the `auth` middleware) → 401/403. Share the
-    /// same `Arc<dyn Authz>` with your own handlers for consistent rules. Requires feature `auth`.
-    #[cfg(feature = "auth")]
-    pub fn authz(mut self, gate: std::sync::Arc<dyn crate::auth::Authz>) -> Self {
-        self.engine.set_authz(gate);
+        self.engine.add(acc, Arc::new(gate));
         self
     }
 

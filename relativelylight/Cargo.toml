@@ -9,6 +9,7 @@ publish = false
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
+http = "1"                       # the `authz` gate trait takes `http::HeaderMap` (no axum needed)
 sea-orm = { workspace = true, optional = true }
 axum = { version = "0.8", optional = true }
 askama = { version = "0.13", optional = true }

@@ -2,12 +2,15 @@
 
 Status: **first slice implemented** (feature `auth`, usable without `crud`): `user`/`session`/`group`/
 `user_group` SeaORM models, argon2id hashing, login/logout with an opaque server-side session cookie
-(via `axum-extra`'s `CookieJar`; cookie name configurable, default `rl_session`), a session-resolving
-middleware ([`Auth::wrap`]), the [`CurrentUser`] extractor, the [`Authz`] trait + presets
-(`Open`/`ValidUsers`/`UsersReadGroupWrite`), admin helpers (`migrate`, `create_user`, `set_password`,
-`ensure_group`, `add_to_group`, `make_admin`), and **enforcement in the `crud` HTTP handlers** via
-`crud::seaorm::Crud::authz` (401/403). **Not yet:** password-change UI, CSRF/CORS/real-ip/logging
-middleware, 2FA/OIDC. The rest of this doc is the design these grow into.
+(via `axum-extra`'s `CookieJar`; cookie name configurable, default `rl_session`), **on-demand session
+resolution** ([`Auth::identify`] → `Option<Identity>`; **no middleware, nothing injected into the
+request**), the always-compiled `authz` gate trait + presets (`authz::Open`,
+`auth::ValidUsers::new(&auth)`, `auth::UsersReadGroupWrite::new(&auth, [..])`), admin helpers
+(`migrate`, `create_user`, `set_password`, `ensure_group`, `add_to_group`, `make_admin`), and
+**per-model enforcement in the `crud` HTTP handlers** via `crud::seaorm::Crud::register(model, gate)`,
+mapping the gate's `Decision` to 401/403, plus per-request UI control-hiding via
+`Admin`/`Table::render_for`. **Not yet:** password-change UI, CSRF/CORS/real-ip/logging middleware,
+2FA/OIDC. The rest of this doc is the design these grow into.
 
 The login (and later password-change) pages are plain **MPA `<form>` posts** — no JS. The library
 renders the form fragment (Bootstrap-friendly classes); the app wraps + styles it via
@@ -18,9 +21,15 @@ sessions, login, password hashing) *and* authorization (a small gate trait + pre
 axum app), and the `crud` module *optionally* consults it to gate the generated API + admin. It also
 keeps the door open for 2FA (TOTP / PassKeys), OIDC SSO, and app-defined API tokens.
 
-**Independence:** `auth` does not require `crud`. When both are enabled, `crud`'s handlers read
-`relativelylight::auth::Principal` from the request and consult `relativelylight::auth::Authz`; when
-`auth` is off, `crud` is ungated (`Open`).
+**Independence:** `auth` does not require `crud`. When both are enabled, each `crud` handler consults
+the model's `relativelylight::auth::Authz` gate, which resolves the identity itself from the request
+headers; when `auth` is off, `crud` is ungated (`Open`).
+
+**No middleware.** Authn is not a layer that injects a context — it is a handful of on-demand lookups
+on [`Auth`]. Given a request's headers, `Auth::identify` resolves the session cookie → user → groups
+(one DB round-trip) and returns an `Option<Identity>`. A gate or a page handler calls it when it needs
+to know who's asking; nothing is stored in request extensions. This keeps the whole feature small: no
+layer ordering, no state-injection, no `FromRequestParts` magic — just a method you call.
 
 Sibling docs: [docs/CRUD.md](CRUD.md) (the API/UI), [PRD.md](../PRD.md) (roadmap).
 
@@ -28,36 +37,40 @@ Sibling docs: [docs/CRUD.md](CRUD.md) (the API/UI), [PRD.md](../PRD.md) (roadmap
 
 - **Standalone.** `auth` gates any axum app on its own; `crud` is just one consumer. (authn and authz
   live together — authz is only a trait + a few impls, not worth its own module.)
-- **One identity, everywhere.** The same authenticated principal gates the `crud` API, the admin UI,
-  *and* the app's own handlers — via one extractor + one authorization trait.
+- **Super simple.** No middleware, no injected context. Authn is `Auth::identify(&headers) ->
+  Option<Identity>`; a gate is one async method that returns allow / needs-login / denied. The app
+  calls what it needs where it needs it.
+- **One identity, everywhere.** The same `Auth::identify` resolves the caller for the `crud` API, the
+  admin UI, *and* the app's own handlers — one lookup, one `Identity`.
 - **The app owns the roots.** As with the router / shell / OpenAPI (see CRUD.md § Composing with your
-  app), auth is applied *by the app* to its router. `auth` provides middleware layers, extractors,
-  login routes, the gate trait, and SeaORM models — the app wires them where it wants, so it can
-  leave `/metrics` public, IP-gate an internal API, or bearer-auth its own namespace.
+  app), auth is applied *by the app* to its router. `auth` provides login routes, the gate trait,
+  gate builders, and SeaORM models — the app wires them where it wants, so it can leave `/metrics`
+  public, IP-gate an internal API, or bearer-auth its own namespace.
 - **Secure by default.** HttpOnly cookies, argon2id hashing, SameSite, sane CORS.
-- **Don't shut doors.** The principal is resolved from *pluggable* credential sources; the session
-  cookie is the built-in, and Bearer/API-token / OIDC sources slot in later without changing the gate
-  or the app's call sites.
+- **Don't shut doors.** The identity is resolved from *pluggable* credential sources; the session
+  cookie is the built-in, and Bearer/API-token / OIDC sources slot in later behind the same
+  `identify`-style lookup without changing the gate or the app's call sites.
 
 ## 2. Layering
 
-Request path (outermost → innermost), all as `tower`/axum layers the app applies:
+There is **no authn/session middleware**. The optional cross-cutting layers (real-ip, logging, CORS,
+CSRF — §4/§7) are still `tower`/axum layers the app applies, but *identity resolution is not a layer*:
 
 ```
-client → [real-ip] → [request logging] → [CORS] → [session] → [authn: resolve Principal]
-       → [CSRF for cookie-auth writes] → router
-                                          ├─ crud routes       (gated by Authz)
-                                          ├─ admin UI pages    (gated by Authz / login redirect)
-                                          └─ app's own routes  (use CurrentUser + Authz, or not)
+client → [real-ip] → [request logging] → [CORS] → [CSRF for cookie-auth writes] → router
+                                          ├─ crud routes       (each handler → model's Authz gate)
+                                          ├─ admin UI pages    (handler calls Auth::identify → redirect)
+                                          └─ app's own routes  (call Auth::identify, or not)
 ```
 
-- **authn** puts an `Option<Principal>` into request extensions (None = anonymous).
-- **authz** is consulted per (operation, model) inside the `crud` handlers, and is callable from the
-  app's own handlers.
+- **authn** is `Auth::identify(&headers) -> Option<Identity>`: resolve the session cookie → user →
+  groups on demand (None = anonymous). Nothing is injected into the request.
+- **authz** is a per-model `Authz` gate; each `crud` handler consults its model's gate, which resolves
+  the identity itself. The same gate builders (and `identify`) are callable from the app's handlers.
 
-Everything lives in `relativelylight::auth`: the `Principal` / `Authz` contract plus the SeaORM
-users/sessions + login + hashing + middleware. The `crud` module references `auth::Principal` /
-`auth::Authz` only when the `auth` feature is enabled (see §9).
+Everything lives in `relativelylight::auth`: the `Identity` / `Authz` / `Decision` contract plus the
+SeaORM users/sessions + login + hashing. The `crud` module references `auth::Authz` / `auth::Decision`
+only when the `auth` feature is enabled (see §9).
 
 ## 3. Identity mechanism — DECIDED: server-side session
 
@@ -79,7 +92,7 @@ Comparison for *our* model (a server-rendered admin + same-origin JSON API insid
 JWT's wins (stateless, cross-service) don't apply to a single monolith, and its revocation story is
 poor — bad for an admin that must be able to disable a user *now*. So the built-in is the cookie
 session. **Bearer tokens are still first-class for the app's own API**, and a future API-token source
-can resolve the *same* `Principal` — but that's app-issued, not the admin's login session.
+can resolve the *same* `Identity` — but that's app-issued, not the admin's login session.
 
 Cookie attributes: `HttpOnly`, `Secure` (configurable off for local http), `SameSite=Strict` (or
 `Lax` if the app needs top-level cross-site GETs), `Path=/`, a rolling idle timeout + absolute
@@ -125,88 +138,98 @@ These are ordinary `crud`-registerable entities (so the admin can manage users/g
 
 ## 6. authz — the gate
 
+The gate trait lives in **`relativelylight::authz`** — always compiled, independent of the `auth`
+feature, so a model can be registered with a gate (`Open`) even in a build with no auth:
+
 ```rust
-pub struct Principal {
-    pub id: String,             // user pk, stringified
-    pub username: String,
-    pub groups: Vec<String>,
-    // extensible: assurance level (2FA), token scopes, … added additively
-}
+// relativelylight::authz
+pub enum Operation { List, Read, Create, Update, Delete }
+pub enum Decision  { Allow, NeedsLogin, Denied }
 
-pub enum WriteOp { Create, Update, Delete }
-
+#[async_trait]
 pub trait Authz: Send + Sync {
-    fn can_list (&self, who: Option<&Principal>, model: &str) -> bool;
-    fn can_read (&self, who: Option<&Principal>, model: &str) -> bool;
-    fn can_write(&self, who: Option<&Principal>, model: &str, op: WriteOp) -> bool;
+    async fn authorize(&self, op: Operation, headers: &HeaderMap) -> Decision;
 }
+pub struct Open;                        // allow everything
+impl<T: Authz + ?Sized> Authz for Arc<T> {…}   // so one Arc gate can guard many models
+
+// relativelylight::auth
+pub struct Identity { pub id: String, pub username: String, pub groups: Vec<String> }
 ```
 
-`who = None` is anonymous (so an `Open` preset can allow it). `model` is the slug, so a single impl
-can branch per model. (Row-level checks — `can_read(row)`, row filters — are a future extension of
-this trait; out of scope for v1.)
+A gate is **attached per model**, so it takes no model argument — instead of one impl branching on a
+slug, you hand different models different gates. It's given the request headers and resolves the
+identity *itself* (the identity-resolving presets hold an [`Auth`] handle and call
+`auth.identify(headers)`), so it can also key off anything else in the request. It returns a
+`Decision` the caller renders: the `crud` engine maps `Allow`/`NeedsLogin`/`Denied` →
+`200`/`401`/`403`; a page handler serves `NeedsLogin` as a redirect to `Auth::login_path`. (Row-level
+checks — per-row read/filter — are a future extension; out of scope for v1.)
 
-**Presets** (a handful of impls; names provisional):
-- **`Open`** — everything allowed (no auth); the default when no gate is set.
-- **`ValidUsers`** — any authenticated principal may do anything; anonymous denied.
-- **`UsersReadGroupWrite { write_groups }`** — any authenticated principal may list/read; write
-  requires membership in one of `write_groups`.
-- **Custom** — implement `Authz` (this is where an app builds full RBAC over the users/groups, or
-  authorizes its own API tokens).
+**Presets:**
+- **`authz::Open`** — everything allowed (no auth); pass it when a model needs no gating.
+- **`auth::ValidUsers::new(&auth)`** — any authenticated user may do anything; anonymous → `NeedsLogin`.
+- **`auth::UsersReadGroupWrite::new(&auth, ["admin"])`** — any authenticated user may list/read; a
+  write needs membership in one of the groups (else `Denied`); anonymous → `NeedsLogin`.
+- **Custom** — implement `authz::Authz` (full RBAC over users/groups, an app's own API tokens, IP
+  allow-lists — anything, since you get the headers and can call `auth.identify`).
 
-**Configuration — one shared gate for all models.** The gate is an `Arc<dyn Authz>` handed to the
-`crud` engine; because every method receives the model slug, one impl can still branch per model when
-it needs to. There is no separate per-model registration in v1 — a single instance keeps the app-side
-API tiny and lets the app share the *same* gate with its own handlers. (Default when `.authz(..)` is
-never called: `Open`.)
+**Configuration — one gate per model, at registration.** `Crud::register(model, gate)` takes the gate
+alongside the model. Pass `Open` for an ungated model, a preset, or a shared `Arc<dyn Authz>` (it
+implements `Authz`, so the same instance can guard several models). There is no separate default — the
+gate is always explicit at the call site.
 
-**Enforcement:** each `crud` handler extracts `Option<Principal>` from request extensions and
-consults the gate before touching the engine → **401** if the op needs a principal and none is
-present, **403** if present but not permitted. The app's own handlers call the same gate (or the
-`CurrentUser` extractor) for consistent rules.
+**Enforcement:** each `crud` handler consults its model's gate *before* touching the engine, passing
+the request headers → the gate resolves the identity and returns a `Decision` → **401** (`NeedsLogin`)
+/ **403** (`Denied`) / proceed (`Allow`). The admin UI reads the *same* per-model gate: `Admin`/`Table`
+have an async `render_for(&headers)` that hides a model's Create/Edit/Delete controls when its gate
+denies a write for the caller (the API remains the actual enforcement point).
 
 ### App-side API (the whole picture)
 
-What the app writes to wire it all up — the library gives layers, routes, an extractor, and a gate;
-the app composes them (it still owns the router):
+What the app writes to wire it all up — the library gives login routes, the gate trait, gate
+builders, and on-demand `identify`; the app composes them (it still owns the router):
 
 ```rust
-use relativelylight::auth::{Auth, Authz, CurrentUser, UsersReadGroupWrite};
+use relativelylight::auth::{Auth, UsersReadGroupWrite};
+use relativelylight::authz::Open;
 use relativelylight::crud::seaorm::Crud;
 use std::sync::Arc;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Redirect, Response};
 
-// 1. authn: SeaORM-backed sessions + login/logout/password + the middleware stack.
+// 1. authn: SeaORM-backed sessions + login/logout/password. Cheap to clone (Arc inside).
 let auth = Auth::new(db.clone())
     .admin_group("admin")        // group that may reset others' passwords (configurable)
-    .secure_cookies(true)        // false for local http
-    .trusted_proxies(["10.0.0.0/8".parse()?]); // for real-client-ip behind a proxy
+    .secure_cookies(true);       // false for local http
 
-// 2. authz: one gate, shared by crud and the app's own handlers.
-let gate: Arc<dyn Authz> = Arc::new(UsersReadGroupWrite {
-    write_groups: vec!["editors".into(), "admin".into()],
-});
+// 2. crud: each model registered with its gate. Share one gate via Arc, or vary per model.
+let content = Arc::new(UsersReadGroupWrite::new(&auth, ["editors", "admin"]));
+let mut crud = Crud::new(db, "/api/v1");
+crud.register(post_mm, content.clone());                          // logged-in read, group write
+crud.register(user_mm, UsersReadGroupWrite::new(&auth, ["admin"])); // admins only, for this model
+crud.register(healthcheck_mm, Open);                              // ungated
 
-// 3. crud, gated by the shared gate.
-let crud = Crud::new(db, "/api/v1").authz(gate.clone());
-
-// 4. compose — the app owns the root router.
+// 3. compose — the app owns the root router. No middleware, no wrapping.
+let engine = Arc::new(crud.into_engine());
 let app = axum::Router::new()
     .merge(auth.routes())              // GET/POST /login, /logout, (/password …)
     .route("/", get(admin_page))       // the app's own (gated) pages/handlers
-    .merge(crud.into_router());        // the gated JSON API
-let app = auth.wrap(app);              // session → Principal (later: real-ip · logging · CORS · CSRF)
+    .merge(engine.clone().router());   // the gated JSON API
 
-// The app's own handler uses the same identity + gate:
-async fn my_handler(user: CurrentUser, State(gate): State<Arc<dyn Authz>>) -> impl IntoResponse {
-    if !gate.can_read(Some(&user.principal()), "report") { /* 403 */ }
-    // …
+// The app's own page resolves the caller on demand — this is the whole of page-level auth:
+async fn admin_page(headers: HeaderMap, State(app): State<AppState>) -> Response {
+    let Some(who) = app.auth.identify(&headers).await else {
+        return Redirect::to(app.auth.login_path()).into_response();
+    };
+    // Render the admin *for this caller* — write controls hide where the gate denies a write:
+    let body = build_admin(&app.engine).render_for(&headers).await.unwrap_or_default();
+    // …wrap `body` (and use who.username / who.in_group("admin") …) in your shell
+    todo!()
 }
 ```
 
-`auth.layer()` is the composed middleware from §2/§4 (each piece individually configurable);
-`auth.routes()` are the login/logout/password endpoints; `CurrentUser` is the extractor backed by the
-session the layer resolved. Anything the app wants to leave open (e.g. `/metrics`) is simply not
-gated — it just doesn't call the gate.
+`auth.routes()` are the login/logout/password endpoints. Anything the app wants to leave open (e.g.
+`/metrics`) simply never calls `identify`.
 
 ## 7. CSRF — DECIDED: always-on double-submit token
 
@@ -229,23 +252,25 @@ cookie-authenticated client just reads the `csrf` cookie and sets the header.
 - **2FA (TOTP, PassKeys/WebAuthn):** the `session` row carries an assurance level; a second-factor
   step upgrades it; `Authz` impls (or a policy) can require a level for sensitive models.
 - **OIDC SSO:** a callback creates a `session` for the mapped user — same session model.
-- **App API tokens:** the app issues tokens and adds a **principal source** that maps a Bearer token →
-  `Principal`; the gate and all call sites are unchanged. The built-in session source ships; token
-  sources are app- or future-provided.
+- **App API tokens:** the app issues tokens and adds an **identity source** that maps a Bearer token →
+  `Identity` (a gate that checks the header instead of the cookie); the gate contract and all call
+  sites are unchanged. The built-in session source ships; token sources are app- or future-provided.
 
 ## 9. Module / feature layout
 
 `auth` is a **module of the `relativelylight` crate**, gated by the **`auth`** feature — usable
 without `crud`:
 
-- **`auth`** — `Principal`, `WriteOp`, `Authz` + presets (`Open`, `ValidUsers`,
-  `UsersReadGroupWrite`, …), the SeaORM `user`/`group`/`session` models, argon2id hashing, the session
-  cookie, the middleware stack (session · real-ip · logging · CORS · CSRF), the `CurrentUser`
-  extractor, and login/logout/password-change routes + components. Pulls `sea-orm`, `argon2`,
-  `tower-http`, a cookie lib, `rand`, `time` (+ an XFF parser or `axum-client-ip`); shares `axum` with
-  the router.
-- The **`crud` gating glue** (`Crud::authz`, reading `Principal` in handlers) compiles only when both
-  `crud` and `auth` are enabled. With `crud` but not `auth`, `crud` is `Open` (unchanged).
+- **`auth`** — `Identity`, on-demand `Auth::identify`, the gate presets (`ValidUsers`,
+  `UsersReadGroupWrite`, which impl `authz::Authz`), the SeaORM `user`/`group`/`session` models,
+  argon2id hashing, the session cookie, and login/logout/password-change routes + components. (The
+  gate trait itself — `Authz`/`Operation`/`Decision`/`Open` — lives in the always-on `authz` module.
+  The cross-cutting layers — real-ip · logging · CORS · CSRF — are still planned; identity itself is
+  *not* a layer.) Pulls `sea-orm`, `argon2`, a cookie lib, `rand`, `time`; shares `axum` +
+  `async-trait` with the crud engine.
+- The **`authz`** module (the `Authz` trait, `Operation`, `Decision`, `Open`) is **always compiled**
+  (it only needs `http` + `async-trait`), so `Crud::register(model, gate)` takes a gate in every
+  build — pass `Open` when nothing needs gating. The identity-resolving presets live in `auth`.
 
 Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
 `features = ["crud", "auth"]` for a gated CRUD API + admin.
@@ -253,13 +278,22 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
 ## 10. Examples
 
 - **`examples/auth`** — uses **`auth` alone (no `crud`)** to prove it stands on its own: a login
-  page, a session cookie, and a `/secret` page gated by `CurrentUser`, plus the `--set-admin-pw`
-  startup path.
-- **`examples/adminpanel`** — **login-gated** `crud::ui::Admin`: the page requires a session
-  (`CurrentUser` → redirect to `/login`) and the JSON API is gated by
-  `UsersReadGroupWrite { write_groups: ["admin"] }` (any logged-in user reads; the admin group
-  writes). Verified end-to-end: anonymous → 401 / redirect, admin → reads + writes.
+  page, a session cookie, and a `/secret` page gated by an on-demand `auth.identify(&headers)` check
+  (redirect to `login_path` when anonymous), plus the `--set-admin-pw` startup path.
+- **`examples/adminpanel`** — **login-gated** `crud::ui::Admin`: the page calls
+  `auth.identify(&headers)` (→ redirect to `/login` when anonymous), each model is registered with a
+  shared `UsersReadGroupWrite::new(&auth, ["admin"])` gate (any logged-in user reads; the admin group
+  writes), and the panel is rendered per request with `render_for` so write controls hide for
+  non-writers. Two logins: `admin` (read-write) and `editor` (read-only). Verified end-to-end:
+  anonymous → 303 / 401; `admin` → 200 reads + 201/200 writes, 4 write controls; `editor` → 200 read
+  page with 0 write controls, API read 200 / write 403.
 - **`examples/crud`** — the ungated counterpart (`Open`), so there's a no-login demo.
+
+> **Note — UI vs API enforcement.** The adminpanel renders the panel *per request* via
+> `Admin::render_for(&headers)`, which hides each model's Create/Edit/Delete controls when its gate
+> denies a write for the caller — so the `editor` login gets a read-only panel. The **API gate stays
+> the actual enforcement point**: hiding a button is cosmetic; an unauthorized write is rejected there
+> (403) regardless.
 
 ## 11. Decisions (confirmed)
 
@@ -268,13 +302,15 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
 2. **Identity** — ✅ cookie + **server-side session** (SeaORM `session` table).
 3. **CSRF** — ✅ **always-on double-submit token** for cookie-authenticated unsafe requests; Bearer
    requests exempt.
-4. **authz config** — ✅ **one shared `Arc<dyn Authz>` for all models** (the impl gets the model slug
-   and may branch); no per-model registration in v1.
-5. **Defaults** — ✅ hashing **argon2id**, admin group **`"admin"`** (configurable); presets `Open` /
-   `ValidUsers` / `UsersReadGroupWrite` / custom.
+4. **authz config** — ✅ **one gate per model, explicit at registration**: `Crud::register(model,
+   gate)`. Each gate is attached per model (no slug arg), is handed the request headers, and resolves
+   the identity itself → a `Decision`. The trait lives in the always-on `authz` module (`Open` for
+   ungated). **No middleware**: authn is on-demand `Auth::identify(&headers)`.
+5. **Defaults** — ✅ hashing **argon2id**, admin group **`"admin"`** (configurable); presets
+   `authz::Open` / `ValidUsers::new(&auth)` / `UsersReadGroupWrite::new(&auth, [..])` / custom.
 
 ## 12. Open (later)
 
-- Row-level authorization (`can_read(row)` / list filters).
+- Row-level authorization (per-row read checks / list filters — the gate seeing the row/query).
 - 2FA (TOTP, PassKeys), OIDC SSO, app-issued API tokens (extra principal source) — §8.
 - Session store scaling (shared store) if the app runs multiple instances.

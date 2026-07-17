@@ -5,11 +5,13 @@
 //!   cargo run -p auth-example                            # serve; log in as admin / password
 //!   cargo run -p auth-example -- --set-admin-pw s3cret   # (re)set admin pw + admin-group membership
 
-use axum::response::Html;
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
 use axum_extra::extract::CookieJar;
-use relativelylight::auth::{self, Auth, CurrentUser};
+use relativelylight::auth::{self, Auth};
 use sea_orm::Database;
 
 // The superadmin group name is the app's choice — a constant here, but it could come from config.
@@ -39,11 +41,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The library renders the login *form*; the app styles it. Here: a Bootstrap page.
         .login_shell(bootstrap_login);
 
+    // No middleware: `secret` resolves the session itself via `auth.identify`. The app router carries
+    // the `Auth` handle as state so handlers can reach it; the login/logout routes bring their own.
     let app = Router::new()
         .route("/", get(public))
-        .route("/secret", get(secret)) // gated by the CurrentUser extractor
+        .route("/secret", get(secret)) // gated on demand (see `secret`)
+        .with_state(auth.clone())
         .merge(auth.routes()); // /login, /logout
-    let app = auth.wrap(app); // resolve the session cookie → Principal for every request
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     println!("auth playground on http://127.0.0.1:3000/   (log in as admin / password)");
@@ -58,22 +62,28 @@ async fn public() -> Html<String> {
     ))
 }
 
-// Requires an authenticated user; `CurrentUser` redirects to /login when anonymous. `CookieJar` lets
-// us show the session cookie (a playground affordance — don't surface session tokens in real apps).
-async fn secret(CurrentUser(user): CurrentUser, jar: CookieJar) -> Html<String> {
-    let cookie = jar.get("rl_session").map(|c| c.value().to_string()).unwrap_or_default();
+// Requires an authenticated user: resolve the session on demand and redirect anonymous visitors to
+// the login page. `CookieJar` lets us show the session cookie (a playground affordance — don't
+// surface session tokens in real apps).
+async fn secret(State(auth): State<Auth>, headers: HeaderMap, jar: CookieJar) -> Response {
+    let Some(who) = auth.identify(&headers).await else {
+        return Redirect::to(auth.login_path()).into_response();
+    };
+    let name = auth.session_cookie_name();
+    let cookie = jar.get(name).map(|c| c.value().to_string()).unwrap_or_default();
     Html(page(
         "Protected page",
         &format!(
             r#"<p>Signed in as <b>{}</b> — groups: [{}].</p>
 <p class="small text-muted mb-1">session cookie</p>
-<pre class="bg-body-secondary p-2 rounded"><code>rl_session={}</code></pre>
+<pre class="bg-body-secondary p-2 rounded"><code>{name}={}</code></pre>
 <a class="btn btn-outline-secondary btn-sm" href="/logout">Log out</a>"#,
-            user.username,
-            user.groups.join(", "),
+            who.username,
+            who.groups.join(", "),
             cookie,
         ),
     ))
+    .into_response()
 }
 
 /// Bootstrap page wrapper for the app's own pages.

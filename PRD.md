@@ -74,11 +74,13 @@ import, and (further out) a server-rendered `htmx` frontend on the same seam.
 
 A feature-gated module (usable without `crud`) providing a **user + group** model (SeaORM) and
 authentication, plus authorization gating for the API and admin (per-operation policy; row-level
-later). **First slice implemented:** argon2id login/logout with a server-side session cookie, a
-session middleware + `CurrentUser` extractor, the `Authz` gate (`can_list`/`can_read`/`can_write`)
-with presets, and admin helpers (`make_admin`, `set_password`, …) — see `examples/auth`. **Planned:**
-wiring the gate into `crud`, password-change UI, CSRF/CORS/real-ip middleware, **TOTP 2FA**,
-**PassKeys**, **OIDC**. Design: **[docs/AUTH.md](docs/AUTH.md)**.
+later). **First slice implemented:** argon2id login/logout with a server-side session cookie,
+on-demand session resolution (`Auth::identify` → `Identity`; **no middleware**), a per-model `Authz`
+gate (`authorize(op, &headers) -> Decision`) with presets, per-model wiring into `crud`
+(`Crud::authz` / `register_authz` → 401/403), and admin helpers (`make_admin`, `set_password`, …) —
+see `examples/auth` + `examples/adminpanel`. **Planned:** password-change UI, CSRF/CORS/real-ip
+layers, per-user UI control-hiding, **TOTP 2FA**, **PassKeys**, **OIDC**. Design:
+**[docs/AUTH.md](docs/AUTH.md)**.
 
 ## 4. Files — file handling ⛔ (planned)
 

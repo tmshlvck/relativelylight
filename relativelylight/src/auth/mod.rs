@@ -2,16 +2,23 @@
 //! (a small [`Authz`] gate trait + presets). Usable on its own (feature `auth`, no `crud`): it gates
 //! any axum app. See `docs/AUTH.md` for the full design.
 //!
+//! There is **no middleware and no injected request context**. Authn is a handful of on-demand
+//! lookups on [`Auth`]: given a request's headers, [`Auth::identify`] resolves the session cookie →
+//! user → groups in one query and returns an [`Identity`] (or `None` for anonymous). The
+//! authorization gate itself lives in [`crate::authz`]; the presets here ([`ValidUsers`],
+//! [`UsersReadGroupWrite`]) implement it by resolving the identity with an `Auth` handle and
+//! returning a [`Decision`](crate::authz::Decision) the caller renders.
+//!
 //! Implemented: the `user`/`session`/`group`/`user_group` SeaORM models, argon2id hashing, a
-//! login/logout flow with an opaque server-side session cookie (via `axum-extra`'s `CookieJar`), a
-//! session-resolving middleware ([`Auth::wrap`]), the [`CurrentUser`] extractor, the [`Authz`] trait
-//! with its presets, admin helpers (`make_admin`, `set_password`, `add_to_group`, …), and
-//! enforcement in the `crud` HTTP handlers via `crud::seaorm::Crud::authz`. Not yet: a password-change
-//! UI, the CSRF/CORS/real-ip/logging middleware, and 2FA/OIDC.
+//! login/logout flow with an opaque server-side session cookie (via `axum-extra`'s `CookieJar`),
+//! on-demand [`Auth::identify`], the gate presets, admin helpers (`make_admin`, `set_password`,
+//! `add_to_group`, …), and per-model enforcement in the `crud` HTTP handlers via
+//! `crud::seaorm::Crud::register`. Not yet: a password-change UI, the CSRF/CORS/real-ip/logging
+//! middleware, and 2FA/OIDC.
 //!
 //! The session cookie (name configurable, default `rl_session`) carries only an **opaque token** —
-//! the id of a row in the session table; the `Principal` is rebuilt server-side from the DB on each
-//! request, and deleting the row revokes it.
+//! the id of a row in the session table; the identity is rebuilt server-side from the DB on each
+//! lookup, and deleting the row revokes it.
 
 pub mod group;
 pub mod session;
@@ -23,14 +30,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
-use axum::extract::{Form, FromRequestParts, Request, State};
-use axum::http::request::Parts;
-use axum::http::StatusCode;
-use axum::middleware::{from_fn_with_state, Next};
+use async_trait::async_trait;
+use axum::extract::{Form, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use crate::authz::{Authz, Decision, Operation};
 use rand_core::{OsRng, RngCore};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
@@ -39,73 +46,79 @@ use sea_orm::{
 
 const DEFAULT_COOKIE: &str = "rl_session";
 
-// ===================== Authorization =====================
+// ===================== Identity + gate presets =====================
 
-/// The authenticated identity, put into request extensions by the auth middleware. `groups` is
-/// empty until the group model lands (next slice).
+/// A logged-in identity, resolved on demand by [`Auth::identify`] from the session cookie. It is a
+/// plain return value — nothing injects it into the request.
 #[derive(Clone, Debug)]
-pub struct Principal {
+pub struct Identity {
     pub id: String,
     pub username: String,
     pub groups: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum WriteOp {
-    Create,
-    Update,
-    Delete,
-}
-
-/// The authorization gate consulted per (operation, model). `who = None` is anonymous; `model` is
-/// the entity slug so one impl can branch per model.
-pub trait Authz: Send + Sync {
-    fn can_list(&self, who: Option<&Principal>, model: &str) -> bool;
-    fn can_read(&self, who: Option<&Principal>, model: &str) -> bool;
-    fn can_write(&self, who: Option<&Principal>, model: &str, op: WriteOp) -> bool;
-}
-
-/// Everything allowed (no auth).
-pub struct Open;
-impl Authz for Open {
-    fn can_list(&self, _: Option<&Principal>, _: &str) -> bool {
-        true
-    }
-    fn can_read(&self, _: Option<&Principal>, _: &str) -> bool {
-        true
-    }
-    fn can_write(&self, _: Option<&Principal>, _: &str, _: WriteOp) -> bool {
-        true
+impl Identity {
+    /// Whether this identity belongs to the named group.
+    pub fn in_group(&self, group: &str) -> bool {
+        self.groups.iter().any(|g| g == group)
     }
 }
 
-/// Any authenticated user may do anything; anonymous denied.
-pub struct ValidUsers;
+/// Gate: any authenticated user may do anything; anonymous → `NeedsLogin`. Holds an [`Auth`] handle
+/// to resolve the caller; construct with `ValidUsers::new(&auth)`.
+pub struct ValidUsers(Auth);
+
+impl ValidUsers {
+    pub fn new(auth: &Auth) -> Self {
+        Self(auth.clone())
+    }
+}
+
+#[async_trait]
 impl Authz for ValidUsers {
-    fn can_list(&self, who: Option<&Principal>, _: &str) -> bool {
-        who.is_some()
-    }
-    fn can_read(&self, who: Option<&Principal>, _: &str) -> bool {
-        who.is_some()
-    }
-    fn can_write(&self, who: Option<&Principal>, _: &str, _: WriteOp) -> bool {
-        who.is_some()
+    async fn authorize(&self, _: Operation, headers: &HeaderMap) -> Decision {
+        match self.0.identify(headers).await {
+            Some(_) => Decision::Allow,
+            None => Decision::NeedsLogin,
+        }
     }
 }
 
-/// Any authenticated user may list/read; writing requires membership in one of `write_groups`.
+/// Gate: any authenticated user may list/read; a write requires membership in one of `write_groups`
+/// (else `Denied`); anonymous → `NeedsLogin`. Construct with
+/// `UsersReadGroupWrite::new(&auth, ["admin"])`.
 pub struct UsersReadGroupWrite {
-    pub write_groups: Vec<String>,
+    auth: Auth,
+    write_groups: Vec<String>,
 }
+
+impl UsersReadGroupWrite {
+    pub fn new<I, S>(auth: &Auth, write_groups: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            auth: auth.clone(),
+            write_groups: write_groups.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[async_trait]
 impl Authz for UsersReadGroupWrite {
-    fn can_list(&self, who: Option<&Principal>, _: &str) -> bool {
-        who.is_some()
-    }
-    fn can_read(&self, who: Option<&Principal>, _: &str) -> bool {
-        who.is_some()
-    }
-    fn can_write(&self, who: Option<&Principal>, _: &str, _: WriteOp) -> bool {
-        who.is_some_and(|p| p.groups.iter().any(|g| self.write_groups.contains(g)))
+    async fn authorize(&self, op: Operation, headers: &HeaderMap) -> Decision {
+        match self.auth.identify(headers).await {
+            None => Decision::NeedsLogin,
+            Some(_) if !op.is_write() => Decision::Allow,
+            Some(who) => {
+                if who.groups.iter().any(|g| self.write_groups.contains(g)) {
+                    Decision::Allow
+                } else {
+                    Decision::Denied
+                }
+            }
+        }
     }
 }
 
@@ -239,6 +252,7 @@ struct Inner {
     db: DatabaseConnection,
     admin_group: String,
     cookie_name: String,
+    login_path: String,
     secure_cookies: bool,
     ttl_secs: i64,
     /// Wraps the login-form fragment into a full page. Default: a minimal unstyled document; set
@@ -246,9 +260,11 @@ struct Inner {
     login_shell: LoginShell,
 }
 
-/// Wires authn into an app: login/logout routes ([`routes`](Auth::routes)) and a session-resolving
-/// middleware ([`wrap`](Auth::wrap)) that puts a [`Principal`] into request extensions. The app owns
-/// the router; it merges the routes and wraps its router where it likes.
+/// Wires authn into an app: login/logout routes ([`routes`](Auth::routes)) and on-demand session
+/// lookups ([`identify`](Auth::identify)). The app owns the router and merges the routes where it
+/// likes; gates and page handlers call `identify` themselves — there is no middleware. Cheap to
+/// clone (an `Arc` inside), so gates hold their own handle.
+#[derive(Clone)]
 pub struct Auth {
     inner: Arc<Inner>,
 }
@@ -260,6 +276,7 @@ impl Auth {
                 db,
                 admin_group: "admin".into(),
                 cookie_name: DEFAULT_COOKIE.into(),
+                login_path: "/login".into(),
                 secure_cookies: true,
                 ttl_secs: 7 * 24 * 3600,
                 login_shell: Arc::new(default_login_shell),
@@ -309,6 +326,12 @@ impl Auth {
         &self.inner.cookie_name
     }
 
+    /// The path to redirect anonymous users to (default `"/login"` — where [`routes`](Auth::routes)
+    /// serves the login form). Gates return [`Decision::NeedsLogin`]; the app redirects here.
+    pub fn login_path(&self) -> &str {
+        &self.inner.login_path
+    }
+
     /// `GET/POST /login`, `GET /logout`. Merge into your router.
     pub fn routes(&self) -> Router {
         Router::new()
@@ -317,47 +340,19 @@ impl Auth {
             .with_state(self.inner.clone())
     }
 
-    /// Wrap a router so every request resolves the session cookie → `Principal` (in extensions).
-    pub fn wrap(&self, router: Router) -> Router {
-        router.layer(from_fn_with_state(self.inner.clone(), resolve_session))
-    }
-}
-
-// ===================== Extractor =====================
-
-/// Extracts the authenticated [`Principal`]; redirects to `/login` when anonymous. Use it on any
-/// handler that requires a logged-in user.
-pub struct CurrentUser(pub Principal);
-
-impl<S> FromRequestParts<S> for CurrentUser
-where
-    S: Send + Sync,
-{
-    type Rejection = Redirect;
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        parts
-            .extensions
-            .get::<Principal>()
-            .cloned()
-            .map(CurrentUser)
-            .ok_or_else(|| Redirect::to("/login"))
+    /// The logged-in [`Identity`] for a request, resolved from its session cookie (session → user →
+    /// groups, one DB round-trip), or `None` if anonymous / expired / inactive. This is the whole of
+    /// authn: call it from a gate or a page handler; nothing is injected into the request.
+    pub async fn identify(&self, headers: &HeaderMap) -> Option<Identity> {
+        let jar = CookieJar::from_headers(headers);
+        let token = jar.get(&self.inner.cookie_name)?.value().to_string();
+        identity_from(&self.inner, &token).await
     }
 }
 
 // ===================== Internals =====================
 
-async fn resolve_session(State(inner): State<Arc<Inner>>, mut req: Request, next: Next) -> Response {
-    let jar = CookieJar::from_headers(req.headers());
-    if let Some(cookie) = jar.get(&inner.cookie_name) {
-        if let Some(principal) = principal_from(&inner, cookie.value()).await {
-            req.extensions_mut().insert(principal);
-        }
-    }
-    next.run(req).await
-}
-
-async fn principal_from(inner: &Inner, token: &str) -> Option<Principal> {
+async fn identity_from(inner: &Inner, token: &str) -> Option<Identity> {
     let session = session::Entity::find_by_id(token.to_string()).one(&inner.db).await.ok()??;
     if session.expires_at < now_secs() {
         return None;
@@ -367,7 +362,7 @@ async fn principal_from(inner: &Inner, token: &str) -> Option<Principal> {
         return None;
     }
     let groups = groups_of(&inner.db, user.id).await;
-    Some(Principal { id: user.id.to_string(), username: user.username, groups })
+    Some(Identity { id: user.id.to_string(), username: user.username, groups })
 }
 
 async fn authenticate(inner: &Inner, username: &str, password: &str) -> Option<String> {
@@ -476,34 +471,20 @@ fn default_login_shell(form: &str) -> String {
 mod tests {
     use super::*;
 
-    fn principal(groups: &[&str]) -> Principal {
-        Principal {
-            id: "1".into(),
-            username: "u".into(),
-            groups: groups.iter().map(|s| s.to_string()).collect(),
-        }
+    #[test]
+    fn identity_group_membership() {
+        let who = Identity { id: "1".into(), username: "u".into(), groups: vec!["admin".into()] };
+        assert!(who.in_group("admin"));
+        assert!(!who.in_group("editors"));
     }
 
     #[test]
-    fn authz_presets() {
-        let anon: Option<&Principal> = None;
-        let user = principal(&[]);
-        let admin = principal(&["admin"]);
-
-        // Open: everything, even anonymous.
-        assert!(Open.can_write(anon, "post", WriteOp::Delete));
-
-        // ValidUsers: any authenticated user; anonymous denied.
-        assert!(!ValidUsers.can_read(anon, "post"));
-        assert!(ValidUsers.can_read(Some(&user), "post"));
-        assert!(ValidUsers.can_write(Some(&user), "post", WriteOp::Create));
-
-        // UsersReadGroupWrite: read for any user; write only for a listed group.
-        let gate = UsersReadGroupWrite { write_groups: vec!["admin".into()] };
-        assert!(!gate.can_read(anon, "post"));
-        assert!(gate.can_read(Some(&user), "post"));
-        assert!(!gate.can_write(Some(&user), "post", WriteOp::Update)); // not in group
-        assert!(gate.can_write(Some(&admin), "post", WriteOp::Update)); // in group
+    fn operation_write_classification() {
+        assert!(!Operation::List.is_write());
+        assert!(!Operation::Read.is_write());
+        assert!(Operation::Create.is_write());
+        assert!(Operation::Update.is_write());
+        assert!(Operation::Delete.is_write());
     }
 
     #[test]

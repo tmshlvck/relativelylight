@@ -46,7 +46,7 @@ pub enum Error {
     ReadOnly,
     BadRequest(String),
     Validation(ValidationErrors),
-    /// Not authenticated (no principal) but the operation requires one → 401.
+    /// The operation needs a logged-in user but the request is anonymous → 401.
     Unauthorized,
     /// Authenticated but not permitted → 403.
     Forbidden,
@@ -261,10 +261,8 @@ pub trait Accessor: Send + Sync {
 pub struct Engine {
     base_path: String,
     accessors: BTreeMap<String, Arc<dyn Accessor>>,
-    /// The authorization gate consulted by the HTTP handlers (default `Open`). Set via
-    /// `seaorm::Crud::authz`. Only present when the `auth` feature is on.
-    #[cfg(feature = "auth")]
-    authz: Arc<dyn crate::auth::Authz>,
+    /// The authorization gate for each model, keyed by slug (set at registration; `Open` = ungated).
+    authz: BTreeMap<String, Arc<dyn crate::authz::Authz>>,
 }
 
 impl Engine {
@@ -279,23 +277,36 @@ impl Engine {
         Self {
             base_path,
             accessors: BTreeMap::new(),
-            #[cfg(feature = "auth")]
-            authz: Arc::new(crate::auth::Open),
+            authz: BTreeMap::new(),
         }
     }
 
-    /// Set the authorization gate (default `Open`). Applied to every HTTP handler.
-    #[cfg(feature = "auth")]
-    pub fn set_authz(&mut self, gate: Arc<dyn crate::auth::Authz>) {
-        self.authz = gate;
+    /// The gate governing `slug` (or `None` for an unregistered slug).
+    fn authz_for(&self, slug: &str) -> Option<&Arc<dyn crate::authz::Authz>> {
+        self.authz.get(slug)
     }
 
-    /// Register an accessor (any backend). Panics on a duplicate slug.
-    pub fn add(&mut self, acc: Arc<dyn Accessor>) {
+    /// Whether the model's gate would allow `op` for this request. Used by the UI to hide write
+    /// controls the caller isn't permitted; the API is the actual enforcement point.
+    pub async fn permits(
+        &self,
+        slug: &str,
+        op: crate::authz::Operation,
+        headers: &::http::HeaderMap,
+    ) -> bool {
+        match self.authz_for(slug) {
+            Some(gate) => matches!(gate.authorize(op, headers).await, crate::authz::Decision::Allow),
+            None => false,
+        }
+    }
+
+    /// Register an accessor and its authorization gate. Panics on a duplicate slug.
+    pub fn add(&mut self, acc: Arc<dyn Accessor>, gate: Arc<dyn crate::authz::Authz>) {
         let slug = acc.slug().to_string();
         if self.accessors.contains_key(&slug) {
             panic!("relativelylight: duplicate slug '{slug}' — set a distinct MetaModel.slug");
         }
+        self.authz.insert(slug.clone(), gate);
         self.accessors.insert(slug, acc);
     }
 
@@ -466,8 +477,8 @@ mod tests {
 #[cfg(feature = "axum")]
 mod http {
     use super::{Engine, Error, ListQuery};
-    use axum::extract::{FromRequestParts, Path, Query, State};
-    use axum::http::request::Parts;
+    use axum::extract::{Path, Query, State};
+    use axum::http::HeaderMap;
     use axum::http::StatusCode;
     use axum::response::{IntoResponse, Response};
     use axum::routing::get;
@@ -504,71 +515,20 @@ mod http {
 
     type St = State<Arc<Engine>>;
 
-    /// Write operations, for the authorization gate.
-    enum Op {
-        Create,
-        Update,
-        Delete,
-    }
+    use crate::authz::{Decision, Operation};
 
-    /// The request's authenticated principal — populated by the `auth` middleware when that feature
-    /// is on and the app applied it. A no-op unit otherwise, so handler signatures are stable.
-    #[cfg(feature = "auth")]
-    struct Caller(Option<crate::auth::Principal>);
-    #[cfg(not(feature = "auth"))]
-    struct Caller;
-
-    impl<S: Send + Sync> FromRequestParts<S> for Caller {
-        type Rejection = std::convert::Infallible;
-        #[cfg(feature = "auth")]
-        async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-            Ok(Caller(parts.extensions.get::<crate::auth::Principal>().cloned()))
-        }
-        #[cfg(not(feature = "auth"))]
-        async fn from_request_parts(_: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-            Ok(Caller)
-        }
-    }
-
-    // ---- authorization gate (real under `auth`, no-op otherwise) ----
-    #[cfg(feature = "auth")]
-    fn decide(c: &Caller, allowed: bool) -> Result<(), Error> {
-        if allowed {
-            Ok(())
-        } else if c.0.is_none() {
-            Err(Error::Unauthorized)
-        } else {
-            Err(Error::Forbidden)
-        }
-    }
-    #[cfg(feature = "auth")]
-    fn gate_list(e: &Engine, c: &Caller, model: &str) -> Result<(), Error> {
-        decide(c, e.authz.can_list(c.0.as_ref(), model))
-    }
-    #[cfg(feature = "auth")]
-    fn gate_read(e: &Engine, c: &Caller, model: &str) -> Result<(), Error> {
-        decide(c, e.authz.can_read(c.0.as_ref(), model))
-    }
-    #[cfg(feature = "auth")]
-    fn gate_write(e: &Engine, c: &Caller, model: &str, op: Op) -> Result<(), Error> {
-        let w = match op {
-            Op::Create => crate::auth::WriteOp::Create,
-            Op::Update => crate::auth::WriteOp::Update,
-            Op::Delete => crate::auth::WriteOp::Delete,
+    /// Consult the model's gate: resolve the caller from the request headers and map the
+    /// [`Decision`](crate::authz::Decision) to `401`/`403`. An unregistered model has no gate — let
+    /// the handler proceed and return its own `404`.
+    async fn authorize(e: &Engine, op: Operation, model: &str, headers: &HeaderMap) -> Result<(), Error> {
+        let Some(gate) = e.authz_for(model) else {
+            return Ok(());
         };
-        decide(c, e.authz.can_write(c.0.as_ref(), model, w))
-    }
-    #[cfg(not(feature = "auth"))]
-    fn gate_list(_: &Engine, _: &Caller, _: &str) -> Result<(), Error> {
-        Ok(())
-    }
-    #[cfg(not(feature = "auth"))]
-    fn gate_read(_: &Engine, _: &Caller, _: &str) -> Result<(), Error> {
-        Ok(())
-    }
-    #[cfg(not(feature = "auth"))]
-    fn gate_write(_: &Engine, _: &Caller, _: &str, _: Op) -> Result<(), Error> {
-        Ok(())
+        match gate.authorize(op, headers).await {
+            Decision::Allow => Ok(()),
+            Decision::NeedsLogin => Err(Error::Unauthorized),
+            Decision::Denied => Err(Error::Forbidden),
+        }
     }
 
     impl Engine {
@@ -622,11 +582,11 @@ mod http {
 
     async fn list(
         State(e): St,
-        caller: Caller,
+        headers: HeaderMap,
         Path(entity): Path<String>,
         Query(params): Query<HashMap<String, String>>,
     ) -> std::result::Result<Response, Error> {
-        gate_list(&e, &caller, &entity)?;
+        authorize(&e, Operation::List, &entity, &headers).await?;
         #[cfg(feature = "csv")]
         if params.get("format").map(|v| v == "csv").unwrap_or(false) {
             let body = crate::crud::csv_io::export(&e, &entity, &parse_list_query(params)).await?;
@@ -646,50 +606,50 @@ mod http {
 
     async fn get_one(
         State(e): St,
-        caller: Caller,
+        headers: HeaderMap,
         Path((entity, pk)): Path<(String, String)>,
     ) -> std::result::Result<Json<Value>, Error> {
-        gate_read(&e, &caller, &entity)?;
+        authorize(&e, Operation::Read, &entity, &headers).await?;
         Ok(Json(e.get(&entity, &pk).await?))
     }
 
     async fn create(
         State(e): St,
-        caller: Caller,
+        headers: HeaderMap,
         Path(entity): Path<String>,
         Json(body): Json<Value>,
     ) -> std::result::Result<(StatusCode, Json<Value>), Error> {
-        gate_write(&e, &caller, &entity, Op::Create)?;
+        authorize(&e, Operation::Create, &entity, &headers).await?;
         Ok((StatusCode::CREATED, Json(e.create(&entity, &body).await?)))
     }
 
     async fn update(
         State(e): St,
-        caller: Caller,
+        headers: HeaderMap,
         Path((entity, pk)): Path<(String, String)>,
         Json(body): Json<Value>,
     ) -> std::result::Result<Json<Value>, Error> {
-        gate_write(&e, &caller, &entity, Op::Update)?;
+        authorize(&e, Operation::Update, &entity, &headers).await?;
         Ok(Json(e.update(&entity, &pk, &body).await?))
     }
 
     async fn delete_one(
         State(e): St,
-        caller: Caller,
+        headers: HeaderMap,
         Path((entity, pk)): Path<(String, String)>,
     ) -> std::result::Result<Json<Value>, Error> {
-        gate_write(&e, &caller, &entity, Op::Delete)?;
+        authorize(&e, Operation::Delete, &entity, &headers).await?;
         Ok(Json(e.delete(&entity, &pk).await?))
     }
 
     /// `DELETE /{entity}?<filters>` — bulk delete. `?all=true` permits wiping the whole table.
     async fn delete_many(
         State(e): St,
-        caller: Caller,
+        headers: HeaderMap,
         Path(entity): Path<String>,
         Query(params): Query<HashMap<String, String>>,
     ) -> std::result::Result<Json<Value>, Error> {
-        gate_write(&e, &caller, &entity, Op::Delete)?;
+        authorize(&e, Operation::Delete, &entity, &headers).await?;
         Ok(Json(e.delete_where(&entity, &parse_list_query(params)).await?))
     }
 
@@ -697,11 +657,11 @@ mod http {
     #[cfg(feature = "csv")]
     async fn import(
         State(e): St,
-        caller: Caller,
+        headers: HeaderMap,
         Path(entity): Path<String>,
         body: String,
     ) -> std::result::Result<Json<Value>, Error> {
-        gate_write(&e, &caller, &entity, Op::Create)?;
+        authorize(&e, Operation::Create, &entity, &headers).await?;
         let report = crate::crud::csv_io::import(&e, &entity, &body).await?;
         Ok(Json(serde_json::to_value(report).unwrap_or_else(|_| json!({}))))
     }

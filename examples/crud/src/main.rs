@@ -5,6 +5,7 @@
 //! Try:  open http://127.0.0.1:3000/   ·   Swagger at /docs   ·   spec at /openapi.json
 
 use askama::Template;
+use relativelylight::authz::Open;
 use relativelylight::crud::ui::Table;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use axum::extract::{Path, State};
@@ -79,12 +80,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }));
 
+    // Ungated demo: every model takes the `Open` gate (no auth). See `adminpanel` for a gated app.
     let mut crud = Crud::new(db, "/api/v1");
-    crud.register(author_mm);
-    crud.register(post_mm);
-    crud.register(user_mm);
-    crud.register(profile_mm);
-    crud.register(tag_mm);
+    crud.register(author_mm, Open);
+    crud.register(post_mm, Open);
+    crud.register(user_mm, Open);
+    crud.register(profile_mm, Open);
+    crud.register(tag_mm, Open);
 
     // Pre-render one shell page per entity (shape read in-process; data is fetched client-side).
     let engine = crud.engine();
