@@ -11,6 +11,9 @@
 .playwright-mcp/
 *.png
 
+# Local test scratch (curl cookie jars, etc.)
+*.cookies
+
 # Editor / OS
 .DS_Store
 *.swp
