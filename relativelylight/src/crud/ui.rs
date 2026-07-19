@@ -17,6 +17,7 @@ use serde_json::Value;
 struct TableTemplate {
     id: String, // unique per instance (the slug) — namespaces the Alpine component on shared pages
     title: String,
+    description: String, // optional subtitle under the heading (empty = none)
     data_url: String,
     columns_json: String,
     search: bool,
@@ -33,6 +34,7 @@ pub struct Table<'a> {
     engine: &'a Engine,
     slug: String,
     title: Option<String>,
+    description: Option<String>,
     search: bool,
     pagination: bool,
     per_page: u64,
@@ -48,6 +50,7 @@ impl<'a> Table<'a> {
             engine,
             slug: slug.into(),
             title: None,
+            description: None,
             search: true,
             pagination: true,
             per_page: 30,
@@ -61,6 +64,12 @@ impl<'a> Table<'a> {
     /// Display label for the entity (table heading + form header). Default: the slug.
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
+        self
+    }
+    /// An optional description shown as a muted subtitle under the table heading — a good place to
+    /// explain what the entity is and when to use it.
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
         self
     }
     pub fn search(mut self, on: bool) -> Self {
@@ -135,6 +144,7 @@ impl<'a> Table<'a> {
             id: self.slug.clone(),
             data_url: self.engine.entity_url(&self.slug),
             title: self.title.clone().unwrap_or_else(|| self.slug.clone()),
+            description: self.description.clone().unwrap_or_default(),
             columns_json,
             search: self.search,
             pagination: self.pagination,

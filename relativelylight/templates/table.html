@@ -1,5 +1,5 @@
 <div x-data="ruTable_{{ id }}()" x-init="load()">
-  <div class="d-flex justify-content-between align-items-center mb-2">
+  <div class="d-flex justify-content-between align-items-center {% if description.is_empty() %}mb-2{% else %}mb-1{% endif %}">
     <h5 class="mb-0 text-capitalize">{{ title }}</h5>
     <div class="d-flex gap-2">
       {% if search %}
@@ -35,6 +35,9 @@
       {% endif %}
     </div>
   </div>
+  {% if !description.is_empty() %}
+  <p class="text-muted small mb-3">{{ description }}</p>
+  {% endif %}
 
   <div class="table-responsive">
     <table class="table table-striped table-hover align-middle">

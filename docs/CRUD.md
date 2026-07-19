@@ -333,6 +333,7 @@ client-side from the JSON API. You provide a shell page that loads Bootstrap 5.3
 ```rust
 let html: String = relativelylight::crud::ui::Table::new(&engine, "post")
     .title("Post")          // heading + form header; default: the slug
+    .description("Blog posts — one row per article.")  // optional muted subtitle under the heading
     .read_only(false)       // true → display only (no create/edit/delete, no form)
     .search(true)           // search box → ?q=
     .pagination(true)
