@@ -11,7 +11,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ColumnType, Condition, ConnectionTrait, DatabaseConnection,
     DbErr, EntityName, EntityTrait, IdenStatic, Identity, IntoActiveModel, Iterable, ModelTrait,
     Order, PaginatorTrait, PrimaryKeyToColumn, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
-    Related, RelationTrait, RelationType, TransactionTrait, Value as DbValue,
+    Related, RelationTrait, RelationType, SqlErr, TransactionTrait, Value as DbValue,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -21,7 +21,13 @@ use std::sync::{Arc, RwLock, Weak};
 
 impl From<DbErr> for Error {
     fn from(e: DbErr) -> Self {
-        Error::Backend(e.to_string())
+        // Classify DB constraint violations portably (SQLite / Postgres / …) via SeaORM's `sql_err`
+        // so the engine can return 409 instead of a generic 500.
+        match e.sql_err() {
+            Some(SqlErr::UniqueConstraintViolation(msg)) => Error::Conflict(msg),
+            Some(SqlErr::ForeignKeyConstraintViolation(msg)) => Error::Conflict(msg),
+            _ => Error::Backend(e.to_string()),
+        }
     }
 }
 

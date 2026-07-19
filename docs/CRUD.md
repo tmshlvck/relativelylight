@@ -250,7 +250,8 @@ wipe the whole unfiltered table unless you pass `?all=true`, and returns a count
 ### Errors
 
 `{ "error": … }` with status **400** (bad body / unknown column), **404** (unknown entity / missing
-row), **405** (read-only), **422** (validation, structured — see below), **500** (DB).
+row), **405** (read-only), **409** (a unique / foreign-key constraint rejected the write), **422**
+(validation, structured — see below), **500** (other DB error).
 
 ## Validation & transforms
 

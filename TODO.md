@@ -41,5 +41,6 @@ Highest priority first.
 
 - [ ] Second backend behind the `Accessor` seam (in-memory or another ORM).
 - [ ] Batch relation reads (avoid N+1 on relation resolution).
-- [ ] Composite-PK URL token + `row_key` escape hatch; map constraint violations to **409** (now 500).
+- [ ] Composite-PK URL token + `row_key` escape hatch. (Constraint violations now map to **409** —
+  done, via `DbErr::sql_err`.)
 - [ ] Richer field metadata (enum `options`, nullable/`required`).

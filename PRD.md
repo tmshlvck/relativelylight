@@ -45,7 +45,8 @@ the backend returns finished JSON and the engine forwards it.
 - A second backend (in-memory, another ORM) — the `Accessor` seam is ORM-neutral, so this needs no
   core change.
 - Relation reads are per-target queries (N+1) — batch/join inside the backend later.
-- Composite-PK URL token + a `row_key` escape hatch; map constraint violations to **409** (now 500).
+- Composite-PK URL token + a `row_key` escape hatch. (Unique / FK constraint violations now map to
+  **409**.)
 - Richer field metadata (enum `options`, nullable/`required`).
 
 ---

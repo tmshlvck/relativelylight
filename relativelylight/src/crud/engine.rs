@@ -46,6 +46,8 @@ pub enum Error {
     ReadOnly,
     BadRequest(String),
     Validation(ValidationErrors),
+    /// A database constraint (unique / foreign-key) rejected the write → 409.
+    Conflict(String),
     /// The operation needs a logged-in user but the request is anonymous → 401.
     Unauthorized,
     /// Authenticated but not permitted → 403.
@@ -60,6 +62,7 @@ impl std::fmt::Display for Error {
             Error::ReadOnly => write!(f, "read-only"),
             Error::BadRequest(m) => write!(f, "bad request: {m}"),
             Error::Validation(_) => write!(f, "validation failed"),
+            Error::Conflict(m) => write!(f, "conflict: {m}"),
             Error::Unauthorized => write!(f, "unauthorized"),
             Error::Forbidden => write!(f, "forbidden"),
         }
@@ -496,6 +499,7 @@ mod http {
                     Json(json!({ "error": "read-only" })),
                 ),
                 Error::BadRequest(m) => (StatusCode::BAD_REQUEST, Json(json!({ "error": m }))),
+                Error::Conflict(m) => (StatusCode::CONFLICT, Json(json!({ "error": m }))),
                 Error::Backend(e) => {
                     (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e })))
                 }
