@@ -1,6 +1,6 @@
 //! SSO / OpenID Connect (feature `sso`). Sign users in through an external identity provider
 //! (Google, Okta, or any OIDC-compliant corporate IdP) via the Authorization Code flow with PKCE,
-//! then map them onto local `rl_user` rows + group memberships.
+//! then map them onto local `auth_user` rows + group memberships.
 //!
 //! **Group mapping.** A login's local groups are the **union** of two rule tables:
 //! - a **global username-pattern table** — `regexp → [groups]` — applied to the resolved username.
@@ -13,7 +13,7 @@
 //! groups the user has but the set doesn't are removed. SSO accounts' groups are therefore fully
 //! managed by these rules (don't hand-assign groups to an SSO user — they'll be stripped next login).
 //!
-//! **Accounts.** An SSO login resolves to an `rl_user` whose `sso_provider` marks it external (no
+//! **Accounts.** An SSO login resolves to an `auth_user` whose `sso_provider` marks it external (no
 //! local password / 2FA). With **auto-registration** on for a provider, an unknown user is created on
 //! first login; with it off, an admin must pre-create the user and set its `sso_provider` first, else
 //! the login is refused. See `docs/AUTH.md`.

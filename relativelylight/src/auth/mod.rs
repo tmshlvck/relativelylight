@@ -197,8 +197,8 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
 
 // ===================== Setup helpers =====================
 
-/// The `CREATE TABLE` statements for the auth tables — `rl_user`, `rl_group`, `rl_user_group`,
-/// `rl_session` (in that order). Use these to fold the auth schema into your own **`sea-orm-migration`**
+/// The `CREATE TABLE` statements for the auth tables — `auth_user`, `auth_group`, `auth_user_group`,
+/// `auth_session` (in that order). Use these to fold the auth schema into your own **`sea-orm-migration`**
 /// migration so it's versioned alongside your app tables — the recommended approach for anything
 /// long-lived (see `docs/AUTH.md`):
 ///
@@ -223,7 +223,7 @@ pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> 
 ///
 /// This is **not** a migration tool: it only ever *creates* missing tables, so it won't add columns
 /// or otherwise evolve an existing schema across library upgrades (e.g. the TOTP / SSO columns added
-/// to `rl_user`). For anything long-lived, drive the schema with **`sea-orm-migration`** and feed it
+/// to `auth_user`). For anything long-lived, drive the schema with **`sea-orm-migration`** and feed it
 /// [`table_create_statements`] instead of calling this. The app owns the database either way.
 pub async fn migrate(db: &DatabaseConnection) -> Result<(), DbErr> {
     let backend = db.get_database_backend();
@@ -1272,6 +1272,6 @@ mod tests {
         }
         // Without if_not_exists (the raw statements), it's a plain CREATE TABLE — for migrations.
         let raw = DbBackend::Sqlite.build(&table_create_statements(DbBackend::Sqlite)[0]).sql;
-        assert!(raw.contains("rl_user"));
+        assert!(raw.contains("auth_user"));
     }
 }

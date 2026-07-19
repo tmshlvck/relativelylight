@@ -1,6 +1,6 @@
 //! TOTP (RFC 6238) helpers over [`totp-rs`](https://docs.rs/totp-rs): generate a secret, build the
 //! `otpauth://` provisioning URL + QR image for enrolment, and verify a submitted code. Secrets are
-//! stored as base32 strings (`rl_user.totp_secret` / `totp_pending`); the parameters (SHA1, 6 digits,
+//! stored as base32 strings (`auth_user.totp_secret` / `totp_pending`); the parameters (SHA1, 6 digits,
 //! 30s step, ±1 skew) are the widely-compatible defaults every authenticator app supports.
 
 use totp_rs::{Algorithm, Secret, TOTP};

@@ -1,9 +1,9 @@
-//! `user_group` — the user↔group membership join (composite PK). Table `rl_user_group`.
+//! `user_group` — the user↔group membership join (composite PK). Table `auth_user_group`.
 
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "rl_user_group")]
+#[sea_orm(table_name = "auth_user_group")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub user_id: i32,

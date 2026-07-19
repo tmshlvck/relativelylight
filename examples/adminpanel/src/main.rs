@@ -69,13 +69,13 @@ fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
             .group("Accounts (auth)")
             // Login accounts: create/edit inline (password is the write-only field above); the id
             // links to /profile/{id} for a dedicated password reset. Password never shows in reads.
-            .entity_with("rl_user", |t| {
+            .entity_with("auth_user", |t| {
                 t.title("Login accounts").format(
                     "id",
                     r#"(v, row) => `<a href="/profile/${row.id}" title="Reset password">${v}</a>`"#,
                 )
             })
-            .entity_with("rl_group", |t| t.title("Groups"));
+            .entity_with("auth_group", |t| t.title("Groups"));
     }
     admin
         .separator()

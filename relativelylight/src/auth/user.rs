@@ -1,4 +1,4 @@
-//! `user` — the authentication principal. Table `rl_user` (prefixed to avoid clashing with app
+//! `user` — the authentication principal. Table `auth_user` (prefixed to avoid clashing with app
 //! tables). `password_hash` holds an argon2id PHC string; it is never exposed in reads.
 //!
 //! TOTP 2FA columns (nullable, both hold a base32 secret): `totp_secret` is the **active** secret —
@@ -12,7 +12,7 @@
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, serde::Serialize, serde::Deserialize)]
-#[sea_orm(table_name = "rl_user")]
+#[sea_orm(table_name = "auth_user")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,

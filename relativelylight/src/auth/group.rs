@@ -1,10 +1,10 @@
 //! `group` — a named group for authorization (e.g. the configurable admin/superadmin group). Table
-//! `rl_group`. Membership is the `user_group` join.
+//! `auth_group`. Membership is the `user_group` join.
 
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, serde::Serialize, serde::Deserialize)]
-#[sea_orm(table_name = "rl_group")]
+#[sea_orm(table_name = "auth_group")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,

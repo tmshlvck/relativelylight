@@ -1,4 +1,4 @@
-//! `session` — a server-side session. Table `rl_session`. `id` is an opaque random token carried in
+//! `session` — a server-side session. Table `auth_session`. `id` is an opaque random token carried in
 //! the session cookie; `expires_at` is a Unix timestamp (seconds). Deleting the row revokes it.
 //!
 //! `awaiting_totp` marks a **half-authenticated** session: the password was verified but the TOTP
@@ -8,7 +8,7 @@
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "rl_session")]
+#[sea_orm(table_name = "auth_session")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: String,
