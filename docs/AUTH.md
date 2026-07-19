@@ -132,6 +132,57 @@ SeaORM models (the app runs the migration / `create_table_from_entity`):
 These are ordinary `crud`-registerable entities (so the admin can manage users/groups), with
 `password_hash` marked `write_only` + hashed via `on_write`, and never emitted in reads.
 
+### Database schema & migrations
+
+`auth::migrate(&db)` creates the four tables **if they don't already exist** — a bootstrap for a fresh
+DB or the examples, safe to call on every start. It is **not** a migration engine: it only *creates*
+missing tables, so it won't add columns when you upgrade the library (e.g. the TOTP / SSO columns on
+`rl_user`) or otherwise evolve the schema.
+
+For anything long-lived, drive the schema with **`sea-orm-migration`** — SeaORM's alembic-equivalent:
+versioned `up`/`down` migrations, applied once and tracked in a `seaql_migrations` table. Fold the auth
+tables into your *initial* migration via `auth::table_create_statements(backend)`, and run the migrator
+**embedded in your binary** at startup (no external tool needed; `sea-orm-cli migrate` works too):
+
+```rust
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+struct InitAuth;
+
+#[async_trait::async_trait]
+impl MigrationTrait for InitAuth {
+    async fn up(&self, m: &SchemaManager) -> Result<(), DbErr> {
+        // rl_user / rl_group / rl_user_group / rl_session — from the library entities.
+        for stmt in relativelylight::auth::table_create_statements(m.get_database_backend()) {
+            m.create_table(stmt).await?;
+        }
+        // … your own app tables via m.create_table(schema.create_table_from_entity(App::Entity)) …
+        Ok(())
+    }
+    async fn down(&self, m: &SchemaManager) -> Result<(), DbErr> {
+        for t in ["rl_session", "rl_user_group", "rl_group", "rl_user"] {
+            m.drop_table(Table::drop().table(Alias::new(t)).to_owned()).await?;
+        }
+        Ok(())
+    }
+}
+
+pub struct Migrator;
+#[async_trait::async_trait]
+impl MigratorTrait for Migrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> { vec![Box::new(InitAuth)] }
+}
+
+// at startup — instead of auth::migrate(&db):
+Migrator::up(&db, None).await?;
+```
+
+`table_create_statements` reflects the auth entities' **current** shape, so it's ideal for the initial
+migration; when a later library version adds a column, add your own `ALTER TABLE` migration for it
+(the columns each release adds are noted here in §5a/§5b). Add `sea-orm-migration` to your app's
+`Cargo.toml` (match your `sea-orm` version).
+
 - **Password hashing:** **argon2id** (via the `argon2` crate) with sane params; verification is
   constant-time. (bcrypt is acceptable but argon2id is the current best default.)
 - **Login page:** a server-rendered `username` + `password` form component (askama fragment, like the

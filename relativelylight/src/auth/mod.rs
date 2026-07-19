@@ -47,9 +47,10 @@ use axum::Router;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use crate::authz::{Authz, Decision, Operation};
 use rand_core::{OsRng, RngCore};
+use sea_orm::sea_query::TableCreateStatement;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
-    IntoActiveModel, QueryFilter, Schema, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr,
+    EntityTrait, IntoActiveModel, QueryFilter, Schema, Set,
 };
 
 const DEFAULT_COOKIE: &str = "rl_session";
@@ -196,15 +197,40 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
 
 // ===================== Setup helpers =====================
 
-/// Create the auth tables — `rl_user`, `rl_session`, `rl_group`, `rl_user_group` (use on a fresh DB
-/// or with your own migrations). The app owns the database.
+/// The `CREATE TABLE` statements for the auth tables — `rl_user`, `rl_group`, `rl_user_group`,
+/// `rl_session` (in that order). Use these to fold the auth schema into your own **`sea-orm-migration`**
+/// migration so it's versioned alongside your app tables — the recommended approach for anything
+/// long-lived (see `docs/AUTH.md`):
+///
+/// ```ignore
+/// // inside a MigrationTrait::up(&self, manager: &SchemaManager)
+/// for stmt in relativelylight::auth::table_create_statements(manager.get_database_backend()) {
+///     manager.create_table(stmt).await?;
+/// }
+/// ```
+pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> {
+    let schema = Schema::new(backend);
+    vec![
+        schema.create_table_from_entity(user::Entity),
+        schema.create_table_from_entity(group::Entity),
+        schema.create_table_from_entity(user_group::Entity),
+        schema.create_table_from_entity(session::Entity),
+    ]
+}
+
+/// Create the auth tables **if they don't already exist** — a bootstrap convenience for a fresh DB or
+/// the examples. Safe to call on every start.
+///
+/// This is **not** a migration tool: it only ever *creates* missing tables, so it won't add columns
+/// or otherwise evolve an existing schema across library upgrades (e.g. the TOTP / SSO columns added
+/// to `rl_user`). For anything long-lived, drive the schema with **`sea-orm-migration`** and feed it
+/// [`table_create_statements`] instead of calling this. The app owns the database either way.
 pub async fn migrate(db: &DatabaseConnection) -> Result<(), DbErr> {
     let backend = db.get_database_backend();
-    let schema = Schema::new(backend);
-    db.execute(backend.build(&schema.create_table_from_entity(user::Entity))).await?;
-    db.execute(backend.build(&schema.create_table_from_entity(session::Entity))).await?;
-    db.execute(backend.build(&schema.create_table_from_entity(group::Entity))).await?;
-    db.execute(backend.build(&schema.create_table_from_entity(user_group::Entity))).await?;
+    for mut stmt in table_create_statements(backend) {
+        stmt.if_not_exists();
+        db.execute(backend.build(&stmt)).await?;
+    }
     Ok(())
 }
 
@@ -1195,5 +1221,21 @@ mod tests {
         assert!(password_pair_error("", "").is_some());
         assert!(password_pair_error("a", "b").is_some());
         assert!(password_pair_error("a", "a").is_none());
+    }
+
+    #[test]
+    fn migrate_is_idempotent_via_if_not_exists() {
+        // The bootstrap `migrate` builds these with IF NOT EXISTS, so re-running on an existing DB
+        // won't error ("table already exists"). Verified at the SQL level (no DB needed).
+        let stmts = table_create_statements(DbBackend::Sqlite);
+        assert_eq!(stmts.len(), 4, "user, group, user_group, session");
+        for mut stmt in stmts {
+            stmt.if_not_exists();
+            let sql = DbBackend::Sqlite.build(&stmt).sql.to_uppercase();
+            assert!(sql.contains("IF NOT EXISTS"), "missing IF NOT EXISTS: {sql}");
+        }
+        // Without if_not_exists (the raw statements), it's a plain CREATE TABLE — for migrations.
+        let raw = DbBackend::Sqlite.build(&table_create_statements(DbBackend::Sqlite)[0]).sql;
+        assert!(raw.contains("rl_user"));
     }
 }
