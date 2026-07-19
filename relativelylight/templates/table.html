@@ -1,6 +1,6 @@
 <div x-data="ruTable_{{ id }}()" x-init="load()">
   <div class="d-flex justify-content-between align-items-center {% if description.is_empty() %}mb-2{% else %}mb-1{% endif %}">
-    <h5 class="mb-0 text-capitalize">{{ title }}</h5>
+    <h5 class="mb-0">{{ title }}</h5>
     <div class="d-flex gap-2">
       {% if search %}
       <input type="search" class="form-control form-control-sm w-auto"
@@ -48,7 +48,7 @@
                  :checked="pageAllSelected()" @change="togglePage($event.target.checked)"></th>
           {% endif %}
           <template x-for="c in columns" :key="c.name">
-            <th class="text-capitalize" x-text="c.label || c.name"></th>
+            <th x-text="c.label || c.name"></th>
           </template>
           {% if editable %}<th class="text-end">Actions</th>{% endif %}
         </tr>
@@ -146,7 +146,7 @@
     <div class="card shadow-lg" style="max-width:720px; margin:3rem auto;">
       <div class="card-content">
         <div class="card-header d-flex justify-content-between align-items-center">
-          <h5 class="mb-0 text-capitalize">
+          <h5 class="mb-0">
             <span x-text="mode === 'create' ? 'New' : 'Edit'"></span> {{ title }}
           </h5>
           <button type="button" class="btn-close" @click="modalOpen = false"></button>
@@ -157,7 +157,7 @@
           </div>
           <template x-for="c in formCols()" :key="c.name">
             <div class="mb-3">
-              <label class="form-label text-capitalize" x-text="c.label || c.name"></label>
+              <label class="form-label" x-text="c.label || c.name"></label>
 
               <template x-if="c.kind === 'field' && c.type === 'Bool'">
                 <div class="form-check form-switch">
