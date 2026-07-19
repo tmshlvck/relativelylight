@@ -349,6 +349,13 @@ type LoginShell = Arc<dyn Fn(&str) -> String + Send + Sync>;
 /// Wraps the profile/password fragment into a full page. Also handed the resolved [`Identity`] so the
 /// app can render its chrome (e.g. the signed-in username in the navbar).
 type ProfileShell = Arc<dyn Fn(&str, &Identity) -> String + Send + Sync>;
+/// Renders an extra app-owned section appended below the password/2FA fragment on the *self* profile
+/// page (e.g. API-token management). Handed the caller's [`Identity`]; returns an HTML fragment.
+type ProfileExtra = Arc<
+    dyn Fn(Identity) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
+        + Send
+        + Sync,
+>;
 
 struct Inner {
     db: DatabaseConnection,
@@ -363,6 +370,8 @@ struct Inner {
     login_shell: LoginShell,
     /// Wraps the profile/password fragment into a full page (see [`Auth::profile_shell`]).
     profile_shell: ProfileShell,
+    /// Optional app-owned section rendered below password/2FA on the self profile page.
+    profile_extra: Option<ProfileExtra>,
     /// Groups whose members may reset *other* users' passwords. `None` → fall back to `[admin_group]`.
     profile_managers: Option<Vec<String>>,
     /// Issuer label shown in authenticator apps for TOTP enrolment (the `otpauth://` URL / QR).
@@ -379,6 +388,14 @@ impl Inner {
     /// Whether `who` may manage *someone else's* profile (i.e. is in a manager group).
     fn can_manage_others(&self, who: &Identity) -> bool {
         who.in_any_group(&self.manager_groups())
+    }
+
+    /// Append the app's profile-extra section (if configured) to a self-profile fragment.
+    async fn with_profile_extra(&self, frag: String, who: &Identity) -> String {
+        match &self.profile_extra {
+            Some(hook) => format!("{frag}{}", hook(who.clone()).await),
+            None => frag,
+        }
     }
 }
 
@@ -409,6 +426,7 @@ impl Auth {
                 ttl_secs: 7 * 24 * 3600,
                 login_shell: Arc::new(default_login_shell),
                 profile_shell: Arc::new(default_profile_shell),
+                profile_extra: None,
                 profile_managers: None,
                 totp_issuer: "relativelylight".into(),
             }),
@@ -431,6 +449,20 @@ impl Auth {
         shell: impl Fn(&str, &Identity) -> String + Send + Sync + 'static,
     ) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().profile_shell = Arc::new(shell);
+        self
+    }
+
+    /// Append an app-rendered section below the password/2FA fragment on the **self** profile page
+    /// (`GET /profile` and after a profile POST) — e.g. API-token management. The hook is handed the
+    /// caller's [`Identity`] (owned, so the returned future can be `'static`) and returns an HTML
+    /// fragment. The manager `/profile/{id}` pages do not include it.
+    pub fn profile_extra<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: Fn(Identity) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = String> + Send + 'static,
+    {
+        let h: ProfileExtra = Arc::new(move |who: Identity| Box::pin(hook(who)));
+        Arc::get_mut(&mut self.inner).unwrap().profile_extra = Some(h);
         self
     }
 
@@ -712,6 +744,7 @@ async fn profile_form(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Re
         Some(provider) => sso_profile_html(&who, provider),
         None => change_form_html(&who, user.totp_secret.is_some(), None, None),
     };
+    let frag = inner.with_profile_extra(frag, &who).await;
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
@@ -743,15 +776,18 @@ async fn profile_submit(
     };
     if let Some(msg) = error {
         let frag = change_form_html(&who, totp_on, Some(msg), None);
+        let frag = inner.with_profile_extra(frag, &who).await;
         return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
     }
 
     if set_password(&inner.db, &who.username, &form.new_password).await.is_err() {
         let frag = change_form_html(&who, totp_on, Some("Could not change the password."), None);
+        let frag = inner.with_profile_extra(frag, &who).await;
         return (StatusCode::INTERNAL_SERVER_ERROR, Html((inner.profile_shell)(&frag, &who)))
             .into_response();
     }
     let frag = change_form_html(&who, totp_on, None, Some("Your password has been changed."));
+    let frag = inner.with_profile_extra(frag, &who).await;
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
