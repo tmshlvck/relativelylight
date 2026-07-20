@@ -1,9 +1,14 @@
 [package]
 name = "relativelylight"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
-publish = false
+description = "Turn Rust ORM entities into a back-office stack — JSON CRUD + metadata API, an auto-generated web admin, and auth (sessions, argon2id, TOTP, OIDC SSO) — with no per-model code."
+repository = "https://github.com/tmshlvck/relativelylight"
+homepage = "https://github.com/tmshlvck/relativelylight"
+readme = "../README.md"
+keywords = ["crud", "admin", "seaorm", "axum", "auth"]
+categories = ["web-programming", "database", "authentication"]
 
 [dependencies]
 serde = { workspace = true }
