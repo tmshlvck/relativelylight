@@ -15,4 +15,14 @@ pub struct Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 
+// N:M: group <-> user via user_group (the inverse side of the membership relation).
+impl Related<super::user::Entity> for Entity {
+    fn to() -> RelationDef {
+        super::user_group::Relation::User.def()
+    }
+    fn via() -> Option<RelationDef> {
+        Some(super::user_group::Relation::Group.def().rev())
+    }
+}
+
 impl ActiveModelBehavior for ActiveModel {}
