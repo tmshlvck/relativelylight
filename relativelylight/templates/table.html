@@ -1,4 +1,4 @@
-<div x-data="ruTable_{{ id }}()" x-init="load()">
+<div x-data="ruTable_{{ id }}()" x-init="load()" x-cloak>
   <div class="d-flex justify-content-between align-items-center {% if description.is_empty() %}mb-2{% else %}mb-1{% endif %}">
     <h5 class="mb-0">{{ title }}</h5>
     <div class="d-flex gap-2">
@@ -101,6 +101,12 @@
             {% endif %}
           </tr>
         </template>
+        <tr x-show="loading">
+          <td :colspan="columns.length + {{ editable }} * 2" class="text-center text-muted py-4">
+            <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+            <span class="ms-2">Loading…</span>
+          </td>
+        </tr>
         <tr x-show="!loading && rows.length === 0">
           <td :colspan="columns.length + {{ editable }} * 2" class="text-center text-muted">No rows</td>
         </tr>
@@ -263,7 +269,9 @@
         perPage: {{ per_page }},
         confirmDelete: {{ confirm }},
         pickerThreshold: {{ picker_threshold }},
-        q: "", page: 1, total: 0, rows: [], loading: false, selected: [],
+        // `loading` starts true: `x-init` always calls load() immediately, so the table shows the
+        // spinner from first paint rather than a momentary empty "No rows".
+        q: "", page: 1, total: 0, rows: [], loading: true, selected: [],
         modalOpen: false, mode: "create", editId: null,
         form: {}, options: {}, fieldErrors: {}, rowErrors: [], saving: false,
         // search→select picker state, keyed by column name:
