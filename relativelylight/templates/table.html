@@ -1,7 +1,12 @@
-<div x-data="ruTable_{{ id }}()" x-init="load()" x-cloak>
+<div x-data="ruTable_{{ id }}()" x-init="load()" x-cloak
+     @ru-panel-show.window="if ($event.detail === mySlug()) load()">
   <div class="d-flex justify-content-between align-items-center {% if description.is_empty() %}mb-2{% else %}mb-1{% endif %}">
     <h5 class="mb-0">{{ title }}</h5>
     <div class="d-flex gap-2">
+      <!-- Refresh: re-fetch the current page (the table loads once, so external changes — DDNS/API
+           writes, the other side of an N:M — need a reload to appear). -->
+      <button class="btn btn-outline-secondary btn-sm" type="button" @click="load()"
+              :disabled="loading" title="Refresh" aria-label="Refresh">&#8635;</button>
       {% if search %}
       <input type="search" class="form-control form-control-sm w-auto"
              placeholder="Search…" x-model="q" @input.debounce.300ms="onSearch()">
@@ -290,6 +295,10 @@
           this.page = d.page || 1;
           this.loading = false;
         },
+        // This entity's slug (last path segment of the data URL) — used to match panel-show events
+        // from the Admin side-panel so the table reloads when re-shown (its data may be stale after a
+        // change elsewhere, e.g. the other side of an N:M relation).
+        mySlug() { return this.dataUrl.split("/").filter(Boolean).pop(); },
 
         // ---- row selection + bulk delete ----
         toggleRow(id) {
@@ -455,7 +464,14 @@
           this.resetPicker();
           await this.fetchOptions();
           await this.$nextTick();          // …before setting form values, so x-model can
-          this.form = this.fromRow(item.row); // select options that now exist in the DOM.
+          // Re-fetch the row so relations edited elsewhere (e.g. the other side of an N:M) aren't
+          // seeded from a stale cached list row. Fall back to the cached row on any error.
+          let row = item.row;
+          try {
+            const res = await fetch(this.dataUrl + "/" + item.id);
+            if (res.ok) row = await res.json();
+          } catch (e) { /* keep cached row */ }
+          this.form = this.fromRow(row); // select options that now exist in the DOM.
           this.modalOpen = true;
         },
         payload() {

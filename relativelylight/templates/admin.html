@@ -10,7 +10,7 @@
         <li class="nav-item">
           <a class="nav-link py-1" href="#"
              :class="{ active: active === '{{ e.slug }}' }"
-             @click.prevent="active = '{{ e.slug }}'">{{ e.label }}</a>
+             @click.prevent="active = '{{ e.slug }}'; $dispatch('ru-panel-show', '{{ e.slug }}')">{{ e.label }}</a>
         </li>
         {% else if e.kind == "group" %}
         <li class="nav-item">
