@@ -129,7 +129,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     auth_user_mm.field("totp_pending").hidden = true;
     // New accounts are active by default (so a freshly created user with a password can log in).
     auth_user_mm.field("is_active").default = Some(serde_json::json!(true));
-    let auth_group_mm = MetaModel::new(auth::group::Entity);
+    // Lifecycle timestamps are maintained by the library (hooks / login flow) — show, don't edit.
+    for f in ["created_at", "updated_at", "last_login_at"] {
+        auth_user_mm.field(f).read_only = true;
+    }
+    let mut auth_group_mm = MetaModel::new(auth::group::Entity);
+    for f in ["created_at", "updated_at"] {
+        auth_group_mm.field(f).read_only = true;
+    }
 
     // Per-field presentation + validation (drives the labels / help / defaults / errors in the form).
     post_mm.field("title").label = Some("Title".into());

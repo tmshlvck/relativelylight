@@ -88,8 +88,30 @@ layers, per-user UI control-hiding, **TOTP 2FA**, **PassKeys**, **OIDC**. Design
 Upload multiple documents (PDF, MS Office / LibreOffice, images), display and download them, and
 capture a photo from the device camera and upload it. Not specified yet.
 
+## 4a. `observe` — the write-observer / audit hook ✅
+
+An always-compiled seam ([`observe`](src/observe.rs)) for **audit logging**. An audit record needs
+both *what changed* (old/new row data, seen at the data layer) and *who/how* (actor, auth type, client
+IP, seen only at the HTTP layer); no single layer has both. So the library fires a
+[`WriteEvent`](observe::WriteEvent) — carrying the change **and** the request context (`headers` +
+socket `peer`) — from the points that do: each `crud` write handler and each mutating `auth` handler.
+The **app registers one [`WriteObserver`](observe::WriteObserver)** (`Crud::on_write` /
+`Auth::on_write`, one `Arc` shared by both), resolves the actor itself (`auth.identify`), derives the
+IP, and **persists the audit row in its own table** — the library ships the hook, not an audit schema.
+**Retention/pruning is the app's responsibility.** See [docs/CRUD.md](docs/CRUD.md#write-observer-audit)
+and [docs/AUTH.md](docs/AUTH.md).
+
+Auth entities also carry **UTC lifecycle timestamps** — `created_at`/`updated_at` (maintained by a
+SeaORM `before_save` hook) on `auth_user`/`auth_group`, plus `last_login_at` on `auth_user` (stamped by
+the login/TOTP/SSO flows).
+
 ## 5. Open questions
 
 - **Presentation config** (widgets, formatting beyond label/help/default) lives downstream of the
   metadata, on the frontend components — not in the wire contract.
 - **auth** and **files** get their own specs once the metadata contract has settled in use.
+- **Timezones (TODO).** The DB and the JSON API standardize on **UTC** (`i64` Unix seconds is the
+  convention for timestamps). Presentation is a **frontend** concern: the Alpine.js admin should render
+  timestamps in the viewer's **browser-local** (or a user-selected) timezone rather than raw UTC. Not
+  yet implemented — the `crud::ui` table currently shows stored values verbatim. When added, keep the
+  wire contract UTC and convert only at render time.

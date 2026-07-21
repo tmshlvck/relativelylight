@@ -391,6 +391,7 @@ async fn callback(
     };
     let desired = sso.resolve_groups(p, username, &claim_values);
     reconcile_groups(db, &user.username, user.id, &desired).await;
+    super::stamp_last_login(db, user.id).await;
 
     // SSO accounts have no local 2FA, so this is a full session immediately.
     let Some(token) = super::create_session(&sso.auth.inner, user.id, false).await else {

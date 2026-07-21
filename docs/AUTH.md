@@ -292,6 +292,44 @@ let app = app.merge(sso.routes());
 > reconciliation logic is unit-tested. The **callback** (code exchange + ID-token verification) can't
 > be exercised here without real provider credentials + user consent — test it against your own IdP.
 
+## 5c. Lifecycle timestamps — implemented
+
+The auth entities carry UTC timestamps (`i64` Unix seconds), maintained automatically:
+
+- `auth_user`: `created_at`, `updated_at`, `last_login_at` (nullable).
+- `auth_group`: `created_at`, `updated_at`.
+
+`created_at`/`updated_at` are stamped by a SeaORM `ActiveModelBehavior::before_save` hook (created on
+insert, updated on every save) — so they're correct no matter who writes (admin CRUD, the profile page,
+`create_user`/`set_password`, …). `last_login_at` is **not** a hook; the login flows stamp it with a
+set-based update (so it doesn't bump `updated_at`) on completion: `login_submit` (no-2FA), the TOTP
+confirm (`login/totp`), and the SSO callback. Mark these fields `read_only` on the `MetaModel` so the
+admin shows but doesn't edit them (see `examples/adminpanel`). All times are UTC; rendering them in the
+viewer's timezone is a frontend concern (see the timezone TODO in [PRD.md](../PRD.md)).
+
+## 5d. Write observer — audit hook (implemented)
+
+`auth` fires the shared [`WriteObserver`](../src/observe.rs) (see [CRUD.md](CRUD.md#write-observer-audit))
+from its **mutating handlers**, so auth-table changes made *outside* the crud engine are still audited:
+
+- `POST /profile` — password change (`source = "auth-profile"`).
+- `POST /profile/{id}` — a manager reset (`source = "auth-admin"`).
+
+Each event carries the request `headers` + socket `peer` (so the app resolves the actor and client IP)
+and an `after` payload describing *what* changed — **never a secret**: password hashes and TOTP secrets
+are redacted (e.g. `{"password_changed": true}`). Register the sink with `Auth::on_write(observer)`;
+share one `Arc` with `Crud::on_write` so a single audit sink covers both surfaces:
+
+```rust
+let audit = Arc::new(MyAuditSink::new(db.clone()));
+let auth = Auth::new(db.clone()).on_write(audit.clone()) /* …other builders… */;
+let mut crud = Crud::new(db, "/admin/api");
+crud.on_write(audit.clone());
+```
+
+The app owns the audit table + retention; the library only emits the events. (Auditing login events and
+TOTP enable/disable can be layered on the same hook later; `last_login_at` already records logins.)
+
 ## 6. authz — the gate
 
 The gate trait lives in **`relativelylight::authz`** — always compiled, independent of the `auth`

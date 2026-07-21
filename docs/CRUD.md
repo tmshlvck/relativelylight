@@ -468,6 +468,38 @@ relativelylight contributes into them:
 The example (`examples/crud`) does all three: it owns `/`, `/ui/{slug}`, `/openapi.json`, `/docs`
 and its Bootstrap/Alpine shell, and merges the crud router and OpenAPI into them.
 
+## Write observer (audit)
+
+Register a [`WriteObserver`](../src/observe.rs) with `Crud::on_write` to be notified after every
+**committed** write (create / update / delete / bulk-delete) through the engine — the hook for audit
+logging. Each write handler fires a `WriteEvent` carrying the change *and* the request context:
+
+```rust
+pub struct WriteEvent<'a> {
+    pub source: &'static str,   // "crud" here
+    pub op: Operation,          // Create | Update | Delete
+    pub entity: &'a str,        // slug, e.g. "post"
+    pub key: Option<String>,    // pk (None for a bulk delete)
+    pub before: Option<Value>,  // prior row (update/delete); None on create
+    pub after: Option<Value>,   // new row (create/update); None on delete
+    pub headers: &'a HeaderMap, // resolve the actor (auth.identify) + read X-Forwarded-For
+    pub peer: Option<SocketAddr>, // socket peer (real client IP on a direct connection)
+}
+
+let mut crud = Crud::new(db, "/api/v1");
+crud.register(post_mm, gate);
+crud.on_write(my_audit_sink.clone());   // Arc<dyn WriteObserver>
+```
+
+Notes: the observer runs **after commit** (a failed write fires nothing); `before` on update is a
+best-effort pre-fetch; a **bulk delete** reports the affected count in `after` (`{"deleted": N}`), not
+every row, so a "delete all" can't blow up the audit. The library provides only the hook and the
+`WriteEvent` type — the app owns the audit **table**, resolves the actor from `headers` (e.g.
+`auth.identify`), derives the IP from `headers`/`peer`, writes the row, and handles retention. The same
+`Arc` can also be handed to `Auth::on_write` (see [AUTH.md](AUTH.md)) so one sink captures both the
+auto-CRUD and the auth surfaces. **Times are UTC** (`i64` Unix seconds) — see the timezone note in
+[PRD.md](../PRD.md).
+
 ## Architecture & extending
 
 The transport-agnostic **`Engine`** is a registry that owns URLs/metadata, does the JSON↔CSV

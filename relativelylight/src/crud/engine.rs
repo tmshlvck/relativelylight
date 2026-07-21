@@ -266,6 +266,8 @@ pub struct Engine {
     accessors: BTreeMap<String, Arc<dyn Accessor>>,
     /// The authorization gate for each model, keyed by slug (set at registration; `Open` = ungated).
     authz: BTreeMap<String, Arc<dyn crate::authz::Authz>>,
+    /// Optional audit sink; fired after each committed write (see [`crate::observe`]).
+    observer: Option<Arc<dyn crate::observe::WriteObserver>>,
 }
 
 impl Engine {
@@ -281,7 +283,14 @@ impl Engine {
             base_path,
             accessors: BTreeMap::new(),
             authz: BTreeMap::new(),
+            observer: None,
         }
+    }
+
+    /// Register an audit sink fired after each committed write (create/update/delete). See
+    /// [`crate::observe`]. Usually set via `Crud::on_write`.
+    pub fn set_observer(&mut self, observer: Arc<dyn crate::observe::WriteObserver>) {
+        self.observer = Some(observer);
     }
 
     /// The gate governing `slug` (or `None` for an unregistered slug).
@@ -480,8 +489,23 @@ mod tests {
 #[cfg(feature = "axum")]
 mod http {
     use super::{Engine, Error, ListQuery};
-    use axum::extract::{Path, Query, State};
+    use axum::extract::{ConnectInfo, FromRequestParts, Path, Query, State};
+    use axum::http::request::Parts;
     use axum::http::HeaderMap;
+    use std::net::SocketAddr;
+
+    /// Infallible extractor for the socket peer address: `Some` when the server was started with
+    /// connection info (`into_make_service_with_connect_info`), else `None`. Unlike
+    /// `Option<ConnectInfo<_>>` (not an axum 0.8 extractor), this never rejects, so it's safe on apps
+    /// that don't use connect-info.
+    struct MaybePeer(Option<SocketAddr>);
+
+    impl<S: Send + Sync> FromRequestParts<S> for MaybePeer {
+        type Rejection = std::convert::Infallible;
+        async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+            Ok(MaybePeer(parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0)))
+        }
+    }
     use axum::http::StatusCode;
     use axum::response::{IntoResponse, Response};
     use axum::routing::get;
@@ -620,41 +644,85 @@ mod http {
     async fn create(
         State(e): St,
         headers: HeaderMap,
+        MaybePeer(peer): MaybePeer,
         Path(entity): Path<String>,
         Json(body): Json<Value>,
     ) -> std::result::Result<(StatusCode, Json<Value>), Error> {
         authorize(&e, Operation::Create, &entity, &headers).await?;
-        Ok((StatusCode::CREATED, Json(e.create(&entity, &body).await?)))
+        let created = e.create(&entity, &body).await?;
+        notify(&e, Operation::Create, &entity, None, None, Some(&created), &headers, peer).await;
+        Ok((StatusCode::CREATED, Json(created)))
     }
 
     async fn update(
         State(e): St,
         headers: HeaderMap,
+        MaybePeer(peer): MaybePeer,
         Path((entity, pk)): Path<(String, String)>,
         Json(body): Json<Value>,
     ) -> std::result::Result<Json<Value>, Error> {
         authorize(&e, Operation::Update, &entity, &headers).await?;
-        Ok(Json(e.update(&entity, &pk, &body).await?))
+        // Snapshot the prior state for the audit event (best-effort).
+        let before = e.get(&entity, &pk).await.ok();
+        let updated = e.update(&entity, &pk, &body).await?;
+        notify(&e, Operation::Update, &entity, Some(&pk), before.as_ref(), Some(&updated), &headers, peer).await;
+        Ok(Json(updated))
     }
 
     async fn delete_one(
         State(e): St,
         headers: HeaderMap,
+        MaybePeer(peer): MaybePeer,
         Path((entity, pk)): Path<(String, String)>,
     ) -> std::result::Result<Json<Value>, Error> {
         authorize(&e, Operation::Delete, &entity, &headers).await?;
-        Ok(Json(e.delete(&entity, &pk).await?))
+        // `delete` returns the deleted row — that is the "before" state.
+        let deleted = e.delete(&entity, &pk).await?;
+        notify(&e, Operation::Delete, &entity, Some(&pk), Some(&deleted), None, &headers, peer).await;
+        Ok(Json(deleted))
     }
 
     /// `DELETE /{entity}?<filters>` — bulk delete. `?all=true` permits wiping the whole table.
     async fn delete_many(
         State(e): St,
         headers: HeaderMap,
+        MaybePeer(peer): MaybePeer,
         Path(entity): Path<String>,
         Query(params): Query<HashMap<String, String>>,
     ) -> std::result::Result<Json<Value>, Error> {
         authorize(&e, Operation::Delete, &entity, &headers).await?;
-        Ok(Json(e.delete_where(&entity, &parse_list_query(params)).await?))
+        let res = e.delete_where(&entity, &parse_list_query(params)).await?;
+        // Bulk delete: record the affected count, not every row.
+        notify(&e, Operation::Delete, &entity, None, Some(&res), None, &headers, peer).await;
+        Ok(Json(res))
+    }
+
+    /// Fire the audit observer (if one is registered) for a committed write.
+    #[allow(clippy::too_many_arguments)]
+    async fn notify(
+        e: &Engine,
+        op: Operation,
+        entity: &str,
+        key: Option<&str>,
+        before: Option<&Value>,
+        after: Option<&Value>,
+        headers: &HeaderMap,
+        peer: Option<SocketAddr>,
+    ) {
+        let Some(observer) = e.observer.as_ref() else {
+            return;
+        };
+        let ev = crate::observe::WriteEvent {
+            source: "crud",
+            op,
+            entity,
+            key: key.map(str::to_string),
+            before: before.cloned(),
+            after: after.cloned(),
+            headers,
+            peer,
+        };
+        observer.on_write(&ev).await;
     }
 
     /// `POST /{entity}/_import` — body is CSV text; returns an `ImportReport` as JSON.

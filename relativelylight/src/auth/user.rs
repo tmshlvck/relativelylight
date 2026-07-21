@@ -23,6 +23,11 @@ pub struct Model {
     pub totp_secret: Option<String>,
     pub totp_pending: Option<String>,
     pub sso_provider: Option<String>,
+    /// Row lifecycle timestamps — Unix seconds, **UTC**. `created_at`/`updated_at` are maintained by
+    /// the `before_save` hook; `last_login_at` is stamped by the login flow (`None` until first login).
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_login_at: Option<i64>,
 }
 
 impl Model {
@@ -45,4 +50,18 @@ impl Related<super::group::Entity> for Entity {
     }
 }
 
-impl ActiveModelBehavior for ActiveModel {}
+// Maintain the UTC lifecycle timestamps: stamp created_at on insert, updated_at on every save.
+#[async_trait::async_trait]
+impl ActiveModelBehavior for ActiveModel {
+    async fn before_save<C>(mut self, _db: &C, insert: bool) -> Result<Self, DbErr>
+    where
+        C: ConnectionTrait,
+    {
+        let now = super::now_secs();
+        if insert {
+            self.created_at = sea_orm::ActiveValue::Set(now);
+        }
+        self.updated_at = sea_orm::ActiveValue::Set(now);
+        Ok(self)
+    }
+}

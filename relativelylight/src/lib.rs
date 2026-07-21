@@ -24,6 +24,11 @@
 /// in [`auth`].
 pub mod authz;
 
+/// The write-observer hook for audit logging: [`WriteEvent`](observe::WriteEvent) +
+/// [`WriteObserver`](observe::WriteObserver), fired by `crud` and `auth` write paths with the request
+/// context so the app can record who/what/from-where. Always compiled.
+pub mod observe;
+
 #[cfg(feature = "crud")]
 pub mod crud;
 

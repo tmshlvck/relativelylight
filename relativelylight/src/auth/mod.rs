@@ -365,6 +365,8 @@ struct Inner {
     profile_path: String,
     secure_cookies: bool,
     ttl_secs: i64,
+    /// Optional audit sink; fired from the mutating auth handlers (password change, manager reset).
+    observer: Option<Arc<dyn crate::observe::WriteObserver>>,
     /// Wraps the login-form fragment into a full page. Default: a minimal unstyled document; set
     /// [`Auth::login_shell`] to embed it in your Bootstrap (or other) shell so the app styles it.
     login_shell: LoginShell,
@@ -397,6 +399,60 @@ impl Inner {
             None => frag,
         }
     }
+
+    /// Fire the audit observer for a mutating auth action (no-op if none registered). `after` should
+    /// describe *what* changed without secrets (never a password hash / TOTP secret).
+    async fn notify(
+        &self,
+        source: &'static str,
+        entity: &str,
+        key: Option<String>,
+        after: serde_json::Value,
+        headers: &HeaderMap,
+        peer: Option<std::net::SocketAddr>,
+    ) {
+        let Some(observer) = &self.observer else { return };
+        let ev = crate::observe::WriteEvent {
+            source,
+            op: crate::authz::Operation::Update,
+            entity,
+            key,
+            before: None,
+            after: Some(after),
+            headers,
+            peer,
+        };
+        observer.on_write(&ev).await;
+    }
+}
+
+/// Stamp a user's `last_login_at` (UTC Unix seconds). Uses a set-based update so it doesn't bump
+/// `updated_at` (a login isn't a content change) or re-run the row hook.
+async fn stamp_last_login(db: &DatabaseConnection, user_id: i32) {
+    let _ = user::Entity::update_many()
+        .col_expr(user::Column::LastLoginAt, sea_orm::sea_query::Expr::value(now_secs()))
+        .filter(user::Column::Id.eq(user_id))
+        .exec(db)
+        .await;
+}
+
+/// Infallible extractor for the socket peer (real client IP on a direct connection); `None` when the
+/// server wasn't started with connection info. See the crud engine's equivalent.
+struct MaybePeer(Option<std::net::SocketAddr>);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for MaybePeer {
+    type Rejection = std::convert::Infallible;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(MaybePeer(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|c| c.0),
+        ))
+    }
 }
 
 /// Wires authn into an app: login/logout routes ([`routes`](Auth::routes)) and on-demand session
@@ -424,6 +480,7 @@ impl Auth {
                 profile_path: "/profile".into(),
                 secure_cookies: true,
                 ttl_secs: 7 * 24 * 3600,
+                observer: None,
                 login_shell: Arc::new(default_login_shell),
                 profile_shell: Arc::new(default_profile_shell),
                 profile_extra: None,
@@ -463,6 +520,13 @@ impl Auth {
     {
         let h: ProfileExtra = Arc::new(move |who: Identity| Box::pin(hook(who)));
         Arc::get_mut(&mut self.inner).unwrap().profile_extra = Some(h);
+        self
+    }
+
+    /// Register an audit sink fired from the mutating auth handlers (password change, manager reset)
+    /// — see [`crate::observe`]. Share one `Arc` with `Crud::on_write` to capture both surfaces.
+    pub fn on_write(mut self, observer: Arc<dyn crate::observe::WriteObserver>) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().observer = Some(observer);
         self
     }
 
@@ -643,7 +707,13 @@ async fn login_submit(
     // The session cookie is set either way; while `awaiting_totp` it grants nothing until the second
     // factor is confirmed at /login/totp.
     let jar = jar.add(session_cookie(&inner, token));
-    let dest = if needs_totp { "/login/totp" } else { "/" };
+    let dest = if needs_totp {
+        "/login/totp"
+    } else {
+        // Login is complete (no 2FA) — stamp last_login now (the TOTP path stamps on confirm).
+        stamp_last_login(&inner.db, user.id).await;
+        "/"
+    };
     (jar, Redirect::to(dest)).into_response()
 }
 
@@ -682,6 +752,7 @@ async fn login_totp_submit(
     let mut am: session::ActiveModel = session.into();
     am.awaiting_totp = Set(false);
     let _ = am.update(&inner.db).await;
+    stamp_last_login(&inner.db, user.id).await; // second factor confirmed → login complete
     Redirect::to("/").into_response()
 }
 
@@ -752,6 +823,7 @@ async fn profile_form(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Re
 async fn profile_submit(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
+    MaybePeer(peer): MaybePeer,
     Form(form): Form<ChangeForm>,
 ) -> Response {
     let Some(who) = identity_of(&inner, &headers).await else {
@@ -786,6 +858,16 @@ async fn profile_submit(
         return (StatusCode::INTERNAL_SERVER_ERROR, Html((inner.profile_shell)(&frag, &who)))
             .into_response();
     }
+    inner
+        .notify(
+            "auth-profile",
+            "auth_user",
+            Some(who.id.clone()),
+            serde_json::json!({ "password_changed": true }),
+            &headers,
+            peer,
+        )
+        .await;
     let frag = change_form_html(&who, totp_on, None, Some("Your password has been changed."));
     let frag = inner.with_profile_extra(frag, &who).await;
     Html((inner.profile_shell)(&frag, &who)).into_response()
@@ -818,6 +900,7 @@ async fn manage_form(
 async fn manage_submit(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
+    MaybePeer(peer): MaybePeer,
     Path(id): Path<String>,
     Form(form): Form<ResetForm>,
 ) -> Response {
@@ -845,6 +928,16 @@ async fn manage_submit(
         return (StatusCode::INTERNAL_SERVER_ERROR, Html((inner.profile_shell)(&frag, &who)))
             .into_response();
     }
+    inner
+        .notify(
+            "auth-admin",
+            "auth_user",
+            Some(id.clone()),
+            serde_json::json!({ "password_reset_by_manager": true, "by": who.username }),
+            &headers,
+            peer,
+        )
+        .await;
     let msg = format!("Password reset for {}.", target.username);
     let frag = reset_form_html(&id, &target.username, totp_on, None, Some(&msg));
     Html((inner.profile_shell)(&frag, &who)).into_response()

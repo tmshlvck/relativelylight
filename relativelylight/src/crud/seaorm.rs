@@ -1034,6 +1034,14 @@ impl Crud {
         self
     }
 
+    /// Register an audit sink fired after each committed write (create/update/delete/bulk-delete)
+    /// through this engine — see [`crate::observe`]. Share one `Arc` with `Auth::on_write` to capture
+    /// both the auto-CRUD and auth surfaces in one place.
+    pub fn on_write(&mut self, observer: Arc<dyn crate::observe::WriteObserver>) -> &mut Self {
+        self.engine.set_observer(observer);
+        self
+    }
+
     /// The underlying backend-agnostic engine (for direct use or a custom transport).
     pub fn engine(&self) -> &Engine {
         &self.engine

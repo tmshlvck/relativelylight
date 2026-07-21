@@ -10,6 +10,9 @@ pub struct Model {
     pub id: i32,
     #[sea_orm(unique)]
     pub name: String,
+    /// Row lifecycle timestamps — Unix seconds, **UTC**, maintained by the `before_save` hook.
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -25,4 +28,18 @@ impl Related<super::user::Entity> for Entity {
     }
 }
 
-impl ActiveModelBehavior for ActiveModel {}
+// Maintain the UTC lifecycle timestamps: created_at on insert, updated_at on every save.
+#[async_trait::async_trait]
+impl ActiveModelBehavior for ActiveModel {
+    async fn before_save<C>(mut self, _db: &C, insert: bool) -> Result<Self, DbErr>
+    where
+        C: ConnectionTrait,
+    {
+        let now = super::now_secs();
+        if insert {
+            self.created_at = sea_orm::ActiveValue::Set(now);
+        }
+        self.updated_at = sea_orm::ActiveValue::Set(now);
+        Ok(self)
+    }
+}
