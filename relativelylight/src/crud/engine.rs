@@ -89,6 +89,17 @@ pub enum LogicalType {
     Other,
 }
 
+/// Optional presentation hint overriding how the UI renders a field (the default is derived from the
+/// [`LogicalType`]). The stored value, validation, and OpenAPI schema are unaffected — only the admin
+/// table cell and form input change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldDisplay {
+    /// An integer column holding **Unix seconds (UTC)**: the cell shows a readable UTC datetime and
+    /// the form offers a datetime picker (edited in UTC), storing back the integer seconds.
+    DateTime,
+}
+
 impl LogicalType {
     pub fn is_text(self) -> bool {
         matches!(self, LogicalType::Text)
@@ -114,6 +125,8 @@ pub enum ColumnMeta {
         label: Option<String>,
         description: Option<String>,
         default: Option<Value>,
+        /// Presentation override (e.g. render an int-seconds column as a datetime).
+        display: Option<FieldDisplay>,
     },
     Relation {
         name: String,
@@ -374,6 +387,7 @@ impl Engine {
                 label,
                 description,
                 default,
+                display,
             } => {
                 let mut o = json!({
                     "kind": "field", "name": name, "type": logical_type,
@@ -387,6 +401,9 @@ impl Engine {
                 }
                 if let Some(dv) = default {
                     o["default"] = dv;
+                }
+                if let Some(disp) = display {
+                    o["display"] = json!(disp);
                 }
                 o
             }

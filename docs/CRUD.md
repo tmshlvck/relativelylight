@@ -123,6 +123,7 @@ pub struct MetaField {
     pub label: Option<String>,
     pub description: Option<String>,
     pub default: Option<Value>,        // create-form default (edit uses the row)
+    pub display: Option<FieldDisplay>, // presentation override, e.g. DateTime (see .datetime())
     // hooks (optional; all None):
     pub validate:  Option<Box<dyn Fn(&Value) -> Result<(), String> + ...>>,
     pub on_write:  Option<Box<dyn Fn(Value) -> Value + ...>>,   // inbound  (e.g. hash)
@@ -147,6 +148,21 @@ In the admin form it renders as a **masked input**; a blank value on *edit* keep
 (so editing other fields doesn't wipe the password). A blank on *create* stores an **empty hash**,
 which [`auth::verify_password`] can never match — so that account simply has no password login (e.g. an
 SSO / PassKey user).
+
+**Datetime helper.** An integer column holding **Unix seconds (UTC)** is stored/validated as an
+`Int`, so by default the UI renders it as a plain number. `MetaField::datetime()` flags it as a
+datetime *for presentation only*: the table cell shows a readable UTC timestamp
+(`YYYY-MM-DD HH:MM:SS UTC`) and the create/edit form uses a `datetime-local` picker (edited in UTC,
+stored back as integer seconds). Storage, validation, and the OpenAPI schema are unchanged.
+
+```rust
+zone.field("created_at").datetime();   // read-only stamp → formatted cell (no input)
+key.field("expires_at").datetime();    // editable timestamp → datetime picker (blank = null)
+```
+
+For a read-only column this affects only the cell (read-only fields have no form input). See the
+[timezone TODO](../PRD.md) — rendering is UTC for now; browser-local / user-preferred timezones are
+a future refinement.
 
 ### `MetaRelation`
 

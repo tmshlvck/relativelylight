@@ -176,7 +176,15 @@
                   <span class="form-check-label small text-muted" x-text="form[c.name] ? 'Yes' : 'No'"></span>
                 </div>
               </template>
-              <template x-if="c.kind === 'field' && (c.type === 'Int' || c.type === 'Float')">
+              <!-- Datetime: an int-seconds column flagged display=datetime → picker edited in UTC. -->
+              <template x-if="c.kind === 'field' && c.display === 'datetime'">
+                <div>
+                  <input type="datetime-local" step="1" class="form-control"
+                         :class="{'is-invalid': fieldErrors[c.name]}" x-model="form[c.name]">
+                  <div class="form-text">Times are UTC.</div>
+                </div>
+              </template>
+              <template x-if="c.kind === 'field' && (c.type === 'Int' || c.type === 'Float') && c.display !== 'datetime'">
                 <input type="number" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
                        :step="c.type === 'Float' ? 'any' : '1'" x-model.number="form[c.name]">
               </template>
@@ -353,7 +361,31 @@
         cellRaw(item, c) { return item.row ? item.row[c.name] : undefined; },
         cellVal(item, c) {
           const v = this.cellRaw(item, c);
+          if (this.isDateTime(c)) return this.fmtDateTime(v);
           return (v === null || v === undefined) ? "" : v;
+        },
+        // --- datetime helpers: a `display: "datetime"` field is an int (Unix seconds, UTC). The
+        // cell shows a readable UTC string; the form uses a datetime-local picker edited in UTC. ---
+        isDateTime(c) { return c.display === "datetime"; },
+        _pad(n) { return String(n).padStart(2, "0"); },
+        fmtDateTime(sec) {                 // Unix seconds → "YYYY-MM-DD HH:MM:SS UTC" (blank if 0/unset)
+          if (sec === null || sec === undefined || sec === "" || Number(sec) === 0) return "";
+          const d = new Date(Number(sec) * 1000);
+          if (isNaN(d.getTime())) return String(sec);
+          return d.getUTCFullYear() + "-" + this._pad(d.getUTCMonth() + 1) + "-" + this._pad(d.getUTCDate())
+            + " " + this._pad(d.getUTCHours()) + ":" + this._pad(d.getUTCMinutes()) + ":" + this._pad(d.getUTCSeconds()) + " UTC";
+        },
+        dtToInput(sec) {                   // Unix seconds → datetime-local value (UTC), for the form
+          if (sec === null || sec === undefined || sec === "" || Number(sec) === 0) return "";
+          const d = new Date(Number(sec) * 1000);
+          if (isNaN(d.getTime())) return "";
+          return d.getUTCFullYear() + "-" + this._pad(d.getUTCMonth() + 1) + "-" + this._pad(d.getUTCDate())
+            + "T" + this._pad(d.getUTCHours()) + ":" + this._pad(d.getUTCMinutes()) + ":" + this._pad(d.getUTCSeconds());
+        },
+        dtFromInput(str) {                 // datetime-local value (interpreted as UTC) → Unix seconds
+          if (!str) return null;
+          const ms = Date.parse(str + "Z");
+          return Number.isNaN(ms) ? null : Math.floor(ms / 1000);
         },
         links(item, c) {
           const v = this.cellRaw(item, c);
@@ -442,6 +474,8 @@
                 f[c.name] = v ? String(v.id) : "";
                 if (v) this.pLabels[c.name][String(v.id)] = v.label;
               }
+            } else if (this.isDateTime(c)) {
+              f[c.name] = this.dtToInput(v);
             } else {
               f[c.name] = (v === null || v === undefined) ? "" : v;
             }
@@ -481,6 +515,9 @@
             if (c.kind === "relation") {
               if (c.cardinality === "ToMany") p[c.name] = (v || []).map(x => this.toNum(x));
               else p[c.name] = (v === "" || v == null) ? null : this.toNum(v);
+            } else if (this.isDateTime(c)) {
+              // Datetime picker → Unix seconds; empty means "clear" (null) for nullable columns.
+              p[c.name] = this.dtFromInput(v);
             } else {
               // Empty numbers are omitted (server default / unchanged); text is sent as-is
               // (including "") so field validators can run.

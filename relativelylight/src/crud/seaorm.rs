@@ -3,7 +3,7 @@
 
 use crate::crud::engine::{
     coerce, default_label, slugify, value_key, Accessor, Cardinality, ColumnMeta, Engine, Error,
-    ListQuery, LogicalType, Page, Result, RowItem, ValidationErrors,
+    FieldDisplay, ListQuery, LogicalType, Page, Result, RowItem, ValidationErrors,
 };
 use async_trait::async_trait;
 use sea_orm::sea_query::{Alias, DynIden, Expr, Query, TableRef};
@@ -55,6 +55,7 @@ pub struct MetaField {
     pub label: Option<String>,       // display label (defaults to the field name in the UI)
     pub description: Option<String>, // help text shown under the field in forms
     pub default: Option<Value>,      // create-form default value (edit uses the row)
+    pub display: Option<FieldDisplay>, // presentation override (e.g. int-seconds → datetime)
     // Optional user hooks:
     pub validate: Option<Validator>,
     pub on_write: Option<WriteTransform>,
@@ -89,6 +90,22 @@ impl MetaField {
                 Value::String(crate::auth::hash_password(plain))
             }
         }));
+        self
+    }
+
+    /// Render this integer column — which must hold **Unix seconds (UTC)** — as a datetime in the
+    /// admin UI: the table cell shows a readable UTC timestamp and the create/edit form uses a
+    /// datetime picker (edited in UTC), storing back the integer seconds. Storage, validation, and
+    /// the OpenAPI schema are unchanged (still an integer). For a read-only column (e.g. an
+    /// auto-stamped `created_at`) this affects only the cell, since read-only fields have no input.
+    ///
+    /// ```ignore
+    /// let mut zone = MetaModel::new(zone::Entity);
+    /// zone.field("created_at").datetime();
+    /// zone.field("expires_at").datetime(); // an editable timestamp → datetime picker
+    /// ```
+    pub fn datetime(&mut self) -> &mut Self {
+        self.display = Some(FieldDisplay::DateTime);
         self
     }
 }
@@ -391,6 +408,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                     label: None,
                     description: None,
                     default: None,
+                    display: None,
                     validate: None,
                     on_write: None,
                     on_read: None,
@@ -502,6 +520,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                     label: f.label.clone(),
                     description: f.description.clone(),
                     default: f.default.clone(),
+                    display: f.display,
                 });
             }
         }
@@ -1073,6 +1092,7 @@ mod tests {
             label: None,
             description: None,
             default: None,
+            display: None,
             validate: None,
             on_write: None,
             on_read: None,
