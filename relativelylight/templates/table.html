@@ -181,7 +181,8 @@
                 <div>
                   <input type="datetime-local" step="1" class="form-control"
                          :class="{'is-invalid': fieldErrors[c.name]}" x-model="form[c.name]">
-                  <div class="form-text">Times are UTC.</div>
+                  <div class="form-text">Times are
+                    <span x-text="(window.RLTime && $store.tz) ? $store.tz.effective() : 'UTC'"></span>.</div>
                 </div>
               </template>
               <template x-if="c.kind === 'field' && (c.type === 'Int' || c.type === 'Float') && c.display !== 'datetime'">
@@ -364,25 +365,34 @@
           if (this.isDateTime(c)) return this.fmtDateTime(v);
           return (v === null || v === undefined) ? "" : v;
         },
-        // --- datetime helpers: a `display: "datetime"` field is an int (Unix seconds, UTC). The
-        // cell shows a readable UTC string; the form uses a datetime-local picker edited in UTC. ---
+        // --- datetime helpers: a `display: "datetime"` field is an int (Unix seconds, UTC). When
+        // rl-time.js (window.RLTime) is loaded these delegate to it, so cells + the form picker
+        // follow the $store.tz selection (reading it here keeps the cell reactive to zone changes);
+        // otherwise they fall back to plain UTC. Storage/API stay integer UTC either way. ---
         isDateTime(c) { return c.display === "datetime"; },
         _pad(n) { return String(n).padStart(2, "0"); },
-        fmtDateTime(sec) {                 // Unix seconds → "YYYY-MM-DD HH:MM:SS UTC" (blank if 0/unset)
+        _tzSel() { return (this.$store && this.$store.tz) ? this.$store.tz.sel() : { mode: "utc", zone: "UTC" }; },
+        fmtDateTime(sec) {                 // Unix seconds → readable string (selected zone, or UTC)
+          if (window.RLTime) {
+            const withUtc = this.$store && this.$store.tz && this.$store.tz.withUtc;
+            return withUtc ? window.RLTime.fmtWithUtc(sec, this._tzSel()) : window.RLTime.fmt(sec, this._tzSel());
+          }
           if (sec === null || sec === undefined || sec === "" || Number(sec) === 0) return "";
           const d = new Date(Number(sec) * 1000);
           if (isNaN(d.getTime())) return String(sec);
           return d.getUTCFullYear() + "-" + this._pad(d.getUTCMonth() + 1) + "-" + this._pad(d.getUTCDate())
             + " " + this._pad(d.getUTCHours()) + ":" + this._pad(d.getUTCMinutes()) + ":" + this._pad(d.getUTCSeconds()) + " UTC";
         },
-        dtToInput(sec) {                   // Unix seconds → datetime-local value (UTC), for the form
+        dtToInput(sec) {                   // Unix seconds → datetime-local value (selected zone, or UTC)
+          if (window.RLTime) return window.RLTime.toInput(sec, this._tzSel());
           if (sec === null || sec === undefined || sec === "" || Number(sec) === 0) return "";
           const d = new Date(Number(sec) * 1000);
           if (isNaN(d.getTime())) return "";
           return d.getUTCFullYear() + "-" + this._pad(d.getUTCMonth() + 1) + "-" + this._pad(d.getUTCDate())
             + "T" + this._pad(d.getUTCHours()) + ":" + this._pad(d.getUTCMinutes()) + ":" + this._pad(d.getUTCSeconds());
         },
-        dtFromInput(str) {                 // datetime-local value (interpreted as UTC) → Unix seconds
+        dtFromInput(str) {                 // datetime-local value → Unix seconds (selected zone, or UTC)
+          if (window.RLTime) return window.RLTime.fromInput(str, this._tzSel());
           if (!str) return null;
           const ms = Date.parse(str + "Z");
           return Number.isNaN(ms) ? null : Math.floor(ms / 1000);

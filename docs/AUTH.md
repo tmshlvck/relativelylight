@@ -305,7 +305,7 @@ insert, updated on every save) — so they're correct no matter who writes (admi
 set-based update (so it doesn't bump `updated_at`) on completion: `login_submit` (no-2FA), the TOTP
 confirm (`login/totp`), and the SSO callback. Mark these fields `read_only` on the `MetaModel` so the
 admin shows but doesn't edit them (see `examples/adminpanel`). All times are UTC; rendering them in the
-viewer's timezone is a frontend concern (see the timezone TODO in [PRD.md](../PRD.md)).
+viewer's timezone is a frontend concern (see [docs/TIME.md](TIME.md)).
 
 ## 5d. Write observer — audit hook (implemented)
 

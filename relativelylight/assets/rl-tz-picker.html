@@ -1,0 +1,19 @@
+<!-- Timezone picker: a Bootstrap dropdown bound to $store.tz. Requires rl-time.js (TIME_JS) loaded
+     after Alpine. Drop it into your shell (e.g. the navbar). See docs/TIME.md. -->
+<div class="dropdown" x-data="rlTzPicker()" title="Display timezone">
+  <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button"
+          data-bs-toggle="dropdown" aria-expanded="false">
+    <span aria-hidden="true">&#128340;</span> <span x-text="label()"></span>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end" style="max-height:60vh; overflow:auto;">
+    <li><a class="dropdown-item" href="#" @click.prevent="pick('utc')"
+           :class="{ active: isActive('utc') }">UTC</a></li>
+    <li><a class="dropdown-item" href="#" @click.prevent="pick('browser')"
+           :class="{ active: isActive('browser') }">Local (browser)</a></li>
+    <li><hr class="dropdown-divider"></li>
+    <template x-for="z in zones()" :key="z.id">
+      <li><a class="dropdown-item" href="#" @click.prevent="pick('zone', z.id)"
+             :class="{ active: isActive('zone', z.id) }" x-text="z.label"></a></li>
+    </template>
+  </ul>
+</div>

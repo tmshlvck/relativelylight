@@ -12,6 +12,26 @@ use askama::Template;
 use http::HeaderMap;
 use serde_json::Value;
 
+/// JavaScript that provides timezone-aware datetime handling: `window.RLTime` (pure
+/// formatting/conversion helpers usable on any page), an Alpine `$store.tz` holding the current
+/// timezone selection, and the `rlTzPicker()` component backing [`TZ_PICKER_HTML`].
+///
+/// Include it **once** in your page shell, after Alpine.js:
+/// ```html
+/// <script>{{ relativelylight::crud::ui::TIME_JS }}</script>
+/// ```
+/// With it loaded, [`Table`] datetime columns (fields flagged
+/// [`MetaField::datetime`](crate::crud::MetaField::datetime)) render in the selected timezone and
+/// their form pickers edit in that zone; without it they fall back to UTC. The DB and every API
+/// stay integer Unix-seconds UTC regardless — this is display only. The app picks the timezone
+/// policy via an optional `window.RL_TZ` global (see [`docs/TIME.md`](https://github.com/tmshlvck/relativelylight/blob/main/docs/TIME.md)).
+pub const TIME_JS: &str = include_str!("../../assets/rl-time.js");
+
+/// A ready-made Bootstrap dropdown (UTC / browser-local / a curated IANA zone list) bound to the
+/// `$store.tz` selection from [`TIME_JS`]. Drop it into your shell — e.g. the navbar — to let users
+/// switch the display timezone. Requires [`TIME_JS`] loaded after Alpine.
+pub const TZ_PICKER_HTML: &str = include_str!("../../assets/rl-tz-picker.html");
+
 #[derive(Template)]
 #[template(path = "table.html")]
 struct TableTemplate {

@@ -115,6 +115,8 @@ Each serves on <http://127.0.0.1:3000/> (run one at a time). The first two put t
   the HTTP API and formats, query params, validation, metadata, CSV, the web admin, OpenAPI, and how
   to compose with your app.
 - **[docs/AUTH.md](docs/AUTH.md)** — the auth design (draft).
+- **[docs/TIME.md](docs/TIME.md)** — time & timezones: UTC storage/API, the `RLTime` display/
+  conversion helpers, the `$store.tz` selection, and the timezone picker.
 - **[PRD.md](PRD.md)** — product overview and roadmap.
 
 ## License

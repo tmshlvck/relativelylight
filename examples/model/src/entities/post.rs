@@ -9,6 +9,9 @@ pub struct Model {
     pub body: String,
     pub views: i32,
     pub published: bool,
+    /// Optional publish time — Unix seconds, UTC. Demonstrates an *editable* datetime column
+    /// (`.datetime()` in the admin config → a timezone-aware datetime picker in the form).
+    pub published_at: Option<i64>,
     pub author_id: i32,
 }
 

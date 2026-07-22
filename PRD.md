@@ -110,8 +110,9 @@ the login/TOTP/SSO flows).
 - **Presentation config** (widgets, formatting beyond label/help/default) lives downstream of the
   metadata, on the frontend components — not in the wire contract.
 - **auth** and **files** get their own specs once the metadata contract has settled in use.
-- **Timezones (TODO).** The DB and the JSON API standardize on **UTC** (`i64` Unix seconds is the
-  convention for timestamps). Presentation is a **frontend** concern: the Alpine.js admin should render
-  timestamps in the viewer's **browser-local** (or a user-selected) timezone rather than raw UTC. Not
-  yet implemented — the `crud::ui` table currently shows stored values verbatim. When added, keep the
-  wire contract UTC and convert only at render time.
+- **Timezones (done).** The DB and the JSON API standardize on **UTC** (`i64` Unix seconds);
+  presentation is a **frontend** concern. `crud::ui::TIME_JS` provides `RLTime` (UTC / browser-local /
+  named-zone formatting + DST-correct datetime-local conversion), an Alpine `$store.tz` selection, and
+  `TZ_PICKER_HTML` (the picker). `Table` datetime columns follow the selection; the wire contract
+  stays UTC and conversion happens only at render time. Full guide: [docs/TIME.md](docs/TIME.md).
+  Remaining refinement: nicer zone abbreviations (Intl `short` yields `GMT+2`, not `CEST`).

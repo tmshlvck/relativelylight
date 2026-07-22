@@ -160,9 +160,9 @@ zone.field("created_at").datetime();   // read-only stamp → formatted cell (no
 key.field("expires_at").datetime();    // editable timestamp → datetime picker (blank = null)
 ```
 
-For a read-only column this affects only the cell (read-only fields have no form input). See the
-[timezone TODO](../PRD.md) — rendering is UTC for now; browser-local / user-preferred timezones are
-a future refinement.
+For a read-only column this affects only the cell (read-only fields have no form input). Cells and
+the form picker render in UTC by default, or follow a timezone selection when you include the
+timezone JS/picker — see **[docs/TIME.md](TIME.md)**.
 
 ### `MetaRelation`
 

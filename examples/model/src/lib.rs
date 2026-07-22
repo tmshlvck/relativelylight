@@ -88,6 +88,9 @@ async fn seed(db: &DatabaseConnection) -> Result<(), DbErr> {
             body: Set(format!("Notes about {} — part {i}.", topic.to_lowercase())),
             views: Set((i * 37) % 500),
             published: Set(i % 4 != 0), // a mix of published / draft for the Yes/No badge
+            // Spread publish times across ~45 hours from a fixed base (2023-11-14T22:13:20Z), and
+            // leave drafts unpublished (None) — so the datetime column shows both values and blanks.
+            published_at: Set((i % 4 != 0).then(|| 1_700_000_000i64 + i as i64 * 3600)),
             author_id: Set((i - 1) % authors.len() as i32 + 1),
         }
         .insert(db)

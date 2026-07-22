@@ -22,7 +22,7 @@ use model::{author, post, profile, tag, user};
 use relativelylight::auth::{self, AdminOnly, Auth, Identity, UsersReadGroupWrite};
 use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::Admin;
+use relativelylight::crud::ui::{Admin, TIME_JS, TZ_PICKER_HTML};
 use std::sync::Arc;
 use utoipa::openapi::{InfoBuilder, OpenApiBuilder};
 
@@ -35,6 +35,20 @@ struct Shell {
     title: String,
     user: String, // signed-in username (empty when anonymous) → navbar link to /profile
     body: String,
+    time_js: &'static str,  // relativelylight's timezone JS (RLTime + $store.tz + rlTzPicker)
+    tz_picker: &'static str, // the navbar timezone dropdown fragment
+}
+
+impl Shell {
+    fn page(title: impl Into<String>, user: impl Into<String>, body: String) -> Self {
+        Self {
+            title: title.into(),
+            user: user.into(),
+            body,
+            time_js: TIME_JS,
+            tz_picker: TZ_PICKER_HTML,
+        }
+    }
 }
 
 struct App {
@@ -130,12 +144,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // New accounts are active by default (so a freshly created user with a password can log in).
     auth_user_mm.field("is_active").default = Some(serde_json::json!(true));
     // Lifecycle timestamps are maintained by the library (hooks / login flow) — show, don't edit.
+    // Lifecycle stamps: read-only + rendered as timezone-aware datetimes (see .datetime() + the
+    // $store.tz picker wired into the shell). They follow the picker's zone; storage stays UTC.
     for f in ["created_at", "updated_at", "last_login_at"] {
         auth_user_mm.field(f).read_only = true;
+        auth_user_mm.field(f).datetime();
     }
     let mut auth_group_mm = MetaModel::new(auth::group::Entity);
     for f in ["created_at", "updated_at"] {
         auth_group_mm.field(f).read_only = true;
+        auth_group_mm.field(f).datetime();
     }
 
     // Per-field presentation + validation (drives the labels / help / defaults / errors in the form).
@@ -144,6 +162,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     post_mm.field("views").default = Some(serde_json::json!(0));
     post_mm.field("published").label = Some("Published".into());
     post_mm.field("published").default = Some(serde_json::json!(true));
+    // Editable datetime → the form renders a timezone-aware <datetime-local> picker (edited in the
+    // selected zone, stored as integer Unix-seconds UTC). Empty = unpublished.
+    post_mm.field("published_at").label = Some("Published at".into());
+    post_mm.field("published_at").description = Some("When the post went live (blank = draft).".into());
+    post_mm.field("published_at").datetime();
     post_mm.relation("author").label = Some("Author".into());
     post_mm.relation("tag").label = Some("Tags".into());
     post_mm.field("title").validate = Some(Box::new(|v| {
@@ -227,9 +250,7 @@ async fn home(headers: HeaderMap, State(app): State<Arc<App>>) -> Response {
         Ok(html) => html,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let page = Shell { title: "relativelylight".into(), user: who.username, body }
-        .render()
-        .unwrap_or_default();
+    let page = Shell::page("relativelylight", who.username, body).render().unwrap_or_default();
     Html(page).into_response()
 }
 
@@ -257,7 +278,7 @@ fn login_shell(form: &str) -> String {
 <p class="text-muted small mt-2 mb-0">Demo: <code>admin</code> / <code>password</code></p>
 </div></div>"#
     );
-    Shell { title: "Log in".into(), user: String::new(), body }.render().unwrap_or_default()
+    Shell::page("Log in", "", body).render().unwrap_or_default()
 }
 
 // The app styles the library's profile/password page the same way. The library hands us the caller's
@@ -267,5 +288,5 @@ fn profile_shell(fragment: &str, who: &Identity) -> String {
         r#"<div class="card shadow-sm mx-auto" style="max-width:32rem"><div class="card-body">{fragment}
 <a class="d-inline-block mt-3" href="/">&larr; Back to admin</a></div></div>"#
     );
-    Shell { title: "Profile".into(), user: who.username.clone(), body }.render().unwrap_or_default()
+    Shell::page("Profile", who.username.clone(), body).render().unwrap_or_default()
 }
