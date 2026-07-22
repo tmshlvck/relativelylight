@@ -15,7 +15,7 @@
 //!
 //! **Times are UTC.** The library stores/returns timestamps as `i64` Unix seconds (UTC); an audit
 //! sink should do the same. (Presenting them in the viewer's local/preferred timezone is a frontend
-//! concern — see the timezone note in `PRD.md`.)
+//! concern — see `docs/TIME.md`.)
 
 use crate::authz::Operation;
 use async_trait::async_trait;

@@ -514,7 +514,7 @@ every row, so a "delete all" can't blow up the audit. The library provides only 
 `auth.identify`), derives the IP from `headers`/`peer`, writes the row, and handles retention. The same
 `Arc` can also be handed to `Auth::on_write` (see [AUTH.md](AUTH.md)) so one sink captures both the
 auto-CRUD and the auth surfaces. **Times are UTC** (`i64` Unix seconds) — see the timezone note in
-[PRD.md](../PRD.md).
+[PRD.md](PRD.md).
 
 ## Architecture & extending
 

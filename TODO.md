@@ -1,7 +1,8 @@
 # TODO
 
-Backlog for `relativelylight`. See [PRD.md](PRD.md) for the product roadmap and
-[docs/AUTH.md](docs/AUTH.md) for the auth design notes these expand on.
+Backlog for `relativelylight`, highest-impact first. See [docs/PRD.md](docs/PRD.md) for the product
+roadmap and [docs/AUTH.md](docs/AUTH.md) for the auth design these expand on. Keep this list current:
+tick/remove items as they ship, and add new ones with a one-line rationale.
 
 ## Security hardening (auth)
 
@@ -9,7 +10,7 @@ Highest priority first.
 
 - [ ] **Login attempt limiting.** Rate-limit and/or lock out repeated failed logins — both the
   password step (`POST /login`) and the TOTP step (`POST /login/totp`). Per-username and per-source-IP
-  counters with backoff/lockout; a small `rl_login_attempt` table (or an in-memory limiter with a
+  counters with backoff/lockout; a small `auth_login_attempt` table (or an in-memory limiter with a
   pluggable store). Also cap TOTP-enrolment (`POST /profile/totp`) and password-reset attempts. This
   is the main missing brute-force defense today — there is currently **no limit** on attempts.
 - [ ] **CSRF protection.** The always-on double-submit token decided in AUTH.md §7 is still not
@@ -30,17 +31,25 @@ Highest priority first.
 
 ## Auth features
 
-- [x] **SSO / OIDC** — Google + Okta/corporate, username/claim group mapping, optional
-  auto-registration (feature `sso`; see AUTH.md §5b). Remaining: cache provider discovery
-  (currently per-request); verify the callback against a live IdP.
+- [ ] **SSO / OIDC follow-ups.** Base OIDC ships (feature `sso`, AUTH.md §5b). Remaining: cache
+  provider discovery (currently fetched per-request); verify the callback against a live IdP.
 - [ ] **PassKeys / WebAuthn** as an additional second factor / passwordless.
 - [ ] **App-issued API tokens** — a Bearer identity source resolving the same `Identity`.
 - [ ] **Row-level authorization** — per-row read checks / list filters (the gate seeing the row/query).
+- [ ] **Gate-preset naming review.** Make the `authz` preset names consistent and offset-symmetric —
+  e.g. an anonymous read-write baseline, then `UserReadWrite`, `UserReadGroupsWrite { write_groups }`,
+  `GroupsReadWrite { rw_groups }` (today's `AdminOnly`). Current set: `Open`, `ValidUsers`,
+  `UsersReadGroupWrite`, `AdminOnly`.
 
 ## crud / engine
 
 - [ ] Second backend behind the `Accessor` seam (in-memory or another ORM).
 - [ ] Batch relation reads (avoid N+1 on relation resolution).
-- [ ] Composite-PK URL token + `row_key` escape hatch. (Constraint violations now map to **409** —
-  done, via `DbErr::sql_err`.)
+- [ ] Composite-PK URL token + a `row_key` escape hatch.
 - [ ] Richer field metadata (enum `options`, nullable/`required`).
+
+## crud::ui / time
+
+- [ ] Standalone `Form` component + per-field widget overrides.
+- [ ] Transactional CSV import.
+- [ ] Nicer timezone abbreviations in `time` (Intl `short` yields `GMT+2`, not `CEST`).

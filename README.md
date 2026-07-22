@@ -1,18 +1,21 @@
 # relativelylight
 
 A web back-office toolkit for Rust. **Auto-generate a JSON CRUD + metadata API and an admin UI from
-your ORM entities — with no per-model code**, and (soon) gate them with built-in auth. It composes
-*into* your app: you keep your own router, page shell, and OpenAPI document; `relativelylight` plugs
-into them.
+your ORM entities — with no per-model code**, gated by built-in authentication. It composes *into*
+your app: you keep your own router, page shell, and OpenAPI document; `relativelylight` plugs into
+them.
 
 The crate is **`relativelylight`**, organized into feature-gated modules:
 - **`crud`** (default) — the CRUD engine, SeaORM backend, admin UI (`ui`), OpenAPI, CSV.
-- **`auth`** — sessions, login, and an authorization gate (usable without `crud`). First slice
-  implemented; see [docs/AUTH.md](docs/AUTH.md).
+- **`auth`** — sessions, login, TOTP 2FA, OIDC SSO, and a per-model authorization gate (usable
+  without `crud`); see [docs/AUTH.md](docs/AUTH.md).
+- **`observe`** / **`time`** — a write-observer audit hook, and timezone-aware display of UTC
+  timestamps; see [docs/TIME.md](docs/TIME.md).
 
 > Status: the `crud` API + `ui` web admin are implemented and used by the examples; `auth` covers
 > argon2 login/session, `Authz` gate presets, a self-service profile (password + TOTP 2FA), and OIDC
-> single sign-on (feature `sso`). File-handling is planned — see [PRD.md](PRD.md).
+> single sign-on (feature `sso`). File-handling is planned — see the roadmap in
+> [docs/PRD.md](docs/PRD.md).
 
 ## What you get
 
@@ -92,16 +95,17 @@ Enable only what you use — an unused feature pulls no dependencies.
 
 ## Examples
 
-Three runnable examples share one seeded in-memory SQLite model (`examples/model`):
+Four runnable examples share one seeded in-memory SQLite model (`examples/model`):
 
 ```bash
-cargo run -p crud-example          # per-entity pages (MPA), CSV, Swagger UI — open (no auth)
-cargo run -p adminpanel-example    # the crud::ui::Admin side-panel — login-gated (admin / password)
-cargo run -p auth-example          # auth alone: argon2 login/session gating a page (admin / password)
+cargo run -p crud-example          # :3000  per-entity pages (MPA), CSV, Swagger UI — open (no auth)
+cargo run -p adminpanel-example    # :3000  the crud::ui::Admin side-panel — login-gated (admin / password)
+cargo run -p auth-example          # :3000  auth alone: argon2 login/session gating a page (admin / password)
+cargo run -p time-example          # :3001  timezone picker + server/user-TZ backend hooks (docs/TIME.md)
 ```
 
-Each serves on <http://127.0.0.1:3000/> (run one at a time). The first two put the JSON API under
-`/api/v1` with Swagger at `/docs`.
+Run one at a time (the first three share port 3000; `time-example` uses 3001). The first two put the
+JSON API under `/api/v1` with Swagger at `/docs`.
 
 ## Requirements
 
@@ -113,11 +117,15 @@ Each serves on <http://127.0.0.1:3000/> (run one at a time). The first two put t
 
 - **[docs/CRUD.md](docs/CRUD.md)** — the full `crud` guide: `MetaModel`/`MetaField`/`MetaRelation`,
   the HTTP API and formats, query params, validation, metadata, CSV, the web admin, OpenAPI, and how
-  to compose with your app.
-- **[docs/AUTH.md](docs/AUTH.md)** — the auth design (draft).
+  to compose with your app. (Examples: `crud`, `adminpanel`.)
+- **[docs/AUTH.md](docs/AUTH.md)** — the `auth` guide: sessions, login, TOTP 2FA, OIDC SSO, the gate
+  presets, and app-side wiring. (Examples: `auth`, `adminpanel`.)
 - **[docs/TIME.md](docs/TIME.md)** — time & timezones: UTC storage/API, the `RLTime` display/
-  conversion helpers, the `$store.tz` selection, and the timezone picker.
-- **[PRD.md](PRD.md)** — product overview and roadmap.
+  conversion helpers, the `$store.tz` selection, and the timezone picker. (Examples: `time`,
+  `adminpanel`.)
+- **[docs/PRD.md](docs/PRD.md)** — product overview, module status, and roadmap.
+- **[AGENTS.md](AGENTS.md)** — orientation for working *on* the library (workspace layout, build/test,
+  and the rule to keep the docs above in sync with behavior changes).
 
 ## License
 

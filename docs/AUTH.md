@@ -14,7 +14,7 @@ mapping and optional auto-registration — see §5b), admin helpers (`migrate`, 
 `set_password`, `ensure_group`, `add_to_group`, `remove_from_group`, `make_admin`), and
 **per-model enforcement in the `crud` HTTP handlers** via `crud::seaorm::Crud::register(model, gate)`,
 mapping the gate's `Decision` to 401/403, plus per-request UI control-hiding via
-`Admin`/`Table::render_for`. **Not yet:** CSRF/CORS/real-ip/logging middleware, PassKeys/OIDC. The rest
+`Admin`/`Table::render_for`. **Not yet:** CSRF/CORS/real-ip/logging middleware, PassKeys. The rest
 of this doc is the design these grow into.
 
 The login, password-change, and 2FA pages are plain **MPA `<form>` posts** — no JS (the enrolment QR
@@ -37,7 +37,7 @@ on [`Auth`]. Given a request's headers, `Auth::identify` resolves the session co
 to know who's asking; nothing is stored in request extensions. This keeps the whole feature small: no
 layer ordering, no state-injection, no `FromRequestParts` magic — just a method you call.
 
-Sibling docs: [docs/CRUD.md](CRUD.md) (the API/UI), [PRD.md](../PRD.md) (roadmap).
+Sibling docs: [docs/CRUD.md](CRUD.md) (the API/UI), [PRD.md](PRD.md) (roadmap).
 
 ## 1. Goals & principles
 
@@ -137,7 +137,7 @@ These are ordinary `crud`-registerable entities (so the admin can manage users/g
 `auth::migrate(&db)` creates the four tables **if they don't already exist** — a bootstrap for a fresh
 DB or the examples, safe to call on every start. It is **not** a migration engine: it only *creates*
 missing tables, so it won't add columns when you upgrade the library (e.g. the TOTP / SSO columns on
-`rl_user`) or otherwise evolve the schema.
+`auth_user`) or otherwise evolve the schema.
 
 For anything long-lived, drive the schema with **`sea-orm-migration`** — SeaORM's alembic-equivalent:
 versioned `up`/`down` migrations, applied once and tracked in a `seaql_migrations` table. Fold the auth
@@ -153,7 +153,7 @@ struct InitAuth;
 #[async_trait::async_trait]
 impl MigrationTrait for InitAuth {
     async fn up(&self, m: &SchemaManager) -> Result<(), DbErr> {
-        // rl_user / rl_group / rl_user_group / rl_session — from the library entities.
+        // auth_user / auth_group / auth_user_group / auth_session — from the library entities.
         for stmt in relativelylight::auth::table_create_statements(m.get_database_backend()) {
             m.create_table(stmt).await?;
         }
@@ -161,7 +161,7 @@ impl MigrationTrait for InitAuth {
         Ok(())
     }
     async fn down(&self, m: &SchemaManager) -> Result<(), DbErr> {
-        for t in ["rl_session", "rl_user_group", "rl_group", "rl_user"] {
+        for t in ["auth_session", "auth_user_group", "auth_group", "auth_user"] {
             m.drop_table(Table::drop().table(Alias::new(t)).to_owned()).await?;
         }
         Ok(())
@@ -241,7 +241,7 @@ IdP — via the Authorization Code flow with PKCE. Built on the `openidconnect` 
 nonce, ID-token signature/aud/iss/exp verification); the QR-free, cookie-carried transaction survives
 the round-trip to the provider. Configured at app start; usable alongside password login + 2FA.
 
-**Accounts.** An SSO login resolves to an `rl_user` whose **`sso_provider`** column marks it external.
+**Accounts.** An SSO login resolves to an `auth_user` whose **`sso_provider`** column marks it external.
 Such accounts have **no local password and no 2FA** — `verify_credentials` refuses a password login,
 and the profile page shows a read-only notice instead of the password / 2FA controls. With a
 provider's **auto-registration** on, an unknown user is created on first login; with it off, an admin
@@ -366,7 +366,7 @@ checks — per-row read/filter — are a future extension; out of scope for v1.)
   write needs membership in one of the groups (else `Denied`); anonymous → `NeedsLogin`.
 - **`auth::AdminOnly::new(&auth, ["admin"])`** — the stricter sibling: *only* members of one of the
   groups may do anything (read **or** write); anonymous → `NeedsLogin`, any other logged-in user →
-  `Denied`. Use it to keep whole models admin-only (e.g. the `rl_user` / `rl_group` tables). Its
+  `Denied`. Use it to keep whole models admin-only (e.g. the `auth_user` / `auth_group` tables). Its
   `admits(&Identity)` method is a header-free membership check for deciding admin-only UI.
 - **Custom** — implement `authz::Authz` (full RBAC over users/groups, an app's own API tokens, IP
   allow-lists — anything, since you get the headers and can call `auth.identify`).
@@ -496,7 +496,7 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   with a shared `UsersReadGroupWrite::new(&auth, ["admin"])` gate (any logged-in user reads; the admin
   group writes), and the panel is rendered per request with `render_for` so write controls hide for
   non-writers. The navbar shows the signed-in user, linking to **`/profile`** (self password change).
-  The auth **`rl_user` / `rl_group`** tables are also surfaced — gated `AdminOnly::new(&auth, ["admin"])`
+  The auth **`auth_user` / `auth_group`** tables are also surfaced — gated `AdminOnly::new(&auth, ["admin"])`
   (admin-only, read included) and shown only to managers. Accounts are **created/edited inline**: one
   `user.field("password_hash").password()` call (the `MetaField::password()` helper, see CRUD.md)
   exposes it as a write-only **Password** field (masked input) whose plaintext is argon2-hashed on
@@ -506,7 +506,7 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   reset. Two logins: `admin` (read-write, manager) and `editor` (read-only). Verified end-to-end:
   anonymous → 303; `admin` → reads + writes, creates accounts with/without a password, resets
   `editor`'s password via `/profile/2`; `editor` → read-only panel with no Accounts section, own
-  `/profile` works, `/profile/1` and the `rl_user` API both 403. Empty-password accounts cannot log in
+  `/profile` works, `/profile/1` and the `auth_user` API both 403. Empty-password accounts cannot log in
   with any password (`verify_password` fails against the empty hash). **TOTP 2FA** verified
   end-to-end: enrol (QR + otpauth URL, wrong code rejected, correct code activates); login then
   requires the second factor (`/login/totp`, awaiting session can't reach `/profile`); self-disable

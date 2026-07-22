@@ -6,8 +6,9 @@ per-model gate) — **with no per-model code**. It's a library you compose *into
 your own axum router, page shell, and OpenAPI document; `relativelylight` contributes routes, HTML
 fragments, and API schemas into them.
 
-This file is a using-it orientation. For the complete guides see **[docs/CRUD.md](docs/CRUD.md)** and
-**[docs/AUTH.md](docs/AUTH.md)**; for the roadmap, **[PRD.md](PRD.md)**.
+This file is a using-it orientation. For the complete guides see **[docs/CRUD.md](docs/CRUD.md)**,
+**[docs/AUTH.md](docs/AUTH.md)**, and **[docs/TIME.md](docs/TIME.md)**; for the roadmap,
+**[docs/PRD.md](docs/PRD.md)**.
 
 ## Install & features
 
@@ -133,28 +134,48 @@ Full design + wiring: **[docs/AUTH.md](docs/AUTH.md)**.
 ## Run the examples
 
 ```bash
-cargo run -p crud-example         # per-entity pages, CSV, Swagger — open, no auth
-cargo run -p adminpanel-example   # crud::ui::Admin, login-gated, inline accounts + 2FA (admin/password, editor/password)
-cargo run -p auth-example         # auth alone (no crud): login, /secret, /profile + 2FA (admin/password)
+cargo run -p crud-example         # :3000  per-entity pages, CSV, Swagger — open, no auth
+cargo run -p adminpanel-example   # :3000  crud::ui::Admin, login-gated, inline accounts + 2FA (admin/password, editor/password)
+cargo run -p auth-example         # :3000  auth alone (no crud): login, /secret, /profile + 2FA (admin/password)
+cargo run -p time-example         # :3001  timezone picker + server/user-TZ backend hooks (see docs/TIME.md)
 ```
 
-Each serves on <http://127.0.0.1:3000/> (run one at a time; fresh seeded in-memory SQLite each start)
-and prints an access-log line per request (source IP · method · URI · status). The first two put the
-JSON API under `/api/v1` with Swagger at `/docs`.
+Run one at a time (fresh seeded in-memory SQLite each start); they print an access-log line per
+request. The first three share port 3000, `time-example` uses 3001. The first two put the JSON API
+under `/api/v1` with Swagger at `/docs`.
 
 ## Documentation
 
 - **[docs/CRUD.md](docs/CRUD.md)** — the full `crud` guide: `MetaModel`/`MetaField`/`MetaRelation`,
   the HTTP API and wire formats, query params, the validation pipeline, metadata, CSV, the web admin,
-  OpenAPI, and composing with your app.
-- **[docs/AUTH.md](docs/AUTH.md)** — the `auth` guide: sessions, login, TOTP 2FA, the gate presets,
-  profile/password pages, and app-side wiring.
-- **[PRD.md](PRD.md)** — product overview, module status, roadmap.
+  OpenAPI, the write-observer audit hook, and composing with your app. (Examples: `crud`, `adminpanel`.)
+- **[docs/AUTH.md](docs/AUTH.md)** — the `auth` guide: sessions, login, TOTP 2FA, OIDC SSO, the gate
+  presets, profile/password pages, and app-side wiring. (Examples: `auth`, `adminpanel`.)
+- **[docs/TIME.md](docs/TIME.md)** — time & timezones: UTC storage/API, the `RLTime` helpers, the
+  `$store.tz` selection, and `TzPicker`. (Examples: `time`, `adminpanel`.)
+- **[docs/PRD.md](docs/PRD.md)** — product overview, module status, roadmap.
+- **[TODO.md](TODO.md)** — the ordered backlog.
 
 ---
 
-<sub>Working *on* this library (not just using it)? It's a Cargo workspace: the crate lives in
-`relativelylight/` (`crud/`, `auth/`, `authz.rs`) with runnable examples in `examples/`. Build with
-`cargo build --all-features`, test with `cargo test --all-features`, lint with `cargo clippy
---all-features`. Keep `docs/CRUD.md` and `docs/AUTH.md` in sync with behavior changes — they're the
-source of truth. Deps: SeaORM 1.1, axum 0.8, askama 0.13, utoipa 5, totp-rs 5.7.</sub>
+## Working *on* the library — keep the docs current
+
+It's a Cargo workspace: the crate lives in `relativelylight/` (`crud/`, `auth/`, `authz.rs`,
+`observe.rs`, `time.rs`, front-end assets in `assets/`) with runnable examples in `examples/`. Build
+with `cargo build --all-features`, test `cargo test --all-features`, lint `cargo clippy
+--all-features`. Deps: SeaORM 1.1, axum 0.8, askama 0.13, utoipa 5, totp-rs 5.7.
+
+**The docs are the source of truth — treat them as part of the change, not an afterthought.** When you
+add or change functionality:
+
+- Update the **per-module guide** that owns it (`docs/CRUD.md`, `docs/AUTH.md`, `docs/TIME.md`) — the
+  public API, wire formats, and behavior. Keep Rust doc-comments (the in-code contract) consistent too.
+- Reflect it in **an example**: extend the closest one, or add a new `examples/*` (and register it in
+  the root `Cargo.toml` `members` + link it from the relevant doc's "Examples" note + the README/AGENTS
+  example lists). Every user-facing feature should be demonstrated somewhere runnable.
+- Adding or promoting a **module/feature**? Update the module table + status in `docs/PRD.md`, add a
+  pointer in `README.md` and this file's Documentation list, and move any now-shipped item out of
+  `TODO.md` (add new follow-ups there with a one-line rationale).
+- `docs/PRD.md` is **requirements + roadmap only** — no usage tutorials (those live in the guides);
+  `README.md` is the user's starting point (what it is + pointers); this file is the using-it/working-on
+  orientation. Don't duplicate content across them — cross-link instead.
