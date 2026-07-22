@@ -86,7 +86,7 @@ Sessions + login with an on-demand identity lookup — **no middleware, nothing 
 request**:
 
 ```rust
-use relativelylight::auth::{Auth, UsersReadGroupWrite, AdminOnly};
+use relativelylight::auth::{Auth, UserReadGroupWrite, GroupReadWrite};
 
 let auth = Auth::new(db.clone())
     .admin_group("admin")
@@ -103,10 +103,12 @@ let app = axum::Router::new()
 let who = auth.identify(&headers).await;   // Option<Identity>; None → redirect to auth.login_path()
 ```
 
-- **Gate presets** (per model, passed to `Crud::register(model, gate)`): `authz::Open` (ungated),
-  `ValidUsers::new(&auth)` (any logged-in user), `UsersReadGroupWrite::new(&auth, ["admin"])`
-  (logged-in read, group write), `AdminOnly::new(&auth, ["admin"])` (group-only, read *and* write).
-  Or implement `authz::Authz` yourself. The engine maps a gate's `Decision` to `200`/`401`/`403`.
+- **Gate presets** (per model, passed to `Crud::register(model, gate)`) name the read/write audience
+  (Public → User → Group): `authz::Open` (public R+W, ungated), `UserReadWrite::new(&auth)` (any
+  logged-in user R+W), `UserReadGroupWrite::new(&auth, ["editors"])` (logged-in read, group write),
+  `PublicReadGroupWrite::new(&auth, ["editors"])` (public read, group write),
+  `GroupReadWrite::new(&auth, ["admin"])` (group-only, read *and* write). Or implement `authz::Authz`
+  yourself. The engine maps a gate's `Decision` to `200`/`401`/`403`.
 - **Profile / password**: `/profile` lets any user change their own password; a manager (a
   profile-manager group, default `[admin_group]`) resets others at `/profile/{id}`.
 - **TOTP 2FA**: users enrol from `/profile` (QR + `otpauth://` URL, verify-before-activate); once on,

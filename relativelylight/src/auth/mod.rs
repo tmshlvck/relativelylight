@@ -5,15 +5,15 @@
 //! There is **no middleware and no injected request context**. Authn is a handful of on-demand
 //! lookups on [`Auth`]: given a request's headers, [`Auth::identify`] resolves the session cookie →
 //! user → groups in one query and returns an [`Identity`] (or `None` for anonymous). The
-//! authorization gate itself lives in [`crate::authz`]; the presets here ([`ValidUsers`],
-//! [`UsersReadGroupWrite`]) implement it by resolving the identity with an `Auth` handle and
+//! authorization gate itself lives in [`crate::authz`]; the presets here ([`UserReadWrite`],
+//! [`UserReadGroupWrite`]) implement it by resolving the identity with an `Auth` handle and
 //! returning a [`Decision`](crate::authz::Decision) the caller renders.
 //!
 //! Implemented: the `user`/`session`/`group`/`user_group` SeaORM models, argon2id hashing, a
 //! login/logout flow with an opaque server-side session cookie (via `axum-extra`'s `CookieJar`),
 //! **TOTP two-factor authentication** (a second-factor step at login, plus self-service enrolment /
 //! disable on the profile page and a manager disable for other users), on-demand [`Auth::identify`],
-//! the gate presets ([`ValidUsers`], [`UsersReadGroupWrite`], [`AdminOnly`]), a self-service
+//! the gate presets ([`UserReadWrite`], [`UserReadGroupWrite`], [`GroupReadWrite`]), a self-service
 //! **profile / password-change** page plus a manager reset (`GET/POST /profile`,
 //! `GET/POST /profile/{id}` — see [`Auth::routes`]), admin helpers (`make_admin`, `set_password`,
 //! `add_to_group`, …), and per-model enforcement in the `crud` HTTP handlers via
@@ -78,18 +78,28 @@ impl Identity {
     }
 }
 
-/// Gate: any authenticated user may do anything; anonymous → `NeedsLogin`. Holds an [`Auth`] handle
-/// to resolve the caller; construct with `ValidUsers::new(&auth)`.
-pub struct ValidUsers(Auth);
+// ===================== Authorization gate presets =====================
+//
+// The presets name the **read audience** and the **write audience**, each one of Public (anyone,
+// incl. anonymous) → User (any authenticated user) → Group (member of one of the named groups),
+// narrowing left-to-right. `authz::Open` is the Public/Public corner (ungated, always compiled).
+// When read and write share an audience the name collapses (`UserReadWrite`, `GroupReadWrite`);
+// otherwise it spells both (`UserReadGroupWrite`, `PublicReadGroupWrite`). Anonymous callers to a
+// write they could satisfy once logged in get `NeedsLogin`; a logged-in caller lacking the group
+// gets `Denied`.
 
-impl ValidUsers {
+/// Gate: any authenticated user may read *and* write; anonymous → `NeedsLogin`. Holds an [`Auth`]
+/// handle to resolve the caller; construct with `UserReadWrite::new(&auth)`.
+pub struct UserReadWrite(Auth);
+
+impl UserReadWrite {
     pub fn new(auth: &Auth) -> Self {
         Self(auth.clone())
     }
 }
 
 #[async_trait]
-impl Authz for ValidUsers {
+impl Authz for UserReadWrite {
     async fn authorize(&self, _: Operation, headers: &HeaderMap) -> Decision {
         match self.0.identify(headers).await {
             Some(_) => Decision::Allow,
@@ -98,15 +108,15 @@ impl Authz for ValidUsers {
     }
 }
 
-/// Gate: any authenticated user may list/read; a write requires membership in one of `write_groups`
+/// Gate: any authenticated user may read; a write requires membership in one of `write_groups`
 /// (else `Denied`); anonymous → `NeedsLogin`. Construct with
-/// `UsersReadGroupWrite::new(&auth, ["admin"])`.
-pub struct UsersReadGroupWrite {
+/// `UserReadGroupWrite::new(&auth, ["editors"])`.
+pub struct UserReadGroupWrite {
     auth: Auth,
     write_groups: Vec<String>,
 }
 
-impl UsersReadGroupWrite {
+impl UserReadGroupWrite {
     pub fn new<I, S>(auth: &Auth, write_groups: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -120,53 +130,84 @@ impl UsersReadGroupWrite {
 }
 
 #[async_trait]
-impl Authz for UsersReadGroupWrite {
+impl Authz for UserReadGroupWrite {
     async fn authorize(&self, op: Operation, headers: &HeaderMap) -> Decision {
         match self.auth.identify(headers).await {
             None => Decision::NeedsLogin,
             Some(_) if !op.is_write() => Decision::Allow,
-            Some(who) => {
-                if who.groups.iter().any(|g| self.write_groups.contains(g)) {
-                    Decision::Allow
-                } else {
-                    Decision::Denied
-                }
-            }
+            Some(who) if who.in_any_group(&self.write_groups) => Decision::Allow,
+            Some(_) => Decision::Denied,
         }
     }
 }
 
-/// Gate: only members of one of `admin_groups` may do anything (read *or* write); anonymous →
-/// `NeedsLogin`, any other logged-in user → `Denied`. Construct with `AdminOnly::new(&auth,
-/// ["admin"])` — the stricter sibling of [`UsersReadGroupWrite`] (which lets any logged-in user read).
-/// Use it to keep whole models (e.g. the user/group tables) admin-only, and its [`admits`](AdminOnly::admits)
-/// helper to decide admin-only UI from an already-resolved [`Identity`].
-pub struct AdminOnly {
+/// Gate: **anyone** (including anonymous) may read; a write requires membership in one of
+/// `write_groups` — anonymous writers → `NeedsLogin`, other logged-in users → `Denied`. The
+/// public-read sibling of [`UserReadGroupWrite`]; e.g. a publicly readable catalog that only staff
+/// may edit. Construct with `PublicReadGroupWrite::new(&auth, ["editors"])`.
+pub struct PublicReadGroupWrite {
     auth: Auth,
-    admin_groups: Vec<String>,
+    write_groups: Vec<String>,
 }
 
-impl AdminOnly {
-    pub fn new<I, S>(auth: &Auth, admin_groups: I) -> Self
+impl PublicReadGroupWrite {
+    pub fn new<I, S>(auth: &Auth, write_groups: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
         Self {
             auth: auth.clone(),
-            admin_groups: admin_groups.into_iter().map(Into::into).collect(),
+            write_groups: write_groups.into_iter().map(Into::into).collect(),
         }
-    }
-
-    /// Whether an already-resolved identity is in one of the admin groups (a header-free check, e.g.
-    /// for hiding admin-only links without a second session lookup).
-    pub fn admits(&self, who: &Identity) -> bool {
-        who.in_any_group(&self.admin_groups)
     }
 }
 
 #[async_trait]
-impl Authz for AdminOnly {
+impl Authz for PublicReadGroupWrite {
+    async fn authorize(&self, op: Operation, headers: &HeaderMap) -> Decision {
+        if !op.is_write() {
+            return Decision::Allow; // public read
+        }
+        match self.auth.identify(headers).await {
+            None => Decision::NeedsLogin,
+            Some(who) if who.in_any_group(&self.write_groups) => Decision::Allow,
+            Some(_) => Decision::Denied,
+        }
+    }
+}
+
+/// Gate: only members of one of `groups` may read *or* write; anonymous → `NeedsLogin`, any other
+/// logged-in user → `Denied`. Construct with `GroupReadWrite::new(&auth, ["admin"])` — the strict
+/// sibling of [`UserReadGroupWrite`] (which lets any logged-in user read). Use it to keep whole
+/// models (e.g. the user/group tables) group-only, and its [`admits`](GroupReadWrite::admits) helper
+/// to decide group-only UI from an already-resolved [`Identity`].
+pub struct GroupReadWrite {
+    auth: Auth,
+    groups: Vec<String>,
+}
+
+impl GroupReadWrite {
+    pub fn new<I, S>(auth: &Auth, groups: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            auth: auth.clone(),
+            groups: groups.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Whether an already-resolved identity is in one of the gate's groups (a header-free check, e.g.
+    /// for hiding group-only links without a second session lookup).
+    pub fn admits(&self, who: &Identity) -> bool {
+        who.in_any_group(&self.groups)
+    }
+}
+
+#[async_trait]
+impl Authz for GroupReadWrite {
     async fn authorize(&self, _: Operation, headers: &HeaderMap) -> Decision {
         match self.auth.identify(headers).await {
             None => Decision::NeedsLogin,
@@ -462,7 +503,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for MaybePeer {
 ///
 /// **Finish configuring it before cloning it.** The `with_*`/`*_shell` builders need sole ownership
 /// of the inner `Arc`, so call them all first; only then clone it (into gate presets like
-/// `ValidUsers::new(&auth)`, `AdminOnly::new(&auth, …)`, or `Sso::new(&auth)`). A builder call after a
+/// `UserReadWrite::new(&auth)`, `GroupReadWrite::new(&auth, …)`, or `Sso::new(&auth)`). A builder call after a
 /// clone exists will panic.
 #[derive(Clone)]
 pub struct Auth {

@@ -19,7 +19,7 @@ use axum::routing::get;
 use axum::Router;
 use std::net::SocketAddr;
 use model::{author, post, profile, tag, user};
-use relativelylight::auth::{self, AdminOnly, Auth, Identity, UsersReadGroupWrite};
+use relativelylight::auth::{self, GroupReadWrite, Auth, Identity, UserReadGroupWrite};
 use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::crud::ui::Admin;
@@ -60,7 +60,7 @@ struct App {
 
 // The admin fragment's structure (nav groups, per-model table config). Built fresh per request so it
 // can be rendered *for the caller*. `is_manager` marks callers in the admin group: only they get the
-// `AdminOnly`-gated Accounts section (the auth users/groups), where each user-id links to its
+// `GroupReadWrite`-gated Accounts section (the auth users/groups), where each user-id links to its
 // password-reset page. Non-managers would get 403 reading those models, so we omit the section for them.
 fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
     let mut admin = Admin::new(engine)
@@ -181,15 +181,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One gate for the whole panel: any logged-in user may list/read; only the admin group may write.
     // A shared `Arc` (it implements `Authz`) guards every model; each gate resolves the caller from
     // the request itself (via the `auth` handle it holds).
-    let gate = Arc::new(UsersReadGroupWrite::new(&auth, [ADMIN_GROUP]));
+    let gate = Arc::new(UserReadGroupWrite::new(&auth, [ADMIN_GROUP]));
     let mut crud = Crud::new(db.clone(), "/api/v1");
     crud.register(author_mm, gate.clone());
     crud.register(post_mm, gate.clone());
     crud.register(user_mm, gate.clone());
     crud.register(profile_mm, gate.clone());
     crud.register(tag_mm, gate.clone());
-    // The auth accounts/groups are admin-only, read included (the new `AdminOnly` preset).
-    let admin_gate = Arc::new(AdminOnly::new(&auth, [ADMIN_GROUP]));
+    // The auth accounts/groups are admin-only, read included (the new `GroupReadWrite` preset).
+    let admin_gate = Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP]));
     crud.register(auth_user_mm, admin_gate.clone());
     crud.register(auth_group_mm, admin_gate.clone());
 

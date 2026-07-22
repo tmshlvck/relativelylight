@@ -36,10 +36,6 @@ Highest priority first.
 - [ ] **PassKeys / WebAuthn** as an additional second factor / passwordless.
 - [ ] **App-issued API tokens** — a Bearer identity source resolving the same `Identity`.
 - [ ] **Row-level authorization** — per-row read checks / list filters (the gate seeing the row/query).
-- [ ] **Gate-preset naming review.** Make the `authz` preset names consistent and offset-symmetric —
-  e.g. an anonymous read-write baseline, then `UserReadWrite`, `UserReadGroupsWrite { write_groups }`,
-  `GroupsReadWrite { rw_groups }` (today's `AdminOnly`). Current set: `Open`, `ValidUsers`,
-  `UsersReadGroupWrite`, `AdminOnly`.
 
 ## crud / engine
 

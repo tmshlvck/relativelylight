@@ -74,15 +74,16 @@ import, and (further out) a server-rendered `htmx` frontend on the same seam.
 Identity is resolved **on demand** (no middleware, nothing injected into the request).
 
 **Implemented:** argon2id login/logout with a server-side session cookie; `Auth::identify → Identity`;
-a per-model `Authz` gate with presets (`Open` / `ValidUsers` / `UsersReadGroupWrite` / `AdminOnly`)
-wired into `crud` (→ 401/403); self-service profile with password change; **TOTP 2FA**
+a per-model `Authz` gate with presets (`Open` / `UserReadWrite` / `UserReadGroupWrite` /
+`PublicReadGroupWrite` / `GroupReadWrite`) wired into `crud` (→ 401/403); self-service profile with
+password change; **TOTP 2FA**
 (enrol/verify/login/disable); **OIDC SSO** (feature `sso`: Google / Okta / corporate, claim→group
 mapping, optional auto-registration); UTC lifecycle timestamps on the auth entities.
 
 **Roadmap / deferred (see [../TODO.md](../TODO.md) for the ordered backlog):** login-attempt rate
 limiting, CSRF double-submit token, re-auth before sensitive changes, TOTP recovery codes + replay
 guard, session hardening, cross-cutting real-IP/CORS layers, **PassKeys/WebAuthn**, app-issued API
-tokens, row-level authorization, and a review of the gate-preset naming.
+tokens, and row-level authorization.
 
 ## 4. `observe` — the write-observer / audit hook ✅
 

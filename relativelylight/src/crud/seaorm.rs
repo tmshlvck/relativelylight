@@ -1028,7 +1028,7 @@ impl Crud {
 
     /// Register a model behind an authorization gate. Pass [`Open`](crate::authz::Open) for an
     /// ungated endpoint, or a gate built from your [`Auth`](crate::auth::Auth) — e.g.
-    /// `crud.register(post, UsersReadGroupWrite::new(&auth, ["admin"]))`. Share one gate across models
+    /// `crud.register(post, UserReadGroupWrite::new(&auth, ["admin"]))`. Share one gate across models
     /// by passing an `Arc<dyn Authz>` (it implements the trait). Each gate is handed the request,
     /// resolves the identity itself, and returns a [`Decision`](crate::authz::Decision) → the handler
     /// maps it to `200`/`401`/`403`.

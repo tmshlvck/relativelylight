@@ -5,8 +5,8 @@ Status: **implemented** (feature `auth`, usable without `crud`): `user`/`session
 (via `axum-extra`'s `CookieJar`; cookie name configurable, default `rl_session`), **on-demand session
 resolution** ([`Auth::identify`] → `Option<Identity>`; **no middleware, nothing injected into the
 request**), the always-compiled `authz` gate trait + presets (`authz::Open`,
-`auth::ValidUsers::new(&auth)`, `auth::UsersReadGroupWrite::new(&auth, [..])`,
-`auth::AdminOnly::new(&auth, [..])`), a self-service **profile / password-change page** plus a
+`auth::UserReadWrite::new(&auth)`, `auth::UserReadGroupWrite::new(&auth, [..])`,
+`auth::GroupReadWrite::new(&auth, [..])`), a self-service **profile / password-change page** plus a
 manager-only reset for other users (`GET/POST /profile`, `GET/POST /profile/{id}`), **TOTP two-factor
 authentication** (login second factor + self-service enrol/disable + manager disable — see §5a),
 **OIDC single sign-on** (feature `sso`: Google / Okta / corporate, with username- and claim-based group
@@ -359,15 +359,24 @@ identity *itself* (the identity-resolving presets hold an [`Auth`] handle and ca
 `200`/`401`/`403`; a page handler serves `NeedsLogin` as a redirect to `Auth::login_path`. (Row-level
 checks — per-row read/filter — are a future extension; out of scope for v1.)
 
-**Presets:**
-- **`authz::Open`** — everything allowed (no auth); pass it when a model needs no gating.
-- **`auth::ValidUsers::new(&auth)`** — any authenticated user may do anything; anonymous → `NeedsLogin`.
-- **`auth::UsersReadGroupWrite::new(&auth, ["admin"])`** — any authenticated user may list/read; a
+**Presets.** Each names its **read audience** and **write audience**, each one of Public (anyone,
+incl. anonymous) → User (any authenticated user) → Group (member of one of the named groups),
+narrowing left-to-right; the name collapses to `‹Audience›ReadWrite` when read and write share an
+audience. A caller who could satisfy a write once logged in gets `NeedsLogin`; a logged-in caller
+lacking the group gets `Denied`.
+
+- **`authz::Open`** — public read + write (no auth); the Public/Public corner. Pass it when a model
+  needs no gating (also the only preset available when the `auth` feature is off).
+- **`auth::UserReadWrite::new(&auth)`** — any authenticated user may read + write; anonymous → `NeedsLogin`.
+- **`auth::UserReadGroupWrite::new(&auth, ["editors"])`** — any authenticated user may read; a
   write needs membership in one of the groups (else `Denied`); anonymous → `NeedsLogin`.
-- **`auth::AdminOnly::new(&auth, ["admin"])`** — the stricter sibling: *only* members of one of the
-  groups may do anything (read **or** write); anonymous → `NeedsLogin`, any other logged-in user →
-  `Denied`. Use it to keep whole models admin-only (e.g. the `auth_user` / `auth_group` tables). Its
-  `admits(&Identity)` method is a header-free membership check for deciding admin-only UI.
+- **`auth::PublicReadGroupWrite::new(&auth, ["editors"])`** — **anyone** (incl. anonymous) may read; a
+  write needs group membership (anonymous writer → `NeedsLogin`, other logged-in → `Denied`). The
+  public-read sibling of `UserReadGroupWrite` — e.g. a publicly readable catalog only staff may edit.
+- **`auth::GroupReadWrite::new(&auth, ["admin"])`** — the strict corner: *only* members of one of the
+  groups may read **or** write; anonymous → `NeedsLogin`, any other logged-in user → `Denied`. Use it
+  to keep whole models group-only (e.g. the `auth_user` / `auth_group` tables). Its
+  `admits(&Identity)` method is a header-free membership check for deciding group-only UI.
 - **Custom** — implement `authz::Authz` (full RBAC over users/groups, an app's own API tokens, IP
   allow-lists — anything, since you get the headers and can call `auth.identify`).
 
@@ -392,7 +401,7 @@ What the app writes to wire it all up — the library gives login routes, the ga
 builders, and on-demand `identify`; the app composes them (it still owns the router):
 
 ```rust
-use relativelylight::auth::{Auth, UsersReadGroupWrite};
+use relativelylight::auth::{Auth, GroupReadWrite, UserReadGroupWrite};
 use relativelylight::authz::Open;
 use relativelylight::crud::seaorm::Crud;
 use std::sync::Arc;
@@ -405,10 +414,10 @@ let auth = Auth::new(db.clone())
     .secure_cookies(true);       // false for local http
 
 // 2. crud: each model registered with its gate. Share one gate via Arc, or vary per model.
-let content = Arc::new(UsersReadGroupWrite::new(&auth, ["editors", "admin"]));
+let content = Arc::new(UserReadGroupWrite::new(&auth, ["editors", "admin"]));
 let mut crud = Crud::new(db, "/api/v1");
 crud.register(post_mm, content.clone());                          // logged-in read, group write
-crud.register(user_mm, UsersReadGroupWrite::new(&auth, ["admin"])); // admins only, for this model
+crud.register(user_mm, GroupReadWrite::new(&auth, ["admin"]));    // admins only (read + write)
 crud.register(healthcheck_mm, Open);                              // ungated
 
 // 3. compose — the app owns the root router. No middleware, no wrapping.
@@ -465,8 +474,8 @@ cookie-authenticated client just reads the `csrf` cookie and sets the header.
 `auth` is a **module of the `relativelylight` crate**, gated by the **`auth`** feature — usable
 without `crud`:
 
-- **`auth`** — `Identity`, on-demand `Auth::identify`, the gate presets (`ValidUsers`,
-  `UsersReadGroupWrite`, which impl `authz::Authz`), the SeaORM `user`/`group`/`session` models,
+- **`auth`** — `Identity`, on-demand `Auth::identify`, the gate presets (`UserReadWrite`,
+  `UserReadGroupWrite`, which impl `authz::Authz`), the SeaORM `user`/`group`/`session` models,
   argon2id hashing, the session cookie, and login/logout/password-change routes + components. (The
   gate trait itself — `Authz`/`Operation`/`Decision`/`Open` — lives in the always-on `authz` module.
   The cross-cutting layers — real-ip · logging · CORS · CSRF — are still planned; identity itself is
@@ -493,10 +502,10 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   `@example.com`, auto-register on).
 - **`examples/adminpanel`** — **login-gated** `crud::ui::Admin`: the page calls
   `auth.identify(&headers)` (→ redirect to `/login` when anonymous), the content models are registered
-  with a shared `UsersReadGroupWrite::new(&auth, ["admin"])` gate (any logged-in user reads; the admin
+  with a shared `UserReadGroupWrite::new(&auth, ["admin"])` gate (any logged-in user reads; the admin
   group writes), and the panel is rendered per request with `render_for` so write controls hide for
   non-writers. The navbar shows the signed-in user, linking to **`/profile`** (self password change).
-  The auth **`auth_user` / `auth_group`** tables are also surfaced — gated `AdminOnly::new(&auth, ["admin"])`
+  The auth **`auth_user` / `auth_group`** tables are also surfaced — gated `GroupReadWrite::new(&auth, ["admin"])`
   (admin-only, read included) and shown only to managers. Accounts are **created/edited inline**: one
   `user.field("password_hash").password()` call (the `MetaField::password()` helper, see CRUD.md)
   exposes it as a write-only **Password** field (masked input) whose plaintext is argon2-hashed on
@@ -534,8 +543,8 @@ via a small `axum::middleware::from_fn` layer + `into_make_service_with_connect_
    the identity itself → a `Decision`. The trait lives in the always-on `authz` module (`Open` for
    ungated). **No middleware**: authn is on-demand `Auth::identify(&headers)`.
 5. **Defaults** — ✅ hashing **argon2id**, admin group **`"admin"`** (configurable); presets
-   `authz::Open` / `ValidUsers::new(&auth)` / `UsersReadGroupWrite::new(&auth, [..])` /
-   `AdminOnly::new(&auth, [..])` / custom.
+   `authz::Open` / `UserReadWrite::new(&auth)` / `UserReadGroupWrite::new(&auth, [..])` /
+   `PublicReadGroupWrite::new(&auth, [..])` / `GroupReadWrite::new(&auth, [..])` / custom.
 6. **2FA** — ✅ **TOTP** (RFC 6238) as a login second factor with self-service enrolment/disable and
    manager disable (§5a); PassKeys/WebAuthn remain future.
 7. **SSO** — ✅ **OIDC** (feature `sso`) for Google / Okta / corporate, with username- and claim-based

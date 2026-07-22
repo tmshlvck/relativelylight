@@ -1,6 +1,6 @@
 [package]
 name = "relativelylight"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "Web-app building blocks: auto-generated CRUD JSON API from your ORM entities, an auto-generated Alpine.js CRUD UI bound to that API, plus sessions, user authentication (password, TOTP 2FA, OIDC SSO), and user management."
