@@ -6,7 +6,7 @@
  *
  *   window.RLTime          pure formatting/conversion functions (usable on any page)
  *   $store.tz              the current timezone selection (Alpine store, reactive)
- *   window.rlTzPicker()    Alpine component backing the dropdown in TZ_PICKER_HTML
+ *   window.rlTzPicker()    Alpine component backing the relativelylight::time::TzPicker dropdown
  *
  * The app chooses the timezone policy (see docs/TIME.md) via an optional global `window.RL_TZ`
  * set BEFORE Alpine initializes:
@@ -42,7 +42,7 @@
     { id: 'Europe/London',      label: '(UTC±00:00) London / Dublin' },
     { id: 'Europe/Prague',      label: '(UTC+01:00) Central Europe (Prague)' },
     { id: 'Europe/Athens',      label: '(UTC+02:00) Eastern Europe (Athens)' },
-    { id: 'Europe/Moscow',      label: '(UTC+03:00) Moscow / Istanbul' },
+    { id: 'Europe/Istanbul',    label: '(UTC+03:00) Istanbul' },
     { id: 'Asia/Dubai',         label: '(UTC+04:00) Dubai' },
     { id: 'Asia/Karachi',       label: '(UTC+05:00) Karachi' },
     { id: 'Asia/Kolkata',       label: '(UTC+05:30) India' },

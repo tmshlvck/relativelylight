@@ -111,8 +111,8 @@ the login/TOTP/SSO flows).
   metadata, on the frontend components — not in the wire contract.
 - **auth** and **files** get their own specs once the metadata contract has settled in use.
 - **Timezones (done).** The DB and the JSON API standardize on **UTC** (`i64` Unix seconds);
-  presentation is a **frontend** concern. `crud::ui::TIME_JS` provides `RLTime` (UTC / browser-local /
+  presentation is a **frontend** concern. `time::JS` provides `RLTime` (UTC / browser-local /
   named-zone formatting + DST-correct datetime-local conversion), an Alpine `$store.tz` selection, and
-  `TZ_PICKER_HTML` (the picker). `Table` datetime columns follow the selection; the wire contract
+  `time::TzPicker` (the picker). `Table` datetime columns follow the selection; the wire contract
   stays UTC and conversion happens only at render time. Full guide: [docs/TIME.md](docs/TIME.md).
   Remaining refinement: nicer zone abbreviations (Intl `short` yields `GMT+2`, not `CEST`).

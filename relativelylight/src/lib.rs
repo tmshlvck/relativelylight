@@ -34,3 +34,8 @@ pub mod crud;
 
 #[cfg(feature = "auth")]
 pub mod auth;
+
+/// Timezone-aware presentation of UTC timestamps: the [`JS`](time::JS) helpers and the
+/// [`TzPicker`](time::TzPicker) component. Storage/APIs stay integer-UTC; this is frontend only.
+/// Always compiled (dependency-free static assets). See [`docs/TIME.md`](https://github.com/tmshlvck/relativelylight/blob/main/docs/TIME.md).
+pub mod time;

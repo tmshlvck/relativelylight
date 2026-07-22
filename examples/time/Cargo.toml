@@ -1,0 +1,13 @@
+[package]
+name = "time-example"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+relativelylight = { path = "../../relativelylight", features = ["ui"] }
+model = { path = "../model" }
+axum = "0.8"
+askama = "0.13"
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["net"] }

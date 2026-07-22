@@ -22,7 +22,8 @@ use model::{author, post, profile, tag, user};
 use relativelylight::auth::{self, AdminOnly, Auth, Identity, UsersReadGroupWrite};
 use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::{Admin, TIME_JS, TZ_PICKER_HTML};
+use relativelylight::crud::ui::Admin;
+use relativelylight::time::{TzPicker, JS as TIME_JS};
 use std::sync::Arc;
 use utoipa::openapi::{InfoBuilder, OpenApiBuilder};
 
@@ -35,8 +36,8 @@ struct Shell {
     title: String,
     user: String, // signed-in username (empty when anonymous) → navbar link to /profile
     body: String,
-    time_js: &'static str,  // relativelylight's timezone JS (RLTime + $store.tz + rlTzPicker)
-    tz_picker: &'static str, // the navbar timezone dropdown fragment
+    time_js: &'static str, // relativelylight's timezone JS (RLTime + $store.tz + rlTzPicker)
+    tz_picker: String,     // the navbar timezone dropdown fragment (time::TzPicker)
 }
 
 impl Shell {
@@ -46,7 +47,7 @@ impl Shell {
             user: user.into(),
             body,
             time_js: TIME_JS,
-            tz_picker: TZ_PICKER_HTML,
+            tz_picker: TzPicker::new().render(),
         }
     }
 }

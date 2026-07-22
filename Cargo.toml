@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["relativelylight", "examples/model", "examples/crud", "examples/adminpanel", "examples/auth"]
+members = ["relativelylight", "examples/model", "examples/crud", "examples/adminpanel", "examples/auth", "examples/time"]
 
 [workspace.dependencies]
 sea-orm = { version = "1.1", features = ["macros", "with-json"] }

@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>relativelylight — time example</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>[x-cloak] { display: none !important; }</style>
+
+  <!-- Timezone policy for this app: don't persist locally (the "stored preference" comes from the
+       server); show the UTC instant alongside the selected zone; and on every user change, POST the
+       selection to our fake profile endpoint. `__rlApplying` suppresses the POST while WE apply the
+       server/user values on load. Set BEFORE time::JS. -->
+  <script>
+    window.__rlApplying = false;
+    window.RL_TZ = {
+      persist: null,
+      withUtc: true,
+      onChange: function (sel) {
+        if (window.__rlApplying) return;              // don't echo our own load-time adoption
+        console.log('[UI] user changed timezone →', sel);
+        fetch('/api/me/timezone', {
+          method: 'PUT', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(sel),
+        });
+      },
+    };
+  </script>
+  <!-- relativelylight::time::JS — plain script so it runs before Alpine's deferred init. -->
+  <script>{{ time_js|safe }}</script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+  <!-- On load: adopt the server timezone (policy e), then the stored user preference (policy d).
+       Both go through $store.tz.set(), but with __rlApplying set so onChange doesn't POST back. -->
+  <script>
+    document.addEventListener('alpine:init', function () {
+      setTimeout(async function () {
+        var store = Alpine.store('tz');
+        if (!store) return;
+        window.__rlApplying = true;
+        try {
+          var srv = await (await fetch('/api/settings/timezone')).json();
+          var el = document.getElementById('server-tz');
+          if (el && srv && srv.zone) el.textContent = srv.zone;
+          if (srv && srv.zone) store.set('zone', srv.zone);        // (e) server default
+          var me = await (await fetch('/api/me/timezone')).json();  // (d) stored user preference wins
+          if (me && me.zone) store.set(me.mode || 'zone', me.zone);
+          console.log('[UI] adopted server=', srv, 'user=', me);
+        } catch (e) { console.warn('tz adoption failed', e); }
+        window.__rlApplying = false;
+      }, 0);
+    });
+  </script>
+</head>
+<body class="bg-body-tertiary">
+  <nav class="navbar bg-dark" data-bs-theme="dark">
+    <div class="container">
+      <span class="navbar-brand">relativelylight · time example</span>
+      <!-- The timezone picker (relativelylight::time::TzPicker) — drives $store.tz. -->
+      {{ tz_picker|safe }}
+    </div>
+  </nav>
+
+  <main class="container my-4">
+    <div class="alert alert-info" x-data>
+      All timestamps are stored and sent as <strong>UTC Unix seconds</strong>; the picker only changes
+      how they're shown/edited. Selected zone:
+      <strong x-text="($store.tz && window.RLTime) ? $store.tz.effective() : 'UTC'"></strong> ·
+      Server zone: <strong id="server-tz">{{ server_tz }}</strong>.
+      Open the browser console and the server console to watch the round-trip as you edit
+      <code>Published at</code> or change the picker.
+    </div>
+    <div class="card shadow-sm">
+      <div class="card-body">
+        {{ table|safe }}
+      </div>
+    </div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

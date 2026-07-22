@@ -26,15 +26,15 @@ Everything below is **frontend**. The server stays UTC-only.
 
 ---
 
-## 2. The JavaScript: `TIME_JS`
+## 2. The JavaScript: `time::JS`
 
-`relativelylight::crud::ui::TIME_JS` is a self-contained script (`assets/rl-time.js`). Include it
+`relativelylight::time::JS` is a self-contained script (`assets/rl-time.js`). Include it
 **once** in your page shell, as a plain (non-deferred) `<script>` **before** Alpine.js so its store
 registers in time:
 
 ```html
 <script>window.RL_TZ = { mode: 'utc', persist: 'local', withUtc: true };</script>
-<script>{{ time_js|safe }}</script>   <!-- pass relativelylight::crud::ui::TIME_JS into your template -->
+<script>{{ time_js|safe }}</script>   <!-- pass relativelylight::time::JS into your template -->
 <script defer src="…/alpinejs@3…"></script>
 ```
 
@@ -78,7 +78,7 @@ Use these directly in your own templates, e.g. a detail page:
 | `$store.tz.set(mode, zone)` | Change the selection; persists (per `RL_TZ.persist`) and fires `RL_TZ.onChange`. |
 
 `Table` datetime columns already read `$store.tz` internally, so cells and the form picker follow the
-selection automatically once `TIME_JS` is loaded. Without `TIME_JS`, `Table` falls back to plain UTC.
+selection automatically once `time::JS` is loaded. Without `time::JS`, `Table` falls back to plain UTC.
 
 ### 2c. `window.rlTzPicker()` — the picker component (see §4)
 
@@ -86,7 +86,7 @@ selection automatically once `TIME_JS` is loaded. Without `TIME_JS`, `Table` fal
 
 ## 3. Choosing a timezone policy (`window.RL_TZ`)
 
-Set `window.RL_TZ` **before** `TIME_JS` runs. All fields optional:
+Set `window.RL_TZ` **before** `time::JS` runs. All fields optional:
 
 ```js
 window.RL_TZ = {
@@ -121,13 +121,13 @@ Policies compose: e.g. default to the server zone (e) but let users override and
 
 ## 4. The picker component
 
-`relativelylight::crud::ui::TZ_PICKER_HTML` (`assets/rl-tz-picker.html`) is a Bootstrap dropdown
+`relativelylight::time::TzPicker` (rendering `assets/rl-tz-picker.html`) is a Bootstrap dropdown
 bound to `$store.tz`: **UTC**, **Local (browser)**, then a curated list of IANA zones covering every
 UTC offset from −12 to +14 (one representative each — `Europe/Prague`, `Asia/Tokyo`, …). Drop it into
-your shell (needs `TIME_JS` loaded):
+your shell (needs `time::JS` loaded):
 
 ```html
-{{ tz_picker|safe }}   <!-- pass relativelylight::crud::ui::TZ_PICKER_HTML into your template -->
+{{ tz_picker|safe }}   <!-- pass relativelylight::time::TzPicker::new().render() into your template -->
 ```
 
 Replace/extend the list with `RL_TZ.zones` (an array of `{ id, label }`). The component
@@ -160,6 +160,11 @@ If a future need is common enough, a small opt-in helper (a settings endpoint + 
 column your app adds to its own user model) could live in the app layer — but it stays **out** of the
 `auth_user` table and the library core.
 
+The **`examples/time`** app is a runnable version of exactly this: a single-table page that on load
+adopts `GET /api/settings/timezone` (server zone) then a `GET /api/me/timezone` "stored preference",
+and `PUT`s every user change to the console (`onChange`). A `__rlApplying` flag suppresses the `PUT`
+during load-time adoption so the app doesn't echo its own values back.
+
 ---
 
 ## 6. Reference: the flow for one datetime column
@@ -172,5 +177,8 @@ column your app adds to its own user model) could live in the app layer — but 
    `RLTime.fromInput` converts back to integer UTC seconds. The row's `created_at` etc. are never
    affected by display zone.
 
-See the **adminpanel example** (`examples/adminpanel`) for the whole thing wired up: `RL_TZ` +
-`TIME_JS` + the picker in the navbar, read-only auth timestamps, and an editable `post.published_at`.
+Examples:
+- **`examples/adminpanel`** — the picker in the navbar over a full admin: `RL_TZ` + `time::JS`,
+  read-only auth timestamps, and an editable `post.published_at`.
+- **`examples/time`** — the minimal single-table version plus the optional backend hooks (server-TZ
+  adoption + a fake per-user TZ endpoint, logging the round-trip to the console).
