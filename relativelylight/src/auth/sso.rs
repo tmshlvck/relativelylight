@@ -407,6 +407,11 @@ async fn resolve_user(
     p: &SsoProvider,
     username: &str,
 ) -> Result<user::Model, (StatusCode, String)> {
+    // The username came from the (verified) ID token, but still sanity-check it before it becomes an
+    // identity key — a misconfigured claim mapping could yield an empty/oversized/control-laden value.
+    if let Err(e) = super::valid_username(username) {
+        return Err((StatusCode::BAD_GATEWAY, format!("ID token username claim is invalid: {e}")));
+    }
     let existing = user::Entity::find()
         .filter(user::Column::Username.eq(username))
         .one(db)

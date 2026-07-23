@@ -8,6 +8,7 @@ use askama::Template;
 use relativelylight::authz::Open;
 use relativelylight::crud::ui::Table;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
+use relativelylight::validate;
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
@@ -39,7 +40,7 @@ struct App {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = model::setup().await?;
 
-    let author_mm = MetaModel::new(author::Entity);
+    let mut author_mm = MetaModel::new(author::Entity);
     let user_mm = MetaModel::new(user::Entity);
     let profile_mm = MetaModel::new(profile::Entity);
     let mut post_mm = MetaModel::new(post::Entity);
@@ -58,17 +59,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     post_mm.relation("author").label = Some("Author".into());
     post_mm.relation("tag").label = Some("Tags".into());
 
-    // Demo validators: a field validator (shown under the field) and a row validator (form banner).
-    post_mm.field("title").validate = Some(Box::new(|v| {
-        let s = v.as_str().unwrap_or("");
-        if s.trim().is_empty() {
-            Err("Title cannot be empty".into())
-        } else if s.chars().count() > 80 {
-            Err("Title too long (max 80 characters)".into())
-        } else {
-            Ok(())
-        }
-    }));
+    // Demo validators from `relativelylight::validate` — typed predicates wired via the
+    // `validate_str` / `validate_int` sugar (see docs/DATAINPUT.md). The same predicates are callable
+    // directly from a hand-written endpoint; here they plug into the auto-CRUD write path.
+    post_mm
+        .field("title")
+        .validate_str(validate::all_of(vec![Box::new(validate::non_empty), Box::new(validate::length(1, 80))]));
+    post_mm.field("views").validate_int(validate::int_min(0)); // a view count is never negative
+
+    // A normalizer (on_write transform) + a validator on the author: trim the name, require a
+    // 2-letter ISO country code.
+    author_mm.field("name").on_write = Some(validate::field::str_transform(validate::normalize::trim));
+    author_mm.field("name").validate_str(validate::non_empty);
+    author_mm.field("country").description = Some("ISO 3166-1 alpha-2 country code, e.g. \"US\".".into());
+    author_mm.field("country").validate_str(validate::length(2, 2));
+
+    // A cross-field row validator (form banner) — unchanged, shows the non-`validate` hook.
     post_mm.validate_row = Some(Box::new(|fields| {
         let get = |k: &str| fields.get(k).and_then(|v| v.as_str()).unwrap_or("");
         let mut errs = relativelylight::crud::ValidationErrors::new();

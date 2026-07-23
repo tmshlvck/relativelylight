@@ -124,7 +124,11 @@ SeaORM models (the app runs the migration / `create_table_from_entity`):
 
 - **`user`** — `id`, `username` (unique), `password_hash`, `is_active`, and the TOTP 2FA columns
   `totp_secret` / `totp_pending` (nullable base32; §5a). (An OIDC-subject column can be added later,
-  additively.)
+  additively.) `username` is validated at every creation path (`create_user`, and the SSO
+  auto-register path) by `auth::valid_username` — non-empty, ≤ 254 bytes, no spaces/control chars
+  (permissive enough for email-style names). Wire the same check into the admin form:
+  `user_mm.field("username").validate_str(relativelylight::auth::valid_username)`. Group names get
+  `auth::valid_group_name` (via `ensure_group`).
 - **`group`** + **`user_group`** (N:M) — group membership drives authz.
 - **`session`** — `id` (opaque token), `user_id`, `expires_at`, and `awaiting_totp` (a
   half-authenticated session — password ok, second factor pending; §5a).

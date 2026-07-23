@@ -155,6 +155,9 @@ under `/api/v1` with Swagger at `/docs`.
   presets, profile/password pages, and app-side wiring. (Examples: `auth`, `adminpanel`.)
 - **[docs/TIME.md](docs/TIME.md)** — time & timezones: UTC storage/API, the `RLTime` helpers, the
   `$store.tz` selection, and `TzPicker`. (Examples: `time`, `adminpanel`.)
+- **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module: typed field validators +
+  normalizers (IP/network, ranges, lengths, enums, hostname/FQDN, hex, email/URL), the crud `field`
+  adapters, and the `MetaField::validate_str/_int` sugar. Same predicate on CRUD + hand-written APIs.
 - **[docs/PRD.md](docs/PRD.md)** — product overview, module status, roadmap.
 - **[TODO.md](TODO.md)** — the ordered backlog.
 

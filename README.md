@@ -123,6 +123,9 @@ JSON API under `/api/v1` with Swagger at `/docs`.
 - **[docs/TIME.md](docs/TIME.md)** — time & timezones: UTC storage/API, the `RLTime` display/
   conversion helpers, the `$store.tz` selection, and the timezone picker. (Examples: `time`,
   `adminpanel`.)
+- **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module: reusable field validators
+  (IP/network, ranges, lengths, enums, hostname/FQDN, hex, email/URL, …) and normalizers as typed
+  predicates, plus the `MetaField::validate_str/_int` sugar and the crud adapters.
 - **[docs/PRD.md](docs/PRD.md)** — product overview, module status, and roadmap.
 - **[AGENTS.md](AGENTS.md)** — orientation for working *on* the library (workspace layout, build/test,
   and the rule to keep the docs above in sync with behavior changes).

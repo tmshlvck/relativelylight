@@ -275,8 +275,37 @@ pub async fn migrate(db: &DatabaseConnection) -> Result<(), DbErr> {
     Ok(())
 }
 
+/// Validate a username before it becomes an identity key. Enforced by [`create_user`] (and thus the
+/// `set_password`/`make_admin` create paths) and by the SSO auto-registration path; apps should also
+/// wire it into the admin form —
+/// `user_mm.field("username").validate_str(relativelylight::auth::valid_username)`.
+///
+/// Requires a non-empty name of at most 254 bytes with **no whitespace or control characters** —
+/// permissive enough for both plain usernames and email-style names (e.g. an OIDC `email` claim),
+/// while keeping spaces / control bytes out of logs, audit records, and the identity/session layer.
+pub fn valid_username(s: &str) -> std::result::Result<(), String> {
+    crate::validate::non_empty(s)?;
+    crate::validate::length_bytes(1, 254)(s)?;
+    if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("username must not contain spaces or control characters".into());
+    }
+    Ok(())
+}
+
+/// Validate a group name (enforced by [`ensure_group`]). Non-empty, ≤ 254 bytes, no control
+/// characters. Spaces are allowed (e.g. `"Site Admins"`), unlike [`valid_username`].
+pub fn valid_group_name(s: &str) -> std::result::Result<(), String> {
+    crate::validate::non_empty(s)?;
+    crate::validate::length_bytes(1, 254)(s)?;
+    if s.chars().any(|c| c.is_control()) {
+        return Err("group name must not contain control characters".into());
+    }
+    Ok(())
+}
+
 /// Insert an active user with the given password (hashed with argon2id).
 pub async fn create_user(db: &DatabaseConnection, username: &str, password: &str) -> Result<(), DbErr> {
+    valid_username(username).map_err(DbErr::Custom)?;
     user::ActiveModel {
         username: Set(username.to_string()),
         password_hash: Set(hash_password(password)),
@@ -310,6 +339,7 @@ pub async fn set_password(db: &DatabaseConnection, username: &str, password: &st
 /// Ensure a group exists (create if missing); return its id. The group name is the app's choice
 /// (e.g. a hard-coded constant or a config value — the admin/superadmin group).
 pub async fn ensure_group(db: &DatabaseConnection, name: &str) -> Result<i32, DbErr> {
+    valid_group_name(name).map_err(DbErr::Custom)?;
     if let Some(g) = group::Entity::find().filter(group::Column::Name.eq(name)).one(db).await? {
         return Ok(g.id);
     }
@@ -1391,6 +1421,26 @@ mod tests {
         assert!(password_pair_error("", "").is_some());
         assert!(password_pair_error("a", "b").is_some());
         assert!(password_pair_error("a", "a").is_none());
+    }
+
+    #[test]
+    fn username_validation() {
+        assert!(valid_username("alice").is_ok());
+        assert!(valid_username("alice@example.com").is_ok()); // email-style (OIDC claim)
+        assert!(valid_username("").is_err());
+        assert!(valid_username("   ").is_err());
+        assert!(valid_username("has space").is_err());
+        assert!(valid_username("nul\0byte").is_err());
+        assert!(valid_username("line\nbreak").is_err());
+        assert!(valid_username(&"x".repeat(255)).is_err());
+    }
+
+    #[test]
+    fn group_name_validation() {
+        assert!(valid_group_name("admin").is_ok());
+        assert!(valid_group_name("Site Admins").is_ok()); // spaces allowed, unlike usernames
+        assert!(valid_group_name("").is_err());
+        assert!(valid_group_name("bad\tname").is_err()); // tab is a control char
     }
 
     #[test]
