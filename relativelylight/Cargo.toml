@@ -38,3 +38,5 @@ openapi = ["dep:utoipa", "crud"]
 csv = ["dep:csv", "crud"]
 auth = ["dep:sea-orm", "dep:axum", "dep:axum-extra", "dep:argon2", "dep:rand_core", "dep:time", "dep:totp-rs"] # sessions/login + TOTP 2FA + Authz gate
 sso = ["auth", "dep:openidconnect", "dep:regex", "dep:base64"] # OIDC single sign-on (Google / Okta / corporate) + group mapping
+validate-regex = ["dep:regex"]   # validate::regex_match (reuses the regex dep)
+validate-base64 = ["dep:base64"] # validate::base64 / base64_url (reuses the base64 dep)

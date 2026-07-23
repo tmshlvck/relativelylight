@@ -108,6 +108,34 @@ impl MetaField {
         self.display = Some(FieldDisplay::DateTime);
         self
     }
+
+    /// Attach a string [validator](crate::validate) — sugar over setting [`validate`](Self::validate)
+    /// via [`validate::field::str_field`](crate::validate::field::str_field):
+    ///
+    /// ```ignore
+    /// use relativelylight::validate;
+    /// model.field("value").validate_str(validate::ipv4);
+    /// model.field("target").validate_str(validate::all_of(vec![
+    ///     Box::new(validate::non_empty), Box::new(validate::fqdn)]));
+    /// ```
+    pub fn validate_str<F>(&mut self, f: F) -> &mut Self
+    where
+        F: Fn(&str) -> std::result::Result<(), String> + Send + Sync + 'static,
+    {
+        self.validate = Some(crate::validate::field::str_field(f));
+        self
+    }
+
+    /// Attach an integer [validator](crate::validate) — sugar over setting [`validate`](Self::validate)
+    /// via [`validate::field::int_field`](crate::validate::field::int_field):
+    /// `model.field("priority").validate_int(validate::int_range(0, 65535))`.
+    pub fn validate_int<F>(&mut self, f: F) -> &mut Self
+    where
+        F: Fn(i64) -> std::result::Result<(), String> + Send + Sync + 'static,
+    {
+        self.validate = Some(crate::validate::field::int_field(f));
+        self
+    }
 }
 
 /// A relation of an entity (config the user may tweak via `MetaModel::relation`).

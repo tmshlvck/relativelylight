@@ -39,3 +39,9 @@ pub mod auth;
 /// [`TzPicker`](time::TzPicker) component. Storage/APIs stay integer-UTC; this is frontend only.
 /// Always compiled (dependency-free static assets). See [`docs/TIME.md`](https://github.com/tmshlvck/relativelylight/blob/main/docs/TIME.md).
 pub mod time;
+
+/// Reusable field validators + normalizers ([`ipv4`](validate::ipv4), [`int_range`](validate::int_range),
+/// [`hostname`](validate::hostname), …) as typed predicates, plus the [`field`](validate::field) adapters
+/// that plug them into the CRUD write path. Std-only core, always compiled. See
+/// [`docs/DATAINPUT.md`](https://github.com/tmshlvck/relativelylight/blob/main/docs/DATAINPUT.md).
+pub mod validate;
