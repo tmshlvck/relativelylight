@@ -38,6 +38,13 @@ pub(crate) struct Provisioning {
     pub qr_data_uri: String,
 }
 
+/// The code an authenticator app would show for `secret_b32` right now — test-only, so the auth
+/// tests can drive the real TOTP paths (and prove the negative cases aren't vacuous).
+#[cfg(test)]
+pub(crate) fn current_code(secret_b32: &str) -> String {
+    build("rl", "rl", secret_b32).and_then(|t| t.generate_current().ok()).expect("valid secret")
+}
+
 pub(crate) fn provisioning(issuer: &str, account: &str, secret_b32: &str) -> Option<Provisioning> {
     let totp = build(issuer, account, secret_b32)?;
     let url = totp.get_url();

@@ -15,8 +15,9 @@
 //! disable on the profile page and a manager disable for other users), on-demand [`Auth::identify`],
 //! the gate presets ([`UserReadWrite`], [`UserReadGroupWrite`], [`GroupReadWrite`]), a self-service
 //! **profile / password-change** page plus a manager reset (`GET/POST /profile`,
-//! `GET/POST /profile/{id}` — see [`Auth::routes`]), admin helpers (`make_admin`, `set_password`,
-//! `add_to_group`, …), and per-model enforcement in the `crud` HTTP handlers via
+//! `GET/POST /profile/{id}` — see [`Auth::routes`]), admin helpers ([`make_admin`] to seed one,
+//! [`reset_admin_access`] for break-glass recovery, [`set_password`], [`add_to_group`], …), and
+//! per-model enforcement in the `crud` HTTP handlers via
 //! `crud::seaorm::Crud::register`, plus **OIDC single sign-on** (feature `sso`, module [`sso`]:
 //! Google / Okta / corporate, with username- and claim-based group mapping and optional
 //! auto-registration). Not yet: the CSRF/CORS/real-ip/logging middleware and PassKeys.
@@ -26,6 +27,9 @@
 //! lookup, and deleting the row revokes it.
 
 pub mod group;
+/// Negative-path (rejection) tests for the auth surface — see the module's own docs.
+#[cfg(test)]
+mod security_tests;
 pub mod session;
 #[cfg(feature = "sso")]
 pub mod sso;
@@ -317,23 +321,24 @@ pub async fn create_user(db: &DatabaseConnection, username: &str, password: &str
     Ok(())
 }
 
-/// Set (or reset) a user's password — updates the hash and re-activates if the user exists, else
-/// creates them. Convenient for an app CLI flag, e.g. `--set-admin-pw`:
+/// Reset an **existing** user's password. Errors if there's no such user — creating an account is
+/// [`create_user`]'s job, so a typo'd username can't silently become a new login.
 ///
-/// ```ignore
-/// if let Some(pw) = admin_pw_flag { auth::set_password(&db, "admin", &pw).await?; return Ok(()); }
-/// ```
+/// It writes **only** the hash. Everything that decides whether the account can log in is left
+/// exactly as it was: a **disabled** account (`is_active = false`) gets the new password and stays
+/// disabled, 2FA stays on, and an SSO account still refuses password login. A password reset is
+/// therefore never a way to re-open a closed account — re-opening one is
+/// [`reset_admin_access`] (break-glass) or an explicit `is_active` edit in the admin UI.
 pub async fn set_password(db: &DatabaseConnection, username: &str, password: &str) -> Result<(), DbErr> {
-    match user::Entity::find().filter(user::Column::Username.eq(username)).one(db).await? {
-        Some(existing) => {
-            let mut am = existing.into_active_model();
-            am.password_hash = Set(hash_password(password));
-            am.is_active = Set(true);
-            am.update(db).await?;
-            Ok(())
-        }
-        None => create_user(db, username, password).await,
-    }
+    let existing = user::Entity::find()
+        .filter(user::Column::Username.eq(username))
+        .one(db)
+        .await?
+        .ok_or_else(|| DbErr::Custom(format!("no such user: {username}")))?;
+    let mut am = existing.into_active_model();
+    am.password_hash = Set(hash_password(password));
+    am.update(db).await?;
+    Ok(())
 }
 
 /// Ensure a group exists (create if missing); return its id. The group name is the app's choice
@@ -381,15 +386,70 @@ pub async fn remove_from_group(
     Ok(())
 }
 
-/// Make a user an admin: (re-)set their password *and* ensure they're a member of the (configurable)
-/// admin group, creating both as needed. Handy for an app's `--set-admin-pw` startup path.
+/// Make a user an admin: set their password *and* ensure they're a member of the (configurable) admin
+/// group, creating user and group as needed. **Idempotent and safe to run on every start** — the
+/// seed-an-admin call the examples make.
+///
+/// It touches only the password and the group membership: an existing account keeps its `is_active`
+/// flag and its 2FA enrolment, so a boot-time seeder can't strip an admin's authenticator. A brand-new
+/// account is created active (via [`create_user`]). If the point is to *restore* access to a locked-out
+/// admin, use [`reset_admin_access`] — that one is deliberately destructive and operator-run.
 pub async fn make_admin(
     db: &DatabaseConnection,
     admin_group: &str,
     username: &str,
     password: &str,
 ) -> Result<(), DbErr> {
-    set_password(db, username, password).await?;
+    match user::Entity::find().filter(user::Column::Username.eq(username)).one(db).await? {
+        Some(_) => set_password(db, username, password).await?,
+        None => create_user(db, username, password).await?,
+    }
+    add_to_group(db, username, admin_group).await
+}
+
+/// **Break-glass admin recovery** — the one path that re-opens an account, for an app's
+/// `--set-admin-pw`-style CLI flag:
+///
+/// ```ignore
+/// if let Some(pw) = admin_pw_flag {
+///     auth::reset_admin_access(&db, ADMIN_GROUP, "admin", &pw).await?;
+///     return Ok(()); // operator action: set it, then exit
+/// }
+/// ```
+///
+/// Creates the user if missing, then makes sure they can actually get back in: sets the password,
+/// sets `is_active = true`, **clears TOTP 2FA** (both the active and the pending secret), and ensures
+/// admin-group membership. So it is destructive by design — an enrolled authenticator is discarded and
+/// the admin must re-enrol from `/profile`. **Run it from a CLI flag an operator invokes, never on
+/// every start**; the boot-time seeder is [`make_admin`].
+///
+/// Refuses an **SSO** account (`Err`): clearing its `sso_provider` to graft on a local password would
+/// silently take the account out of the identity provider's hands (and its group reconciliation), so
+/// point break-glass at a local username instead.
+pub async fn reset_admin_access(
+    db: &DatabaseConnection,
+    admin_group: &str,
+    username: &str,
+    password: &str,
+) -> Result<(), DbErr> {
+    match user::Entity::find().filter(user::Column::Username.eq(username)).one(db).await? {
+        Some(existing) => {
+            if let Some(provider) = existing.sso_provider.clone() {
+                return Err(DbErr::Custom(format!(
+                    "{username} signs in through '{provider}' (SSO): a local password would be refused \
+                     at login — use a local username for break-glass access, or clear its sso_provider \
+                     deliberately first"
+                )));
+            }
+            let mut am = existing.into_active_model();
+            am.password_hash = Set(hash_password(password));
+            am.is_active = Set(true);
+            am.totp_secret = Set(None);
+            am.totp_pending = Set(None);
+            am.update(db).await?;
+        }
+        None => create_user(db, username, password).await?,
+    }
     add_to_group(db, username, admin_group).await
 }
 

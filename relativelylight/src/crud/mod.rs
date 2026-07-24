@@ -9,6 +9,10 @@
 pub mod engine;
 pub mod seaorm;
 
+/// Negative-path tests for the HTTP gate enforcement (needs `auth` for the real presets).
+#[cfg(all(test, feature = "axum", feature = "auth"))]
+mod gate_tests;
+
 #[cfg(feature = "ui")]
 pub mod ui;
 

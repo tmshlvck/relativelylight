@@ -1,9 +1,9 @@
 //! examples/auth — the `auth` module used **without** `crud` (auth stands on its own). See
 //! `docs/AUTH.md`. A public page, a `/secret` page gated by login, `/login` + `/logout`, and a
-//! configurable admin group. Also demonstrates the `--set-admin-pw <pw>` startup path.
+//! configurable admin group. Also demonstrates the `--set-admin-pw <pw>` break-glass startup path.
 //!
 //!   cargo run -p auth-example                            # serve; log in as admin / password
-//!   cargo run -p auth-example -- --set-admin-pw s3cret   # (re)set admin pw + admin-group membership
+//!   cargo run -p auth-example -- --set-admin-pw s3cret   # break-glass: pw + enable + clear 2FA + group
 
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::HeaderMap;
@@ -25,18 +25,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Database::connect("sqlite::memory:").await?;
     auth::migrate(&db).await?;
 
-    // How an app wires a `--set-admin-pw` CLI flag: (re)create the admin user + admin group and set
-    // the password, then exit. (This example's DB is in-memory, so it's a call-site demo; a real app
-    // would point at a persistent database.)
+    // How an app wires a `--set-admin-pw` CLI flag: **break-glass** admin recovery — create-or-reset
+    // the password, re-activate the account, clear its TOTP 2FA, ensure admin-group membership, exit.
+    // Operator-run only (it discards an enrolled authenticator); the boot-time seeder below is
+    // `make_admin`. (This example's DB is in-memory, so it's a call-site demo; a real app would point
+    // at a persistent database.)
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--set-admin-pw") {
         let pw = args.get(i + 1).map(String::as_str).unwrap_or("");
-        auth::make_admin(&db, ADMIN_GROUP, "admin", pw).await?;
-        println!("admin password set and added to '{ADMIN_GROUP}'");
+        auth::reset_admin_access(&db, ADMIN_GROUP, "admin", pw).await?;
+        println!("admin password set, account enabled, 2FA cleared, added to '{ADMIN_GROUP}'");
         return Ok(());
     }
 
-    // Otherwise seed a demo admin (in the admin group) and serve.
+    // Otherwise seed a demo admin (in the admin group) and serve. `make_admin` is idempotent and
+    // leaves an existing account's `is_active` / 2FA alone, so it's safe on every start.
     auth::make_admin(&db, ADMIN_GROUP, "admin", "password").await?;
 
     // Optional SSO from env (no hard-coded secrets). Decide whether it's configured *before* building

@@ -11,8 +11,9 @@ manager-only reset for other users (`GET/POST /profile`, `GET/POST /profile/{id}
 authentication** (login second factor + self-service enrol/disable + manager disable — see §5a),
 **OIDC single sign-on** (feature `sso`: Google / Okta / corporate, with username- and claim-based group
 mapping and optional auto-registration — see §5b), admin helpers (`migrate`, `create_user`,
-`set_password`, `ensure_group`, `add_to_group`, `remove_from_group`, `make_admin`), and
-**per-model enforcement in the `crud` HTTP handlers** via `crud::seaorm::Crud::register(model, gate)`,
+`set_password`, `ensure_group`, `add_to_group`, `remove_from_group`, `make_admin`,
+`reset_admin_access`), and **per-model enforcement in the `crud` HTTP handlers** via
+`crud::seaorm::Crud::register(model, gate)`,
 mapping the gate's `Decision` to 401/403, plus per-request UI control-hiding via
 `Admin`/`Table::render_for`. **Not yet:** CSRF/CORS/real-ip/logging middleware, PassKeys. The rest
 of this doc is the design these grow into.
@@ -202,7 +203,33 @@ migration; when a later library version adds a column, add your own `ALTER TABLE
   (default `[admin_group]`, override with `Auth::profile_managers([..])`); a caller may always manage
   their own, and `/profile/{self}` redirects to `/profile`. `Auth::can_manage_others(&who)` tells the
   app whether to surface an admin-only "reset password" link. The **admin group name is configurable**
-  (default `"admin"`).
+  (default `"admin"`). Both paths write **only the password hash** — see the helper contract below.
+
+### Admin helpers — who may re-open an account
+
+Three helpers with deliberately different blast radii, so a routine password reset can never restore
+login capability by accident:
+
+| helper | creates? | password | `is_active` | TOTP 2FA | group |
+|---|---|---|---|---|---|
+| `set_password(db, user, pw)` | ❌ `Err` if unknown | set | untouched | untouched | — |
+| `make_admin(db, group, user, pw)` | ✅ (active) | set | untouched | untouched | ensured |
+| `reset_admin_access(db, group, user, pw)` | ✅ (active) | set | **→ true** | **cleared** | ensured |
+
+- **`set_password`** is a *reset*, not an upsert: an unknown username is an error (creating accounts is
+  `create_user`'s job), so a typo can't silently become a new login. A **disabled** account gets the new
+  password and stays disabled; 2FA stays on; an SSO account still refuses password login. This is what
+  `POST /profile` and `POST /profile/{id}` call.
+- **`make_admin`** is the **boot-time seeder** (what the examples call on every start): idempotent, and
+  it never strips an existing admin's `is_active` flag or authenticator.
+- **`reset_admin_access`** is **break-glass recovery**, for an operator-invoked `--set-admin-pw` flag:
+  it re-activates the account and **discards its TOTP enrolment** so a locked-out admin can get back in
+  and re-enrol from `/profile`. Destructive by design — don't call it on every start. It **refuses an
+  SSO account** (`Err` naming the provider): grafting a local password on would quietly take the
+  account out of the identity provider's hands (and out of its group reconciliation), so point
+  break-glass at a local username instead.
+
+Re-enabling a disabled *non-admin* account stays an explicit `is_active` edit (e.g. in the admin UI).
 
 ## 5a. TOTP two-factor authentication — implemented
 
@@ -500,7 +527,8 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   page, a session cookie, and a `/secret` page gated by an on-demand `auth.identify(&headers)` check
   (redirect to `login_path` when anonymous). The `/secret` page shows the signed-in user and links to
   the self-service **`/profile`** page — password change **and TOTP 2FA** enrolment/disable — wrapped
-  in the app's chrome via `profile_shell`, plus the `--set-admin-pw` startup path. **SSO** is wired in
+  in the app's chrome via `profile_shell`, plus the `--set-admin-pw` break-glass startup path
+  (`reset_admin_access`; the demo admin is seeded with `make_admin`). **SSO** is wired in
   (feature `sso`) and enabled by setting `SSO_GOOGLE_CLIENT_ID` / `SSO_GOOGLE_CLIENT_SECRET` in the
   env: a "Sign in with Google" button appears and `/sso/google/*` is served (username→group rule for
   `@example.com`, auto-register on).
@@ -534,6 +562,63 @@ via a small `axum::middleware::from_fn` layer + `into_make_service_with_connect_
 > denies a write for the caller — so the `editor` login gets a read-only panel. The **API gate stays
 > the actual enforcement point**: hiding a button is cosmetic; an unauthorized write is rejected there
 > (403) regardless.
+
+## 10a. Automated tests — the negative paths
+
+The examples above verify the happy paths by hand; the **rejection** paths are pinned by an automated
+suite (`cargo test --all-features`) that runs the shipped routers against a fresh in-memory SQLite DB
+(`tower::ServiceExt::oneshot`, no socket). Two modules:
+
+- **`auth/security_tests.rs`** — sessions, login, TOTP, profile:
+  - a cookie is worth nothing unless its row is **live, unexpired, past the second factor, and its
+    user active** — expired, `awaiting_totp`, deactivated-user, deleted-user, forged, empty,
+    truncated, and wrong-cookie-name tokens all resolve to anonymous, as does a token offered as
+    `Authorization: Bearer …` (there is no header identity source yet);
+  - `POST /login` returns **401 with no session cookie and no session row** for a wrong/empty/prefix
+    password, an unknown user, an **inactive** account, and an **SSO** account (correct password
+    included); the error text stays generic. Session tokens are 256 random bits and never repeat, and
+    the cookie is `HttpOnly; SameSite=Strict; Path=/` (+ `Secure` unless `secure_cookies(false)`);
+  - a password-only login to a 2FA account yields a **half-authenticated** session that identifies as
+    anonymous and can't open `/profile`; `/login/totp` refuses a wrong, empty, malformed, or
+    **another user's** code (401, session stays pending, no `last_login_at`) and refuses to run at all
+    without a pending session (no session / full session / expired session → back to `/login`);
+  - enrolment activates 2FA **only** on a code matching the pending secret (a wrong code keeps the
+    same pending secret and leaves 2FA off; a POST with nothing pending is a no-op), and the enrolment
+    page never renders another user's secret;
+  - `/profile` needs the **current password** (wrong/empty/case-changed → 400, old password still
+    works, new one not set) and rejects an empty or mismatched new pair; every profile route redirects
+    anonymous / bogus / pending / expired callers to the login page **without touching the target**;
+  - a plain user gets **403** on `/profile/{id}`, its reset POST, and `/profile/{id}/totp/disable`,
+    and the target's password + TOTP secret are provably unchanged; narrowing `profile_managers`
+    excludes even the admin group; unknown/non-numeric ids are 404; and a manager aiming the
+    no-current-password reset at **themselves** is bounced to `/profile` (it's not a way around the
+    current-password check). SSO accounts can't set a local password or enrol local 2FA, and a
+    manager's reset aimed at an SSO account still can't produce a password login; a reset of a
+    **disabled** account stores the new hash but leaves it disabled and unable to log in (same for
+    the `make_admin` seeder, which also leaves an enrolled authenticator alone), while `set_password`
+    refuses an unknown username outright and **break-glass `reset_admin_access`** does re-open the
+    account (password + `is_active` + 2FA cleared + admin group, verified by an actual login) but
+    refuses SSO targets;
+  - the **gate presets** are asserted as a matrix — anonymous, logged-in non-member, and member ×
+    read/write — and every preset treats an expired, half-authenticated, or deactivated session as
+    anonymous. `GroupReadWrite::admits` follows a revoked membership on the next `identify`.
+- **`crud/gate_tests.rs`** — the API enforcement point, over the real engine router with a stub
+  `Accessor` that counts calls: every route authorizes with the right `Operation`, `NeedsLogin` → 401
+  and `Denied` → 403 with a JSON error body, a rejected request **never reaches the backend** (so a
+  gate checked after the write would fail, not pass quietly), an unregistered model is a plain 404,
+  and the real `UserReadGroupWrite` preset over a real login cookie gives anonymous 401 everywhere,
+  a non-member reads-only (403 on writes, zero backend writes), and a member full access.
+
+Each group carries a positive control (a correct login, a correct TOTP code, an allowing gate) so a
+mistake that breaks *everything* can't make the negatives pass vacuously.
+
+**Not covered by tests** (and open in [TODO.md](../TODO.md)): brute-force limits — the login and TOTP
+tests hammer the endpoints with no lockout, which is the current behavior, not a desired one — CSRF
+(§7, not implemented), re-authentication before disabling 2FA / changing a password, TOTP replay
+inside the skew window, session-id rotation on privilege change and invalidating a user's *other*
+sessions after a password change, and the SSO callback (see the verification note in §5b). One rough
+edge the review turned up is filed there too: the manager reset isn't refused for SSO targets the way
+the self-service page is (it writes a local hash that still can't log in).
 
 ## 11. Decisions (confirmed)
 

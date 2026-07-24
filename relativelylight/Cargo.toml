@@ -29,6 +29,12 @@ openidconnect = { version = "4", optional = true } # OIDC relying-party (SSO); d
 regex = { version = "1", optional = true }         # SSO username → group mapping rules
 base64 = { version = "0.22", optional = true }     # decode the verified ID-token payload; txn cookie
 
+[dev-dependencies]
+tokio = { workspace = true }
+sea-orm = { workspace = true, features = ["sqlx-sqlite", "runtime-tokio-rustls"] } # in-memory SQLite for the auth/engine tests
+tower = { version = "0.5", features = ["util"] }  # ServiceExt::oneshot — drive the routers without a socket
+axum = "0.8"
+
 [features]
 default = ["crud", "axum"]
 crud = ["dep:sea-orm"]        # the CRUD engine + SeaORM backend (the `crud` module)

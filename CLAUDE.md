@@ -170,6 +170,13 @@ It's a Cargo workspace: the crate lives in `relativelylight/` (`crud/`, `auth/`,
 with `cargo build --all-features`, test `cargo test --all-features`, lint `cargo clippy
 --all-features`. Deps: SeaORM 1.1, axum 0.8, askama 0.13, utoipa 5, totp-rs 5.7.
 
+**Security behavior is tested by rejection.** `auth/security_tests.rs` and `crud/gate_tests.rs` drive
+the real routers over in-memory SQLite and assert the *negative* cases — bad password, bogus/expired/
+half-authenticated session, wrong TOTP code, non-manager profile writes, each gate preset's decision,
+and that a denied request never reaches the backend. Touching login, sessions, 2FA, the profile pages,
+or a gate means extending them (with a positive control, so the negatives can't pass vacuously); see
+[docs/AUTH.md §10a](docs/AUTH.md) for what they cover and what they deliberately don't.
+
 **The docs are the source of truth — treat them as part of the change, not an afterthought.** When you
 add or change functionality:
 

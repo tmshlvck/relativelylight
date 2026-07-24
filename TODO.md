@@ -27,7 +27,12 @@ Highest priority first.
   `X-Forwarded-For` parsing), structured request logging, and a configurable CORS layer. The examples
   have a minimal access log; the library should offer these as opt-in layers.
 - [ ] **Session hardening.** Rotate the session id on privilege change (login, 2FA completion),
-  optional idle vs. absolute timeout, and "sign out everywhere" (delete a user's sessions).
+  optional idle vs. absolute timeout, and "sign out everywhere" (delete a user's sessions). Include
+  invalidating a user's **other** sessions when their password is changed or reset by a manager —
+  today a stolen cookie survives the password change that was meant to kick it out.
+- [ ] **Guard the manager reset on SSO accounts.** `POST /profile/{id}` writes a local password hash
+  onto an `sso_provider` account (login is still refused, so it's hygiene, not a bypass) — refuse it
+  the way the self-service page already does.
 
 ## Auth features
 
