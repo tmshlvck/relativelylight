@@ -28,6 +28,28 @@ Highest priority first.
   optional idle vs. absolute timeout, and "sign out everywhere" (delete a user's sessions). Include
   invalidating a user's **other** sessions when their password is changed or reset by a manager —
   today a stolen cookie survives the password change that was meant to kick it out.
+- [ ] **Password-complexity validator (`validate::password`) — low priority.** Nothing enforces password
+  strength today: not the admin UI, not the JSON API, and not `POST /profile` (`password_pair_error` only
+  checks non-empty + match). The `crud` pipeline is already the right shape — the order is **coerce →
+  validate → transform** (`MetaModel::split_write`, CRUD.md § Validation), so a field validator sees the
+  **plaintext** before `MetaField::password()`'s argon2 `on_write` hashes it, and
+  `user.field("password_hash").validate_str(validate::password(..))` needs no engine change. Wanted: a
+  `PasswordPolicy { min_len, require_upper, require_digit, require_special, blocklist }` plus three
+  presets, so an app maps a config value (`password_level = 2`) onto one:
+  1. ≥ 6 chars with at least one capital **or** digit;
+  2. ≥ 8 chars with capitals, digits **and** specials;
+  3. as (2), plus reject anything containing `password`, `user`, `auth`, `123`, … (case-insensitive
+     substring).
+  **Applies to a non-empty value only** — an empty secret keeps its existing meaning (blank on edit =
+  "keep current", blank on create = login disabled), so the policy wraps in `validate::optional`.
+  **One policy, both surfaces:** the *same* validator must run in the Admin UI/API (where the app
+  chooses it per model) *and* on the self-service profile page — otherwise `/profile` stays a way around
+  the rule. That means a home in `auth` too (`Auth::password_policy(..)`, honoured by `POST /profile`
+  and, if it should apply there, `set_password`/`create_user`). Notes: a field validator only runs when
+  the field is *present* in the body, so "a password is required" still needs `validate_row` or the
+  planned `required` metadata; "must not contain the username" is inherently cross-field
+  (`validate_row`, not this validator); and NIST SP 800-63B discourages composition rules in favour of
+  length + a breached-password list, so a length-only + blocklist preset is worth offering as well.
 - [ ] **Guard the manager reset on SSO accounts.** `POST /profile/{id}` writes a local password hash
   onto an `sso_provider` account (login is still refused, so it's hygiene, not a bypass) — refuse it
   the way the self-service page already does.

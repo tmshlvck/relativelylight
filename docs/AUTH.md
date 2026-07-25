@@ -281,7 +281,11 @@ and the profile page shows a read-only notice instead of the password / 2FA cont
 provider's **auto-registration** on, an unknown user is created on first login; with it off, an admin
 must pre-create the user and set its `sso_provider` to the provider key first, else the login is
 refused. A local (password) account can't be signed into via SSO, and an account bound to one provider
-can't sign in through another.
+can't sign in through another. A **blank** `sso_provider` counts as *no* provider, exactly
+like `NULL`: an admin form that leaves the column empty writes `""`, and the account it creates must stay
+an ordinary local one. Ask `user::Model::sso_key()` / `is_sso()` rather than testing the column — the
+normalization then holds everywhere (password login, the profile page, break-glass recovery, and the SSO
+callback's own account check).
 
 **Group mapping — union of two tables, reconciled every login.**
 - A **global username-pattern table** — `regexp → [groups]` (`Sso::username_group_rule`) — matched
@@ -718,6 +722,9 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
   - the **gate presets** are asserted as a matrix — anonymous, logged-in non-member, and member ×
     read/write — and every preset treats an expired, half-authenticated, or deactivated session as
     anonymous. `GroupReadWrite::admits` follows a revoked membership on the next `identify`.
+  - a **blank `sso_provider`** is a local account: password login works, the profile page offers the
+    password form (not the SSO notice), 2FA enrolment is available and break-glass doesn't refuse it,
+    while a real provider key still refuses password login (whitespace-only counts as blank too).
   - **attempt limiting** (§5e): the sliding-window logic is unit-tested against explicit timestamps
     (locks only at the limit, lifts as failures age out, a locked key can't be extended, clear, key
     isolation, `max = 0` disables, bounded memory under a spray); over HTTP, an account locks after the

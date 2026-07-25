@@ -418,7 +418,7 @@ async fn resolve_user(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let Some(u) = existing {
-        return match u.sso_provider.as_deref() {
+        return match u.sso_key() {
             Some(key) if key == p.key => Ok(u),
             Some(_) => Err((StatusCode::FORBIDDEN, "account is bound to a different SSO provider".into())),
             None => Err((StatusCode::FORBIDDEN, "this is a local (password) account, not SSO".into())),

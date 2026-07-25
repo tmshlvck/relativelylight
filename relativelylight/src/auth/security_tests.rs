@@ -985,6 +985,45 @@ async fn a_manager_reset_cannot_turn_an_sso_account_into_a_password_login() {
     }
 }
 
+#[tokio::test]
+async fn a_blank_sso_provider_is_a_local_account() {
+    // An admin form that leaves the nullable `sso_provider` column empty writes `""` — the account it
+    // creates must still be an ordinary local one. Treating `Some("")` as "external" silently produced
+    // accounts that could never log in and whose profile page offered nothing to change.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    fx.update_user("alice", |am| am.sso_provider = Set(Some(String::new()))).await;
+    let row = fx.row("alice").await;
+    assert!(!row.is_sso(), "blank is not a provider");
+    assert_eq!(row.sso_key(), None);
+
+    // …so password login works,
+    let res = fx.try_login("alice").await;
+    res.assert_redirect("/");
+    let token = res.session_token(fx.auth.session_cookie_name()).expect("logged in");
+    // …the profile page offers the password form rather than the read-only SSO notice,
+    let page = fx.get("/profile", Some(&fx.cookie(&token))).await;
+    assert!(page.body.contains("current_password"), "local password form: {}", page.body);
+    assert!(!page.body.contains("single sign-on"));
+    // …2FA enrolment is available,
+    assert_eq!(fx.get("/profile/totp", Some(&fx.cookie(&token))).await.status, StatusCode::OK);
+    // …and break-glass doesn't refuse it as an external account.
+    reset_admin_access(&fx.db, "admin", "alice", OTHER_PW).await.unwrap();
+    assert!(fx.password_works("alice", OTHER_PW).await);
+
+    // Whitespace-only is blank too; a real key still means SSO.
+    fx.update_user("alice", |am| am.sso_provider = Set(Some("   ".into()))).await;
+    assert!(!fx.row("alice").await.is_sso(), "whitespace is not a provider");
+    fx.update_user("alice", |am| am.sso_provider = Set(Some("okta".into()))).await;
+    let row = fx.row("alice").await;
+    assert!(row.is_sso() && row.sso_key() == Some("okta"));
+    assert_eq!(
+        fx.post("/login", &form(&[("username", "alice"), ("password", OTHER_PW)]), None).await.status,
+        StatusCode::UNAUTHORIZED,
+        "a real provider still refuses password login"
+    );
+}
+
 // ===================== Attempt limiting (brute-force brake) =====================
 
 impl Resp {

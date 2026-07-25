@@ -435,7 +435,7 @@ pub async fn reset_admin_access(
 ) -> Result<(), DbErr> {
     match user::Entity::find().filter(user::Column::Username.eq(username)).one(db).await? {
         Some(existing) => {
-            if let Some(provider) = existing.sso_provider.clone() {
+            if let Some(provider) = existing.sso_key().map(str::to_string) {
                 return Err(DbErr::Custom(format!(
                     "{username} signs in through '{provider}' (SSO): a local password would be refused \
                      at login — use a local username for break-glass access, or clear its sso_provider \
@@ -902,7 +902,7 @@ async fn verify_credentials(inner: &Inner, username: &str, password: &str) -> Op
         .one(&inner.db)
         .await
         .ok()??;
-    (user.is_active && user.sso_provider.is_none() && verify_password(&user.password_hash, password))
+    (user.is_active && !user.is_sso() && verify_password(&user.password_hash, password))
         .then_some(user)
 }
 
@@ -1135,7 +1135,7 @@ async fn profile_form(
         return Redirect::to(&inner.login_path).into_response();
     };
     let (token, jar) = csrf_token(&inner, &headers, jar);
-    let frag = match &user.sso_provider {
+    let frag = match user.sso_key() {
         Some(provider) => sso_profile_html(&who, provider),
         None => change_form_html(&who, user.totp_secret.is_some(), None, None, &token),
     };

@@ -388,7 +388,17 @@ the `MetaModel` you registered.
 string fields as a masked password input** (secrets like a password: typed in, hashed by an `on_write`
 hook, never shown in reads). On **edit** a write-only field starts blank and is *omitted* from the
 save when left blank — "leave blank to keep current" — so a blank doesn't clobber the stored secret;
-on **create** it's sent as-is (an empty value is allowed, e.g. an account with no password). Relations
+on **create** it's sent as-is (an empty value is allowed, e.g. an account with no password).
+
+The modal is a real **`<form>`** submitted with `fetch` (`@submit.prevent`), so <kbd>Enter</kbd> in any
+field saves, and a browser's password manager gets the one form-submission signal it needs to offer to
+remember a credential *at the right moment*. Immediately after a successful save — and on Cancel/close —
+every `write_only` field is blanked and the form reset, so a secret never lingers in a hidden input.
+Without that, Chrome re-offers to save the **previously** created account's password on every
+subsequent row you save (it keeps re-detecting the stale value), and offers the wrong credential for
+this site. <kbd>Enter</kbd> inside a relation search box searches instead of submitting.
+
+Relations
 pick a widget by the target's size (from a `total` probe): **≤ `picker_threshold`** rows → a plain
 `<select>` (to-one) / multi-`<select>` (N:M) with all options preloaded; **more** → a live
 search→select combobox that queries the target (`GET {list_url}?q=…&view=terse`) with a

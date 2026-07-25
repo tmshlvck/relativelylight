@@ -160,8 +160,13 @@
           <h5 class="mb-0">
             <span x-text="mode === 'create' ? 'New' : 'Edit'"></span> {{ title }}
           </h5>
-          <button type="button" class="btn-close" @click="modalOpen = false"></button>
+          <button type="button" class="btn-close" @click="closeModal()"></button>
         </div>
+        <!-- A real <form>: submitting it (Save, or Enter in a field) is the signal a browser's password
+             manager needs to offer to save a credential *once*, at the right moment. We post it
+             ourselves with fetch (@submit.prevent) and clear the secret fields right after, so the
+             previous account's password can't linger in the DOM and get re-offered on the next save. -->
+        <form x-ref="editForm" @submit.prevent="save()" autocomplete="off" novalidate>
         <div class="card-body">
           <div class="alert alert-danger" x-show="rowErrors.length">
             <template x-for="e in rowErrors" :key="e"><div x-text="e"></div></template>
@@ -222,7 +227,8 @@
                   <div class="input-group">
                     <input type="text" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
                            :placeholder="form[c.name] ? selLabel(c) : searchHint(c)"
-                           x-model="pQuery[c.name]" @focus="pSearch(c)" @input.debounce.250ms="pSearch(c)">
+                           x-model="pQuery[c.name]" @focus="pSearch(c)" @input.debounce.250ms="pSearch(c)"
+                           @keydown.enter.prevent="pSearch(c)">
                     <button class="btn btn-outline-secondary" type="button"
                             x-show="form[c.name]" @click="pClear(c)" title="Clear">&times;</button>
                   </div>
@@ -248,7 +254,8 @@
                     </template>
                   </div>
                   <input type="text" class="form-control" :placeholder="searchHint(c)"
-                         x-model="pQuery[c.name]" @focus="pSearch(c)" @input.debounce.250ms="pSearch(c)">
+                         x-model="pQuery[c.name]" @focus="pSearch(c)" @input.debounce.250ms="pSearch(c)"
+                         @keydown.enter.prevent="pSearch(c)">
                   <ul class="list-group position-absolute w-100 shadow" style="z-index:1060; max-height:220px; overflow:auto"
                       x-show="pOpen[c.name] && (pResults[c.name] || []).length">
                     <template x-for="o in (pResults[c.name] || [])" :key="o.id">
@@ -266,9 +273,10 @@
           </template>
         </div>
         <div class="card-footer text-end">
-          <button class="btn btn-secondary" @click="modalOpen = false">Cancel</button>
-          <button class="btn btn-primary" @click="save()" :disabled="saving">Save</button>
+          <button type="button" class="btn btn-secondary" @click="closeModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary" :disabled="saving">Save</button>
         </div>
+        </form>
       </div>
     </div>
   </div>
@@ -505,6 +513,20 @@
           return f;
         },
         resetPicker() { this.pQuery = {}; this.pResults = {}; this.pOpen = {}; this.pLabels = {}; },
+        // Blank every write-only field (a password): the modal only hides, so a typed secret would
+        // otherwise sit in a live input until the next open — a footgun, and what makes Chrome re-offer
+        // the *last* account's password every time another row is saved.
+        clearSecrets() {
+          for (const c of this.formCols()) if (c.write_only) this.form[c.name] = "";
+        },
+        // Close the modal, leaving no secret behind (also resets the DOM form, so a browser autofill
+        // that never touched our model is cleared too).
+        async closeModal() {
+          this.clearSecrets();
+          await this.$nextTick();
+          if (this.$refs.editForm) this.$refs.editForm.reset();
+          this.modalOpen = false;
+        },
         async openCreate() {
           this.mode = "create"; this.editId = null;
           this.fieldErrors = {}; this.rowErrors = [];
@@ -575,7 +597,9 @@
             this.rowErrors = [msg];
             return;
           }
-          this.modalOpen = false;
+          // Saved. The submit already gave the browser its one chance to offer to remember the
+          // credential; wipe it now so the next save doesn't re-present the same one.
+          await this.closeModal();
           await this.load();
         },
         async del(item) {

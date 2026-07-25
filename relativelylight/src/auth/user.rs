@@ -8,6 +8,9 @@
 //! `sso_provider` marks an **externally-authenticated (SSO) account**: `None` is a local account
 //! (password login); `Some(key)` means the user signs in via that OIDC provider only — password login
 //! is refused and password/2FA can't be set in their profile. Groups are managed by the SSO mapping.
+//! **An empty string counts as "no provider"**, same as `None` — a blank text input in an admin form
+//! writes `""`, and an account created that way must still be a normal local account. Always ask
+//! [`Model::sso_key`] / [`Model::is_sso`] rather than testing the column directly.
 
 use sea_orm::entity::prelude::*;
 
@@ -31,9 +34,16 @@ pub struct Model {
 }
 
 impl Model {
+    /// The provider key this account signs in through, or `None` for a local (password) account.
+    /// Normalizes a **blank** `sso_provider` to `None`: an admin form that leaves the column empty
+    /// stores `""`, which must not turn the account into an SSO one that can never log in.
+    pub fn sso_key(&self) -> Option<&str> {
+        self.sso_provider.as_deref().map(str::trim).filter(|p| !p.is_empty())
+    }
+
     /// Whether this is an SSO (externally-authenticated) account — no local password / 2FA.
     pub fn is_sso(&self) -> bool {
-        self.sso_provider.is_some()
+        self.sso_key().is_some()
     }
 }
 
