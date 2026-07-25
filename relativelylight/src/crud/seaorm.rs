@@ -47,6 +47,10 @@ pub struct MetaField {
     pub logical_type: LogicalType,
     pub is_pk: bool,
     pub is_fk: bool,
+    /// Whether the column accepts SQL NULL (read from the entity's `ColumnDef`). Reported in the
+    /// metadata + OpenAPI schema, and it decides what an **empty** submitted string means — see
+    /// [`blank_is_null`](Self::blank_is_null).
+    pub nullable: bool,
     // Visibility — you may change these:
     pub read_only: bool,
     pub write_only: bool,
@@ -56,6 +60,13 @@ pub struct MetaField {
     pub description: Option<String>, // help text shown under the field in forms
     pub default: Option<Value>,      // create-form default value (edit uses the row)
     pub display: Option<FieldDisplay>, // presentation override (e.g. int-seconds → datetime)
+    /// For a **nullable** text-ish column: store an empty submitted string as `NULL` rather than `""`
+    /// (default `true`). A blank form input means "nothing here", and a column that is `NULL` for some
+    /// rows and `""` for others is a trap for every later `is_some()` check. Set it `false` when an
+    /// empty string is a value you mean to keep distinct from absent. Ignored on a `NOT NULL` column,
+    /// where `""` is the only way to say "empty" (that's what keeps `MetaField::password()`'s
+    /// blank-means-no-password behaviour working).
+    pub blank_is_null: bool,
     // Optional user hooks:
     pub validate: Option<Validator>,
     pub on_write: Option<WriteTransform>,
@@ -107,6 +118,23 @@ impl MetaField {
     pub fn datetime(&mut self) -> &mut Self {
         self.display = Some(FieldDisplay::DateTime);
         self
+    }
+
+    /// Canonicalize an empty submitted string on a **nullable** text-ish column to `null` (see
+    /// [`blank_is_null`](Self::blank_is_null)). Runs right after coercion, so validators and
+    /// `on_write` hooks — and the row that lands in the database — all see one representation of
+    /// "nothing here" instead of `NULL` for some writers and `""` for others.
+    fn normalize_blank(&self, v: Value) -> Value {
+        let blankable = matches!(
+            self.logical_type,
+            LogicalType::Text | LogicalType::Uuid | LogicalType::Date | LogicalType::DateTime
+        );
+        match &v {
+            Value::String(s) if self.nullable && self.blank_is_null && blankable && s.is_empty() => {
+                Value::Null
+            }
+            _ => v,
+        }
     }
 
     /// Attach a string [validator](crate::validate) — sugar over setting [`validate`](Self::validate)
@@ -425,8 +453,11 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                 let name = c.as_str().to_string();
                 let is_pk = pk.contains(&name);
                 let is_fk = fk_cols.contains(&name);
+                let def = c.def();
                 MetaField {
-                    logical_type: logical_type(c.def().get_column_type()),
+                    logical_type: logical_type(def.get_column_type()),
+                    nullable: def.is_null(),
+                    blank_is_null: true,
                     read_only: is_pk,
                     write_only: false,
                     hidden: is_fk,
@@ -545,6 +576,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                     logical_type: f.logical_type,
                     read_only: f.read_only,
                     write_only: f.write_only,
+                    nullable: f.nullable,
                     label: f.label.clone(),
                     description: f.description.clone(),
                     default: f.default.clone(),
@@ -591,7 +623,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                 continue;
             }
             let Some(raw) = obj.get(&f.name) else { continue };
-            match coerce(f.logical_type, raw) {
+            match coerce(f.logical_type, raw).map(|v| f.normalize_blank(v)) {
                 Err(e) => errs.field(&f.name, e),
                 Ok(norm) => {
                     if let Some(v) = &f.validate {
@@ -1121,6 +1153,144 @@ impl Crud {
     }
 }
 
+/// A tiny entity for the metadata tests: one NOT NULL and one nullable text column, plus a nullable
+/// int, so introspection has something to read `ColumnDef::is_null()` off.
+#[cfg(test)]
+mod nullable_tests {
+    use super::*;
+
+    mod thing {
+        use sea_orm::entity::prelude::*;
+
+        #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, serde::Serialize, serde::Deserialize)]
+        #[sea_orm(table_name = "thing")]
+        pub struct Model {
+            #[sea_orm(primary_key)]
+            pub id: i32,
+            pub name: String,             // NOT NULL
+            pub nickname: Option<String>, // nullable
+            pub note: Option<String>,     // nullable
+            pub rank: Option<i32>,        // nullable int
+        }
+
+        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+        pub enum Relation {}
+
+        impl ActiveModelBehavior for ActiveModel {}
+    }
+
+    /// The metadata a frontend/OpenAPI consumer sees for each column.
+    fn nullability(mm: &MetaModel<thing::Entity>) -> Vec<(String, bool)> {
+        mm.columns()
+            .into_iter()
+            .filter_map(|c| match c {
+                ColumnMeta::Field { name, nullable, .. } => Some((name, nullable)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nullability_is_read_from_the_entity() {
+        let mm = MetaModel::new(thing::Entity);
+        assert_eq!(
+            nullability(&mm),
+            vec![
+                ("id".to_string(), false),
+                ("name".to_string(), false),
+                ("nickname".to_string(), true),
+                ("note".to_string(), true),
+                ("rank".to_string(), true),
+            ]
+        );
+    }
+
+    /// Coerce + normalize one write body, returning the scalars that would be written.
+    fn scalars(mm: &MetaModel<thing::Entity>, body: Value) -> Vec<(String, Value)> {
+        let obj = body.as_object().unwrap().clone();
+        let (scalars, _, _) = mm.prepare_write(&obj, true).expect("no validation errors");
+        scalars
+    }
+
+    #[test]
+    fn a_blank_string_becomes_null_only_where_null_is_possible() {
+        let mm = MetaModel::new(thing::Entity);
+        let out = scalars(&mm, serde_json::json!({ "name": "", "nickname": "", "note": "  " }));
+        assert_eq!(
+            out,
+            vec![
+                // NOT NULL: "" is the only way to say "empty", so it's kept verbatim. This is what
+                // keeps `MetaField::password()`'s blank-means-no-password behaviour working.
+                ("name".to_string(), Value::String(String::new())),
+                // Nullable: a blank input means "nothing here" → SQL NULL, not "".
+                ("nickname".to_string(), Value::Null),
+                // Only an *empty* string is canonicalized; whitespace is content.
+                ("note".to_string(), Value::String("  ".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn values_and_explicit_nulls_pass_through_untouched() {
+        let mm = MetaModel::new(thing::Entity);
+        let out = scalars(
+            &mm,
+            serde_json::json!({ "name": "thing", "nickname": "nick", "note": null, "rank": 3 }),
+        );
+        assert_eq!(
+            out,
+            vec![
+                ("name".to_string(), Value::String("thing".into())),
+                ("nickname".to_string(), Value::String("nick".into())),
+                ("note".to_string(), Value::Null),
+                ("rank".to_string(), Value::from(3)),
+            ]
+        );
+    }
+
+    #[test]
+    fn blank_is_null_can_be_switched_off_per_field() {
+        // For a column where "" and NULL are meaningfully different to the app.
+        let mut mm = MetaModel::new(thing::Entity);
+        mm.field("nickname").blank_is_null = false;
+        let out = scalars(&mm, serde_json::json!({ "nickname": "" }));
+        assert_eq!(out, vec![("nickname".to_string(), Value::String(String::new()))]);
+    }
+
+    #[test]
+    fn a_validator_sees_the_canonical_value() {
+        // The normalization runs before `validate`, so a predicate lifted with `validate_str` gets
+        // `null` (which it passes — nullability is the column's concern) rather than "".
+        let mut mm = MetaModel::new(thing::Entity);
+        mm.field("nickname").validate_str(crate::validate::non_empty);
+        let out = scalars(&mm, serde_json::json!({ "nickname": "" }));
+        assert_eq!(out, vec![("nickname".to_string(), Value::Null)], "blank was not rejected as empty");
+        // …and a real value still goes through the predicate, which still rejects what it should
+        // (`non_empty` treats whitespace as empty).
+        let ok = serde_json::json!({ "nickname": "nick" }).as_object().unwrap().clone();
+        assert!(mm.prepare_write(&ok, true).is_ok());
+        let blank = serde_json::json!({ "nickname": "   " }).as_object().unwrap().clone();
+        assert!(mm.prepare_write(&blank, true).is_err(), "whitespace-only is still rejected");
+    }
+
+    #[test]
+    fn the_metadata_json_carries_nullability() {
+        let mm = MetaModel::new(thing::Entity);
+        let cols = mm.columns();
+        let engine_view: Vec<Value> = cols
+            .into_iter()
+            .filter_map(|c| match c {
+                ColumnMeta::Field { name, nullable, .. } => {
+                    Some(serde_json::json!({ "name": name, "nullable": nullable }))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(engine_view.iter().any(|c| c["name"] == "nickname" && c["nullable"] == true));
+        assert!(engine_view.iter().any(|c| c["name"] == "name" && c["nullable"] == false));
+    }
+}
+
 #[cfg(all(test, feature = "auth"))]
 mod tests {
     use super::*;
@@ -1132,6 +1302,8 @@ mod tests {
             logical_type: LogicalType::Text,
             is_pk: false,
             is_fk: false,
+            nullable: false,
+            blank_is_null: true,
             read_only: false,
             write_only: false,
             hidden: false,

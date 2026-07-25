@@ -127,6 +127,8 @@ pub struct MetaField {
     pub display: Option<FieldDisplay>, // presentation override, e.g. DateTime (see .datetime())
     // hooks (optional; all None):
     pub validate:  Option<Box<dyn Fn(&Value) -> Result<(), String> + ...>>,
+    pub nullable:  bool,        // from the entity: does the column accept NULL? (read-only info)
+    pub blank_is_null: bool,    // nullable + empty string submitted → store NULL (default true)
     pub on_write:  Option<Box<dyn Fn(Value) -> Value + ...>>,   // inbound  (e.g. hash)
     pub on_read:   Option<Box<dyn Fn(&Value) -> Value + ...>>,  // outbound (e.g. redact)
 }
@@ -315,6 +317,32 @@ post.validate_row = Some(Box::new(|fields| {
 ```
 
 Field errors render under the field; `errors[]` are cross-field/banner errors.
+
+### Nullable columns: `""` vs `NULL`
+
+Nullability is read from the entity (`ColumnDef::is_null()`) into `MetaField::nullable`, reported in the
+metadata (`"nullable": true`) and in the OpenAPI schema (as a 3.1 type union, `"type": ["string","null"]`).
+It also decides what an **empty** submitted string means:
+
+| Column | Submitted `""` | Stored |
+|---|---|---|
+| nullable text/uuid/date/datetime | "nothing here" | `NULL` |
+| `NOT NULL` | the empty string | `""` |
+
+The canonicalization happens in the engine (right after coercion, before validators and `on_write`), so
+**every** writer gets it — the admin UI, an API client, a CSV import. Without it a column ends up `NULL`
+for some rows and `""` for others, and every later `is_some()` check becomes a trap: that is exactly how
+an account created in the admin panel could end up with `sso_provider = ""` and never log in again
+(AUTH.md §5b). Two consequences worth knowing:
+
+- Validators see the canonical value, so a `validate_str` predicate gets `null` (which passes —
+  nullability is the column's concern) instead of `""`.
+- A `NOT NULL` column is untouched, which is what keeps `MetaField::password()`'s blank-means-no-password
+  behaviour working.
+
+Set `field("x").blank_is_null = false` where an empty string is a value you mean to keep distinct from
+absent. In the admin form, a column that is `NOT NULL` **and** has no default is marked with a red `*`;
+that marker is advisory — the API and the database remain the enforcement points.
 
 ## Metadata
 

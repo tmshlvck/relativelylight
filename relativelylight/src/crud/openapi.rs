@@ -12,7 +12,7 @@ use utoipa::openapi::path::{
 };
 use utoipa::openapi::request_body::{RequestBody, RequestBodyBuilder};
 use utoipa::openapi::schema::{
-    ArrayBuilder, ComponentsBuilder, ObjectBuilder, Ref, SchemaFormat, Type,
+    ArrayBuilder, ComponentsBuilder, ObjectBuilder, Ref, SchemaFormat, SchemaType, Type,
 };
 use utoipa::openapi::{
     InfoBuilder, OpenApi, OpenApiBuilder, RefOr, Required, ResponseBuilder, Responses,
@@ -34,6 +34,35 @@ fn string_fmt(fmt: &str) -> RefOr<Schema> {
             .format(Some(SchemaFormat::Custom(fmt.to_string())))
             .build(),
     ))
+}
+
+/// Widen a scalar schema to also admit `null` — OpenAPI 3.1 spells that as a type union
+/// (`"type": ["string", "null"]`), not the 3.0 `nullable: true` keyword.
+fn or_null(schema: RefOr<Schema>) -> RefOr<Schema> {
+    let RefOr::T(Schema::Object(obj)) = schema else { return schema };
+    let types: Vec<Type> = match obj.schema_type.clone() {
+        SchemaType::Type(t) => vec![t, Type::Null],
+        SchemaType::Array(mut ts) => {
+            if !ts.contains(&Type::Null) {
+                ts.push(Type::Null);
+            }
+            ts
+        }
+        SchemaType::AnyValue => return RefOr::T(Schema::Object(obj)), // typeless already admits null
+    };
+    let mut b = ObjectBuilder::from(obj);
+    b = b.schema_type(SchemaType::from_iter(types));
+    RefOr::T(Schema::Object(b.build()))
+}
+
+/// JSON Schema for a scalar field, by logical type. `nullable` columns admit `null` as well.
+fn scalar_nullable(ty: LogicalType, nullable: bool) -> RefOr<Schema> {
+    let s = scalar(ty);
+    if nullable {
+        or_null(s)
+    } else {
+        s
+    }
 }
 
 /// JSON Schema for a scalar field, by logical type.
@@ -74,9 +103,9 @@ fn record_schema(cols: &[ColumnMeta]) -> RefOr<Schema> {
     let mut o = ObjectBuilder::new();
     for c in cols {
         match c {
-            ColumnMeta::Field { name, logical_type, write_only, .. } => {
+            ColumnMeta::Field { name, logical_type, write_only, nullable, .. } => {
                 if !write_only {
-                    o = o.property(name, scalar(*logical_type));
+                    o = o.property(name, scalar_nullable(*logical_type, *nullable));
                 }
             }
             ColumnMeta::Relation { name, cardinality, .. } => {
@@ -98,9 +127,9 @@ fn write_schema(cols: &[ColumnMeta]) -> RefOr<Schema> {
     let mut o = ObjectBuilder::new();
     for c in cols {
         match c {
-            ColumnMeta::Field { name, logical_type, read_only, .. } => {
+            ColumnMeta::Field { name, logical_type, read_only, nullable, .. } => {
                 if !read_only {
-                    o = o.property(name, scalar(*logical_type));
+                    o = o.property(name, scalar_nullable(*logical_type, *nullable));
                 }
             }
             ColumnMeta::Relation { name, cardinality, read_only, .. } => {
@@ -281,6 +310,38 @@ pub fn json(engine: &Engine, title: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A nullable column must admit `null` in both schemas — OpenAPI 3.1 spells that as a type union
+    /// (`"type": ["string","null"]`), not the 3.0 `nullable: true` keyword. Asserted on the serialized
+    /// JSON, which is what a client actually reads.
+    #[test]
+    fn nullable_columns_widen_the_schema_type() {
+        let field = |name: &str, nullable: bool| ColumnMeta::Field {
+            name: name.into(),
+            logical_type: LogicalType::Text,
+            read_only: false,
+            write_only: false,
+            nullable,
+            label: None,
+            description: None,
+            default: None,
+            display: None,
+        };
+        let cols = vec![field("name", false), field("nickname", true)];
+
+        for schema in [record_schema(&cols), write_schema(&cols)] {
+            let json = serde_json::to_value(&schema).expect("serializes");
+            let props = &json["properties"];
+            assert_eq!(props["name"]["type"], serde_json::json!("string"), "NOT NULL: plain string");
+            assert_eq!(
+                props["nickname"]["type"],
+                serde_json::json!(["string", "null"]),
+                "nullable: a type union, got {}",
+                props["nickname"]
+            );
+        }
+    }
     use super::scalar;
     use crate::crud::engine::LogicalType;
 

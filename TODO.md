@@ -31,7 +31,7 @@ Highest priority first.
 - [ ] **Password-complexity validator (`validate::password`) — low priority.** Nothing enforces password
   strength today: not the admin UI, not the JSON API, and not `POST /profile` (`password_pair_error` only
   checks non-empty + match). The `crud` pipeline is already the right shape — the order is **coerce →
-  validate → transform** (`MetaModel::split_write`, CRUD.md § Validation), so a field validator sees the
+  validate → transform** (`MetaModel::prepare_write`, CRUD.md § Validation), so a field validator sees the
   **plaintext** before `MetaField::password()`'s argon2 `on_write` hashes it, and
   `user.field("password_hash").validate_str(validate::password(..))` needs no engine change. Wanted: a
   `PasswordPolicy { min_len, require_upper, require_digit, require_special, blocklist }` plus three
@@ -67,7 +67,12 @@ Highest priority first.
 - [ ] Second backend behind the `Accessor` seam (in-memory or another ORM).
 - [ ] Batch relation reads (avoid N+1 on relation resolution).
 - [ ] Composite-PK URL token + a `row_key` escape hatch.
-- [ ] Richer field metadata (enum `options`, nullable/`required`).
+- [ ] Richer field metadata: enum `options`, and **engine-side `required` enforcement**. `nullable`
+  now ships (read from `ColumnDef::is_null()`, in the metadata + OpenAPI, driving the `""`→`NULL`
+  canonicalization and the form's `*` marker), but a missing `NOT NULL` column is still whatever the
+  database says (a 500) rather than a 422 field error. Enforcing presence needs care: columns filled by
+  an `ActiveModelBehavior::before_save` hook (`created_at`/`updated_at`) are legitimately absent from the
+  body, so it needs an opt-out per field rather than a blanket derive.
 
 ## crud::ui / time
 

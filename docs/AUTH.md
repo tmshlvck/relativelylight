@@ -290,7 +290,10 @@ can't sign in through another. A **blank** `sso_provider` counts as *no* provide
 like `NULL`: an admin form that leaves the column empty writes `""`, and the account it creates must stay
 an ordinary local one. Ask `user::Model::sso_key()` / `is_sso()` rather than testing the column — the
 normalization then holds everywhere (password login, the profile page, break-glass recovery, and the SSO
-callback's own account check).
+callback's own account check). Rows written *before* the admin UI learned to send `null` for an empty
+nullable column can be tidied with `auth::normalize_blank_user_columns(&db)` (blank `sso_provider` /
+`totp_secret` / `totp_pending` → `NULL`; idempotent, safe on every start) — hygiene only, since the
+readers tolerate blanks either way.
 
 **Group mapping — union of two tables, reconciled every login.**
 - A **global username-pattern table** — `regexp → [groups]` (`Sso::username_group_rule`) — matched

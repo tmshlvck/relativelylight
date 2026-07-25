@@ -53,7 +53,18 @@ impl Accessor for Stub {
         "id".into()
     }
     fn columns(&self) -> Vec<ColumnMeta> {
-        Vec::new()
+        let field = |name: &str, nullable: bool| ColumnMeta::Field {
+            name: name.into(),
+            logical_type: crate::crud::LogicalType::Text,
+            read_only: false,
+            write_only: false,
+            nullable,
+            label: None,
+            description: None,
+            default: None,
+            display: None,
+        };
+        vec![field("name", false), field("nickname", true)]
     }
     async fn list(&self, _q: &ListQuery, _terse: bool) -> Result<Page> {
         self.calls.read();
@@ -371,4 +382,21 @@ async fn the_table_ui_sends_the_token_only_when_the_engine_enforces_it() {
     assert!(html.contains(r#""x-csrf-token""#), "and echoes it in the header");
     // Every write path sends it (create/update via save, both deletes, CSV import).
     assert_eq!(html.matches("csrfHeaders()").count(), 6, "one definition + five call sites");
+}
+
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn the_table_ui_is_told_which_columns_are_nullable() {
+    // The form needs it twice over: to send `null` (not "") when a nullable input is left empty, and to
+    // mark the columns a row can't be written without.
+    use crate::crud::ui::Table;
+    let gate: Arc<dyn Authz> = Arc::new(Fixed { decision: Decision::Allow, seen: Default::default() });
+    let mut engine = Engine::new("/api/v1");
+    engine.add(Arc::new(Stub { calls: Arc::new(Calls::default()) }), gate);
+    let html = Table::new(&engine, "thing").render().unwrap();
+
+    assert!(html.contains(r#""nullable":true"#), "nullability reaches the embedded column metadata");
+    assert!(html.contains(r#""nullable":false"#));
+    assert!(html.contains("c.nullable"), "…and the payload builder consults it");
+    assert!(html.contains("mustFill(c)"), "…and the label marks what must be filled");
 }

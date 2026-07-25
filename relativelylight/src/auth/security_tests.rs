@@ -986,6 +986,28 @@ async fn a_manager_reset_cannot_turn_an_sso_account_into_a_password_login() {
 }
 
 #[tokio::test]
+async fn the_cleanup_helper_nulls_blank_columns() {
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    fx.user("bob").await;
+    fx.update_user("alice", |am| {
+        am.sso_provider = Set(Some(String::new()));
+        am.totp_secret = Set(Some(String::new()));
+        am.totp_pending = Set(Some(String::new()));
+    })
+    .await;
+    fx.update_user("bob", |am| am.sso_provider = Set(Some("okta".into()))).await;
+
+    let touched = normalize_blank_user_columns(&fx.db).await.unwrap();
+    assert_eq!(touched, 3, "one row × three columns");
+    let alice = fx.row("alice").await;
+    assert!(alice.sso_provider.is_none() && alice.totp_secret.is_none() && alice.totp_pending.is_none());
+    assert_eq!(fx.row("bob").await.sso_provider.as_deref(), Some("okta"), "real values untouched");
+    // Idempotent: nothing left to do on a second run.
+    assert_eq!(normalize_blank_user_columns(&fx.db).await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn a_blank_totp_secret_is_no_second_factor() {
     // Same trap as a blank `sso_provider`, with a worse outcome: treating `Some("")` as "2FA on" would
     // demand a login code that no authenticator can produce — the account could never log in again.

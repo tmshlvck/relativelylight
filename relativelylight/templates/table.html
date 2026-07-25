@@ -173,7 +173,11 @@
           </div>
           <template x-for="c in formCols()" :key="c.name">
             <div class="mb-3">
-              <label class="form-label" x-text="c.label || c.name"></label>
+              <label class="form-label">
+                <span x-text="c.label || c.name"></span>
+                <!-- NOT NULL with no default: the row can't be written without a value. -->
+                <span x-show="mustFill(c)" class="text-danger" title="Required">*</span>
+              </label>
 
               <template x-if="c.kind === 'field' && c.type === 'Bool'">
                 <div class="form-check form-switch">
@@ -512,6 +516,12 @@
           }
           return f;
         },
+        // Whether a form field has to carry a value: a NOT NULL column with no default that this form
+        // actually writes. Advisory (the API is the enforcement point) — it just marks the label.
+        mustFill(c) {
+          if (c.kind !== "field" || c.read_only || c.nullable) return false;
+          return c.default === undefined || c.default === null;
+        },
         resetPicker() { this.pQuery = {}; this.pResults = {}; this.pOpen = {}; this.pLabels = {}; },
         // Blank every write-only field (a password): the modal only hides, so a typed secret would
         // otherwise sit in a live input until the next open — a footgun, and what makes Chrome re-offer
@@ -570,6 +580,10 @@
               // A blank write-only secret on edit means "keep current" — omit it so it isn't cleared.
               // (On create it's sent through, so an empty password is allowed and stored as such.)
               if (c.write_only && empty && this.mode === "edit") continue;
+              // On a nullable column an empty input means "nothing here" → send null, so the row gets
+              // SQL NULL instead of "" (the server canonicalizes this too; sending it honestly keeps
+              // the wire format truthful). A NOT NULL column has no such option: "" is its "empty".
+              if (empty && c.nullable && !c.write_only) { p[c.name] = null; continue; }
               p[c.name] = v === undefined ? "" : v;
             }
           }

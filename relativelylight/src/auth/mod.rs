@@ -454,6 +454,27 @@ pub async fn reset_admin_access(
     add_to_group(db, username, admin_group).await
 }
 
+/// Rewrite blank `sso_provider` / `totp_secret` / `totp_pending` values on `auth_user` to `NULL` — a
+/// one-off cleanup for rows written before the admin UI knew that an empty input on a nullable column
+/// means "nothing here" (see `docs/CRUD.md` § nullable columns). Returns the number of rows touched.
+///
+/// The readers tolerate blanks either way ([`user::Model::sso_key`], [`totp_key`](user::Model::totp_key)),
+/// so this is hygiene rather than a fix: it stops the column being `NULL` for some rows and `""` for
+/// others, which is what trips up hand-written queries. Safe to call on every start, or once from a
+/// migration.
+pub async fn normalize_blank_user_columns(db: &DatabaseConnection) -> Result<u64, DbErr> {
+    let mut touched = 0;
+    for col in [user::Column::SsoProvider, user::Column::TotpSecret, user::Column::TotpPending] {
+        let res = user::Entity::update_many()
+            .col_expr(col, sea_orm::sea_query::Expr::value(Option::<String>::None))
+            .filter(col.eq(""))
+            .exec(db)
+            .await?;
+        touched += res.rows_affected;
+    }
+    Ok(touched)
+}
+
 /// The group names a user belongs to.
 async fn groups_of(db: &DatabaseConnection, user_id: i32) -> Vec<String> {
     let memberships = user_group::Entity::find()

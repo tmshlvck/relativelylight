@@ -49,7 +49,8 @@ the backend returns finished JSON; the engine forwards it and adds the metadata 
 - A second backend (in-memory, another ORM) behind the ORM-neutral `Accessor` seam — no core change.
 - Batch relation reads (relation resolution is currently per-target — N+1).
 - Composite-PK URL token + a `row_key` escape hatch.
-- Richer field metadata (enum `options`, nullable/`required`).
+- Richer field metadata: `nullable` ships (introspected, in the metadata + OpenAPI, and canonicalizing an
+  empty submitted string to `NULL`); still open are enum `options` and engine-side `required` enforcement.
 
 ## 2. `crud::ui` — auto-generated web admin ✅
 

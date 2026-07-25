@@ -125,6 +125,10 @@ pub enum ColumnMeta {
         logical_type: LogicalType,
         read_only: bool,
         write_only: bool,
+        /// Whether the column accepts SQL NULL. Drives the UI's "empty means nothing here" handling
+        /// (an empty input on a nullable column is sent as `null`, not `""`) and the schema's type
+        /// union; its inverse tells a form which fields must carry a value.
+        nullable: bool,
         label: Option<String>,
         description: Option<String>,
         default: Option<Value>,
@@ -427,6 +431,7 @@ impl Engine {
                 logical_type,
                 read_only,
                 write_only,
+                nullable,
                 label,
                 description,
                 default,
@@ -435,6 +440,7 @@ impl Engine {
                 let mut o = json!({
                     "kind": "field", "name": name, "type": logical_type,
                     "read_only": read_only, "write_only": write_only,
+                    "nullable": nullable,
                 });
                 if let Some(l) = label {
                     o["label"] = json!(l);
