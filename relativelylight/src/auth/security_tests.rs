@@ -26,6 +26,9 @@ use tower::ServiceExt; // oneshot
 
 const PW: &str = "correct-horse-battery-staple";
 const OTHER_PW: &str = "hunter2";
+/// The CSRF token the fixture's posts carry. Double-submit is stateless — what matters is that the
+/// cookie and the submitted value agree, so a test can pick the value.
+const CSRF: &str = "5cbf19b46ff34d0a8de0dcbe12b6b7e2c0c1a5f4b3e2d1c0b9a8978685746352";
 
 // ===================== Fixture =====================
 
@@ -134,7 +137,25 @@ impl Fx {
         self.send(self.req("GET", path, cookie).body(Body::empty()).unwrap()).await
     }
 
+    /// Post as a browser filling in one of our forms: the body carries the hidden `_csrf` field and
+    /// the request carries the matching token cookie. Use [`post_raw`](Fx::post_raw) to post without
+    /// one (that's what the CSRF tests do).
     async fn post(&self, path: &str, form: &str, cookie: Option<&str>) -> Resp {
+        let body = if form.is_empty() {
+            format!("{}={CSRF}", crate::csrf::FIELD)
+        } else {
+            format!("{form}&{}={CSRF}", crate::csrf::FIELD)
+        };
+        let csrf_cookie = format!("{}={CSRF}", self.auth.csrf().cookie());
+        let cookie = match cookie {
+            Some(c) => format!("{c}; {csrf_cookie}"),
+            None => csrf_cookie,
+        };
+        self.post_raw(path, &body, Some(&cookie)).await
+    }
+
+    /// Post exactly what's given — nothing added, so the CSRF check sees only what the caller sent.
+    async fn post_raw(&self, path: &str, form: &str, cookie: Option<&str>) -> Resp {
         let req = self
             .req("POST", path, cookie)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -925,6 +946,191 @@ async fn a_manager_reset_cannot_turn_an_sso_account_into_a_password_login() {
         assert_eq!(res.status, StatusCode::UNAUTHORIZED, "SSO accounts never log in by password");
         assert!(res.session_token(fx.auth.session_cookie_name()).is_none());
     }
+}
+
+// ===================== CSRF (double-submit token) =====================
+
+/// Every unsafe route `auth::routes()` serves, with a body that would otherwise succeed or at least
+/// get past extraction. Used to sweep the CSRF failure modes.
+fn unsafe_routes(other_id: i32) -> Vec<(String, String)> {
+    vec![
+        ("/login".into(), form(&[("username", "alice"), ("password", PW)])),
+        ("/login/totp".into(), form(&[("code", "000000")])),
+        (
+            "/profile".into(),
+            form(&[
+                ("current_password", PW),
+                ("new_password", OTHER_PW),
+                ("confirm_password", OTHER_PW),
+            ]),
+        ),
+        ("/profile/totp".into(), form(&[("code", "000000")])),
+        ("/profile/totp/disable".into(), String::new()),
+        (format!("/profile/{other_id}"), form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)])),
+        (format!("/profile/{other_id}/totp/disable"), String::new()),
+    ]
+}
+
+#[tokio::test]
+async fn every_unsafe_auth_route_rejects_a_missing_or_mismatched_token() {
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let victim = fx.user("victim").await;
+    let victim_secret = fx.enable_totp("victim").await;
+    // A *fully authenticated manager* session: authorization would allow all of this. Only the missing
+    // CSRF token stands in the way, which is exactly what's under test.
+    fx.user_in("admin", "admin").await;
+    let session = fx.cookie(&fx.session_for("admin").await);
+    let cookie_name = fx.auth.csrf().cookie().to_string();
+    let other = "b".repeat(64);
+
+    for (path, body) in unsafe_routes(victim) {
+        // Each of these is a request a cross-site attacker could actually make.
+        let cases = [
+            ("no token at all", body.clone(), session.clone()),
+            (
+                "cookie but no submitted token",
+                body.clone(),
+                format!("{session}; {cookie_name}={CSRF}"),
+            ),
+            (
+                "submitted token but no cookie",
+                format!("{body}&_csrf={CSRF}"),
+                session.clone(),
+            ),
+            (
+                "stale token (cookie rotated)",
+                format!("{body}&_csrf={other}"),
+                format!("{session}; {cookie_name}={CSRF}"),
+            ),
+            (
+                "empty cookie and empty field",
+                format!("{body}&_csrf="),
+                format!("{session}; {cookie_name}="),
+            ),
+        ];
+        for (what, body, cookie) in cases {
+            let res = fx.post_raw(&path, &body, Some(&cookie)).await;
+            assert_eq!(res.status, StatusCode::FORBIDDEN, "POST {path} with {what}");
+            assert!(res.body.contains("Security check failed"), "POST {path}: {}", res.body);
+            assert!(res.set_cookies().is_empty(), "POST {path} with {what}: sets no cookies");
+        }
+    }
+
+    // Nothing happened: no password changed, no 2FA touched, no session created.
+    assert!(fx.password_works("victim", PW).await && fx.password_works("admin", PW).await);
+    assert!(!fx.password_works("victim", OTHER_PW).await);
+    assert_eq!(fx.row("victim").await.totp_secret.as_deref(), Some(victim_secret.as_str()));
+    assert!(fx.row("admin").await.totp_pending.is_none(), "no enrolment was started");
+}
+
+#[tokio::test]
+async fn a_form_page_issues_the_token_and_the_matching_post_succeeds() {
+    // The end-to-end MPA flow: GET the form (cookie + hidden field), post it back, it works.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+
+    let page = fx.get("/login", None).await;
+    let set = page
+        .set_cookies()
+        .into_iter()
+        .find(|c| c.starts_with(fx.auth.csrf().cookie()))
+        .expect("the form page issues a token cookie")
+        .to_string();
+    assert!(!set.contains("HttpOnly"), "the UI's JS must be able to read it: {set}");
+    assert!(set.contains("SameSite=Strict"), "{set}");
+    let token = page.session_token(fx.auth.csrf().cookie()).expect("token value");
+    assert!(
+        page.body.contains(&format!(r#"name="_csrf" value="{token}""#)),
+        "the form embeds the same token: {}",
+        page.body
+    );
+
+    let res = fx
+        .post_raw(
+            "/login",
+            &form(&[("username", "alice"), ("password", PW), ("_csrf", &token)]),
+            Some(&format!("{}={token}", fx.auth.csrf().cookie())),
+        )
+        .await;
+    res.assert_redirect("/");
+    assert!(res.session_token(fx.auth.session_cookie_name()).is_some(), "logged in");
+    // Login is a privilege change → the token is rotated with the session.
+    let rotated = res.session_token(fx.auth.csrf().cookie()).expect("a fresh csrf cookie");
+    assert_ne!(rotated, token, "the CSRF token must rotate at login");
+}
+
+#[tokio::test]
+async fn a_second_factor_page_carries_a_token_and_logout_clears_the_cookie() {
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let secret = fx.enable_totp("alice").await;
+
+    let res = fx.post("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
+    let session = fx.cookie(&res.session_token(fx.auth.session_cookie_name()).unwrap());
+    let totp_cookie = res.session_token(fx.auth.csrf().cookie()).expect("rotated at login");
+
+    // The TOTP form embeds the current token, and the code post needs it.
+    let page = fx.get("/login/totp", Some(&format!("{session}; {}={totp_cookie}", fx.auth.csrf().cookie()))).await;
+    assert!(page.body.contains(&format!(r#"value="{totp_cookie}""#)), "{}", page.body);
+    let bad = fx
+        .post_raw("/login/totp", &form(&[("code", &totp::current_code(&secret))]), Some(&session))
+        .await;
+    assert_eq!(bad.status, StatusCode::FORBIDDEN, "even a correct code needs the token");
+
+    // Logout is a GET (SameSite=Strict covers it) and clears both cookies the browser sends.
+    let both = format!("{session}; {}={totp_cookie}", fx.auth.csrf().cookie());
+    let out = fx.get("/logout", Some(&both)).await;
+    let cleared: Vec<&str> = out.set_cookies();
+    assert!(
+        cleared.iter().any(|c| c.starts_with(&format!("{}=", fx.auth.csrf().cookie()))),
+        "logout clears the csrf cookie too: {cleared:?}"
+    );
+    assert!(out.session_token(fx.auth.csrf().cookie()).is_none(), "cleared, not reissued");
+}
+
+#[tokio::test]
+async fn a_bearer_request_is_exempt_from_the_csrf_check() {
+    // No ambient cookie → no CSRF vector, so the check must not stand in an API client's way. The
+    // request still gets no further than authn (there is no Bearer identity source yet).
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let req = fx
+        .req("POST", "/profile", None)
+        .header(header::AUTHORIZATION, "Bearer some-api-token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(form(&[
+            ("current_password", PW),
+            ("new_password", OTHER_PW),
+            ("confirm_password", OTHER_PW),
+        ])))
+        .unwrap();
+    let res = fx.send(req).await;
+    res.assert_redirect("/login"); // past CSRF, stopped by authn
+    assert_ne!(res.status, StatusCode::FORBIDDEN);
+    assert!(fx.password_works("alice", PW).await, "and it changed nothing");
+}
+
+#[tokio::test]
+async fn the_csrf_cookie_name_follows_the_configuration() {
+    let fx = Fx::with(|a| a.csrf_cookie_name("app_csrf")).await;
+    fx.user("alice").await;
+    let page = fx.get("/login", None).await;
+    assert!(
+        page.set_cookies().iter().any(|c| c.starts_with("app_csrf=")),
+        "configured name is used: {:?}",
+        page.set_cookies()
+    );
+    // The default name is then just another attacker-controlled cookie: it must not satisfy the check.
+    let token = page.session_token("app_csrf").unwrap();
+    let res = fx
+        .post_raw(
+            "/login",
+            &form(&[("username", "alice"), ("password", PW), ("_csrf", &token)]),
+            Some(&format!("rl_csrf={token}")),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "wrong cookie name proves nothing");
 }
 
 // ===================== Gate presets =====================

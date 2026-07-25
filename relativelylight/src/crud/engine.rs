@@ -52,6 +52,8 @@ pub enum Error {
     Unauthorized,
     /// Authenticated but not permitted → 403.
     Forbidden,
+    /// A cookie-authenticated write without a valid CSRF token → 403 (see [`crate::csrf`]).
+    Csrf,
 }
 
 impl std::fmt::Display for Error {
@@ -65,6 +67,7 @@ impl std::fmt::Display for Error {
             Error::Conflict(m) => write!(f, "conflict: {m}"),
             Error::Unauthorized => write!(f, "unauthorized"),
             Error::Forbidden => write!(f, "forbidden"),
+            Error::Csrf => write!(f, "csrf token missing or invalid"),
         }
     }
 }
@@ -281,6 +284,9 @@ pub struct Engine {
     authz: BTreeMap<String, Arc<dyn crate::authz::Authz>>,
     /// Optional audit sink; fired after each committed write (see [`crate::observe`]).
     observer: Option<Arc<dyn crate::observe::WriteObserver>>,
+    /// Optional CSRF checker; when set, every write must carry a valid token (see [`crate::csrf`]).
+    #[cfg(feature = "csrf")]
+    csrf: Option<crate::csrf::Csrf>,
 }
 
 impl Engine {
@@ -297,6 +303,8 @@ impl Engine {
             accessors: BTreeMap::new(),
             authz: BTreeMap::new(),
             observer: None,
+            #[cfg(feature = "csrf")]
+            csrf: None,
         }
     }
 
@@ -304,6 +312,41 @@ impl Engine {
     /// [`crate::observe`]. Usually set via `Crud::on_write`.
     pub fn set_observer(&mut self, observer: Arc<dyn crate::observe::WriteObserver>) {
         self.observer = Some(observer);
+    }
+
+    /// Require a valid CSRF token on every write through this engine — see [`crate::csrf`]. Pass the
+    /// app's checker (`auth.csrf()`) so the API and the auth forms share one token cookie. Usually set
+    /// via `Crud::csrf`.
+    #[cfg(feature = "csrf")]
+    pub fn set_csrf(&mut self, csrf: crate::csrf::Csrf) {
+        self.csrf = Some(csrf);
+    }
+
+    /// The CSRF cookie name writes must echo, or `None` when this engine doesn't enforce CSRF. The
+    /// `crud::ui` tables read it to decide whether their `fetch` calls send the header.
+    #[cfg(feature = "csrf")]
+    pub fn csrf_cookie_name(&self) -> Option<&str> {
+        self.csrf.as_ref().map(|c| c.cookie())
+    }
+
+    /// The CSRF cookie name writes must echo — always `None` in a build without the `csrf` feature.
+    #[cfg(not(feature = "csrf"))]
+    pub fn csrf_cookie_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Whether this request satisfies the CSRF check (always `true` when CSRF isn't configured).
+    #[cfg(feature = "csrf")]
+    fn csrf_ok(&self, headers: &::http::HeaderMap) -> bool {
+        match &self.csrf {
+            Some(csrf) => csrf.verify(headers, None), // JSON/CSV API: the header is the only carrier
+            None => true,
+        }
+    }
+
+    #[cfg(not(feature = "csrf"))]
+    fn csrf_ok(&self, _headers: &::http::HeaderMap) -> bool {
+        true
     }
 
     /// The gate governing `slug` (or `None` for an unregistered slug).
@@ -553,6 +596,10 @@ mod http {
                     (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" })))
                 }
                 Error::Forbidden => (StatusCode::FORBIDDEN, Json(json!({ "error": "forbidden" }))),
+                Error::Csrf => (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "csrf token missing or invalid" })),
+                ),
             }
             .into_response()
         }
@@ -561,6 +608,21 @@ mod http {
     type St = State<Arc<Engine>>;
 
     use crate::authz::{Decision, Operation};
+
+    /// The guard every **write** handler runs first: the CSRF check (when the engine enforces one)
+    /// before the gate, so a forged cross-site request is rejected without a session lookup or any
+    /// other work. Safe methods don't call it — they need no token.
+    async fn authorize_write(
+        e: &Engine,
+        op: Operation,
+        model: &str,
+        headers: &HeaderMap,
+    ) -> Result<(), Error> {
+        if !e.csrf_ok(headers) {
+            return Err(Error::Csrf);
+        }
+        authorize(e, op, model, headers).await
+    }
 
     /// Consult the model's gate: resolve the caller from the request headers and map the
     /// [`Decision`](crate::authz::Decision) to `401`/`403`. An unregistered model has no gate — let
@@ -665,7 +727,7 @@ mod http {
         Path(entity): Path<String>,
         Json(body): Json<Value>,
     ) -> std::result::Result<(StatusCode, Json<Value>), Error> {
-        authorize(&e, Operation::Create, &entity, &headers).await?;
+        authorize_write(&e, Operation::Create, &entity, &headers).await?;
         let created = e.create(&entity, &body).await?;
         notify(&e, Operation::Create, &entity, None, None, Some(&created), &headers, peer).await;
         Ok((StatusCode::CREATED, Json(created)))
@@ -678,7 +740,7 @@ mod http {
         Path((entity, pk)): Path<(String, String)>,
         Json(body): Json<Value>,
     ) -> std::result::Result<Json<Value>, Error> {
-        authorize(&e, Operation::Update, &entity, &headers).await?;
+        authorize_write(&e, Operation::Update, &entity, &headers).await?;
         // Snapshot the prior state for the audit event (best-effort).
         let before = e.get(&entity, &pk).await.ok();
         let updated = e.update(&entity, &pk, &body).await?;
@@ -692,7 +754,7 @@ mod http {
         MaybePeer(peer): MaybePeer,
         Path((entity, pk)): Path<(String, String)>,
     ) -> std::result::Result<Json<Value>, Error> {
-        authorize(&e, Operation::Delete, &entity, &headers).await?;
+        authorize_write(&e, Operation::Delete, &entity, &headers).await?;
         // `delete` returns the deleted row — that is the "before" state.
         let deleted = e.delete(&entity, &pk).await?;
         notify(&e, Operation::Delete, &entity, Some(&pk), Some(&deleted), None, &headers, peer).await;
@@ -707,7 +769,7 @@ mod http {
         Path(entity): Path<String>,
         Query(params): Query<HashMap<String, String>>,
     ) -> std::result::Result<Json<Value>, Error> {
-        authorize(&e, Operation::Delete, &entity, &headers).await?;
+        authorize_write(&e, Operation::Delete, &entity, &headers).await?;
         let res = e.delete_where(&entity, &parse_list_query(params)).await?;
         // Bulk delete: record the affected count, not every row.
         notify(&e, Operation::Delete, &entity, None, Some(&res), None, &headers, peer).await;
@@ -750,7 +812,7 @@ mod http {
         Path(entity): Path<String>,
         body: String,
     ) -> std::result::Result<Json<Value>, Error> {
-        authorize(&e, Operation::Create, &entity, &headers).await?;
+        authorize_write(&e, Operation::Create, &entity, &headers).await?;
         let report = crate::crud::csv_io::import(&e, &entity, &body).await?;
         Ok(Json(serde_json::to_value(report).unwrap_or_else(|_| json!({}))))
     }

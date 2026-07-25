@@ -13,16 +13,15 @@ Highest priority first.
   counters with backoff/lockout; a small `auth_login_attempt` table (or an in-memory limiter with a
   pluggable store). Also cap TOTP-enrolment (`POST /profile/totp`) and password-reset attempts. This
   is the main missing brute-force defense today — there is currently **no limit** on attempts.
-- [ ] **CSRF protection.** The always-on double-submit token decided in AUTH.md §7 is still not
-  implemented; cookie-authenticated unsafe requests (login, password change, 2FA enrol/disable, the
-  admin UI `fetch` writes) rely on `SameSite=Strict` alone. Add the `csrf` cookie + `X-CSRF-Token`
-  header check; exempt Bearer-authenticated requests.
 - [ ] **Re-authenticate before sensitive changes.** Require the current password (or a fresh TOTP
   code) before disabling 2FA, changing the password, or (later) removing a PassKey.
 - [ ] **TOTP recovery / backup codes.** One-time recovery codes issued at enrolment, so a user who
   loses their authenticator isn't locked out (today only a manager can disable their 2FA).
 - [ ] **TOTP replay guard.** Reject a code that was already used within its 30s window (track the last
   accepted step per user) to prevent replay inside the skew window.
+- [ ] **CSRF follow-ups.** The double-submit token ships (AUTH.md §7). Remaining: a `Csrf` layer for
+  app-owned unsafe routes (today each handler calls `Csrf::verify` itself), and a rejection hook so an
+  app can render the 403 in its own shell instead of the built-in page.
 - [ ] **Cross-cutting middleware (AUTH.md §4).** Real-client-IP (trusted-proxy `Forwarded`/
   `X-Forwarded-For` parsing), structured request logging, and a configurable CORS layer. The examples
   have a minimal access log; the library should offer these as opt-in layers.

@@ -1089,6 +1089,24 @@ impl Crud {
         self
     }
 
+    /// Require a valid **CSRF token** on every write through this API — the double-submit token from
+    /// [`crate::csrf`]. Pass the app's checker so the API and the `auth` login/profile forms share one
+    /// token cookie:
+    ///
+    /// ```ignore
+    /// crud.csrf(auth.csrf());   // writes now need the X-CSRF-Token header
+    /// ```
+    ///
+    /// Writes then answer `403 {"error":"csrf token missing or invalid"}` unless the request echoes the
+    /// cookie in `X-CSRF-Token` (or carries an `Authorization` header, which is exempt). The
+    /// `crud::ui` tables add the header automatically. Off by default — a browserless API that
+    /// authenticates some other way needs no token.
+    #[cfg(feature = "csrf")]
+    pub fn csrf(&mut self, csrf: crate::csrf::Csrf) -> &mut Self {
+        self.engine.set_csrf(csrf);
+        self
+    }
+
     /// The underlying backend-agnostic engine (for direct use or a custom transport).
     pub fn engine(&self) -> &Engine {
         &self.engine

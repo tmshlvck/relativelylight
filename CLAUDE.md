@@ -26,6 +26,7 @@ sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 | `openapi` | | runtime OpenAPI 3.1 (`crud::openapi`) |
 | `csv` | | CSV import/export endpoints |
 | `auth` | | sessions, login, **TOTP 2FA**, profile/password pages, and the identity-resolving gate presets |
+| `csrf` | | the **double-submit CSRF token** (`csrf` module) — always on for `auth`'s forms, opt-in for the API; implied by `auth` |
 | `sso` | | **OIDC single sign-on** (Google / Okta / corporate) + group mapping (implies `auth`) |
 
 Enable only what you use — an unused feature pulls no dependencies. `auth` works **without** `crud`
@@ -114,6 +115,9 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
 - **TOTP 2FA**: users enrol from `/profile` (QR + `otpauth://` URL, verify-before-activate); once on,
   login requires the code at `/login/totp`. Self-disable, plus manager disable for others. Expose a
   password column as a hashed, write-only field with `MetaField::password()`.
+- **CSRF**: every form `auth` renders carries a hidden `_csrf` token checked on POST; turn it on for the
+  JSON API with `crud.csrf(auth.csrf())` (the admin UI's `fetch` writes then send `X-CSRF-Token`
+  automatically). `Authorization`-bearing requests are exempt. See [docs/AUTH.md §7](docs/AUTH.md).
 - **SSO / OIDC** (feature `sso`): `auth::sso::Sso` adds Google / Okta / corporate sign-in
   (`/sso/{provider}/login` + `/callback`). Local groups come from a **union** of a global
   username-regexp table and a per-provider claim table, reconciled onto the user each login. Optional

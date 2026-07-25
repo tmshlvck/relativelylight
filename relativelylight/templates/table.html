@@ -291,6 +291,16 @@
         // search→select picker state, keyed by column name:
         pBig: {}, pTotal: {}, pLabels: {}, pQuery: {}, pResults: {}, pOpen: {},
 
+        // CSRF: echo the double-submit cookie in the X-CSRF-Token header on every write. The cookie is
+        // readable on purpose (it is not a credential); a cross-site attacker can neither read nor set
+        // it. Empty name = this engine doesn't enforce CSRF, so no header is sent.
+        csrfHeaders() {
+          const name = "{{ csrf_cookie }}";
+          if (!name) return {};
+          const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
+          return m ? { "x-csrf-token": decodeURIComponent(m[1]) } : {};
+        },
+
         async load() {
           this.loading = true;
           const p = new URLSearchParams();
@@ -327,7 +337,8 @@
           if (!n) return;
           if (this.confirmDelete && !confirm(`Delete ${n} selected {{ title }}?`)) return;
           const p = new URLSearchParams({ ids: this.selected.join(",") });
-          const res = await fetch(this.dataUrl + "?" + p.toString(), { method: "DELETE" });
+          const res = await fetch(this.dataUrl + "?" + p.toString(),
+                                  { method: "DELETE", headers: this.csrfHeaders() });
           const r = await res.json();
           this.selected = [];
           if (r.deleted != null) { await this.load(); } else { alert(r.error || "delete failed"); }
@@ -337,7 +348,8 @@
           if (this.confirmDelete && !confirm(`Delete ${scope}? This cannot be undone.`)) return;
           const p = new URLSearchParams();
           if (this.q) p.set("q", this.q); else p.set("all", "true"); // whole-table wipe needs all=true
-          const res = await fetch(this.dataUrl + "?" + p.toString(), { method: "DELETE" });
+          const res = await fetch(this.dataUrl + "?" + p.toString(),
+                                  { method: "DELETE", headers: this.csrfHeaders() });
           const r = await res.json();
           if (r.deleted != null) { this.page = 1; await this.load(); } else { alert(r.error || "delete failed"); }
         },
@@ -547,7 +559,7 @@
           const url = this.mode === "create" ? this.dataUrl : this.dataUrl + "/" + this.editId;
           const method = this.mode === "create" ? "POST" : "PATCH";
           const res = await fetch(url, {
-            method, headers: { "content-type": "application/json" },
+            method, headers: { "content-type": "application/json", ...this.csrfHeaders() },
             body: JSON.stringify(this.payload()),
           });
           this.saving = false;
@@ -568,7 +580,7 @@
         },
         async del(item) {
           if (this.confirmDelete && !confirm("Delete this {{ title }} (#" + item.id + ")?")) return;
-          await fetch(this.dataUrl + "/" + item.id, { method: "DELETE" });
+          await fetch(this.dataUrl + "/" + item.id, { method: "DELETE", headers: this.csrfHeaders() });
           await this.load();
         },
 
@@ -583,7 +595,7 @@
           if (!file) return;
           const text = await file.text();
           const res = await fetch(this.dataUrl + "/_import", {
-            method: "POST", headers: { "content-type": "text/csv" }, body: text,
+            method: "POST", headers: { "content-type": "text/csv", ...this.csrfHeaders() }, body: text,
           });
           ev.target.value = "";              // allow re-importing the same file
           const r = await res.json();

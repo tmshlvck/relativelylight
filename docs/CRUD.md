@@ -34,6 +34,7 @@ sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 | `ui` | | `askama` | the server-rendered admin components (`crud::ui::Table`, `::Admin`) |
 | `openapi` | | `utoipa` | runtime OpenAPI 3.1 generation (`crud::openapi::json`) |
 | `csv` | | `csv` | CSV import/export routes + `crud::csv_io` |
+| `csrf` | | `rand_core` | `Crud::csrf` — require a CSRF token on writes (implied by `auth`) |
 
 Enable only what you use — an unused feature pulls no dependencies.
 
@@ -265,9 +266,25 @@ wipe the whole unfiltered table unless you pass `?all=true`, and returns a count
 
 ### Errors
 
-`{ "error": … }` with status **400** (bad body / unknown column), **404** (unknown entity / missing
-row), **405** (read-only), **409** (a unique / foreign-key constraint rejected the write), **422**
-(validation, structured — see below), **500** (other DB error).
+`{ "error": … }` with status **400** (bad body / unknown column), **401** (the model's gate needs a
+login), **403** (the gate denied the caller, *or* a write failed the CSRF check — see below), **404**
+(unknown entity / missing row), **405** (read-only), **409** (a unique / foreign-key constraint rejected
+the write), **422** (validation, structured — see below), **500** (other DB error).
+
+### CSRF on writes (feature `csrf`)
+
+A cookie-authenticated API is a CSRF target, so the engine can require a double-submit token on every
+write:
+
+```rust
+crud.csrf(auth.csrf());   // share the auth module's token cookie
+```
+
+Each `POST`/`PATCH`/`DELETE` must then echo the `rl_csrf` cookie in an **`X-CSRF-Token`** header, or it
+gets `403 {"error":"csrf token missing or invalid"}` — checked *before* the gate, so a forged write
+never reaches the database. Reads need no token, and requests carrying an `Authorization` header are
+exempt (a Bearer credential isn't ambient). `Table`/`Admin` add the header to their write `fetch` calls
+automatically. Off by default; full design in [AUTH.md §7](AUTH.md).
 
 ## Validation & transforms
 

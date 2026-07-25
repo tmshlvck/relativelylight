@@ -13,10 +13,10 @@ authentication** (login second factor + self-service enrol/disable + manager dis
 mapping and optional auto-registration — see §5b), admin helpers (`migrate`, `create_user`,
 `set_password`, `ensure_group`, `add_to_group`, `remove_from_group`, `make_admin`,
 `reset_admin_access`), and **per-model enforcement in the `crud` HTTP handlers** via
-`crud::seaorm::Crud::register(model, gate)`,
-mapping the gate's `Decision` to 401/403, plus per-request UI control-hiding via
-`Admin`/`Table::render_for`. **Not yet:** CSRF/CORS/real-ip/logging middleware, PassKeys. The rest
-of this doc is the design these grow into.
+`crud::seaorm::Crud::register(model, gate)` — mapping the gate's `Decision` to 401/403, plus
+per-request UI control-hiding via `Admin`/`Table::render_for` — and **double-submit CSRF protection**
+(feature `csrf`, §7: always on for the module's own forms, `Crud::csrf` for the API). **Not yet:** the
+CORS/real-ip/logging middleware, PassKeys. The rest of this doc is the design these grow into.
 
 The login, password-change, and 2FA pages are plain **MPA `<form>` posts** — no JS (the enrolment QR
 is a server-rendered inline PNG). The library renders the form fragment (Bootstrap-friendly classes);
@@ -473,21 +473,71 @@ async fn admin_page(headers: HeaderMap, State(app): State<AppState>) -> Response
 `auth.routes()` are the login/logout/password endpoints. Anything the app wants to leave open (e.g.
 `/metrics`) simply never calls `identify`.
 
-## 7. CSRF — DECIDED: always-on double-submit token
+## 7. CSRF — implemented (double-submit token, feature `csrf`)
 
-Cookie-authenticated **unsafe** requests (POST/PATCH/DELETE) must carry a CSRF token, validated
-against a cookie-bound value (double-submit). This is defense-in-depth on top of SameSite=Strict:
+Cookie-authenticated **unsafe** requests (POST/PATCH/PUT/DELETE) must carry a CSRF token, checked
+against a cookie-bound value (double-submit). Defense-in-depth on top of `SameSite=Strict`. The module
+is `relativelylight::csrf` (feature `csrf`, implied by `auth`); the type is `Csrf`.
 
-- A `csrf` cookie (readable by JS — *not* HttpOnly) is issued alongside the session; unsafe requests
-  must echo it in an `X-CSRF-Token` header (or `_csrf` form field). The server compares the two.
-- The `crud::ui` admin's `fetch` calls add the header automatically (the token is embedded in the
-  rendered fragment); a helper embeds it in server-rendered forms (login, password change).
-- **Bearer-authenticated requests are exempt** (no ambient cookie → no CSRF vector), so the app's
-  token-based API isn't burdened.
-- Safe methods (GET/HEAD) and unauthenticated requests need no token.
+**The token.** 256 random bits (hex) in the `rl_csrf` cookie (name configurable) — `SameSite=Strict`,
+`Path=/`, `Secure` unless told otherwise, lifetime matching the session TTL, and deliberately **not
+`HttpOnly`**: the admin UI's JS must read it. That is safe because the token is *not a credential* —
+it grants nothing on its own. A same-site client can always satisfy the check (read your own cookie,
+echo it); a cross-site attacker cannot, because they can neither read your cookie nor set one for your
+host. That asymmetry *is* the protection.
 
-So `Table`/`Admin` and the login/password forms work out of the box; an app writing its own
-cookie-authenticated client just reads the `csrf` cookie and sets the header.
+An unsafe request presents it in either:
+- the **`_csrf` form field** — MPA `<form>` posts (every fragment `auth` renders embeds the hidden
+  input), or
+- the **`X-CSRF-Token` header** — `fetch`/XHR clients, including `crud::ui`.
+
+**Where it's enforced.**
+
+| Surface | Enforcement | Rejection |
+|---|---|---|
+| `Auth::routes()` — `/login`, `/login/totp`, `/profile*` | **always on** | `403` + a bare "Security check failed" page |
+| the `crud` JSON API | **opt-in**: `crud.csrf(auth.csrf())` | `403 {"error":"csrf token missing or invalid"}` |
+| your own handlers | call `Csrf::verify` yourself | yours |
+
+On the auth routes the check runs **first** — before the password comparison, before any DB work — so a
+forged post costs nothing and can't be used as an argon2 amplifier. Same in the engine: the CSRF check
+precedes the gate, so a forged write never reaches a session lookup, let alone the backend. Safe methods
+(GET/HEAD, i.e. every read) need no token. A page render **issues** the cookie if the request has none
+(`Csrf::ensure`), and login / 2FA-completion **rotate** it along with the session; logout clears it.
+
+**`Authorization`-bearing requests are exempt** — an API credential isn't ambient, so a cross-site
+request can't borrow it and there's nothing to protect. This keeps a token-based API unburdened (and
+holds the door open for the app-issued API tokens of §8).
+
+**Wiring it up.** `auth`'s own pages need nothing. For the API, hand the engine the same checker so both
+surfaces share one cookie:
+
+```rust
+let auth = Auth::new(db.clone()).secure_cookies(false);   // configure Auth fully first
+let mut crud = Crud::new(db, "/api/v1");
+crud.register(post, gate);
+crud.csrf(auth.csrf());          // writes now require X-CSRF-Token
+```
+
+`Table`/`Admin` then read the cookie name off the engine and add the header to every write `fetch`
+(create, update, both deletes, CSV import) — nothing to pass in. An app-owned page that posts to its own
+route does the two halves itself:
+
+```rust
+let (token, set) = auth.csrf().ensure(&headers);          // → hidden input / JS-readable cookie
+let jar = if let Some(c) = set { jar.add(c) } else { jar };
+// …and in the POST handler:
+if !auth.csrf().verify(&headers, form.csrf.as_deref()) { return StatusCode::FORBIDDEN.into_response(); }
+```
+
+> **Note — one deviation from the original sketch.** `crud::ui` reads the token from the cookie at
+> request time rather than having it baked into the rendered fragment. Same check, but a fragment
+> rendered before a rotation (or cached) can't go stale, and `Table::render()` keeps working without
+> request headers.
+
+**Limits.** There is no `Csrf` tower layer yet, and the 403 page isn't themeable — both in
+[TODO.md](../TODO.md). Note also that a **co-hosted** app sharing the host must use a distinct
+`csrf_cookie_name` (cookies aren't port-scoped), exactly as with the session cookie.
 
 ## 8. Future-proofing (not in v1, but designed for)
 
@@ -547,7 +597,11 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   reset. Two logins: `admin` (read-write, manager) and `editor` (read-only). Verified end-to-end:
   anonymous → 303; `admin` → reads + writes, creates accounts with/without a password, resets
   `editor`'s password via `/profile/2`; `editor` → read-only panel with no Accounts section, own
-  `/profile` works, `/profile/1` and the `auth_user` API both 403. Empty-password accounts cannot log in
+  `/profile` works, `/profile/1` and the `auth_user` API both 403. **CSRF** is on for the API
+  (`crud.csrf(auth.csrf())`) and verified end-to-end in a browser: the panel's create/update/delete
+  `fetch` calls carry `X-CSRF-Token` and succeed, the same write by `curl` without the header is
+  `403 {"error":"csrf token missing or invalid"}`, reads are unaffected, and `POST /profile` without the
+  hidden `_csrf` field is 403. Empty-password accounts cannot log in
   with any password (`verify_password` fails against the empty hash). **TOTP 2FA** verified
   end-to-end: enrol (QR + otpauth URL, wrong code rejected, correct code activates); login then
   requires the second factor (`/login/totp`, awaiting session can't reach `/profile`); self-disable
@@ -602,19 +656,29 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
   - the **gate presets** are asserted as a matrix — anonymous, logged-in non-member, and member ×
     read/write — and every preset treats an expired, half-authenticated, or deactivated session as
     anonymous. `GroupReadWrite::admits` follows a revoked membership on the next `identify`.
+  - **CSRF** (§7): every unsafe auth route rejects a missing, cookie-less, header-only, mismatched, or
+    blank token with `403` and no cookies set — checked with a *fully authorized manager session*, so
+    only the token is missing — and nothing changes behind it; a `GET` form page issues the cookie
+    (JS-readable, `SameSite=Strict`) and embeds the same value, the matching post succeeds, and login
+    rotates the token; even a correct TOTP code is refused without one; logout clears the cookie; an
+    `Authorization`-bearing request is exempt; and a configured cookie name means the default name no
+    longer satisfies the check.
 - **`crud/gate_tests.rs`** — the API enforcement point, over the real engine router with a stub
   `Accessor` that counts calls: every route authorizes with the right `Operation`, `NeedsLogin` → 401
   and `Denied` → 403 with a JSON error body, a rejected request **never reaches the backend** (so a
   gate checked after the write would fail, not pass quietly), an unregistered model is a plain 404,
   and the real `UserReadGroupWrite` preset over a real login cookie gives anonymous 401 everywhere,
-  a non-member reads-only (403 on writes, zero backend writes), and a member full access.
+  a non-member reads-only (403 on writes, zero backend writes), and a member full access. With
+  `set_csrf` configured, writes without a matching `X-CSRF-Token` are `403` and never reach the backend
+  (header alone, cookie alone, mismatch, blank), reads still need no token, a Bearer client is exempt,
+  and `Table` emits the header logic only when the engine enforces CSRF.
 
 Each group carries a positive control (a correct login, a correct TOTP code, an allowing gate) so a
 mistake that breaks *everything* can't make the negatives pass vacuously.
 
 **Not covered by tests** (and open in [TODO.md](../TODO.md)): brute-force limits — the login and TOTP
-tests hammer the endpoints with no lockout, which is the current behavior, not a desired one — CSRF
-(§7, not implemented), re-authentication before disabling 2FA / changing a password, TOTP replay
+tests hammer the endpoints with no lockout, which is the current behavior, not a desired one —
+re-authentication before disabling 2FA / changing a password, TOTP replay
 inside the skew window, session-id rotation on privilege change and invalidating a user's *other*
 sessions after a password change, and the SSO callback (see the verification note in §5b). One rough
 edge the review turned up is filed there too: the manager reset isn't refused for SSO targets the way
@@ -625,8 +689,8 @@ the self-service page is (it writes a local hash that still can't log in).
 1. **Packaging** — ✅ a **feature-gated `auth` module** in the single `relativelylight` crate (authn +
    authz together). Usable without `crud`; `crud` optionally consults it.
 2. **Identity** — ✅ cookie + **server-side session** (SeaORM `session` table).
-3. **CSRF** — ✅ **always-on double-submit token** for cookie-authenticated unsafe requests; Bearer
-   requests exempt.
+3. **CSRF** — ✅ **double-submit token** (feature `csrf`, §7): always on for the module's own forms,
+   `Crud::csrf(auth.csrf())` for the JSON API; `Authorization`-bearing requests exempt.
 4. **authz config** — ✅ **one gate per model, explicit at registration**: `Crud::register(model,
    gate)`. Each gate is attached per model (no slug arg), is handed the request headers, and resolves
    the identity itself → a `Decision`. The trait lives in the always-on `authz` module (`Open` for

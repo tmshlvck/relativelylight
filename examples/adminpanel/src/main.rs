@@ -192,6 +192,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let admin_gate = Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP]));
     crud.register(auth_user_mm, admin_gate.clone());
     crud.register(auth_group_mm, admin_gate.clone());
+    // CSRF: this API is cookie-authenticated, so every write must echo the double-submit token.
+    // Sharing `auth.csrf()` puts the API and the login/profile forms on one token cookie; the panel's
+    // `fetch` calls pick it up automatically. See docs/AUTH.md §7.
+    crud.csrf(auth.csrf());
 
     // One shared engine: the router serves the API from it, and the page handler renders the admin
     // fragment from it *per request* (so write controls hide for users who can't write).

@@ -7,6 +7,7 @@
 //! - [`crud`] (default): the CRUD engine, SeaORM backend, admin UI, OpenAPI, CSV — see
 //!   `docs/CRUD.md`.
 //! - `auth`: sessions, login, and identity resolution — see `docs/AUTH.md`.
+//! - [`csrf`] (with `auth`): the double-submit CSRF token for cookie-authenticated writes.
 //! - [`authz`] (always on): the per-model authorization gate consulted by the engine.
 //!
 //! ```ignore
@@ -34,6 +35,12 @@ pub mod crud;
 
 #[cfg(feature = "auth")]
 pub mod auth;
+
+/// Double-submit CSRF protection for cookie-authenticated writes: [`Csrf`](csrf::Csrf) issues and
+/// verifies the token. Always on for `auth`'s own forms; opt-in for the `crud` API via `Crud::csrf`.
+/// Feature `csrf` (implied by `auth`). See [`docs/AUTH.md` §7](https://github.com/tmshlvck/relativelylight/blob/main/docs/AUTH.md).
+#[cfg(feature = "csrf")]
+pub mod csrf;
 
 /// Timezone-aware presentation of UTC timestamps: the [`JS`](time::JS) helpers and the
 /// [`TzPicker`](time::TzPicker) component. Storage/APIs stay integer-UTC; this is frontend only.

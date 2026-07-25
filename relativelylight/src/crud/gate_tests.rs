@@ -112,10 +112,39 @@ fn routes() -> Vec<(&'static str, &'static str, &'static str, Operation)> {
 }
 
 fn app(gate: Arc<dyn Authz>) -> (axum::Router, Arc<Calls>) {
+    build(gate, None)
+}
+
+fn build(gate: Arc<dyn Authz>, csrf: Option<crate::csrf::Csrf>) -> (axum::Router, Arc<Calls>) {
     let calls = Arc::new(Calls::default());
     let mut engine = Engine::new("/api/v1");
     engine.add(Arc::new(Stub { calls: calls.clone() }), gate);
+    if let Some(csrf) = csrf {
+        engine.set_csrf(csrf);
+    }
     (Arc::new(engine).router(), calls)
+}
+
+/// A request with an arbitrary set of extra headers (for the CSRF token / Bearer cases).
+async fn send_with(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, String) {
+    let mut b = Request::builder().method(method).uri(uri);
+    if !body.is_empty() {
+        let ct = if body.starts_with('{') { "application/json" } else { "text/csv" };
+        b = b.header(header::CONTENT_TYPE, ct);
+    }
+    for (name, value) in headers {
+        b = b.header(*name, *value);
+    }
+    let res = app.clone().oneshot(b.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
 async fn send(app: &axum::Router, method: &str, uri: &str, body: &str, cookie: Option<&str>) -> (StatusCode, String) {
@@ -224,19 +253,122 @@ async fn a_real_group_gate_rejects_anonymous_and_non_member_writes() {
     assert!(calls.snapshot().1 >= 4, "the member's writes did reach the backend");
 }
 
-/// Log `username` in through the real login route and return their `Cookie:` header.
+/// Log `username` in through the real login route and return their `Cookie:` header. The login form is
+/// CSRF-protected, so the post carries a double-submit token pair like a browser would.
 async fn login(auth: &Auth, username: &str) -> String {
     let auth_app = auth.routes();
+    let csrf = "a".repeat(64);
     let req = Request::builder()
         .method("POST")
         .uri("/login")
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .body(Body::from(format!("username={username}&password=pw")))
+        .header(header::COOKIE, format!("{}={csrf}", auth.csrf().cookie()))
+        .body(Body::from(format!("username={username}&password=pw&_csrf={csrf}")))
         .unwrap();
     let res = auth_app.oneshot(req).await.unwrap();
     assert!(res.status().is_redirection(), "login failed for {username}");
-    let set = res.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap();
     let name = auth.session_cookie_name();
-    let value = set.strip_prefix(&format!("{name}=")).unwrap().split(';').next().unwrap();
+    let value = res
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find_map(|c| c.strip_prefix(&format!("{name}=")))
+        .and_then(|rest| rest.split(';').next())
+        .expect("session cookie");
     format!("{name}={value}")
+}
+
+// ===================== CSRF on the JSON API =====================
+
+#[tokio::test]
+async fn with_csrf_configured_writes_need_the_header_and_reads_do_not() {
+    let csrf = crate::csrf::Csrf::new().secure(false);
+    let token = "c".repeat(64);
+    let cookie = format!("{}={token}", csrf.cookie());
+    let gate = Arc::new(Fixed { decision: Decision::Allow, seen: Default::default() });
+    let (app, calls) = build(gate, Some(csrf.clone()));
+
+    for (method, uri, body, op) in routes() {
+        // Reads never need a token; writes are rejected without one — even though the gate allows.
+        let (status, text) = send_with(&app, method, uri, body, &[("cookie", &cookie)]).await;
+        if op.is_write() {
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri} without the header");
+            assert!(text.contains("csrf"), "{method} {uri}: says why — {text}");
+        } else {
+            assert!(status.is_success(), "{method} {uri} is safe → no token needed, got {status}");
+        }
+    }
+    assert_eq!(calls.snapshot().1, 0, "no write reached the backend");
+
+    // The matching header (what crud::ui sends) lets them through.
+    for (method, uri, body, op) in routes().into_iter().filter(|(.., op)| op.is_write()) {
+        let (status, _) =
+            send_with(&app, method, uri, body, &[("cookie", &cookie), (crate::csrf::HEADER, &token)])
+                .await;
+        assert!(status.is_success(), "{method} {uri} ({op:?}) with a matching token → {status}");
+    }
+    assert!(calls.snapshot().1 >= 4, "writes reached the backend once the token matched");
+}
+
+#[tokio::test]
+async fn a_wrong_or_cookieless_token_does_not_pass_the_api_check() {
+    let csrf = crate::csrf::Csrf::new().secure(false);
+    let token = "c".repeat(64);
+    let cookie = format!("{}={token}", csrf.cookie());
+    let gate = Arc::new(Fixed { decision: Decision::Allow, seen: Default::default() });
+    let (app, calls) = build(gate, Some(csrf));
+
+    let cases: [(&str, Vec<(&str, &str)>); 4] = [
+        ("header alone (attacker can set headers, not cookies)", vec![(crate::csrf::HEADER, &token)]),
+        ("cookie alone", vec![("cookie", &cookie)]),
+        ("mismatched pair", vec![("cookie", &cookie), (crate::csrf::HEADER, "nope")]),
+        ("empty header", vec![("cookie", &cookie), (crate::csrf::HEADER, "")]),
+    ];
+    for (what, headers) in cases {
+        let (status, _) = send_with(&app, "POST", "/api/v1/thing", r#"{"a":1}"#, &headers).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "POST with {what}");
+    }
+    assert_eq!(calls.snapshot().1, 0, "none of them reached the backend");
+}
+
+#[tokio::test]
+async fn a_bearer_api_client_is_exempt_from_the_csrf_check() {
+    let gate = Arc::new(Fixed { decision: Decision::Allow, seen: Default::default() });
+    let (app, calls) = build(gate, Some(crate::csrf::Csrf::new()));
+    let (status, _) = send_with(
+        &app,
+        "POST",
+        "/api/v1/thing",
+        r#"{"a":1}"#,
+        &[("authorization", "Bearer token-abc")],
+    )
+    .await;
+    assert!(status.is_success(), "a non-cookie credential needs no CSRF token, got {status}");
+    assert_eq!(calls.snapshot().1, 1);
+}
+
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn the_table_ui_sends_the_token_only_when_the_engine_enforces_it() {
+    use crate::crud::ui::Table;
+    let calls = Arc::new(Calls::default());
+    let gate: Arc<dyn Authz> = Arc::new(Fixed { decision: Decision::Allow, seen: Default::default() });
+
+    let mut plain = Engine::new("/api/v1");
+    plain.add(Arc::new(Stub { calls: calls.clone() }), gate.clone());
+    let html = Table::new(&plain, "thing").render().unwrap();
+    assert!(
+        html.contains(r#"const name = "";"#),
+        "no CSRF configured → the fetch helper has no cookie to read, so it sends no header"
+    );
+
+    let mut guarded = Engine::new("/api/v1");
+    guarded.add(Arc::new(Stub { calls }), gate);
+    guarded.set_csrf(crate::csrf::Csrf::new().cookie_name("app_csrf"));
+    let html = Table::new(&guarded, "thing").render().unwrap();
+    assert!(html.contains(r#"const name = "app_csrf";"#), "reads the configured cookie name");
+    assert!(html.contains(r#""x-csrf-token""#), "and echoes it in the header");
+    // Every write path sends it (create/update via save, both deletes, CSV import).
+    assert_eq!(html.matches("csrfHeaders()").count(), 6, "one definition + five call sites");
 }

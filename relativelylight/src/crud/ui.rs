@@ -27,6 +27,8 @@ struct TableTemplate {
     confirm: bool,
     picker_threshold: u64,
     formatters: String, // JS object literal: { "col": (value, row) => htmlString, … }
+    /// CSRF cookie name to echo in write requests, or empty when the engine doesn't enforce CSRF.
+    csrf_cookie: String,
 }
 
 /// A table for one registered entity, rendered as an HTML fragment for the app shell.
@@ -153,6 +155,7 @@ impl<'a> Table<'a> {
             confirm: self.confirm,
             picker_threshold: self.picker_threshold,
             formatters,
+            csrf_cookie: self.engine.csrf_cookie_name().unwrap_or_default().to_string(),
         };
         tmpl.render().map_err(|e| Error::Backend(e.to_string()))
     }

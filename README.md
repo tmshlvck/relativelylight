@@ -89,6 +89,7 @@ post.field("title").validate = Some(Box::new(|v| {
 | `openapi` | | runtime OpenAPI 3.1 generation |
 | `csv` | | CSV import/export endpoints |
 | `auth` | | sessions, on-demand login resolution, TOTP 2FA, a per-model authorization gate |
+| `csrf` | | the double-submit CSRF token (`csrf` module); implied by `auth` |
 | `sso` | | OIDC single sign-on (Google / Okta / corporate) + group mapping (implies `auth`) |
 
 Enable only what you use — an unused feature pulls no dependencies.

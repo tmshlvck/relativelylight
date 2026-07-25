@@ -50,7 +50,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use crate::authz::{Authz, Decision, Operation};
-use rand_core::{OsRng, RngCore};
+use rand_core::OsRng;
 use sea_orm::sea_query::TableCreateStatement;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr,
@@ -509,9 +509,20 @@ struct Inner {
     profile_managers: Option<Vec<String>>,
     /// Issuer label shown in authenticator apps for TOTP enrolment (the `otpauth://` URL / QR).
     totp_issuer: String,
+    /// Name of the double-submit CSRF cookie (see [`crate::csrf`]).
+    csrf_cookie: String,
 }
 
 impl Inner {
+    /// The CSRF checker for this app: the configured cookie name, `Secure` and the lifetime tracking
+    /// the session cookie, so a live session always has a usable token.
+    fn csrf(&self) -> crate::csrf::Csrf {
+        crate::csrf::Csrf::new()
+            .cookie_name(self.csrf_cookie.clone())
+            .secure(self.secure_cookies)
+            .ttl_secs(self.ttl_secs)
+    }
+
     /// The groups that may reset *other* users' passwords: the configured manager groups, defaulting
     /// to the admin group.
     fn manager_groups(&self) -> Vec<String> {
@@ -617,6 +628,7 @@ impl Auth {
                 profile_extra: None,
                 profile_managers: None,
                 totp_issuer: "relativelylight".into(),
+                csrf_cookie: crate::csrf::Csrf::new().cookie().to_string(),
             }),
         }
     }
@@ -703,6 +715,23 @@ impl Auth {
     pub fn cookie_name(mut self, name: impl Into<String>) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().cookie_name = name.into();
         self
+    }
+
+    /// CSRF token cookie name (default `"rl_csrf"`) — see [`crate::csrf`]. As with the session cookie,
+    /// give co-hosted apps distinct names.
+    pub fn csrf_cookie_name(mut self, name: impl Into<String>) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().csrf_cookie = name.into();
+        self
+    }
+
+    /// The CSRF checker these routes use — hand it to the API so both surfaces share one token
+    /// cookie: `crud.csrf(auth.csrf())`. Also usable in your own handlers ([`csrf::Csrf::ensure`] to
+    /// hand a token to a page you render, [`csrf::Csrf::verify`] to check a post).
+    ///
+    /// [`csrf::Csrf::ensure`]: crate::csrf::Csrf::ensure
+    /// [`csrf::Csrf::verify`]: crate::csrf::Csrf::verify
+    pub fn csrf(&self) -> crate::csrf::Csrf {
+        self.inner.csrf()
     }
 
     /// The configured admin group name.
@@ -813,21 +842,33 @@ async fn create_session(inner: &Inner, user_id: i32, awaiting_totp: bool) -> Opt
 struct LoginForm {
     username: String,
     password: String,
+    #[serde(default, rename = "_csrf")]
+    csrf: Option<String>,
 }
 
-async fn login_form(State(inner): State<Arc<Inner>>) -> Html<String> {
-    Html((inner.login_shell)(&login_form_html(None)))
+async fn login_form(State(inner): State<Arc<Inner>>, headers: HeaderMap, jar: CookieJar) -> Response {
+    let (token, jar) = csrf_token(&inner, &headers, jar);
+    (jar, Html((inner.login_shell)(&login_form_html(None, &token)))).into_response()
 }
 
 async fn login_submit(
     State(inner): State<Arc<Inner>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Form(form): Form<LoginForm>,
 ) -> Response {
+    if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
+        return csrf_rejected(&inner); // checked before the password: no DB work for a forged post
+    }
     let Some(user) = verify_credentials(&inner, &form.username, &form.password).await else {
+        let (token, jar) = csrf_token(&inner, &headers, jar);
         return (
             StatusCode::UNAUTHORIZED,
-            Html((inner.login_shell)(&login_form_html(Some("Invalid username or password.")))),
+            jar,
+            Html((inner.login_shell)(&login_form_html(
+                Some("Invalid username or password."),
+                &token,
+            ))),
         )
             .into_response();
     };
@@ -836,8 +877,9 @@ async fn login_submit(
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
     };
     // The session cookie is set either way; while `awaiting_totp` it grants nothing until the second
-    // factor is confirmed at /login/totp.
-    let jar = jar.add(session_cookie(&inner, token));
+    // factor is confirmed at /login/totp. The CSRF token is rotated with it (privilege change).
+    let (_, csrf_cookie) = inner.csrf().issue();
+    let jar = jar.add(session_cookie(&inner, token)).add(csrf_cookie);
     let dest = if needs_totp {
         "/login/totp"
     } else {
@@ -850,9 +892,16 @@ async fn login_submit(
 
 /// `GET /login/totp` — the second-factor form, reached after a correct password when 2FA is on. Reads
 /// the pending session; if there isn't one, sends the visitor back to /login.
-async fn login_totp_form(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Response {
+async fn login_totp_form(
+    State(inner): State<Arc<Inner>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Response {
     match pending_totp_user(&inner, &headers).await {
-        Some(_) => Html((inner.login_shell)(&totp_login_html(None))).into_response(),
+        Some(_) => {
+            let (token, jar) = csrf_token(&inner, &headers, jar);
+            (jar, Html((inner.login_shell)(&totp_login_html(None, &token)))).into_response()
+        }
         None => Redirect::to(&inner.login_path).into_response(),
     }
 }
@@ -860,6 +909,15 @@ async fn login_totp_form(State(inner): State<Arc<Inner>>, headers: HeaderMap) ->
 #[derive(serde::Deserialize)]
 struct TotpForm {
     code: String,
+    #[serde(default, rename = "_csrf")]
+    csrf: Option<String>,
+}
+
+/// The body of a post that carries nothing but the CSRF token (the "disable 2FA" buttons).
+#[derive(serde::Deserialize)]
+struct CsrfOnlyForm {
+    #[serde(default, rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 /// `POST /login/totp` — verify the code against the pending session's user; on success clear
@@ -867,16 +925,22 @@ struct TotpForm {
 async fn login_totp_submit(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
+    jar: CookieJar,
     Form(form): Form<TotpForm>,
 ) -> Response {
+    if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
+        return csrf_rejected(&inner);
+    }
     let Some((session, user)) = pending_totp_user(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
     let ok = user.totp_secret.as_deref().is_some_and(|s| totp::verify(s, &form.code));
     if !ok {
+        let (token, jar) = csrf_token(&inner, &headers, jar);
         return (
             StatusCode::UNAUTHORIZED,
-            Html((inner.login_shell)(&totp_login_html(Some("Invalid code. Try again.")))),
+            jar,
+            Html((inner.login_shell)(&totp_login_html(Some("Invalid code. Try again."), &token))),
         )
             .into_response();
     }
@@ -884,7 +948,9 @@ async fn login_totp_submit(
     am.awaiting_totp = Set(false);
     let _ = am.update(&inner.db).await;
     stamp_last_login(&inner.db, user.id).await; // second factor confirmed → login complete
-    Redirect::to("/").into_response()
+    // The session just gained full privilege — rotate the CSRF token with it.
+    let (_, csrf_cookie) = inner.csrf().issue();
+    (jar.add(csrf_cookie), Redirect::to("/")).into_response()
 }
 
 /// Resolve the half-authenticated session (password ok, TOTP pending) and its user from the cookie.
@@ -903,7 +969,9 @@ async fn logout(State(inner): State<Arc<Inner>>, jar: CookieJar) -> Response {
     if let Some(cookie) = jar.get(&inner.cookie_name) {
         let _ = session::Entity::delete_by_id(cookie.value().to_string()).exec(&inner.db).await;
     }
-    let jar = jar.remove(Cookie::build(inner.cookie_name.clone()).path("/").build());
+    let jar = jar
+        .remove(Cookie::build(inner.cookie_name.clone()).path("/").build())
+        .remove(inner.csrf().clear_cookie());
     (jar, Redirect::to("/login")).into_response()
 }
 
@@ -914,12 +982,16 @@ struct ChangeForm {
     current_password: String,
     new_password: String,
     confirm_password: String,
+    #[serde(default, rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
 struct ResetForm {
     new_password: String,
     confirm_password: String,
+    #[serde(default, rename = "_csrf")]
+    csrf: Option<String>,
 }
 
 /// Resolve the caller from the request cookie (as [`Auth::identify`], but from `Inner`).
@@ -935,19 +1007,24 @@ async fn user_by_id(db: &DatabaseConnection, id: i32) -> Option<user::Model> {
 
 /// `GET /profile` — the self-service change-password form + 2FA status (anonymous → login). For an
 /// SSO account it's a read-only notice: password + 2FA are managed by the identity provider.
-async fn profile_form(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Response {
+async fn profile_form(
+    State(inner): State<Arc<Inner>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Response {
     let Some(who) = identity_of(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
     let Some(user) = current_user(&inner, &who).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
+    let (token, jar) = csrf_token(&inner, &headers, jar);
     let frag = match &user.sso_provider {
         Some(provider) => sso_profile_html(&who, provider),
-        None => change_form_html(&who, user.totp_secret.is_some(), None, None),
+        None => change_form_html(&who, user.totp_secret.is_some(), None, None, &token),
     };
     let frag = inner.with_profile_extra(frag, &who).await;
-    Html((inner.profile_shell)(&frag, &who)).into_response()
+    (jar, Html((inner.profile_shell)(&frag, &who))).into_response()
 }
 
 /// `POST /profile` — verify the current password, then set the new one for the caller.
@@ -957,6 +1034,10 @@ async fn profile_submit(
     MaybePeer(peer): MaybePeer,
     Form(form): Form<ChangeForm>,
 ) -> Response {
+    if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
+        return csrf_rejected(&inner);
+    }
+    let csrf = inner.csrf().token(&headers).unwrap_or_default();
     let Some(who) = identity_of(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
@@ -978,13 +1059,13 @@ async fn profile_submit(
         password_pair_error(&form.new_password, &form.confirm_password)
     };
     if let Some(msg) = error {
-        let frag = change_form_html(&who, totp_on, Some(msg), None);
+        let frag = change_form_html(&who, totp_on, Some(msg), None, &csrf);
         let frag = inner.with_profile_extra(frag, &who).await;
         return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
     }
 
     if set_password(&inner.db, &who.username, &form.new_password).await.is_err() {
-        let frag = change_form_html(&who, totp_on, Some("Could not change the password."), None);
+        let frag = change_form_html(&who, totp_on, Some("Could not change the password."), None, &csrf);
         let frag = inner.with_profile_extra(frag, &who).await;
         return (StatusCode::INTERNAL_SERVER_ERROR, Html((inner.profile_shell)(&frag, &who)))
             .into_response();
@@ -999,7 +1080,7 @@ async fn profile_submit(
             peer,
         )
         .await;
-    let frag = change_form_html(&who, totp_on, None, Some("Your password has been changed."));
+    let frag = change_form_html(&who, totp_on, None, Some("Your password has been changed."), &csrf);
     let frag = inner.with_profile_extra(frag, &who).await;
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
@@ -1009,6 +1090,7 @@ async fn profile_submit(
 async fn manage_form(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
+    jar: CookieJar,
     Path(id): Path<String>,
 ) -> Response {
     let Some(who) = identity_of(&inner, &headers).await else {
@@ -1023,8 +1105,10 @@ async fn manage_form(
     let Some(target) = target_user(&inner, &id).await else {
         return (StatusCode::NOT_FOUND, "No such user").into_response();
     };
-    let frag = reset_form_html(&id, &target.username, target.totp_secret.is_some(), None, None);
-    Html((inner.profile_shell)(&frag, &who)).into_response()
+    let (token, jar) = csrf_token(&inner, &headers, jar);
+    let frag =
+        reset_form_html(&id, &target.username, target.totp_secret.is_some(), None, None, &token);
+    (jar, Html((inner.profile_shell)(&frag, &who))).into_response()
 }
 
 /// `POST /profile/{id}` — a manager sets another user's password (no current password required).
@@ -1035,6 +1119,10 @@ async fn manage_submit(
     Path(id): Path<String>,
     Form(form): Form<ResetForm>,
 ) -> Response {
+    if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
+        return csrf_rejected(&inner);
+    }
+    let csrf = inner.csrf().token(&headers).unwrap_or_default();
     let Some(who) = identity_of(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
@@ -1050,12 +1138,18 @@ async fn manage_submit(
     let totp_on = target.totp_secret.is_some();
 
     if let Some(msg) = password_pair_error(&form.new_password, &form.confirm_password) {
-        let frag = reset_form_html(&id, &target.username, totp_on, Some(msg), None);
+        let frag = reset_form_html(&id, &target.username, totp_on, Some(msg), None, &csrf);
         return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
     }
     if set_password(&inner.db, &target.username, &form.new_password).await.is_err() {
-        let frag =
-            reset_form_html(&id, &target.username, totp_on, Some("Could not set the password."), None);
+        let frag = reset_form_html(
+            &id,
+            &target.username,
+            totp_on,
+            Some("Could not set the password."),
+            None,
+            &csrf,
+        );
         return (StatusCode::INTERNAL_SERVER_ERROR, Html((inner.profile_shell)(&frag, &who)))
             .into_response();
     }
@@ -1070,7 +1164,7 @@ async fn manage_submit(
         )
         .await;
     let msg = format!("Password reset for {}.", target.username);
-    let frag = reset_form_html(&id, &target.username, totp_on, None, Some(&msg));
+    let frag = reset_form_html(&id, &target.username, totp_on, None, Some(&msg), &csrf);
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
@@ -1078,7 +1172,11 @@ async fn manage_submit(
 
 /// `GET /profile/totp` — begin enrolment: mint a fresh pending secret, store it on the user, and show
 /// the QR + `otpauth://` URL with a verify form. A new secret is generated on each visit.
-async fn totp_setup_form(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Response {
+async fn totp_setup_form(
+    State(inner): State<Arc<Inner>>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Response {
     let Some(who) = identity_of(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
@@ -1094,7 +1192,8 @@ async fn totp_setup_form(State(inner): State<Arc<Inner>>, headers: HeaderMap) ->
     if am.update(&inner.db).await.is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not start 2FA setup").into_response();
     }
-    render_totp_setup(&inner, &who, &secret, None)
+    let (token, jar) = csrf_token(&inner, &headers, jar);
+    (jar, render_totp_setup(&inner, &who, &secret, None, &token)).into_response()
 }
 
 /// `POST /profile/totp` — confirm enrolment: verify the code against the pending secret, then promote
@@ -1104,6 +1203,10 @@ async fn totp_setup_submit(
     headers: HeaderMap,
     Form(form): Form<TotpForm>,
 ) -> Response {
+    if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
+        return csrf_rejected(&inner);
+    }
+    let csrf = inner.csrf().token(&headers).unwrap_or_default();
     let Some(who) = identity_of(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
@@ -1117,7 +1220,13 @@ async fn totp_setup_submit(
         return Redirect::to(&inner.profile_path).into_response(); // nothing in progress
     };
     if !totp::verify(&pending, &form.code) {
-        return render_totp_setup(&inner, &who, &pending, Some("That code didn't match. Try again."));
+        return render_totp_setup(
+            &inner,
+            &who,
+            &pending,
+            Some("That code didn't match. Try again."),
+            &csrf,
+        );
     }
     let mut am: user::ActiveModel = user.into();
     am.totp_secret = Set(Some(pending));
@@ -1125,12 +1234,21 @@ async fn totp_setup_submit(
     if am.update(&inner.db).await.is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not enable 2FA").into_response();
     }
-    let frag = change_form_html(&who, true, None, Some("Two-factor authentication is now enabled."));
+    let frag =
+        change_form_html(&who, true, None, Some("Two-factor authentication is now enabled."), &csrf);
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
 /// `POST /profile/totp/disable` — the caller turns off their own 2FA.
-async fn totp_self_disable(State(inner): State<Arc<Inner>>, headers: HeaderMap) -> Response {
+async fn totp_self_disable(
+    State(inner): State<Arc<Inner>>,
+    headers: HeaderMap,
+    Form(form): Form<CsrfOnlyForm>,
+) -> Response {
+    if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
+        return csrf_rejected(&inner);
+    }
+    let csrf = inner.csrf().token(&headers).unwrap_or_default();
     let Some(who) = identity_of(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
@@ -1138,7 +1256,8 @@ async fn totp_self_disable(State(inner): State<Arc<Inner>>, headers: HeaderMap) 
         return Redirect::to(&inner.login_path).into_response();
     };
     clear_totp(&inner, user).await;
-    let frag = change_form_html(&who, false, None, Some("Two-factor authentication disabled."));
+    let frag =
+        change_form_html(&who, false, None, Some("Two-factor authentication disabled."), &csrf);
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
@@ -1148,7 +1267,12 @@ async fn totp_manage_disable(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Form(form): Form<CsrfOnlyForm>,
 ) -> Response {
+    if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
+        return csrf_rejected(&inner);
+    }
+    let csrf = inner.csrf().token(&headers).unwrap_or_default();
     let Some(who) = identity_of(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
@@ -1164,7 +1288,7 @@ async fn totp_manage_disable(
     let username = target.username.clone();
     clear_totp(&inner, target).await;
     let msg = format!("Two-factor authentication disabled for {username}.");
-    let frag = reset_form_html(&id, &username, false, None, Some(&msg));
+    let frag = reset_form_html(&id, &username, false, None, Some(&msg), &csrf);
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
@@ -1183,11 +1307,17 @@ async fn clear_totp(inner: &Inner, user: user::Model) {
 }
 
 /// Render the 2FA enrolment page (QR + otpauth URL + verify form) for a pending secret.
-fn render_totp_setup(inner: &Inner, who: &Identity, secret: &str, error: Option<&str>) -> Response {
+fn render_totp_setup(
+    inner: &Inner,
+    who: &Identity,
+    secret: &str,
+    error: Option<&str>,
+    csrf: &str,
+) -> Response {
     let Some(prov) = totp::provisioning(&inner.totp_issuer, &who.username, secret) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not build QR code").into_response();
     };
-    let frag = totp_setup_html(&prov, error);
+    let frag = totp_setup_html(&prov, error, csrf);
     Html((inner.profile_shell)(&frag, who)).into_response()
 }
 
@@ -1209,6 +1339,33 @@ fn password_pair_error(new: &str, confirm: &str) -> Option<&'static str> {
     }
 }
 
+/// The CSRF token to embed in a form we're about to render, minting (and setting) one if this request
+/// carries none. Returns the jar to hand back with the response.
+fn csrf_token(inner: &Inner, headers: &HeaderMap, jar: CookieJar) -> (String, CookieJar) {
+    let (token, set) = inner.csrf().ensure(headers);
+    match set {
+        Some(cookie) => (token, jar.add(cookie)),
+        None => (token, jar),
+    }
+}
+
+/// The response to an unsafe request whose CSRF token is missing or wrong: a bare `403` page. It is
+/// deliberately shell-less and static — we don't know that the caller is who they claim, so we render
+/// nothing about them and set no cookies. A user who hit it with a stale tab just reloads.
+fn csrf_rejected(inner: &Inner) -> Response {
+    let login = esc(&inner.login_path);
+    (
+        StatusCode::FORBIDDEN,
+        Html(format!(
+            r#"<!doctype html><meta charset="utf-8"><title>Security check failed</title>
+<main><h1>Security check failed</h1>
+<p>This form was stale or the request didn't come from this site. Reload the page and try again.</p>
+<p><a href="{login}">Back to the login page</a></p></main>"#
+        )),
+    )
+        .into_response()
+}
+
 /// Build the session cookie (HttpOnly, SameSite=Strict, Path=/, configurable Secure + Max-Age).
 fn session_cookie(inner: &Inner, token: String) -> Cookie<'static> {
     Cookie::build((inner.cookie_name.clone(), token))
@@ -1221,9 +1378,7 @@ fn session_cookie(inner: &Inner, token: String) -> Cookie<'static> {
 }
 
 fn new_token() -> String {
-    let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    crate::csrf::random_token() // 256 bits of OS randomness as hex
 }
 
 fn now_secs() -> i64 {
@@ -1232,12 +1387,14 @@ fn now_secs() -> i64 {
 
 /// The login `<form>` fragment. Semantic HTML with Bootstrap-friendly class hooks — it carries no
 /// page chrome and loads no CSS; the app's [`Auth::login_shell`] wraps + styles it.
-fn login_form_html(error: Option<&str>) -> String {
+fn login_form_html(error: Option<&str>, csrf: &str) -> String {
     let alert = error
         .map(|e| format!(r#"<div class="alert alert-danger" role="alert">{e}</div>"#))
         .unwrap_or_default();
+    let csrf = crate::csrf::Csrf::hidden_input(csrf);
     format!(
         r#"<form method="post" action="/login">
+  {csrf}
   {alert}
   <div class="mb-3">
     <label class="form-label" for="rl-username">Username</label>
@@ -1281,13 +1438,16 @@ fn change_form_html(
     totp_on: bool,
     error: Option<&str>,
     success: Option<&str>,
+    csrf: &str,
 ) -> String {
     let alert = alert_html(error, success);
-    let twofa = twofa_self_section(totp_on);
+    let twofa = twofa_self_section(totp_on, csrf);
+    let csrf_input = crate::csrf::Csrf::hidden_input(csrf);
     format!(
         r#"<h1 class="h5 mb-3">Change your password</h1>
 <p class="text-muted small">Signed in as <strong>{user}</strong>.</p>
 <form method="post" action="/profile">
+  {csrf_input}
   {alert}
   <div class="mb-3">
     <label class="form-label" for="rl-current">Current password</label>
@@ -1310,14 +1470,17 @@ fn change_form_html(
 }
 
 /// The self two-factor section: current state + a link to set up, or a button to disable.
-fn twofa_self_section(on: bool) -> String {
+fn twofa_self_section(on: bool, csrf: &str) -> String {
     if on {
-        r#"<h2 class="h6">Two-factor authentication</h2>
+        format!(
+            r#"<h2 class="h6">Two-factor authentication</h2>
 <p class="text-muted small mb-2">Enabled — a code from your authenticator app is required at login.</p>
 <form method="post" action="/profile/totp/disable">
+  {csrf_input}
   <button class="btn btn-outline-danger btn-sm" type="submit">Disable 2FA</button>
-</form>"#
-            .to_string()
+</form>"#,
+            csrf_input = crate::csrf::Csrf::hidden_input(csrf),
+        )
     } else {
         r#"<h2 class="h6">Two-factor authentication</h2>
 <p class="text-muted small mb-2">Off. Add a second factor with an authenticator app (TOTP).</p>
@@ -1348,13 +1511,16 @@ fn reset_form_html(
     totp_on: bool,
     error: Option<&str>,
     success: Option<&str>,
+    csrf: &str,
 ) -> String {
     let alert = alert_html(error, success);
-    let twofa = twofa_manage_section(id, username, totp_on);
+    let twofa = twofa_manage_section(id, username, totp_on, csrf);
+    let csrf_input = crate::csrf::Csrf::hidden_input(csrf);
     format!(
         r#"<h1 class="h5 mb-3">Reset password</h1>
 <p class="text-muted">Set a new password for <strong>{user}</strong> (no current password required).</p>
 <form method="post" action="/profile/{id}">
+  {csrf_input}
   {alert}
   <div class="mb-3">
     <label class="form-label" for="rl-new">New password</label>
@@ -1374,16 +1540,18 @@ fn reset_form_html(
 }
 
 /// The manager two-factor section: disable the target's 2FA (managers can't set it up for others).
-fn twofa_manage_section(id: &str, username: &str, on: bool) -> String {
+fn twofa_manage_section(id: &str, username: &str, on: bool, csrf: &str) -> String {
     if on {
         format!(
             r#"<h2 class="h6">Two-factor authentication</h2>
 <p class="text-muted small mb-2">This user has 2FA enabled. Disabling it lets them log in with just a password until they set it up again.</p>
 <form method="post" action="/profile/{id}/totp/disable">
+  {csrf_input}
   <button class="btn btn-outline-danger btn-sm" type="submit">Disable 2FA for {user}</button>
 </form>"#,
             id = esc(id),
             user = esc(username),
+            csrf_input = crate::csrf::Csrf::hidden_input(csrf),
         )
     } else {
         r#"<h2 class="h6">Two-factor authentication</h2>
@@ -1393,12 +1561,14 @@ fn twofa_manage_section(id: &str, username: &str, on: bool) -> String {
 }
 
 /// The login second-factor `<form>` fragment (shown at `/login/totp` after a correct password).
-fn totp_login_html(error: Option<&str>) -> String {
+fn totp_login_html(error: Option<&str>, csrf: &str) -> String {
     let alert = alert_html(error, None);
+    let csrf_input = crate::csrf::Csrf::hidden_input(csrf);
     format!(
         r#"<h1 class="h5 mb-3">Two-factor authentication</h1>
 <p class="text-muted small">Enter the 6-digit code from your authenticator app.</p>
 <form method="post" action="/login/totp">
+  {csrf_input}
   {alert}
   <div class="mb-3">
     <label class="form-label" for="rl-totp">Authentication code</label>
@@ -1411,8 +1581,9 @@ fn totp_login_html(error: Option<&str>) -> String {
 
 /// The 2FA enrolment `<form>` fragment: the QR image, the `otpauth://` URL as copyable text, and a
 /// code field to confirm before activation.
-fn totp_setup_html(prov: &totp::Provisioning, error: Option<&str>) -> String {
+fn totp_setup_html(prov: &totp::Provisioning, error: Option<&str>, csrf: &str) -> String {
     let alert = alert_html(error, None);
+    let csrf_input = crate::csrf::Csrf::hidden_input(csrf);
     format!(
         r#"<h1 class="h5 mb-3">Set up two-factor authentication</h1>
 <p class="text-muted small">Scan this QR code with an authenticator app (or add the setup URL by hand), then enter the 6-digit code it shows to confirm.</p>
@@ -1423,6 +1594,7 @@ fn totp_setup_html(prov: &totp::Provisioning, error: Option<&str>) -> String {
 <p class="small text-muted mb-1">Setup URL (otpauth)</p>
 <pre class="bg-body-secondary p-2 rounded" style="white-space:pre-wrap;word-break:break-all"><code>{url}</code></pre>
 <form method="post" action="/profile/totp">
+  {csrf_input}
   <div class="mb-3">
     <label class="form-label" for="rl-totp">Authentication code</label>
     <input class="form-control" id="rl-totp" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus>
