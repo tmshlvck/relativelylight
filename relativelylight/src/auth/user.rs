@@ -4,6 +4,9 @@
 //! TOTP 2FA columns (nullable, both hold a base32 secret): `totp_secret` is the **active** secret —
 //! when set, a valid code is required at login; `totp_pending` is a secret mid-setup, not yet
 //! confirmed. Both are secrets and must never be exposed in reads (mark them `hidden` on the model).
+//! As with `sso_provider`, a **blank** secret counts as *no* secret: a `Some("")` written by an admin
+//! form (or a CSV import) would otherwise demand a login code that can never verify, locking the
+//! account out for good. Ask [`Model::totp_key`] / [`Model::has_totp`] / [`Model::pending_totp_key`].
 //!
 //! `sso_provider` marks an **externally-authenticated (SSO) account**: `None` is a local account
 //! (password login); `Some(key)` means the user signs in via that OIDC provider only — password login
@@ -44,6 +47,24 @@ impl Model {
     /// Whether this is an SSO (externally-authenticated) account — no local password / 2FA.
     pub fn is_sso(&self) -> bool {
         self.sso_key().is_some()
+    }
+
+    /// The **active** TOTP secret, or `None` when 2FA is off. Normalizes a blank secret to `None`:
+    /// treating `Some("")` as "2FA on" would require a code at login that no authenticator can
+    /// produce — an account locked out of its own login.
+    pub fn totp_key(&self) -> Option<&str> {
+        self.totp_secret.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
+
+    /// Whether 2FA is active for this account (a usable [`totp_key`](Model::totp_key)).
+    pub fn has_totp(&self) -> bool {
+        self.totp_key().is_some()
+    }
+
+    /// The secret of an enrolment **in progress**, or `None` when there is none (blank normalized
+    /// away, so a blank `totp_pending` isn't mistaken for a half-finished setup).
+    pub fn pending_totp_key(&self) -> Option<&str> {
+        self.totp_pending.as_deref().map(str::trim).filter(|s| !s.is_empty())
     }
 }
 

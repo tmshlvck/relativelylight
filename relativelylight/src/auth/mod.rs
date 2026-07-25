@@ -894,7 +894,7 @@ async fn identity_from(inner: &Inner, token: &str) -> Option<Identity> {
 }
 
 /// Verify username + password. Returns the user on success (regardless of 2FA) — the caller decides
-/// whether a second factor is still required (`user.totp_secret.is_some()`). SSO accounts
+/// whether a second factor is still required (`user.has_totp()`). SSO accounts
 /// (`sso_provider` set) never authenticate by password.
 async fn verify_credentials(inner: &Inner, username: &str, password: &str) -> Option<user::Model> {
     let user = user::Entity::find()
@@ -971,7 +971,7 @@ async fn login_submit(
         )
             .into_response();
     };
-    let needs_totp = user.totp_secret.is_some();
+    let needs_totp = user.has_totp();
     let Some(token) = create_session(&inner, user.id, needs_totp).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
     };
@@ -1048,7 +1048,7 @@ async fn login_totp_submit(
             Html((inner.login_shell)(&totp_login_html(Some(&lockout_message(retry)), &token))),
         );
     }
-    let ok = user.totp_secret.as_deref().is_some_and(|s| totp::verify(s, &form.code));
+    let ok = user.totp_key().is_some_and(|s| totp::verify(s, &form.code));
     if !ok {
         inner.record_failure(&attempts, peer);
         let (token, jar) = csrf_token(&inner, &headers, jar);
@@ -1137,7 +1137,7 @@ async fn profile_form(
     let (token, jar) = csrf_token(&inner, &headers, jar);
     let frag = match user.sso_key() {
         Some(provider) => sso_profile_html(&who, provider),
-        None => change_form_html(&who, user.totp_secret.is_some(), None, None, &token),
+        None => change_form_html(&who, user.has_totp(), None, None, &token),
     };
     let frag = inner.with_profile_extra(frag, &who).await;
     (jar, Html((inner.profile_shell)(&frag, &who))).into_response()
@@ -1167,7 +1167,7 @@ async fn profile_submit(
     if user.is_sso() {
         return Redirect::to(&inner.profile_path).into_response(); // SSO: password managed by the IdP
     }
-    let totp_on = user.totp_secret.is_some();
+    let totp_on = user.has_totp();
 
     // A stolen session guessing the current password gets the same brake — in its own bucket, so
     // fumbling it here can't lock the account out of *logging in*.
@@ -1233,7 +1233,7 @@ async fn manage_form(
     };
     let (token, jar) = csrf_token(&inner, &headers, jar);
     let frag =
-        reset_form_html(&id, &target.username, target.totp_secret.is_some(), None, None, &token);
+        reset_form_html(&id, &target.username, target.has_totp(), None, None, &token);
     (jar, Html((inner.profile_shell)(&frag, &who))).into_response()
 }
 
@@ -1261,7 +1261,7 @@ async fn manage_submit(
     let Some(target) = target_user(&inner, &id).await else {
         return (StatusCode::NOT_FOUND, "No such user").into_response();
     };
-    let totp_on = target.totp_secret.is_some();
+    let totp_on = target.has_totp();
 
     if let Some(msg) = password_pair_error(&form.new_password, &form.confirm_password) {
         let frag = reset_form_html(&id, &target.username, totp_on, Some(msg), None, &csrf);
@@ -1343,7 +1343,7 @@ async fn totp_setup_submit(
     if user.is_sso() {
         return Redirect::to(&inner.profile_path).into_response();
     }
-    let Some(pending) = user.totp_pending.clone() else {
+    let Some(pending) = user.pending_totp_key().map(str::to_string) else {
         return Redirect::to(&inner.profile_path).into_response(); // nothing in progress
     };
     // Enrolment confirms a 6-digit code too — brake it, in its own bucket.

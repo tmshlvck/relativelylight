@@ -260,6 +260,11 @@ secret; only on success is it promoted to `totp_secret` (2FA now required at log
 re-shows the same QR. `Auth::totp_issuer(name)` sets the issuer label authenticator apps display
 (default `"relativelylight"`).
 
+**Blank = off.** As with `sso_provider`, a blank `totp_secret` counts as *no* secret (`Model::totp_key`
+/ `has_totp`), and a blank `totp_pending` as *no* enrolment in progress. Treating `Some("")` as "2FA on"
+would demand a login code no authenticator can produce — an account locked out of its own login — and
+an empty text input in an admin form is exactly how that value appears.
+
 **Disable.** `POST /profile/totp/disable` turns off the caller's own 2FA. A **manager** (a
 profile-manager group, §5) can disable *another* user's 2FA via `POST /profile/{id}/totp/disable`
 (shown on the `/profile/{id}` page) — but managers can never *set up* 2FA for someone else, since
@@ -722,6 +727,9 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
   - the **gate presets** are asserted as a matrix — anonymous, logged-in non-member, and member ×
     read/write — and every preset treats an expired, half-authenticated, or deactivated session as
     anonymous. `GroupReadWrite::admits` follows a revoked membership on the next `identify`.
+  - a **blank `totp_secret`** is no second factor: login completes in one step with no half-authenticated
+    session, the profile page offers "Set up 2FA", a code against a blank `totp_pending` activates
+    nothing, and a real secret still demands the second factor.
   - a **blank `sso_provider`** is a local account: password login works, the profile page offers the
     password form (not the SSO notice), 2FA enrolment is available and break-glass doesn't refuse it,
     while a real provider key still refuses password login (whitespace-only counts as blank too).

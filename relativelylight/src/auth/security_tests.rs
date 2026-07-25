@@ -986,6 +986,44 @@ async fn a_manager_reset_cannot_turn_an_sso_account_into_a_password_login() {
 }
 
 #[tokio::test]
+async fn a_blank_totp_secret_is_no_second_factor() {
+    // Same trap as a blank `sso_provider`, with a worse outcome: treating `Some("")` as "2FA on" would
+    // demand a login code that no authenticator can produce — the account could never log in again.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    fx.update_user("alice", |am| {
+        am.totp_secret = Set(Some(String::new()));
+        am.totp_pending = Set(Some("   ".into()));
+    })
+    .await;
+    let row = fx.row("alice").await;
+    assert!(!row.has_totp(), "blank is not an active secret");
+    assert_eq!(row.totp_key(), None);
+    assert_eq!(row.pending_totp_key(), None, "blank is not an enrolment in progress");
+
+    // Login completes in one step — no second factor demanded, no half-authenticated session.
+    let res = fx.try_login("alice").await;
+    res.assert_redirect("/");
+    let token = res.session_token(fx.auth.session_cookie_name()).expect("logged in");
+    assert!(!fx.session_row(&token).await.unwrap().awaiting_totp);
+    assert!(fx.identify_token(&token).await.is_some());
+
+    // The profile page offers to *set up* 2FA rather than to disable it…
+    let page = fx.get("/profile", Some(&fx.cookie(&token))).await;
+    assert!(page.body.contains("Set up 2FA"), "2FA reads as off: {}", page.body);
+    assert!(!page.body.contains("Disable 2FA"));
+    // …and a code posted against the blank pending secret can't activate anything.
+    let res = fx.post("/profile/totp", &form(&[("code", "000000")]), Some(&fx.cookie(&token))).await;
+    res.assert_redirect("/profile"); // "nothing in progress"
+    assert!(!fx.row("alice").await.has_totp());
+
+    // Control: a real secret does demand the second factor.
+    let secret = fx.enable_totp("alice").await;
+    assert_eq!(fx.row("alice").await.totp_key(), Some(secret.as_str()));
+    fx.try_login("alice").await.assert_redirect("/login/totp");
+}
+
+#[tokio::test]
 async fn a_blank_sso_provider_is_a_local_account() {
     // An admin form that leaves the nullable `sso_provider` column empty writes `""` — the account it
     // creates must still be an ordinary local one. Treating `Some("")` as "external" silently produced
