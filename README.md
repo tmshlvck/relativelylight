@@ -88,7 +88,7 @@ post.field("title").validate = Some(Box::new(|v| {
 | `ui` | | the web admin components (`crud::ui::Table`, `crud::ui::Admin`) |
 | `openapi` | | runtime OpenAPI 3.1 generation |
 | `csv` | | CSV import/export endpoints |
-| `auth` | | sessions, on-demand login resolution, TOTP 2FA, a per-model authorization gate |
+| `auth` | | sessions, on-demand login resolution, TOTP 2FA, attempt limiting, a per-model authorization gate |
 | `csrf` | | the double-submit CSRF token (`csrf` module); implied by `auth` |
 | `sso` | | OIDC single sign-on (Google / Okta / corporate) + group mapping (implies `auth`) |
 

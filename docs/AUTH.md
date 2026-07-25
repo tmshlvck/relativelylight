@@ -14,8 +14,10 @@ mapping and optional auto-registration — see §5b), admin helpers (`migrate`, 
 `set_password`, `ensure_group`, `add_to_group`, `remove_from_group`, `make_admin`,
 `reset_admin_access`), and **per-model enforcement in the `crud` HTTP handlers** via
 `crud::seaorm::Crud::register(model, gate)` — mapping the gate's `Decision` to 401/403, plus
-per-request UI control-hiding via `Admin`/`Table::render_for` — and **double-submit CSRF protection**
-(feature `csrf`, §7: always on for the module's own forms, `Crud::csrf` for the API). **Not yet:** the
+per-request UI control-hiding via `Admin`/`Table::render_for` — **double-submit CSRF protection**
+(feature `csrf`, §7: always on for the module's own forms, `Crud::csrf` for the API), and
+**attempt limiting** on every credential check (§5e: sliding-window lockout, per account by default,
+per source IP opt-in). **Not yet:** the
 CORS/real-ip/logging middleware, PassKeys. The rest of this doc is the design these grow into.
 
 The login, password-change, and 2FA pages are plain **MPA `<form>` posts** — no JS (the enrolment QR
@@ -118,6 +120,7 @@ All optional, all applied by the app; defaults chosen for "safe but works out of
   app narrows to an allow-list of origins (turning credentials on when it does, required for
   cookie-auth cross-origin).
 - **CSRF** — see §7.
+- **Attempt limiting** — not a layer: the login/profile handlers brake themselves, see §5e.
 
 ## 5. authn — users, sessions, login, passwords
 
@@ -361,6 +364,62 @@ crud.on_write(audit.clone());
 The app owns the audit table + retention; the library only emits the events. (Auditing login events and
 TOTP enable/disable can be layered on the same hook later; `last_login_at` already records logins.)
 
+## 5e. Login attempt limiting — implemented
+
+The brute-force brake in front of every credential check. **Sliding window, temporary lockout:** each
+*checked* failure is recorded against a key; while a key holds `max` failures inside the last `window`
+seconds the handler answers **`429` with `Retry-After`** and never looks at the submitted secret — so a
+locked account costs no argon2 work, and the response is identical for a real and a made-up username
+(no enumeration hint). Attempts made *while locked* are **not** recorded, so an attacker cannot hold a
+lock open indefinitely: it lifts as the recorded failures age out.
+
+**What's braked, and in which bucket** (separate buckets so one surface can't lock another):
+
+| Check | Bucket | Note |
+|---|---|---|
+| `POST /login` (password) | `login:{account}` | account name lower-cased, so case can't dodge it |
+| `POST /login/totp` (second factor) | `login:{account}` | **shares** the login bucket — same account being guessed |
+| `POST /profile` (current password) | `profile:{account}` | a stolen session guessing the password can't lock you out of *logging in* |
+| `POST /profile/totp` (enrolment code) | `enrol:{account}` | |
+| `POST /login` from one address | `ip:{addr}` | **opt-in**, see below |
+
+A manager's reset at `POST /profile/{id}` isn't limited: it verifies no secret, so there's nothing to
+guess (it's gated by group membership instead).
+
+**Configuration** — defaults are 10 failures per 15 minutes, per account, IP limiting off:
+
+```rust
+let auth = Auth::new(db)
+    .login_limit(5, 300)          // 5 failures per 5 minutes per account (0 = off)
+    .login_limit_per_ip(15);      // also cap failures per source address (default: off)
+// .no_login_limit()              // or turn the whole thing off (edge/proxy limits instead)
+auth.clear_login_attempts("alice");   // operator unlock: forget one account's failures
+```
+
+**Per-IP is opt-in on purpose.** It's the only thing that catches *username spraying* (many accounts,
+one source), but the address comes from the socket peer — so behind a reverse proxy every request
+carries the **proxy's** address and one shared bucket would eventually lock out your whole user base.
+Enable it when the app sees real client addresses (bound directly, served with
+`into_make_service_with_connect_info`, as the examples are); leave it off until the trusted-proxy
+real-ip parsing of §4 lands. A successful login clears the *account's* bucket but deliberately not the
+IP's — one valid credential shouldn't reset a spraying source's budget.
+
+**The CSRF check runs first**, so a cross-site forged post is rejected *before* it can spend the
+victim's attempt budget — otherwise any page could lock a user out of their own account by firing a
+handful of cross-site logins at us.
+
+**In-memory, per process.** The counters are a `Mutex<HashMap>` in the `Auth` handle: no schema, no DB
+traffic on the hot path, but they **reset on restart** and each replica of a scaled-out deployment
+counts on its own (N replicas → N× the effective budget). Memory is bounded — a spray of distinct
+usernames triggers a sweep of expired keys. If you need shared or durable counters, limit at the edge
+(proxy / gateway) instead; a pluggable store is [TODO](../TODO.md).
+
+**Known trade-off.** A temporary lockout is also a small denial-of-service handle: someone who knows an
+account name can keep it locked by failing on purpose. That's why the lock is short, lifts on its own,
+and can be cleared with `clear_login_attempts` (a restart clears everything, the counters being
+in-memory). The alternative — progressive delays — holds a server task open per attempt instead, which
+is its own resource risk.
+
 ## 6. authz — the gate
 
 The gate trait lives in **`relativelylight::authz`** — always compiled, independent of the `auth`
@@ -578,7 +637,10 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   (redirect to `login_path` when anonymous). The `/secret` page shows the signed-in user and links to
   the self-service **`/profile`** page — password change **and TOTP 2FA** enrolment/disable — wrapped
   in the app's chrome via `profile_shell`, plus the `--set-admin-pw` break-glass startup path
-  (`reset_admin_access`; the demo admin is seeded with `make_admin`). **SSO** is wired in
+  (`reset_admin_access`; the demo admin is seeded with `make_admin`). **Attempt limiting** is tuned down
+  to 5 failures / 5 minutes per account with a 15-per-IP cap (§5e) and verified end-to-end: the 5th bad
+  password locks the account (`429` + `Retry-After: ~298`, the correct password refused with it), and
+  spraying `ghost1…ghostN` from one address trips the IP cap at its 15th failure. **SSO** is wired in
   (feature `sso`) and enabled by setting `SSO_GOOGLE_CLIENT_ID` / `SSO_GOOGLE_CLIENT_SECRET` in the
   env: a "Sign in with Google" button appears and `/sso/google/*` is served (username→group rule for
   `@example.com`, auto-register on).
@@ -656,6 +718,17 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
   - the **gate presets** are asserted as a matrix — anonymous, logged-in non-member, and member ×
     read/write — and every preset treats an expired, half-authenticated, or deactivated session as
     anonymous. `GroupReadWrite::admits` follows a revoked membership on the next `identify`.
+  - **attempt limiting** (§5e): the sliding-window logic is unit-tested against explicit timestamps
+    (locks only at the limit, lifts as failures age out, a locked key can't be extended, clear, key
+    isolation, `max = 0` disables, bounded memory under a spray); over HTTP, an account locks after the
+    configured failures and then refuses even the **correct** password with `429` + `Retry-After` and
+    creates no session, a made-up username gets a byte-identical response, case can't dodge the bucket,
+    another account is unaffected, a successful login resets the count, the TOTP step shares the
+    account's bucket (a correct code refused while locked, password login locked with it), the profile
+    and enrolment checks brake in their own buckets without touching login, **CSRF-rejected posts spend
+    no budget**, per-IP is off by default and catches spraying when enabled (a valid login from the
+    offending address refused, other addresses fine), and `clear_login_attempts` / `no_login_limit`
+    work.
   - **CSRF** (§7): every unsafe auth route rejects a missing, cookie-less, header-only, mismatched, or
     blank token with `403` and no cookies set — checked with a *fully authorized manager session*, so
     only the token is missing — and nothing changes behind it; a `GET` form page issues the cookie
@@ -676,9 +749,8 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
 Each group carries a positive control (a correct login, a correct TOTP code, an allowing gate) so a
 mistake that breaks *everything* can't make the negatives pass vacuously.
 
-**Not covered by tests** (and open in [TODO.md](../TODO.md)): brute-force limits — the login and TOTP
-tests hammer the endpoints with no lockout, which is the current behavior, not a desired one —
-re-authentication before disabling 2FA / changing a password, TOTP replay
+**Not covered by tests** (and open in [TODO.md](../TODO.md)): re-authentication before disabling 2FA /
+changing a password, TOTP replay
 inside the skew window, session-id rotation on privilege change and invalidating a user's *other*
 sessions after a password change, and the SSO callback (see the verification note in §5b). One rough
 edge the review turned up is filed there too: the manager reset isn't refused for SSO targets the way
@@ -702,6 +774,8 @@ the self-service page is (it writes a local hash that still can't log in).
    manager disable (§5a); PassKeys/WebAuthn remain future.
 7. **SSO** — ✅ **OIDC** (feature `sso`) for Google / Okta / corporate, with username- and claim-based
    group mapping (union + reconcile) and optional per-provider auto-registration (§5b).
+8. **Attempt limiting** — ✅ **in-memory sliding-window lockout** (429 + `Retry-After`) on every
+   credential check (§5e); per-account on by default, per-source-IP opt-in until real-ip parsing lands.
 
 ## 12. Open (later)
 

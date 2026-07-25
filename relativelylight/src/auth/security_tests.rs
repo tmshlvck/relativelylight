@@ -141,6 +141,26 @@ impl Fx {
     /// the request carries the matching token cookie. Use [`post_raw`](Fx::post_raw) to post without
     /// one (that's what the CSRF tests do).
     async fn post(&self, path: &str, form: &str, cookie: Option<&str>) -> Resp {
+        let (body, cookie) = self.browser_post(form, cookie);
+        self.post_raw(path, &body, Some(&cookie)).await
+    }
+
+    /// As [`post`](Fx::post), but the request also carries a socket peer, as it would behind
+    /// `into_make_service_with_connect_info` — that's where the per-IP limiter gets its address.
+    async fn post_from(&self, path: &str, form: &str, cookie: Option<&str>, peer: &str) -> Resp {
+        let (body, cookie) = self.browser_post(form, cookie);
+        let mut req = self
+            .req("POST", path, Some(&cookie))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(body))
+            .unwrap();
+        let addr: std::net::SocketAddr = peer.parse().expect("peer address");
+        req.extensions_mut().insert(axum::extract::ConnectInfo(addr));
+        self.send(req).await
+    }
+
+    /// The body + cookie header a browser would send for one of our forms (hidden `_csrf` + cookie).
+    fn browser_post(&self, form: &str, cookie: Option<&str>) -> (String, String) {
         let body = if form.is_empty() {
             format!("{}={CSRF}", crate::csrf::FIELD)
         } else {
@@ -151,7 +171,24 @@ impl Fx {
             Some(c) => format!("{c}; {csrf_cookie}"),
             None => csrf_cookie,
         };
-        self.post_raw(path, &body, Some(&cookie)).await
+        (body, cookie)
+    }
+
+    /// Try to log in with the wrong password `n` times, returning the last response.
+    async fn fail_login(&self, username: &str, n: usize) -> Resp {
+        let mut last = None;
+        for _ in 0..n {
+            last = Some(
+                self.post("/login", &form(&[("username", username), ("password", "wrong")]), None)
+                    .await,
+            );
+        }
+        last.expect("at least one attempt")
+    }
+
+    /// Log in with the *correct* password.
+    async fn try_login(&self, username: &str) -> Resp {
+        self.post("/login", &form(&[("username", username), ("password", PW)]), None).await
     }
 
     /// Post exactly what's given — nothing added, so the CSRF check sees only what the caller sent.
@@ -946,6 +983,247 @@ async fn a_manager_reset_cannot_turn_an_sso_account_into_a_password_login() {
         assert_eq!(res.status, StatusCode::UNAUTHORIZED, "SSO accounts never log in by password");
         assert!(res.session_token(fx.auth.session_cookie_name()).is_none());
     }
+}
+
+// ===================== Attempt limiting (brute-force brake) =====================
+
+impl Resp {
+    /// The `Retry-After` value, which every 429 must carry.
+    fn retry_after(&self) -> i64 {
+        self.headers
+            .get(header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("a 429 must carry Retry-After: {:?}", self.headers))
+    }
+
+    /// Assert this is a lockout response: 429, a sane `Retry-After`, a message that says to come back
+    /// later — and nothing that reveals whether the account exists.
+    fn assert_locked_out(&self, window: i64) {
+        assert_eq!(self.status, StatusCode::TOO_MANY_REQUESTS, "expected a lockout: {}", self.body);
+        let retry = self.retry_after();
+        assert!(retry >= 1 && retry <= window, "Retry-After {retry} outside 1..={window}");
+        assert!(self.body.contains("Too many failed attempts"), "{}", self.body);
+        assert!(!self.body.to_lowercase().contains("no such"), "no enumeration hint");
+    }
+}
+
+#[tokio::test]
+async fn login_locks_the_account_after_the_configured_failures() {
+    let fx = Fx::with(|a| a.login_limit(3, 900)).await;
+    fx.user("alice").await;
+
+    for i in 1..=3 {
+        let res = fx.fail_login("alice", 1).await;
+        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "failure {i} is a plain 401");
+    }
+    // The 4th attempt is refused *with the correct password* — the secret is never looked at.
+    let res = fx.try_login("alice").await;
+    res.assert_locked_out(900);
+    assert!(res.session_token(fx.auth.session_cookie_name()).is_none(), "no session cookie");
+    assert_eq!(session::Entity::find().all(&fx.db).await.unwrap().len(), 0, "no session row");
+    assert!(fx.password_works("alice", PW).await, "and the account is otherwise untouched");
+}
+
+#[tokio::test]
+async fn an_unknown_username_locks_the_same_way() {
+    // Otherwise the lockout itself would reveal which accounts exist.
+    let fx = Fx::with(|a| a.login_limit(2, 900)).await;
+    fx.user("alice").await;
+    fx.fail_login("ghost", 2).await;
+    let ghost = fx.post("/login", &form(&[("username", "ghost"), ("password", "x")]), None).await;
+    ghost.assert_locked_out(900);
+
+    fx.fail_login("alice", 2).await;
+    let alice = fx.try_login("alice").await;
+    alice.assert_locked_out(900);
+    assert_eq!(ghost.status, alice.status);
+    assert_eq!(ghost.body, alice.body, "same response for a real and a made-up account");
+}
+
+#[tokio::test]
+async fn a_lockout_is_per_account_and_case_cannot_dodge_it() {
+    let fx = Fx::with(|a| a.login_limit(2, 900)).await;
+    fx.user("alice").await;
+    fx.user("bob").await;
+
+    // Two failures as "alice", a third as "ALICE" — same bucket, so alice is locked…
+    fx.fail_login("alice", 2).await;
+    fx.post("/login", &form(&[("username", "ALICE"), ("password", "wrong")]), None)
+        .await
+        .assert_locked_out(900);
+    fx.try_login("alice").await.assert_locked_out(900);
+    // …while bob is unaffected.
+    fx.try_login("bob").await.assert_redirect("/");
+}
+
+#[tokio::test]
+async fn a_successful_login_clears_the_accounts_failures() {
+    let fx = Fx::with(|a| a.login_limit(3, 900)).await;
+    fx.user("alice").await;
+
+    fx.fail_login("alice", 2).await;
+    fx.try_login("alice").await.assert_redirect("/"); // clears the bucket
+    // If the count had survived, the next two failures would lock the account.
+    let res = fx.fail_login("alice", 2).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED, "the counter restarted: {}", res.body);
+    fx.try_login("alice").await.assert_redirect("/");
+}
+
+#[tokio::test]
+async fn the_totp_step_shares_the_accounts_bucket() {
+    let fx = Fx::with(|a| a.login_limit(3, 900)).await;
+    fx.user("alice").await;
+    let secret = fx.enable_totp("alice").await;
+
+    let res = fx.try_login("alice").await;
+    res.assert_redirect("/login/totp");
+    let session = fx.cookie(&res.session_token(fx.auth.session_cookie_name()).unwrap());
+
+    for _ in 0..3 {
+        let res = fx.post("/login/totp", &form(&[("code", "000000")]), Some(&session)).await;
+        assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    }
+    // A *correct* code is now refused too — 6 digits get the same brake as the password.
+    let code = totp::current_code(&secret);
+    let res = fx.post("/login/totp", &form(&[("code", &code)]), Some(&session)).await;
+    res.assert_locked_out(900);
+    assert!(fx.session_row(&session[session.find('=').unwrap() + 1..]).await.unwrap().awaiting_totp);
+    // And because it's one bucket, password login is locked as well.
+    fx.try_login("alice").await.assert_locked_out(900);
+}
+
+#[tokio::test]
+async fn a_forged_post_cannot_spend_the_attempt_budget() {
+    // If CSRF-rejected posts counted, any site could lock a user out of their account by making a
+    // browser fire off a handful of cross-site logins.
+    let fx = Fx::with(|a| a.login_limit(3, 900)).await;
+    fx.user("alice").await;
+
+    for _ in 0..20 {
+        let res = fx
+            .post_raw("/login", &form(&[("username", "alice"), ("password", "wrong")]), None)
+            .await;
+        assert_eq!(res.status, StatusCode::FORBIDDEN, "no CSRF token → rejected before counting");
+    }
+    fx.try_login("alice").await.assert_redirect("/"); // not locked
+}
+
+#[tokio::test]
+async fn the_profile_password_check_has_its_own_bucket() {
+    let fx = Fx::with(|a| a.login_limit(3, 900)).await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    let wrong = form(&[
+        ("current_password", OTHER_PW),
+        ("new_password", "new-secret"),
+        ("confirm_password", "new-secret"),
+    ]);
+
+    for _ in 0..3 {
+        let res = fx.post("/profile", &wrong, Some(&cookie)).await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    }
+    // Locked here — even a *correct* current password is refused…
+    let right = form(&[
+        ("current_password", PW),
+        ("new_password", "new-secret"),
+        ("confirm_password", "new-secret"),
+    ]);
+    fx.post("/profile", &right, Some(&cookie)).await.assert_locked_out(900);
+    assert!(fx.password_works("alice", PW).await, "the password was not changed");
+    // …but fumbling it here must not lock the account out of logging in.
+    fx.try_login("alice").await.assert_redirect("/");
+}
+
+#[tokio::test]
+async fn enrolment_codes_are_limited_in_their_own_bucket() {
+    let fx = Fx::with(|a| a.login_limit(3, 900)).await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    fx.get("/profile/totp", Some(&cookie)).await; // mints the pending secret
+    let pending = fx.row("alice").await.totp_pending.expect("pending secret");
+
+    for _ in 0..3 {
+        let res = fx.post("/profile/totp", &form(&[("code", "000000")]), Some(&cookie)).await;
+        assert_eq!(res.status, StatusCode::OK, "a wrong code re-shows the form");
+    }
+    // The correct code is refused while locked, so 2FA stays off and the secret stays pending.
+    let res = fx
+        .post("/profile/totp", &form(&[("code", &totp::current_code(&pending))]), Some(&cookie))
+        .await;
+    res.assert_locked_out(900);
+    let row = fx.row("alice").await;
+    assert!(row.totp_secret.is_none(), "not enabled");
+    assert_eq!(row.totp_pending.as_deref(), Some(pending.as_str()), "still mid-enrolment");
+    fx.try_login("alice").await.assert_redirect("/"); // login unaffected
+}
+
+#[tokio::test]
+async fn per_ip_limiting_is_off_by_default() {
+    // Spraying distinct usernames from one address: each account keeps its own small budget, so nothing
+    // locks. This is exactly the gap `login_limit_per_ip` closes — and why it needs real client IPs.
+    let fx = Fx::with(|a| a.login_limit(3, 900)).await;
+    fx.user("alice").await;
+    for i in 0..10 {
+        let res = fx
+            .post_from(
+                "/login",
+                &form(&[("username", &format!("ghost{i}")), ("password", "wrong")]),
+                None,
+                "203.0.113.7:5000",
+            )
+            .await;
+        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "spray {i} is not rate-limited by default");
+    }
+    fx.try_login("alice").await.assert_redirect("/");
+}
+
+#[tokio::test]
+async fn per_ip_limiting_catches_username_spraying_when_enabled() {
+    let fx = Fx::with(|a| a.login_limit(100, 900).login_limit_per_ip(3)).await;
+    fx.user("alice").await;
+    let attacker = "203.0.113.7:5000";
+
+    for i in 0..3 {
+        let res = fx
+            .post_from(
+                "/login",
+                &form(&[("username", &format!("ghost{i}")), ("password", "wrong")]),
+                None,
+                attacker,
+            )
+            .await;
+        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "spray {i}");
+    }
+    // A fourth attempt from that address is refused — even a *valid* login for an untouched account.
+    let res = fx
+        .post_from("/login", &form(&[("username", "alice"), ("password", PW)]), None, attacker)
+        .await;
+    res.assert_locked_out(900);
+    assert!(res.session_token(fx.auth.session_cookie_name()).is_none());
+    // Another address is unaffected, and so is the account itself.
+    fx.post_from("/login", &form(&[("username", "alice"), ("password", PW)]), None, "198.51.100.9:443")
+        .await
+        .assert_redirect("/");
+}
+
+#[tokio::test]
+async fn an_operator_can_unlock_an_account_and_can_switch_limiting_off() {
+    let fx = Fx::with(|a| a.login_limit(2, 900)).await;
+    fx.user("alice").await;
+    fx.fail_login("alice", 2).await;
+    fx.try_login("alice").await.assert_locked_out(900);
+
+    fx.auth.clear_login_attempts("alice");
+    fx.try_login("alice").await.assert_redirect("/");
+
+    // …and an app that limits at its edge can turn ours off entirely.
+    let open = Fx::with(|a| a.no_login_limit()).await;
+    open.user("alice").await;
+    let res = open.fail_login("alice", 25).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED, "no lockout when disabled");
+    open.try_login("alice").await.assert_redirect("/");
 }
 
 // ===================== CSRF (double-submit token) =====================

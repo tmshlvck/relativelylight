@@ -115,6 +115,10 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
 - **TOTP 2FA**: users enrol from `/profile` (QR + `otpauth://` URL, verify-before-activate); once on,
   login requires the code at `/login/totp`. Self-disable, plus manager disable for others. Expose a
   password column as a hashed, write-only field with `MetaField::password()`.
+- **Attempt limiting**: every credential check (login, the TOTP step, the profile password, 2FA
+  enrolment) is behind a sliding-window lockout — 10 failures / 15 min per account by default → `429` +
+  `Retry-After`, tune with `.login_limit(max, window_secs)`, add `.login_limit_per_ip(n)` when your app
+  sees real client IPs, `.no_login_limit()` to opt out, `auth.clear_login_attempts(user)` to unlock.
 - **CSRF**: every form `auth` renders carries a hidden `_csrf` token checked on POST; turn it on for the
   JSON API with `crud.csrf(auth.csrf())` (the admin UI's `fetch` writes then send `X-CSRF-Token`
   automatically). `Authorization`-bearing requests are exempt. See [docs/AUTH.md §7](docs/AUTH.md).

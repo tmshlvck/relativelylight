@@ -116,6 +116,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .secure_cookies(false) // local http
         .admin_group(ADMIN_GROUP)
         .totp_issuer("relativelylight admin") // shown in authenticator apps for 2FA
+        // Brute-force brake: 5 failed credential checks per account per 5 minutes (the library default
+        // is 10 / 15 min), plus a per-source-IP cap to catch username spraying. Per-IP is safe to
+        // enable *here* because this example binds directly and serves with connect-info, so the peer
+        // really is the client — behind a reverse proxy it would bucket everyone together (AUTH.md §5e).
+        .login_limit(5, 300)
+        .login_limit_per_ip(15)
         .login_shell(login_shell)
         .profile_shell(profile_shell); // the app's chrome around the library's profile page
 

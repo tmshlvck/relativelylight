@@ -80,12 +80,14 @@ a per-model `Authz` gate with presets (`Open` / `UserReadWrite` / `UserReadGroup
 password change; **TOTP 2FA**
 (enrol/verify/login/disable); **OIDC SSO** (feature `sso`: Google / Okta / corporate, claim→group
 mapping, optional auto-registration); **double-submit CSRF protection** (feature `csrf`: always on for
-the login/profile forms, `Crud::csrf` for the API); UTC lifecycle timestamps on the auth entities. The rejection
+the login/profile forms, `Crud::csrf` for the API); **attempt limiting** on every credential check
+(sliding-window lockout → 429, per account by default, per source IP opt-in); UTC lifecycle timestamps
+on the auth entities. The rejection
 paths (bad credentials, unusable sessions, wrong TOTP codes, non-manager profile writes, each gate
 preset) are covered by an automated negative-path suite — [AUTH.md §10a](AUTH.md).
 
-**Roadmap / deferred (see [../TODO.md](../TODO.md) for the ordered backlog):** login-attempt rate
-limiting, re-auth before sensitive changes, TOTP recovery codes + replay
+**Roadmap / deferred (see [../TODO.md](../TODO.md) for the ordered backlog):** a shared/durable store
+for the attempt counters, re-auth before sensitive changes, TOTP recovery codes + replay
 guard, session hardening, cross-cutting real-IP/CORS layers, **PassKeys/WebAuthn**, app-issued API
 tokens, and row-level authorization.
 

@@ -8,17 +8,16 @@ tick/remove items as they ship, and add new ones with a one-line rationale.
 
 Highest priority first.
 
-- [ ] **Login attempt limiting.** Rate-limit and/or lock out repeated failed logins — both the
-  password step (`POST /login`) and the TOTP step (`POST /login/totp`). Per-username and per-source-IP
-  counters with backoff/lockout; a small `auth_login_attempt` table (or an in-memory limiter with a
-  pluggable store). Also cap TOTP-enrolment (`POST /profile/totp`) and password-reset attempts. This
-  is the main missing brute-force defense today — there is currently **no limit** on attempts.
 - [ ] **Re-authenticate before sensitive changes.** Require the current password (or a fresh TOTP
   code) before disabling 2FA, changing the password, or (later) removing a PassKey.
 - [ ] **TOTP recovery / backup codes.** One-time recovery codes issued at enrolment, so a user who
   loses their authenticator isn't locked out (today only a manager can disable their 2FA).
 - [ ] **TOTP replay guard.** Reject a code that was already used within its 30s window (track the last
   accepted step per user) to prevent replay inside the skew window.
+- [ ] **Attempt-limiting follow-ups.** The sliding-window lockout ships (AUTH.md §5e), but the counters
+  are **in-memory per process**: add a pluggable store (SeaORM table / Redis) so a multi-replica
+  deployment shares one budget and survives restarts, and flip `login_limit_per_ip` on by default once
+  the trusted-proxy real-ip parsing exists (today it would bucket everyone behind a proxy together).
 - [ ] **CSRF follow-ups.** The double-submit token ships (AUTH.md §7). Remaining: a `Csrf` layer for
   app-owned unsafe routes (today each handler calls `Csrf::verify` itself), and a rejection hook so an
   app can render the 403 in its own shell instead of the built-in page.

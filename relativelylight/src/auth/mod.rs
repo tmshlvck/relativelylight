@@ -27,6 +27,7 @@
 //! lookup, and deleting the row revokes it.
 
 pub mod group;
+mod limit;
 /// Negative-path (rejection) tests for the auth surface — see the module's own docs.
 #[cfg(test)]
 mod security_tests;
@@ -511,9 +512,43 @@ struct Inner {
     totp_issuer: String,
     /// Name of the double-submit CSRF cookie (see [`crate::csrf`]).
     csrf_cookie: String,
+    /// How many failed credential checks lock a key out (see [`limit`]).
+    limits: limit::LoginLimit,
+    /// The failure counters themselves (in-memory, per process).
+    limiter: limit::Limiter,
 }
 
 impl Inner {
+    /// Whether this account (and, when enabled, this source IP) is currently locked out of credential
+    /// checks — `Some(retry_after_secs)` if so. Checked *before* the secret is looked at.
+    fn locked_out(&self, key: &str, peer: Option<std::net::SocketAddr>) -> Option<i64> {
+        let now = now_secs();
+        let window = self.limits.window_secs;
+        let by_user = self
+            .limits
+            .max_username
+            .and_then(|max| self.limiter.locked_for(key, max, window, now));
+        let by_ip = self.limits.max_ip.zip(peer).and_then(|(max, addr)| {
+            self.limiter.locked_for(&limit::ip_key(addr.ip()), max, window, now)
+        });
+        match (by_user, by_ip) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Record one failed credential check against the account key (and the source IP when per-IP
+    /// limiting is on). Only ever called for an attempt we actually *checked*.
+    fn record_failure(&self, key: &str, peer: Option<std::net::SocketAddr>) {
+        let (now, window) = (now_secs(), self.limits.window_secs);
+        if self.limits.max_username.is_some() {
+            self.limiter.record(key, window, now);
+        }
+        if let (Some(_), Some(addr)) = (self.limits.max_ip, peer) {
+            self.limiter.record(&limit::ip_key(addr.ip()), window, now);
+        }
+    }
+
     /// The CSRF checker for this app: the configured cookie name, `Secure` and the lifetime tracking
     /// the session cookie, so a live session always has a usable token.
     fn csrf(&self) -> crate::csrf::Csrf {
@@ -629,6 +664,8 @@ impl Auth {
                 profile_managers: None,
                 totp_issuer: "relativelylight".into(),
                 csrf_cookie: crate::csrf::Csrf::new().cookie().to_string(),
+                limits: limit::LoginLimit::default(),
+                limiter: limit::Limiter::default(),
             }),
         }
     }
@@ -722,6 +759,53 @@ impl Auth {
     pub fn csrf_cookie_name(mut self, name: impl Into<String>) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().csrf_cookie = name.into();
         self
+    }
+
+    /// How many failed credential checks lock an **account** out, and over what sliding window
+    /// (default: 10 failures per 15 minutes). While locked, `POST /login`, the TOTP step, and the
+    /// profile/enrolment checks answer `429` with a `Retry-After` without looking at the submitted
+    /// secret; the lock lifts as those failures age out of the window (attempts made while locked
+    /// aren't counted, so it can't be held open). `max = 0` turns account limiting off.
+    ///
+    /// The counters are **in-memory, per process** — see [`limit`] for what that means for restarts and
+    /// multi-replica deployments.
+    pub fn login_limit(mut self, max: u32, window_secs: i64) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.limits.max_username = (max > 0).then_some(max);
+        inner.limits.window_secs = window_secs.max(1);
+        self
+    }
+
+    /// Also lock out a **source IP** after `max` failed logins in the window (default: **off**). This
+    /// catches username spraying, which per-account counters miss entirely.
+    ///
+    /// Opt-in because the IP comes from the socket peer: enable it when your app sees real client
+    /// addresses (bound directly, served with `into_make_service_with_connect_info`). **Behind a
+    /// reverse proxy every request carries the proxy's address**, so a shared bucket would eventually
+    /// lock out *all* your users — leave it off until the trusted-proxy real-ip parsing lands
+    /// (`docs/AUTH.md` §4). `max = 0` turns it off again.
+    pub fn login_limit_per_ip(mut self, max: u32) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().limits.max_ip = (max > 0).then_some(max);
+        self
+    }
+
+    /// Turn attempt limiting off entirely (account *and* IP) — for an app that rate-limits at its edge,
+    /// or a test that needs to hammer the login route.
+    pub fn no_login_limit(mut self) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).unwrap();
+        inner.limits.max_username = None;
+        inner.limits.max_ip = None;
+        self
+    }
+
+    /// Forget every recorded failure for `username` — the operator's unlock, for a user locked out by
+    /// someone else's guessing (a support call, a CLI flag). Clears the login, profile-password, and
+    /// 2FA-enrolment buckets; source-IP counters are untouched. A successful login clears the account's
+    /// login bucket by itself, and since the counters are in-memory a process restart clears everything.
+    pub fn clear_login_attempts(&self, username: &str) {
+        for key in limit::all_user_keys(username) {
+            self.inner.limiter.clear(&key);
+        }
     }
 
     /// The CSRF checker these routes use — hand it to the API so both surfaces share one token
@@ -854,13 +938,28 @@ async fn login_form(State(inner): State<Arc<Inner>>, headers: HeaderMap, jar: Co
 async fn login_submit(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
+    MaybePeer(peer): MaybePeer,
     jar: CookieJar,
     Form(form): Form<LoginForm>,
 ) -> Response {
     if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
-        return csrf_rejected(&inner); // checked before the password: no DB work for a forged post
+        // Checked before anything else: a forged post does no DB work *and* can't spend the victim's
+        // attempt budget (otherwise cross-site requests could lock a user out).
+        return csrf_rejected(&inner);
+    }
+    let attempts = limit::login_key(&form.username);
+    if let Some(retry) = inner.locked_out(&attempts, peer) {
+        // Locked: the password is never looked at, so this costs no argon2 and says nothing about
+        // whether the account exists.
+        let (token, jar) = csrf_token(&inner, &headers, jar);
+        return too_many_attempts(
+            retry,
+            jar,
+            Html((inner.login_shell)(&login_form_html(Some(&lockout_message(retry)), &token))),
+        );
     }
     let Some(user) = verify_credentials(&inner, &form.username, &form.password).await else {
+        inner.record_failure(&attempts, peer);
         let (token, jar) = csrf_token(&inner, &headers, jar);
         return (
             StatusCode::UNAUTHORIZED,
@@ -876,6 +975,9 @@ async fn login_submit(
     let Some(token) = create_session(&inner, user.id, needs_totp).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
     };
+    // Credentials accepted → forget this account's failures (the IP bucket is left alone: one valid
+    // login shouldn't reset a spraying source's budget).
+    inner.limiter.clear(&attempts);
     // The session cookie is set either way; while `awaiting_totp` it grants nothing until the second
     // factor is confirmed at /login/totp. The CSRF token is rotated with it (privilege change).
     let (_, csrf_cookie) = inner.csrf().issue();
@@ -925,6 +1027,7 @@ struct CsrfOnlyForm {
 async fn login_totp_submit(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
+    MaybePeer(peer): MaybePeer,
     jar: CookieJar,
     Form(form): Form<TotpForm>,
 ) -> Response {
@@ -934,8 +1037,20 @@ async fn login_totp_submit(
     let Some((session, user)) = pending_totp_user(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
+    // The second factor shares the account's login bucket: password guessing and code guessing are the
+    // same account being attacked, and 6 digits deserve the tighter of the two brakes.
+    let attempts = limit::login_key(&user.username);
+    if let Some(retry) = inner.locked_out(&attempts, peer) {
+        let (token, jar) = csrf_token(&inner, &headers, jar);
+        return too_many_attempts(
+            retry,
+            jar,
+            Html((inner.login_shell)(&totp_login_html(Some(&lockout_message(retry)), &token))),
+        );
+    }
     let ok = user.totp_secret.as_deref().is_some_and(|s| totp::verify(s, &form.code));
     if !ok {
+        inner.record_failure(&attempts, peer);
         let (token, jar) = csrf_token(&inner, &headers, jar);
         return (
             StatusCode::UNAUTHORIZED,
@@ -948,6 +1063,7 @@ async fn login_totp_submit(
     am.awaiting_totp = Set(false);
     let _ = am.update(&inner.db).await;
     stamp_last_login(&inner.db, user.id).await; // second factor confirmed → login complete
+    inner.limiter.clear(&attempts);
     // The session just gained full privilege — rotate the CSRF token with it.
     let (_, csrf_cookie) = inner.csrf().issue();
     (jar.add(csrf_cookie), Redirect::to("/")).into_response()
@@ -1053,7 +1169,16 @@ async fn profile_submit(
     }
     let totp_on = user.totp_secret.is_some();
 
+    // A stolen session guessing the current password gets the same brake — in its own bucket, so
+    // fumbling it here can't lock the account out of *logging in*.
+    let attempts = limit::profile_key(&who.username);
+    if let Some(retry) = inner.locked_out(&attempts, peer) {
+        let frag = change_form_html(&who, totp_on, Some(&lockout_message(retry)), None, &csrf);
+        let frag = inner.with_profile_extra(frag, &who).await;
+        return too_many_attempts(retry, (), Html((inner.profile_shell)(&frag, &who)));
+    }
     let error = if !verify_password(&user.password_hash, &form.current_password) {
+        inner.record_failure(&attempts, peer);
         Some("Current password is incorrect.")
     } else {
         password_pair_error(&form.new_password, &form.confirm_password)
@@ -1064,6 +1189,7 @@ async fn profile_submit(
         return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
     }
 
+    inner.limiter.clear(&attempts); // the current password was right
     if set_password(&inner.db, &who.username, &form.new_password).await.is_err() {
         let frag = change_form_html(&who, totp_on, Some("Could not change the password."), None, &csrf);
         let frag = inner.with_profile_extra(frag, &who).await;
@@ -1201,6 +1327,7 @@ async fn totp_setup_form(
 async fn totp_setup_submit(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
+    MaybePeer(peer): MaybePeer,
     Form(form): Form<TotpForm>,
 ) -> Response {
     if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
@@ -1219,7 +1346,17 @@ async fn totp_setup_submit(
     let Some(pending) = user.totp_pending.clone() else {
         return Redirect::to(&inner.profile_path).into_response(); // nothing in progress
     };
+    // Enrolment confirms a 6-digit code too — brake it, in its own bucket.
+    let attempts = limit::enrol_key(&who.username);
+    if let Some(retry) = inner.locked_out(&attempts, peer) {
+        return too_many_attempts(
+            retry,
+            (),
+            render_totp_setup(&inner, &who, &pending, Some(&lockout_message(retry)), &csrf),
+        );
+    }
     if !totp::verify(&pending, &form.code) {
+        inner.record_failure(&attempts, peer);
         return render_totp_setup(
             &inner,
             &who,
@@ -1228,6 +1365,7 @@ async fn totp_setup_submit(
             &csrf,
         );
     }
+    inner.limiter.clear(&attempts);
     let mut am: user::ActiveModel = user.into();
     am.totp_secret = Set(Some(pending));
     am.totp_pending = Set(None);
@@ -1346,6 +1484,34 @@ fn csrf_token(inner: &Inner, headers: &HeaderMap, jar: CookieJar) -> (String, Co
     match set {
         Some(cookie) => (token, jar.add(cookie)),
         None => (token, jar),
+    }
+}
+
+/// `429 Too Many Requests` with a `Retry-After`, wrapping whatever the caller wants to render (the
+/// login form with the message, the profile page, …). `extra` is any additional response part — a
+/// `CookieJar` where one is being handed back, or `()`.
+fn too_many_attempts<E, B>(retry_after: i64, extra: E, body: B) -> Response
+where
+    E: axum::response::IntoResponseParts,
+    B: IntoResponse,
+{
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(axum::http::header::RETRY_AFTER, retry_after.max(1).to_string())],
+        extra,
+        body,
+    )
+        .into_response()
+}
+
+/// What a locked-out visitor is told: enough to know to come back later, nothing about whether the
+/// account exists or how many tries are left.
+fn lockout_message(retry_after: i64) -> String {
+    let minutes = (retry_after + 59) / 60;
+    if minutes <= 1 {
+        "Too many failed attempts. Try again in a minute.".to_string()
+    } else {
+        format!("Too many failed attempts. Try again in about {minutes} minutes.")
     }
 }
 
