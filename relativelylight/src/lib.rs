@@ -28,6 +28,10 @@ pub mod authz;
 /// The write-observer hook for audit logging: [`WriteEvent`](observe::WriteEvent) +
 /// [`WriteObserver`](observe::WriteObserver), fired by `crud` and `auth` write paths with the request
 /// context so the app can record who/what/from-where. Always compiled.
+/// Client-address resolution (`trust_proxy` → socket peer vs forwarded headers) — used by `auth`'s
+/// lockout and available to the app for its own logging and limits, so one client is one key.
+pub mod net;
+
 pub mod observe;
 
 #[cfg(feature = "crud")]

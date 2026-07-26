@@ -18,6 +18,7 @@
 //!   an expired, half-authenticated, or deactivated session is treated as anonymous.
 
 use super::*;
+use crate::auth::lockout::Lockout;
 use crate::authz::{Decision, Operation};
 use axum::body::Body;
 use axum::http::{header, Request};
@@ -41,15 +42,24 @@ struct Fx {
 
 impl Fx {
     async fn new() -> Fx {
-        Fx::with(|a| a).await
+        Fx::build(Lockout::default(), |a| a).await
     }
 
     /// As [`Fx::new`], with a chance to configure `Auth` before it's cloned into the router (the
     /// builders need sole ownership of the inner `Arc`).
     async fn with(configure: impl FnOnce(Auth) -> Auth) -> Fx {
+        Fx::build(Lockout::default(), configure).await
+    }
+
+    /// As [`Fx::new`] with a specific lockout policy (it is a `new` argument, not a builder).
+    async fn with_lockout(lockout: Lockout) -> Fx {
+        Fx::build(lockout, |a| a).await
+    }
+
+    async fn build(lockout: Lockout, configure: impl FnOnce(Auth) -> Auth) -> Fx {
         let db = Database::connect("sqlite::memory:").await.expect("sqlite in-memory");
         migrate(&db).await.expect("migrate");
-        let auth = configure(Auth::new(db.clone()).secure_cookies(false));
+        let auth = configure(Auth::new(db.clone(), lockout).secure_cookies(false));
         let app = auth.routes();
         Fx { db, auth, app }
     }
@@ -103,6 +113,40 @@ impl Fx {
     /// no-op — a `403`/`400` that silently wrote anyway would be the real bug).
     async fn password_works(&self, username: &str, password: &str) -> bool {
         verify_password(&self.row(username).await.password_hash, password)
+    }
+
+    /// A login post carrying `X-Forwarded-For`, as a proxy would send it.
+    async fn post_forwarded(&self, xff: &str, username: &str, password: &str) -> Resp {
+        self.post_with_header("x-forwarded-for", xff, username, password).await
+    }
+
+    /// A login post carrying a CDN-style client header (for the custom-resolver test).
+    async fn post_cdn(&self, ip: &str, username: &str, password: &str) -> Resp {
+        self.post_with_header("cf-connecting-ip", ip, username, password).await
+    }
+
+    /// A login post with one extra header, plus a socket peer (`127.0.0.1`) — so a test can tell which
+    /// of the two the lockout actually counted.
+    async fn post_with_header(&self, name: &str, value: &str, username: &str, password: &str) -> Resp {
+        let (body, cookie) =
+            self.browser_post(&form(&[("username", username), ("password", password)]), None);
+        let mut req = self
+            .req("POST", "/login", Some(&cookie))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(name, value)
+            .body(Body::from(body))
+            .unwrap();
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(addr));
+        self.send(req).await
+    }
+
+    /// The account's lockout row, if it has one.
+    async fn lockout_row(&self, username: &str) -> Option<lockout::username_entity::Model> {
+        lockout::username_entity::Entity::find_by_id(username.to_lowercase())
+            .one(&self.db)
+            .await
+            .expect("query")
     }
 
     async fn session_row(&self, token: &str) -> Option<session::Model> {
@@ -1107,9 +1151,15 @@ impl Resp {
     }
 }
 
+/// A policy that locks an account after `after` failures for `secs`, with the address counter off —
+/// so a test about accounts isn't also tripping the address budget.
+fn by_account(after: u32, secs: i64) -> Lockout {
+    Lockout { username_after: after, username_duration_secs: secs, ip_after: 0, ..Lockout::default() }
+}
+
 #[tokio::test]
 async fn login_locks_the_account_after_the_configured_failures() {
-    let fx = Fx::with(|a| a.login_limit(3, 900)).await;
+    let fx = Fx::with_lockout(by_account(3, 900)).await;
     fx.user("alice").await;
 
     for i in 1..=3 {
@@ -1127,7 +1177,7 @@ async fn login_locks_the_account_after_the_configured_failures() {
 #[tokio::test]
 async fn an_unknown_username_locks_the_same_way() {
     // Otherwise the lockout itself would reveal which accounts exist.
-    let fx = Fx::with(|a| a.login_limit(2, 900)).await;
+    let fx = Fx::with_lockout(by_account(2, 900)).await;
     fx.user("alice").await;
     fx.fail_login("ghost", 2).await;
     let ghost = fx.post("/login", &form(&[("username", "ghost"), ("password", "x")]), None).await;
@@ -1142,11 +1192,11 @@ async fn an_unknown_username_locks_the_same_way() {
 
 #[tokio::test]
 async fn a_lockout_is_per_account_and_case_cannot_dodge_it() {
-    let fx = Fx::with(|a| a.login_limit(2, 900)).await;
+    let fx = Fx::with_lockout(by_account(2, 900)).await;
     fx.user("alice").await;
     fx.user("bob").await;
 
-    // Two failures as "alice", a third as "ALICE" — same bucket, so alice is locked…
+    // Two failures as "alice", a third as "ALICE" — same row, so alice is locked…
     fx.fail_login("alice", 2).await;
     fx.post("/login", &form(&[("username", "ALICE"), ("password", "wrong")]), None)
         .await
@@ -1157,12 +1207,30 @@ async fn a_lockout_is_per_account_and_case_cannot_dodge_it() {
 }
 
 #[tokio::test]
+async fn a_locked_account_records_nothing_so_the_lock_cannot_be_held_open() {
+    // The row must keep the failure count and timestamp of the attempt that locked it; if further
+    // attempts bumped `last_failure_at`, an attacker could keep someone locked out indefinitely.
+    let fx = Fx::with_lockout(by_account(2, 900)).await;
+    fx.user("alice").await;
+    fx.fail_login("alice", 2).await;
+    let locked_at = fx.lockout_row("alice").await.expect("row");
+
+    for _ in 0..5 {
+        fx.fail_login("alice", 1).await.assert_locked_out(900);
+    }
+    let after = fx.lockout_row("alice").await.expect("row");
+    assert_eq!(after.failures, locked_at.failures, "count unchanged while locked");
+    assert_eq!(after.last_failure_at, locked_at.last_failure_at, "expiry not pushed out");
+}
+
+#[tokio::test]
 async fn a_successful_login_clears_the_accounts_failures() {
-    let fx = Fx::with(|a| a.login_limit(3, 900)).await;
+    let fx = Fx::with_lockout(by_account(3, 900)).await;
     fx.user("alice").await;
 
     fx.fail_login("alice", 2).await;
-    fx.try_login("alice").await.assert_redirect("/"); // clears the bucket
+    fx.try_login("alice").await.assert_redirect("/"); // clears the row
+    assert!(fx.lockout_row("alice").await.is_none(), "the row is gone, not just reset");
     // If the count had survived, the next two failures would lock the account.
     let res = fx.fail_login("alice", 2).await;
     assert_eq!(res.status, StatusCode::UNAUTHORIZED, "the counter restarted: {}", res.body);
@@ -1171,7 +1239,9 @@ async fn a_successful_login_clears_the_accounts_failures() {
 
 #[tokio::test]
 async fn the_totp_step_shares_the_accounts_bucket() {
-    let fx = Fx::with(|a| a.login_limit(3, 900)).await;
+    // The second factor is still an *unauthenticated* check — the session grants nothing until the
+    // code is confirmed — and 6 digits are the most guessable secret we hold.
+    let fx = Fx::with_lockout(by_account(3, 900)).await;
     fx.user("alice").await;
     let secret = fx.enable_totp("alice").await;
 
@@ -1196,7 +1266,7 @@ async fn the_totp_step_shares_the_accounts_bucket() {
 async fn a_forged_post_cannot_spend_the_attempt_budget() {
     // If CSRF-rejected posts counted, any site could lock a user out of their account by making a
     // browser fire off a handful of cross-site logins.
-    let fx = Fx::with(|a| a.login_limit(3, 900)).await;
+    let fx = Fx::with_lockout(by_account(3, 900)).await;
     fx.user("alice").await;
 
     for _ in 0..20 {
@@ -1205,12 +1275,16 @@ async fn a_forged_post_cannot_spend_the_attempt_budget() {
             .await;
         assert_eq!(res.status, StatusCode::FORBIDDEN, "no CSRF token → rejected before counting");
     }
+    assert!(fx.lockout_row("alice").await.is_none(), "nothing was recorded");
     fx.try_login("alice").await.assert_redirect("/"); // not locked
 }
 
 #[tokio::test]
-async fn the_profile_password_check_has_its_own_bucket() {
-    let fx = Fx::with(|a| a.login_limit(3, 900)).await;
+async fn authenticated_credential_checks_are_not_limited() {
+    // Deliberate: the brake exists for *unauthenticated* brute force. Someone posting to /profile
+    // already holds a session, which is a session-theft problem with its own mitigations — and if we
+    // counted it, a stolen session could lock the real user out of logging in.
+    let fx = Fx::with_lockout(by_account(3, 900)).await;
     fx.user("alice").await;
     let cookie = fx.cookie(&fx.session_for("alice").await);
     let wrong = form(&[
@@ -1219,68 +1293,108 @@ async fn the_profile_password_check_has_its_own_bucket() {
         ("confirm_password", "new-secret"),
     ]);
 
-    for _ in 0..3 {
+    for _ in 0..10 {
         let res = fx.post("/profile", &wrong, Some(&cookie)).await;
-        assert_eq!(res.status, StatusCode::BAD_REQUEST);
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "rejected, but never locked out");
     }
-    // Locked here — even a *correct* current password is refused…
-    let right = form(&[
-        ("current_password", PW),
-        ("new_password", "new-secret"),
-        ("confirm_password", "new-secret"),
-    ]);
-    fx.post("/profile", &right, Some(&cookie)).await.assert_locked_out(900);
-    assert!(fx.password_works("alice", PW).await, "the password was not changed");
-    // …but fumbling it here must not lock the account out of logging in.
-    fx.try_login("alice").await.assert_redirect("/");
+    assert!(fx.lockout_row("alice").await.is_none(), "no lockout row for an authenticated check");
+    fx.try_login("alice").await.assert_redirect("/"); // login untouched
+    assert!(fx.password_works("alice", PW).await, "and no password was changed");
 }
 
 #[tokio::test]
-async fn enrolment_codes_are_limited_in_their_own_bucket() {
-    let fx = Fx::with(|a| a.login_limit(3, 900)).await;
+async fn enrolment_codes_are_not_limited_either() {
+    // Also authenticated, and the code being guessed is the caller's *own* pending secret — there is
+    // no other account to reach by guessing it.
+    let fx = Fx::with_lockout(by_account(3, 900)).await;
     fx.user("alice").await;
     let cookie = fx.cookie(&fx.session_for("alice").await);
     fx.get("/profile/totp", Some(&cookie)).await; // mints the pending secret
     let pending = fx.row("alice").await.totp_pending.expect("pending secret");
 
-    for _ in 0..3 {
+    for _ in 0..10 {
         let res = fx.post("/profile/totp", &form(&[("code", "000000")]), Some(&cookie)).await;
-        assert_eq!(res.status, StatusCode::OK, "a wrong code re-shows the form");
+        assert_eq!(res.status, StatusCode::OK, "a wrong code just re-shows the form");
     }
-    // The correct code is refused while locked, so 2FA stays off and the secret stays pending.
-    let res = fx
-        .post("/profile/totp", &form(&[("code", &totp::current_code(&pending))]), Some(&cookie))
-        .await;
-    res.assert_locked_out(900);
-    let row = fx.row("alice").await;
-    assert!(row.totp_secret.is_none(), "not enabled");
-    assert_eq!(row.totp_pending.as_deref(), Some(pending.as_str()), "still mid-enrolment");
-    fx.try_login("alice").await.assert_redirect("/"); // login unaffected
+    assert!(fx.lockout_row("alice").await.is_none());
+    // The right code still enrols; nothing was locked on the way.
+    fx.post("/profile/totp", &form(&[("code", &totp::current_code(&pending))]), Some(&cookie)).await;
+    assert!(fx.row("alice").await.has_totp(), "2FA enabled");
 }
 
 #[tokio::test]
-async fn per_ip_limiting_is_off_by_default() {
-    // Spraying distinct usernames from one address: each account keeps its own small budget, so nothing
-    // locks. This is exactly the gap `login_limit_per_ip` closes — and why it needs real client IPs.
-    let fx = Fx::with(|a| a.login_limit(3, 900)).await;
+async fn forwarded_headers_are_ignored_unless_the_app_trusts_a_proxy() {
+    // The security-critical direction: unproxied, `X-Forwarded-For` is attacker-supplied, so a caller
+    // must not be able to choose whose address gets locked out. Failures are counted against the peer.
+    let fx = Fx::with_lockout(Lockout { ip_after: 2, trust_proxy: false, ..Lockout::default() }).await;
     fx.user("alice").await;
-    for i in 0..10 {
-        let res = fx
-            .post_from(
-                "/login",
-                &form(&[("username", &format!("ghost{i}")), ("password", "wrong")]),
-                None,
-                "203.0.113.7:5000",
-            )
-            .await;
-        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "spray {i} is not rate-limited by default");
+
+    for _ in 0..2 {
+        fx.post_forwarded("9.9.9.9", "ghost", "wrong").await;
     }
-    fx.try_login("alice").await.assert_redirect("/");
+    assert_eq!(fx.auth.ip_lockout().locked("9.9.9.9".parse().ok()).await, None, "spoof not counted");
+    let peer = fx.auth.ip_lockout().locked("127.0.0.1".parse().ok()).await;
+    assert!(peer.is_some(), "the socket peer was counted instead");
+    // …so the lockout follows the real connection, whatever header it sent.
+    fx.post_forwarded("1.2.3.4", "alice", PW).await.assert_locked_out(900);
 }
 
 #[tokio::test]
-async fn per_ip_limiting_catches_username_spraying_when_enabled() {
-    let fx = Fx::with(|a| a.login_limit(100, 900).login_limit_per_ip(3)).await;
+async fn a_trusted_proxy_makes_the_forwarded_hop_the_subject() {
+    // The proxied deployment: one flag, and the library resolves the client itself.
+    let fx = Fx::with_lockout(Lockout {
+        username_after: 100,
+        ip_after: 2,
+        trust_proxy: true,
+        ..Lockout::default()
+    })
+    .await;
+    fx.user("alice").await;
+
+    for _ in 0..2 {
+        fx.post_forwarded("198.51.100.9", "ghost", "wrong").await;
+    }
+    assert!(fx.auth.ip_lockout().locked("198.51.100.9".parse().ok()).await.is_some());
+    fx.post_forwarded("198.51.100.9", "alice", PW).await.assert_locked_out(900);
+    // Another client behind the same proxy is untouched, and the proxy's own address was never counted.
+    fx.post_forwarded("203.0.113.7", "alice", PW).await.assert_redirect("/");
+    assert_eq!(fx.auth.ip_lockout().locked("127.0.0.1".parse().ok()).await, None, "peer not counted");
+}
+
+#[tokio::test]
+async fn a_custom_resolver_overrides_the_built_in_one() {
+    // For chains stranger than "one proxy sets X-Forwarded-For" — here a CDN's own header, with
+    // `trust_proxy` left off to prove the override wins outright.
+    let fx = Fx::build(
+        Lockout { username_after: 100, ip_after: 2, trust_proxy: false, ..Lockout::default() },
+        |a| {
+            a.client_ip(|headers, _peer| {
+                headers.get("cf-connecting-ip")?.to_str().ok()?.trim().parse().ok()
+            })
+        },
+    )
+    .await;
+    fx.user("alice").await;
+
+    for _ in 0..2 {
+        fx.post_cdn("198.51.100.9", "ghost", "wrong").await;
+    }
+    assert!(fx.auth.ip_lockout().locked("198.51.100.9".parse().ok()).await.is_some());
+    fx.post_cdn("198.51.100.9", "alice", PW).await.assert_locked_out(900);
+    fx.post_cdn("203.0.113.7", "alice", PW).await.assert_redirect("/");
+    assert_eq!(fx.auth.ip_lockout().locked("127.0.0.1".parse().ok()).await, None, "peer not counted");
+}
+
+#[tokio::test]
+async fn per_ip_limiting_catches_username_spraying_when_the_peer_is_the_client() {
+    // The default deployment: exposed directly, so the socket peer is the client and needs no wiring.
+    let fx = Fx::with_lockout(Lockout {
+        username_after: 100,
+        ip_after: 3,
+        ip_duration_secs: 900,
+        ..Lockout::default()
+    })
+    .await;
     fx.user("alice").await;
     let attacker = "203.0.113.7:5000";
 
@@ -1307,22 +1421,89 @@ async fn per_ip_limiting_catches_username_spraying_when_enabled() {
         .assert_redirect("/");
 }
 
+// --------- the app's own credential checks, through the same counters ---------
+
 #[tokio::test]
-async fn an_operator_can_unlock_an_account_and_can_switch_limiting_off() {
-    let fx = Fx::with(|a| a.login_limit(2, 900)).await;
+async fn the_apps_own_checks_share_the_accounts_bucket_in_both_directions() {
+    // The point of handing out the lockout handles: an account has *one* budget however it is reached.
+    let fx = Fx::with_lockout(by_account(3, 900)).await;
+    fx.user("alice").await;
+    let usernames = fx.auth.username_lockout();
+
+    // App-side failures lock the login form…
+    for i in 1..=2 {
+        assert!(!usernames.record_failure("alice").await, "failure {i} is under the limit");
+    }
+    assert!(usernames.record_failure("ALICE").await, "the 3rd trips it (and case is folded)");
+    fx.try_login("alice").await.assert_locked_out(900);
+
+    // …and login failures lock the app's endpoint.
+    let fx = Fx::with_lockout(by_account(3, 900)).await;
+    fx.user("bob").await;
+    let usernames = fx.auth.username_lockout();
+    assert_eq!(usernames.locked("bob").await, None, "no failures yet");
+    fx.fail_login("bob", 3).await;
+    let retry = usernames.locked("bob").await.expect("the app sees the login failures");
+    assert!((1..=900).contains(&retry), "Retry-After {retry} inside the window");
+    assert_eq!(usernames.locked("carol").await, None, "another account is untouched");
+}
+
+#[tokio::test]
+async fn deleting_the_row_is_the_unlock() {
+    // This is what an operator does in the admin panel — the entity is an ordinary table, so the
+    // unlock is a gated, audited DELETE and needs no bespoke endpoint.
+    let fx = Fx::with_lockout(by_account(2, 900)).await;
     fx.user("alice").await;
     fx.fail_login("alice", 2).await;
     fx.try_login("alice").await.assert_locked_out(900);
 
-    fx.auth.clear_login_attempts("alice");
+    lockout::username_entity::Entity::delete_by_id("alice".to_string())
+        .exec(&fx.db)
+        .await
+        .expect("delete the lockout row");
     fx.try_login("alice").await.assert_redirect("/");
+}
 
-    // …and an app that limits at its edge can turn ours off entirely.
-    let open = Fx::with(|a| a.no_login_limit()).await;
-    open.user("alice").await;
-    let res = open.fail_login("alice", 25).await;
+#[tokio::test]
+async fn the_ip_counter_brakes_credentials_that_name_no_account() {
+    // A bearer token carries no username, so the address is the only thing its failures can be
+    // counted against — this is the app's path, with the address the app resolved.
+    let fx = Fx::with_lockout(Lockout { ip_after: 3, ip_duration_secs: 900, ..Lockout::default() }).await;
+    let ips = fx.auth.ip_lockout();
+    let client: Option<std::net::IpAddr> = "198.51.100.9".parse().ok();
+
+    for i in 1..=2 {
+        assert!(!ips.record_failure(client).await, "failure {i} under the limit");
+    }
+    assert!(ips.record_failure(client).await, "the 3rd trips it");
+    assert!(ips.locked(client).await.is_some());
+    assert_eq!(ips.locked("198.51.100.10".parse().ok()).await, None, "another client is free");
+    assert_eq!(ips.locked(None).await, None, "an unknown address can't be keyed on");
+}
+
+#[tokio::test]
+async fn a_limit_of_zero_switches_a_counter_off_and_prune_clears_expired_rows() {
+    let off = Fx::with_lockout(Lockout { username_after: 0, ip_after: 0, ..Lockout::default() }).await;
+    off.user("alice").await;
+    let res = off.fail_login("alice", 25).await;
     assert_eq!(res.status, StatusCode::UNAUTHORIZED, "no lockout when disabled");
-    open.try_login("alice").await.assert_redirect("/");
+    assert!(off.lockout_row("alice").await.is_none(), "and nothing is written");
+    off.try_login("alice").await.assert_redirect("/");
+
+    // Pruning drops rows whose lockout has expired, and leaves live ones alone.
+    let fx = Fx::with_lockout(by_account(2, 900)).await;
+    fx.user("alice").await;
+    fx.fail_login("alice", 2).await;
+    let stale = lockout::username_entity::ActiveModel {
+        username: Set("ghost".to_string()),
+        failures: Set(9),
+        last_failure_at: Set(now_secs() - 10_000),
+    };
+    stale.insert(&fx.db).await.expect("stale row");
+    let removed = prune(&fx.db, by_account(2, 900)).await.expect("prune");
+    assert_eq!(removed, 1, "only the expired row went");
+    assert!(fx.lockout_row("alice").await.is_some(), "the live lockout stays");
+    fx.try_login("alice").await.assert_locked_out(900);
 }
 
 // ===================== CSRF (double-submit token) =====================

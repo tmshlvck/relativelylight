@@ -16,9 +16,10 @@ mapping and optional auto-registration — see §5b), admin helpers (`migrate`, 
 `crud::seaorm::Crud::register(model, gate)` — mapping the gate's `Decision` to 401/403, plus
 per-request UI control-hiding via `Admin`/`Table::render_for` — **double-submit CSRF protection**
 (feature `csrf`, §7: always on for the module's own forms, `Crud::csrf` for the API), and
-**attempt limiting** on every credential check (§5e: sliding-window lockout, per account by default,
-per source IP opt-in). **Not yet:** the
-CORS/real-ip/logging middleware, PassKeys. The rest of this doc is the design these grow into.
+**lockout** on the unauthenticated credential checks (§5e: two DB-backed counters, by account name and
+by source address, shared with the app's own credential checks and cleared by deleting a row in the
+admin panel). **Not yet:** the
+CORS/logging middleware (client-IP resolution is shipped as `net::client_ip` — §4), PassKeys. The rest of this doc is the design these grow into.
 
 The login, password-change, and 2FA pages are plain **MPA `<form>` posts** — no JS (the enrolment QR
 is a server-rendered inline PNG). The library renders the form fragment (Bootstrap-friendly classes);
@@ -111,16 +112,18 @@ lifetime.
 
 All optional, all applied by the app; defaults chosen for "safe but works out of the box".
 
-- **Real client IP** — parse `Forwarded` / `X-Forwarded-For` with a **configurable trusted-proxy**
-  list (never trust the header blind). Exposed as a `ClientIp` extractor; used by logging and
-  available to the app. Default: trust none (use the socket peer) unless proxies are configured.
+- **Real client IP** — **partly shipped** as [`relativelylight::net::client_ip`](../relativelylight/src/net.rs):
+  a `trust_proxy` flag selects the socket peer or the left-most `X-Forwarded-For` / `X-Real-IP` hop,
+  IPv4-mapped addresses collapse to IPv4, and `auth`'s lockout uses it (§5e). Still to come: a
+  trusted-proxy CIDR list rather than one boolean, RFC 7239 `Forwarded`, and a `ClientIp` extractor /
+  layer so an app doesn't thread `(headers, peer)` by hand.
 - **Request logging** — one structured line per request: method, path, status, latency, client IP,
   and principal (user id / "anon"). Built on `tower_http::trace` or a thin custom layer.
 - **CORS** — `tower_http::cors::CorsLayer`. **Open by default** (any origin, credentials off); the
   app narrows to an allow-list of origins (turning credentials on when it does, required for
   cookie-auth cross-origin).
 - **CSRF** — see §7.
-- **Attempt limiting** — not a layer: the login/profile handlers brake themselves, see §5e.
+- **Lockout** — not a layer: the unauthenticated login handlers brake themselves, see §5e.
 
 ## 5. authn — users, sessions, login, passwords
 
@@ -376,61 +379,124 @@ crud.on_write(audit.clone());
 The app owns the audit table + retention; the library only emits the events. (Auditing login events and
 TOTP enable/disable can be layered on the same hook later; `last_login_at` already records logins.)
 
-## 5e. Login attempt limiting — implemented
+## 5e. Lockout: the brute-force brake — implemented
 
-The brute-force brake in front of every credential check. **Sliding window, temporary lockout:** each
-*checked* failure is recorded against a key; while a key holds `max` failures inside the last `window`
-seconds the handler answers **`429` with `Retry-After`** and never looks at the submitted secret — so a
-locked account costs no argon2 work, and the response is identical for a real and a made-up username
-(no enumeration hint). Attempts made *while locked* are **not** recorded, so an attacker cannot hold a
-lock open indefinitely: it lifts as the recorded failures age out.
+The brake in front of the **unauthenticated** credential checks. Two counters, two tables, two
+deliberately separate types (`auth::lockout::{UsernameLockout, IpLockout}`) — they do the same
+arithmetic today and are expected to diverge (a username allow-list wants regexes, an address
+allow-list wants CIDRs).
 
-**What's braked, and in which bucket** (separate buckets so one surface can't lock another):
+**The rule.** A checked-and-rejected credential upserts a row (`failures += 1`, `last_failure_at =
+now`) *unless* the key is already at the limit — a locked key records nothing, so an attacker cannot
+push the expiry out by continuing. A key is locked while `failures >= after` **and** `last_failure_at +
+duration > now`; the handler then answers **`429` with `Retry-After`** and never looks at the submitted
+secret, so a locked account costs no argon2 work and the response is identical for a real and a
+made-up username (no enumeration hint). Once the window passes the row reads as absent and the pruner
+deletes it. Effective semantics: **"`after` failures, each within `duration` of the previous, lock the
+key for `duration` after the last one"** — a decaying window, not a strict sliding one.
 
-| Check | Bucket | Note |
+**What is braked — and what deliberately isn't:**
+
+| Check | Counted against | Why |
 |---|---|---|
-| `POST /login` (password) | `login:{account}` | account name lower-cased, so case can't dodge it |
-| `POST /login/totp` (second factor) | `login:{account}` | **shares** the login bucket — same account being guessed |
-| `POST /profile` (current password) | `profile:{account}` | a stolen session guessing the password can't lock you out of *logging in* |
-| `POST /profile/totp` (enrolment code) | `enrol:{account}` | |
-| `POST /login` from one address | `ip:{addr}` | **opt-in**, see below |
+| `POST /login` (password) | account + address | the anonymous guessing surface |
+| `POST /login/totp` (second factor) | account + address | still unauthenticated (the session grants nothing until the code is confirmed), and 6 digits are the most guessable secret we hold |
+| the app's own checks (`Auth::username_lockout` / `ip_lockout`) | whichever it passes | same counters, so one account has one budget everywhere |
+| `POST /profile` (current password) | **not limited** | the caller is *authenticated*: that's session theft, whose mitigations are short TTLs and re-auth (TODO.md) — and counting it would let a stolen session lock the real user out of logging in |
+| `POST /profile/totp` (enrolment code) | **not limited** | authenticated, and the code guessed is the caller's *own* pending secret |
+| `POST /profile/{id}` (manager reset) | **not limited** | verifies no secret; gated by group membership instead |
 
-A manager's reset at `POST /profile/{id}` isn't limited: it verifies no secret, so there's nothing to
-guess (it's gated by group membership instead).
-
-**Configuration** — defaults are 10 failures per 15 minutes, per account, IP limiting off:
+**Configuration is mandatory** — it is an argument to `Auth::new`, not a builder call, so there is no
+way to end up with an unbraked login by forgetting one:
 
 ```rust
-let auth = Auth::new(db)
-    .login_limit(5, 300)          // 5 failures per 5 minutes per account (0 = off)
-    .login_limit_per_ip(15);      // also cap failures per source address (default: off)
-// .no_login_limit()              // or turn the whole thing off (edge/proxy limits instead)
-auth.clear_login_attempts("alice");   // operator unlock: forget one account's failures
+let auth = Auth::new(db, Lockout {
+    username_after: 10,          // failed logins per account before it locks (0 = off)
+    username_duration_secs: 900,
+    ip_after: 100,               // failed checks per source address (0 = off)
+    ip_duration_secs: 900,
+});
+// Lockout::default() is exactly the values above.
 ```
 
-**Per-IP is opt-in on purpose.** It's the only thing that catches *username spraying* (many accounts,
-one source), but the address comes from the socket peer — so behind a reverse proxy every request
-carries the **proxy's** address and one shared bucket would eventually lock out your whole user base.
-Enable it when the app sees real client addresses (bound directly, served with
-`into_make_service_with_connect_info`, as the examples are); leave it off until the trusted-proxy
-real-ip parsing of §4 lands. A successful login clears the *account's* bucket but deliberately not the
-IP's — one valid credential shouldn't reset a spraying source's budget.
+`*_after: 0` switches a counter off completely — nothing is read, nothing is written. A `*_duration_secs`
+of `0` is *not* the way to do that: it is clamped to 1 second, so rows are still written and the lock
+just expires immediately. The two windows are independent on purpose (an address is a coarser subject
+than an account, so it usually deserves a different one).
 
-**The CSRF check runs first**, so a cross-site forged post is rejected *before* it can spend the
-victim's attempt budget — otherwise any page could lock a user out of their own account by firing a
-handful of cross-site logins at us.
+```rust
+```
 
-**In-memory, per process.** The counters are a `Mutex<HashMap>` in the `Auth` handle: no schema, no DB
-traffic on the hot path, but they **reset on restart** and each replica of a scaled-out deployment
-counts on its own (N replicas → N× the effective budget). Memory is bounded — a spray of distinct
-usernames triggers a sweep of expired keys. If you need shared or durable counters, limit at the edge
-(proxy / gateway) instead; a pluggable store is [TODO](../TODO.md).
+The address budget is deliberately far looser than the account one: a locked address turns away *valid*
+callers too, which matters when your users share one (CGNAT, an office NAT).
 
-**Known trade-off.** A temporary lockout is also a small denial-of-service handle: someone who knows an
-account name can keep it locked by failing on purpose. That's why the lock is short, lifts on its own,
-and can be cleared with `clear_login_attempts` (a restart clears everything, the counters being
-in-memory). The alternative — progressive delays — holds a server task open per attempt instead, which
-is its own resource risk.
+**Who is the client?** The per-address half needs an address, and there are exactly two right answers —
+which one applies is a security boundary, so it is a config flag rather than a guess:
+
+```rust
+Lockout { trust_proxy: false, .. }   // exposed directly: the socket peer is the client
+Lockout { trust_proxy: true,  .. }   // behind a proxy you control: the left-most X-Forwarded-For hop
+```
+
+That is [`net::client_ip`](crate::net::client_ip), which the app should call for its own logging, audit
+rows and limits too — then a failed login and a failed API call from one client land on the **same** row,
+canonicalized the same way (an IPv4-mapped `::ffff:a.b.c.d` peer and a plain `a.b.c.d` forwarded hop are
+otherwise two different keys).
+
+Get the flag wrong in either direction and it bites: unproxied with `trust_proxy: true`, a caller picks
+whose address gets locked out by sending a header; proxied with `trust_proxy: false`, every user is
+bucketed under the proxy's address, where a hundred failures lock your whole login form. There is no
+default that is safe for both, which is why it has to be stated.
+
+For chains stranger than "one proxy sets `X-Forwarded-For`" — several hops to walk, a CDN header like
+`CF-Connecting-IP` — `Auth::client_ip(|headers, peer| ..)` replaces the resolution outright.
+
+Setting `ip_after: 0` turns per-address counting off everywhere, leaving the per-account brake — which
+still covers the common case of one account being guessed at, just not spraying across many.
+
+**The app's own credential checks share these counters.** An app that authenticates callers itself —
+API tokens, HTTP Basic on a machine endpoint, a DDNS update URL — must not keep a second limiter, or an
+account gets two budgets and an unlock frees only half of them:
+
+```rust
+let usernames = auth.username_lockout();   // in AppState; cheap to clone
+let ips = auth.ip_lockout();
+
+if let Some(retry) = usernames.locked(username).await { return too_many(retry) }   // before the secret
+match check_credential(...) {
+    Ok(who) => { usernames.clear(username).await; Ok(who) }
+    Err(_)  => { usernames.record_failure(username).await; Err(unauthorized()) }   // checked & rejected
+}
+```
+
+Rules that matter: pass **no** username when the credential names no account (a bearer token) and let
+the address counter carry it; pass the **real** client address; and only ever record a credential you
+actually checked and rejected — never one with no credential at all, a failed CSRF check, or one you
+turned away *because* it was locked, or a third party can spend someone else's budget.
+`record_failure` returns whether *this* failure tripped the lock, so you log once instead of on every
+subsequent attempt. `examples/auth` has a working one (`GET /api/whoami`).
+
+**The unlock is a row delete.** The two entities (`lockout::username_entity`, `lockout::ip_entity`) are
+ordinary SeaORM models: register them in your admin panel and an operator can see who is being guessed
+at and clear a row — gated by your `Authz`, CSRF-checked, and audited by your `WriteObserver` like any
+other write. No bespoke endpoint, no CLI, no shelling into the host. `examples/adminpanel` registers
+both as read-only-plus-delete panels.
+
+**Housekeeping is the app's.** Nothing in this crate schedules anything — no background task, no timer.
+`auth::prune(&db, lockout)` deletes expired sessions *and* expired lockout rows from both tables; call
+it at startup and from whatever periodic loop the app already has (both examples do). Skipping it is
+safe: an expired session never authenticates and an expired lockout row reads as unlocked and resets
+itself on the next failure — the rows just accumulate.
+
+**Durable and shared, on purpose.** The rows survive a restart (a deploy must not hand every attacker a
+fresh budget) and every replica sees the same counts. The cost is a write per *failed* check and a read
+per check, which is nothing: failures are rare in normal operation, a locked key is read-only, and the
+password path is dominated by argon2 anyway.
+
+**Known trade-off.** A lockout is also a small denial-of-service handle: someone who knows an account
+name can keep it locked by failing on purpose, and now that the rows are durable a restart no longer
+clears it. That is why the lock is short, lifts on its own, and can be cleared from the admin panel.
+The alternative — progressive delays — holds a server task open per attempt, which is its own risk.
 
 ## 6. authz — the gate
 
@@ -736,17 +802,22 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
   - a **blank `sso_provider`** is a local account: password login works, the profile page offers the
     password form (not the SSO notice), 2FA enrolment is available and break-glass doesn't refuse it,
     while a real provider key still refuses password login (whitespace-only counts as blank too).
-  - **attempt limiting** (§5e): the sliding-window logic is unit-tested against explicit timestamps
-    (locks only at the limit, lifts as failures age out, a locked key can't be extended, clear, key
-    isolation, `max = 0` disables, bounded memory under a spray); over HTTP, an account locks after the
-    configured failures and then refuses even the **correct** password with `429` + `Retry-After` and
-    creates no session, a made-up username gets a byte-identical response, case can't dodge the bucket,
-    another account is unaffected, a successful login resets the count, the TOTP step shares the
-    account's bucket (a correct code refused while locked, password login locked with it), the profile
-    and enrolment checks brake in their own buckets without touching login, **CSRF-rejected posts spend
-    no budget**, per-IP is off by default and catches spraying when enabled (a valid login from the
-    offending address refused, other addresses fine), and `clear_login_attempts` / `no_login_limit`
-    work.
+  - **lockout** (§5e): the decay arithmetic is unit-tested against explicit timestamps (locks only at
+    the limit, the wait shrinks and then expires, `after = 0` disables, keys are folded and capped);
+    over HTTP against the real tables, an account locks after the configured failures and then refuses
+    even the **correct** password with `429` + `Retry-After` and creates no session, a made-up username
+    gets a byte-identical response, case can't dodge the row, another account is unaffected, a
+    successful login deletes the row, a **locked row is not touched by further attempts** (so the
+    expiry can't be pushed out), the TOTP step shares the account's row (a correct code refused while
+    locked, password login locked with it), **the authenticated checks — profile password and 2FA
+    enrolment — are not limited at all** and write no rows, **CSRF-rejected posts spend no budget**,
+    forwarded headers are ignored unless `trust_proxy` is set (a spoofed `X-Forwarded-For` is not
+    counted; the peer is) and believed when it is (the forwarded hop is locked, another client behind
+    the same proxy isn't, and the proxy's own address never is), a custom `client_ip` resolver overrides
+    both, `net::client_ip` is unit-tested for chains / `X-Real-IP` / junk / IPv4-mapped collapsing, the
+    app's handles
+    share the account's row in **both** directions, deleting the row is the unlock, the address counter
+    brakes credentials that name no account, and `prune` drops expired rows while leaving live ones.
   - **CSRF** (§7): every unsafe auth route rejects a missing, cookie-less, header-only, mismatched, or
     blank token with `403` and no cookies set — checked with a *fully authorized manager session*, so
     only the token is missing — and nothing changes behind it; a `GET` form page issues the cookie

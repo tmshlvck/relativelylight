@@ -1,23 +1,36 @@
 //! examples/auth — the `auth` module used **without** `crud` (auth stands on its own). See
 //! `docs/AUTH.md`. A public page, a `/secret` page gated by login, `/login` + `/logout`, and a
-//! configurable admin group. Also demonstrates the `--set-admin-pw <pw>` break-glass startup path.
+//! configurable admin group. Also demonstrates the `--set-admin-pw <pw>` break-glass startup path and
+//! an **app-owned credential check** (`/api/whoami`, HTTP Basic) braked with the *same* attempt
+//! counters as the login form via [`Auth::attempts`] — see `brute-force brake` below.
 //!
 //!   cargo run -p auth-example                            # serve; log in as admin / password
+//!   TRUST_PROXY=1 cargo run -p auth-example               # …behind a proxy: believe X-Forwarded-For
 //!   cargo run -p auth-example -- --set-admin-pw s3cret   # break-glass: pw + enable + clear 2FA + group
+//!   curl -u admin:password    127.0.0.1:3000/api/whoami  # the app's own credential check
+//!   curl -u admin:nope -i     127.0.0.1:3000/api/whoami  # 5 of these → 429, and /login locks too
+//!
+//! It also shows the two housekeeping duties the library leaves to the app: it schedules
+//! `auth::prune` (expired sessions + expired lockout rows), and a real app would register the two
+//! lockout entities in its admin panel so an operator can see who is locked out and clear a row.
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
 use axum_extra::extract::CookieJar;
+use relativelylight::auth::lockout::{IpLockout, Lockout, UsernameLockout};
+use relativelylight::net::client_ip;
 use relativelylight::auth::sso::{Sso, SsoButton, SsoProvider};
 use relativelylight::auth::{self, Auth, Identity};
-use sea_orm::Database;
-use std::net::SocketAddr;
+use sea_orm::{ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter};
+use std::net::{IpAddr, SocketAddr};
 
 // The superadmin group name is the app's choice — a constant here, but it could come from config.
+// **Use the one name everywhere**: the gate / `admin_group`, the boot-time seeder, and break-glass
+// recovery. If those three ever disagree, an "admin" is created outside the group the gate checks.
 const ADMIN_GROUP: &str = "superadmin";
 
 #[tokio::main]
@@ -54,16 +67,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         String::new()
     };
 
-    let auth = Auth::new(db)
+    // The brute-force brake is mandatory — `Auth::new` takes its configuration. Here: 5 failed logins
+    // per account and 15 per source address, both for 5 minutes (the library defaults are 10 / 100 per
+    // 15 min).
+    let lockout = Lockout {
+        username_after: 5,
+        username_duration_secs: 300,
+        ip_after: 15,
+        ip_duration_secs: 300,
+        // Who the client is, for the per-address half: the socket peer normally, the forwarded hop when
+        // this example runs behind a proxy (`TRUST_PROXY=1`). The library resolves it either way.
+        trust_proxy: trust_proxy_from_env(),
+    };
+    let auth_db = db.clone(); // the app's own endpoint checks passwords itself
+    let db_for_prune = db.clone();
+    let auth = Auth::new(db, lockout)
         .secure_cookies(false) // local http, so no `Secure` attribute
         .admin_group(ADMIN_GROUP)
         .totp_issuer("relativelylight auth demo") // shown in authenticator apps for 2FA
-        // Brute-force brake: 5 failed credential checks per account per 5 minutes (the library default
-        // is 10 / 15 min), plus a per-source-IP cap to catch username spraying. Per-IP is safe to
-        // enable *here* because this example binds directly and serves with connect-info, so the peer
-        // really is the client — behind a reverse proxy it would bucket everyone together (AUTH.md §5e).
-        .login_limit(5, 300)
-        .login_limit_per_ip(15)
         .login_shell(move |form| bootstrap_login(form, &sso_buttons))
         .profile_shell(bootstrap_profile);
 
@@ -71,16 +92,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sso = google.map(|(id, secret)| build_sso(&auth, id, secret));
 
     // No middleware: `secret` resolves the session itself via `auth.identify`. The app router carries
-    // the `Auth` handle as state so handlers can reach it; the login/logout routes bring their own.
+    // its own state (the `Auth` handle, the DB, and the shared attempt counters) so handlers can reach
+    // them; the login/logout routes bring their own.
+    let state = AppState {
+        auth: auth.clone(),
+        db: auth_db,
+        // The *same* counters the login form uses, so one account has one budget across both.
+        usernames: auth.username_lockout(),
+        ips: auth.ip_lockout(),
+    };
     let mut app = Router::new()
         .route("/", get(public))
         .route("/secret", get(secret)) // gated on demand (see `secret`)
-        .with_state(auth.clone())
+        .route("/api/whoami", get(whoami)) // the app's own credential check (see `whoami`)
+        .with_state(state)
         .merge(auth.routes()); // /login, /logout, /profile (password + 2FA), /login/totp
     if let Some(sso) = &sso {
         app = app.merge(sso.routes()); // /sso/{provider}/login + /callback
     }
     let app = app.layer(axum::middleware::from_fn(access_log));
+
+    // Housekeeping is the **app's** job — the library schedules nothing. `auth::prune` deletes expired
+    // sessions and expired lockout rows (both counters); run it once at startup and then on whatever
+    // loop the app already has. Skipping it is safe, just untidy: an expired session never
+    // authenticates and an expired lockout row reads as unlocked.
+    let prune_db = db_for_prune.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            ticker.tick().await;
+            match auth::prune(&prune_db, lockout).await {
+                Ok(0) => {}
+                Ok(n) => println!("pruned {n} expired session/lockout rows"),
+                Err(e) => eprintln!("prune failed: {e}"),
+            }
+        }
+    });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     println!("auth playground on http://127.0.0.1:3000/   (log in as admin / password)");
@@ -89,6 +136,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
+}
+
+/// `TRUST_PROXY=1` (or `true`) tells the lockout to believe `X-Forwarded-For` — set it when you put a
+/// reverse proxy in front of this example, and leave it unset when it listens on the port itself. It is
+/// a security boundary, not a convenience: unproxied, the header is attacker-supplied.
+fn trust_proxy_from_env() -> bool {
+    matches!(std::env::var("TRUST_PROXY").as_deref(), Ok("1") | Ok("true"))
 }
 
 /// Build SSO config from env, so the demo needs no hard-coded secrets. Set `SSO_GOOGLE_CLIENT_ID` +
@@ -142,14 +196,17 @@ async fn access_log(ConnectInfo(addr): ConnectInfo<SocketAddr>, req: Request, ne
 async fn public() -> Html<String> {
     Html(page(
         "Public page",
-        r#"<p><a href="/secret">/secret</a> requires a login · <a href="/login">/login</a></p>"#,
+        r#"<p><a href="/secret">/secret</a> requires a login · <a href="/login">/login</a></p>
+<p class="small text-muted"><code>GET /api/whoami</code> takes HTTP Basic — the app checks it itself,
+braked with the same attempt counters as the login form.</p>"#,
     ))
 }
 
 // Requires an authenticated user: resolve the session on demand and redirect anonymous visitors to
 // the login page. `CookieJar` lets us show the session cookie (a playground affordance — don't
 // surface session tokens in real apps).
-async fn secret(State(auth): State<Auth>, headers: HeaderMap, jar: CookieJar) -> Response {
+async fn secret(State(app): State<AppState>, headers: HeaderMap, jar: CookieJar) -> Response {
+    let auth = &app.auth;
     let Some(who) = auth.identify(&headers).await else {
         return Redirect::to(auth.login_path()).into_response();
     };
@@ -169,6 +226,99 @@ async fn secret(State(auth): State<Auth>, headers: HeaderMap, jar: CookieJar) ->
         ),
     ))
     .into_response()
+}
+
+/// What the app's own routes need: the `Auth` handle, a DB connection, and the shared attempt
+/// counters. `Attempts` is cheap to clone, so it lives in the state like any other handle.
+#[derive(Clone)]
+struct AppState {
+    auth: Auth,
+    db: DatabaseConnection,
+    usernames: UsernameLockout,
+    ips: IpLockout,
+}
+
+/// `GET /api/whoami` — an **app-owned** credential check (HTTP Basic against the same user table),
+/// standing in for the API-token endpoint a real app would have. `auth` never sees this request, so
+/// braking it is the app's job — and it must use the library's counters, not its own, so that:
+///
+/// - one account has **one** budget: burning it here locks `/login` too, and vice versa;
+/// - `Auth::clear_login_attempts` (the operator unlock) frees every surface at once.
+///
+/// The shape to copy: check `locked` *before* the secret, record only a credential you actually
+/// checked and rejected, clear the account on success.
+async fn whoami(
+    State(app): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    // A request with no credential at all is a plain 401 — never counted, or an anonymous scanner
+    // could lock out everyone who shares its address.
+    let Some((username, password)) = basic_auth(&headers) else {
+        return unauthorized("send HTTP Basic credentials");
+    };
+    // The *same* resolution the login route uses, so a client that fails here and fails there lands on
+    // one row: `relativelylight::net::client_ip` with this app's proxy flag.
+    let ip: Option<IpAddr> = client_ip(trust_proxy_from_env(), &headers, Some(peer.ip()));
+
+    if let Some(retry) = locked(&app, &username, ip).await {
+        // Refused without looking at the password: no argon2 work, and no hint about the account.
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(axum::http::header::RETRY_AFTER, retry.to_string())],
+            format!("too many failed attempts — retry in {retry}s\n"),
+        )
+            .into_response();
+    }
+
+    let user = auth::user::Entity::find()
+        .filter(auth::user::Column::Username.eq(&username))
+        .one(&app.db)
+        .await
+        .ok()
+        .flatten()
+        // An SSO account's password isn't ours to check, and a 2FA account's password isn't the whole
+        // credential — a machine endpoint should hand those users an API token instead.
+        .filter(|u| u.is_active && !u.is_sso() && !u.has_totp());
+    let ok = user.as_ref().is_some_and(|u| auth::verify_password(&u.password_hash, &password));
+    if !ok {
+        let by_user = app.usernames.record_failure(&username).await;
+        let by_ip = app.ips.record_failure(ip).await;
+        if by_user || by_ip {
+            println!("locked out: {username} / {} (too many failed checks)", peer.ip());
+        }
+        return unauthorized("bad credentials");
+    }
+    app.usernames.clear(&username).await; // a good credential forgets the account's failures
+    format!("ok: {username}\n").into_response()
+}
+
+/// The longer of the account's and the address's remaining lockout, if either is locked.
+async fn locked(app: &AppState, username: &str, ip: Option<IpAddr>) -> Option<i64> {
+    let (by_user, by_ip) = (app.usernames.locked(username).await, app.ips.locked(ip).await);
+    match (by_user, by_ip) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The username + password from an `Authorization: Basic` header, if it carries one.
+fn basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
+    use base64::Engine;
+    let raw = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(raw.strip_prefix("Basic ")?).ok()?;
+    let text = String::from_utf8(decoded).ok()?;
+    let (u, p) = text.split_once(':')?;
+    Some((u.to_string(), p.to_string()))
+}
+
+fn unauthorized(why: &str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(axum::http::header::WWW_AUTHENTICATE, "Basic realm=\"api\"")],
+        format!("{why}\n"),
+    )
+        .into_response()
 }
 
 /// Bootstrap page wrapper for the app's own pages.

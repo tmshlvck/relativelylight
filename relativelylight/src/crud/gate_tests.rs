@@ -228,7 +228,7 @@ async fn a_real_group_gate_rejects_anonymous_and_non_member_writes() {
     // End-to-end: the shipped `UserReadGroupWrite` preset over a real session cookie.
     let db = Database::connect("sqlite::memory:").await.unwrap();
     migrate(&db).await.unwrap();
-    let auth = Auth::new(db.clone()).secure_cookies(false);
+    let auth = Auth::new(db.clone(), crate::auth::lockout::Lockout::default()).secure_cookies(false);
     crate::auth::create_user(&db, "alice", "pw").await.unwrap();
     crate::auth::create_user(&db, "editor", "pw").await.unwrap();
     crate::auth::add_to_group(&db, "editor", "editors").await.unwrap();

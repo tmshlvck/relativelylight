@@ -27,7 +27,9 @@
 //! lookup, and deleting the row revokes it.
 
 pub mod group;
-mod limit;
+/// Lockout (§5e): the two DB-backed failure counters — by account name and by source address —
+/// braking the unauthenticated credential checks, here and in the app.
+pub mod lockout;
 /// Negative-path (rejection) tests for the auth surface — see the module's own docs.
 #[cfg(test)]
 mod security_tests;
@@ -261,7 +263,31 @@ pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> 
         schema.create_table_from_entity(group::Entity),
         schema.create_table_from_entity(user_group::Entity),
         schema.create_table_from_entity(session::Entity),
+        schema.create_table_from_entity(lockout::username_entity::Entity),
+        schema.create_table_from_entity(lockout::ip_entity::Entity),
     ]
+}
+
+/// Housekeeping: delete expired sessions and expired lockout rows. **Nothing in this crate schedules
+/// it** — call it from the app's own periodic loop (and once at startup), the way you'd run any other
+/// retention job. Skipping it is safe: an expired session never authenticates and an expired lockout
+/// row reads as unlocked (and resets itself on the next failure); the rows just accumulate.
+///
+/// Returns how many rows were deleted, in total.
+pub async fn prune(db: &DatabaseConnection, lockout: lockout::Lockout) -> Result<u64, DbErr> {
+    let sessions = session::Entity::delete_many()
+        .filter(session::Column::ExpiresAt.lt(now_secs()))
+        .exec(db)
+        .await?
+        .rows_affected;
+    let usernames =
+        lockout::UsernameLockout::new(db.clone(), lockout.username_after, lockout.username_duration_secs)
+            .prune()
+            .await?;
+    let ips = lockout::IpLockout::new(db.clone(), lockout.ip_after, lockout.ip_duration_secs)
+        .prune()
+        .await?;
+    Ok(sessions + usernames + ips)
 }
 
 /// Create the auth tables **if they don't already exist** — a bootstrap convenience for a fresh DB or
@@ -510,6 +536,11 @@ type ProfileExtra = Arc<
         + Sync,
 >;
 
+/// Resolves the client address of a request — see [`Auth::client_ip`]. The app owns this policy because
+/// only the app knows whether it is behind a proxy and which hop to believe.
+type ClientIpFn =
+    Arc<dyn Fn(&HeaderMap, Option<std::net::SocketAddr>) -> Option<std::net::IpAddr> + Send + Sync>;
+
 struct Inner {
     db: DatabaseConnection,
     admin_group: String,
@@ -533,40 +564,61 @@ struct Inner {
     totp_issuer: String,
     /// Name of the double-submit CSRF cookie (see [`crate::csrf`]).
     csrf_cookie: String,
-    /// How many failed credential checks lock a key out (see [`limit`]).
-    limits: limit::LoginLimit,
-    /// The failure counters themselves (in-memory, per process).
-    limiter: limit::Limiter,
+    /// Whether a proxy's forwarded headers may be believed (see [`lockout::Lockout::trust_proxy`]).
+    trust_proxy: bool,
+    /// An app-supplied override for client-address resolution; `None` → [`crate::net::client_ip`] with
+    /// `trust_proxy` above, which is what nearly every deployment wants (see [`Auth::client_ip`]).
+    client_ip: Option<ClientIpFn>,
+    /// The failure counters: DB-backed, shared with the app for credentials this module never sees.
+    usernames: lockout::UsernameLockout,
+    ips: lockout::IpLockout,
 }
 
 impl Inner {
-    /// Whether this account (and, when enabled, this source IP) is currently locked out of credential
-    /// checks — `Some(retry_after_secs)` if so. Checked *before* the secret is looked at.
-    fn locked_out(&self, key: &str, peer: Option<std::net::SocketAddr>) -> Option<i64> {
-        let now = now_secs();
-        let window = self.limits.window_secs;
-        let by_user = self
-            .limits
-            .max_username
-            .and_then(|max| self.limiter.locked_for(key, max, window, now));
-        let by_ip = self.limits.max_ip.zip(peer).and_then(|(max, addr)| {
-            self.limiter.locked_for(&limit::ip_key(addr.ip()), max, window, now)
-        });
+    /// Whether this account — or, when the peer is trusted as the client, this source address — is
+    /// locked out of credential checks: `Some(retry_after_secs)` if so. Checked *before* the secret is
+    /// looked at, and only on the unauthenticated routes (`/login`, `/login/totp`).
+    async fn locked_out(
+        &self,
+        username: &str,
+        headers: &HeaderMap,
+        peer: Option<std::net::SocketAddr>,
+    ) -> Option<i64> {
+        let by_user = self.usernames.locked(username).await;
+        let by_ip = match self.client_ip(headers, peer) {
+            Some(ip) => self.ips.locked(Some(ip)).await,
+            None => None,
+        };
         match (by_user, by_ip) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
         }
     }
 
-    /// Record one failed credential check against the account key (and the source IP when per-IP
-    /// limiting is on). Only ever called for an attempt we actually *checked*.
-    fn record_failure(&self, key: &str, peer: Option<std::net::SocketAddr>) {
-        let (now, window) = (now_secs(), self.limits.window_secs);
-        if self.limits.max_username.is_some() {
-            self.limiter.record(key, window, now);
+    /// Record one failed credential check against the account (and the source address when the peer is
+    /// the client). Only ever called for an attempt we actually *checked*.
+    async fn record_failure(
+        &self,
+        username: &str,
+        headers: &HeaderMap,
+        peer: Option<std::net::SocketAddr>,
+    ) {
+        self.usernames.record_failure(username).await;
+        if let Some(ip) = self.client_ip(headers, peer) {
+            self.ips.record_failure(Some(ip)).await;
         }
-        if let (Some(_), Some(addr)) = (self.limits.max_ip, peer) {
-            self.limiter.record(&limit::ip_key(addr.ip()), window, now);
+    }
+
+    /// The client address to count against: the app's override if it set one, else the built-in
+    /// resolution — the forwarded hop when `trust_proxy`, the socket peer otherwise.
+    fn client_ip(
+        &self,
+        headers: &HeaderMap,
+        peer: Option<std::net::SocketAddr>,
+    ) -> Option<std::net::IpAddr> {
+        match &self.client_ip {
+            Some(f) => f(headers, peer),
+            None => crate::net::client_ip(self.trust_proxy, headers, peer.map(|p| p.ip())),
         }
     }
 
@@ -668,7 +720,13 @@ pub struct Auth {
 }
 
 impl Auth {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: DatabaseConnection, lockout: lockout::Lockout) -> Self {
+        let usernames = lockout::UsernameLockout::new(
+            db.clone(),
+            lockout.username_after,
+            lockout.username_duration_secs,
+        );
+        let ips = lockout::IpLockout::new(db.clone(), lockout.ip_after, lockout.ip_duration_secs);
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -685,8 +743,10 @@ impl Auth {
                 profile_managers: None,
                 totp_issuer: "relativelylight".into(),
                 csrf_cookie: crate::csrf::Csrf::new().cookie().to_string(),
-                limits: limit::LoginLimit::default(),
-                limiter: limit::Limiter::default(),
+                trust_proxy: lockout.trust_proxy,
+                client_ip: None,
+                usernames,
+                ips,
             }),
         }
     }
@@ -782,51 +842,45 @@ impl Auth {
         self
     }
 
-    /// How many failed credential checks lock an **account** out, and over what sliding window
-    /// (default: 10 failures per 15 minutes). While locked, `POST /login`, the TOTP step, and the
-    /// profile/enrolment checks answer `429` with a `Retry-After` without looking at the submitted
-    /// secret; the lock lifts as those failures age out of the window (attempts made while locked
-    /// aren't counted, so it can't be held open). `max = 0` turns account limiting off.
+    /// **Override** client-address resolution for the per-address half of the lockout (§5e).
     ///
-    /// The counters are **in-memory, per process** — see [`limit`] for what that means for restarts and
-    /// multi-replica deployments.
-    pub fn login_limit(mut self, max: u32, window_secs: i64) -> Self {
-        let inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.limits.max_username = (max > 0).then_some(max);
-        inner.limits.window_secs = window_secs.max(1);
-        self
-    }
-
-    /// Also lock out a **source IP** after `max` failed logins in the window (default: **off**). This
-    /// catches username spraying, which per-account counters miss entirely.
+    /// You rarely need this: by default the login routes call [`crate::net::client_ip`] with the
+    /// [`trust_proxy`](lockout::Lockout::trust_proxy) flag from [`Lockout`](lockout::Lockout), which
+    /// covers "exposed directly" and "one trusted proxy setting `X-Forwarded-For`". Reach for the
+    /// override when your chain is stranger than that — several hops to walk, a CDN header like
+    /// `CF-Connecting-IP`, or an address you carry in your own middleware:
     ///
-    /// Opt-in because the IP comes from the socket peer: enable it when your app sees real client
-    /// addresses (bound directly, served with `into_make_service_with_connect_info`). **Behind a
-    /// reverse proxy every request carries the proxy's address**, so a shared bucket would eventually
-    /// lock out *all* your users — leave it off until the trusted-proxy real-ip parsing lands
-    /// (`docs/AUTH.md` §4). `max = 0` turns it off again.
-    pub fn login_limit_per_ip(mut self, max: u32) -> Self {
-        Arc::get_mut(&mut self.inner).unwrap().limits.max_ip = (max > 0).then_some(max);
+    /// ```ignore
+    /// .client_ip(|headers, _peer| headers.get("cf-connecting-ip")?.to_str().ok()?.parse().ok())
+    /// ```
+    ///
+    /// Whatever you choose, use the *same* resolution for your logs, audit rows and any limits of your
+    /// own — the audit [`WriteEvent`](crate::observe::WriteEvent) hands you `headers` + `peer` for
+    /// exactly that — so one client is one key everywhere.
+    pub fn client_ip<F>(mut self, resolve: F) -> Self
+    where
+        F: Fn(&HeaderMap, Option<std::net::SocketAddr>) -> Option<std::net::IpAddr>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Arc::get_mut(&mut self.inner).unwrap().client_ip = Some(Arc::new(resolve));
         self
     }
 
-    /// Turn attempt limiting off entirely (account *and* IP) — for an app that rate-limits at its edge,
-    /// or a test that needs to hammer the login route.
-    pub fn no_login_limit(mut self) -> Self {
-        let inner = Arc::get_mut(&mut self.inner).unwrap();
-        inner.limits.max_username = None;
-        inner.limits.max_ip = None;
-        self
+    /// The account-name lockout counter — hand it whatever credential checks the **app** makes itself
+    /// (HTTP Basic on a machine endpoint, a DDNS update URL) so one account has one budget across every
+    /// surface: burning it there locks the login form too, and clearing one row frees both. See
+    /// [`lockout`] for the call shape.
+    pub fn username_lockout(&self) -> lockout::UsernameLockout {
+        self.inner.usernames.clone()
     }
 
-    /// Forget every recorded failure for `username` — the operator's unlock, for a user locked out by
-    /// someone else's guessing (a support call, a CLI flag). Clears the login, profile-password, and
-    /// 2FA-enrolment buckets; source-IP counters are untouched. A successful login clears the account's
-    /// login bucket by itself, and since the counters are in-memory a process restart clears everything.
-    pub fn clear_login_attempts(&self, username: &str) {
-        for key in limit::all_user_keys(username) {
-            self.inner.limiter.clear(&key);
-        }
+    /// The source-address lockout counter — the only brake on credentials that carry no account name
+    /// (a bearer token). Pass the **real** client address; this module's own routes count one only when
+    /// the app has supplied a [`client_ip`](Auth::client_ip) resolver to tell them who that is.
+    pub fn ip_lockout(&self) -> lockout::IpLockout {
+        self.inner.ips.clone()
     }
 
     /// The CSRF checker these routes use — hand it to the API so both surfaces share one token
@@ -968,8 +1022,7 @@ async fn login_submit(
         // attempt budget (otherwise cross-site requests could lock a user out).
         return csrf_rejected(&inner);
     }
-    let attempts = limit::login_key(&form.username);
-    if let Some(retry) = inner.locked_out(&attempts, peer) {
+    if let Some(retry) = inner.locked_out(&form.username, &headers, peer).await {
         // Locked: the password is never looked at, so this costs no argon2 and says nothing about
         // whether the account exists.
         let (token, jar) = csrf_token(&inner, &headers, jar);
@@ -980,7 +1033,7 @@ async fn login_submit(
         );
     }
     let Some(user) = verify_credentials(&inner, &form.username, &form.password).await else {
-        inner.record_failure(&attempts, peer);
+        inner.record_failure(&form.username, &headers, peer).await;
         let (token, jar) = csrf_token(&inner, &headers, jar);
         return (
             StatusCode::UNAUTHORIZED,
@@ -996,9 +1049,9 @@ async fn login_submit(
     let Some(token) = create_session(&inner, user.id, needs_totp).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
     };
-    // Credentials accepted → forget this account's failures (the IP bucket is left alone: one valid
+    // Credentials accepted → forget this account's failures (the address's are left alone: one valid
     // login shouldn't reset a spraying source's budget).
-    inner.limiter.clear(&attempts);
+    inner.usernames.clear(&form.username).await;
     // The session cookie is set either way; while `awaiting_totp` it grants nothing until the second
     // factor is confirmed at /login/totp. The CSRF token is rotated with it (privilege change).
     let (_, csrf_cookie) = inner.csrf().issue();
@@ -1060,8 +1113,7 @@ async fn login_totp_submit(
     };
     // The second factor shares the account's login bucket: password guessing and code guessing are the
     // same account being attacked, and 6 digits deserve the tighter of the two brakes.
-    let attempts = limit::login_key(&user.username);
-    if let Some(retry) = inner.locked_out(&attempts, peer) {
+    if let Some(retry) = inner.locked_out(&user.username, &headers, peer).await {
         let (token, jar) = csrf_token(&inner, &headers, jar);
         return too_many_attempts(
             retry,
@@ -1071,7 +1123,7 @@ async fn login_totp_submit(
     }
     let ok = user.totp_key().is_some_and(|s| totp::verify(s, &form.code));
     if !ok {
-        inner.record_failure(&attempts, peer);
+        inner.record_failure(&user.username, &headers, peer).await;
         let (token, jar) = csrf_token(&inner, &headers, jar);
         return (
             StatusCode::UNAUTHORIZED,
@@ -1084,7 +1136,7 @@ async fn login_totp_submit(
     am.awaiting_totp = Set(false);
     let _ = am.update(&inner.db).await;
     stamp_last_login(&inner.db, user.id).await; // second factor confirmed → login complete
-    inner.limiter.clear(&attempts);
+    inner.usernames.clear(&user.username).await;
     // The session just gained full privilege — rotate the CSRF token with it.
     let (_, csrf_cookie) = inner.csrf().issue();
     (jar.add(csrf_cookie), Redirect::to("/")).into_response()
@@ -1168,7 +1220,7 @@ async fn profile_form(
 async fn profile_submit(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
-    MaybePeer(peer): MaybePeer,
+    MaybePeer(peer): MaybePeer, // for the audit record, not for limiting
     Form(form): Form<ChangeForm>,
 ) -> Response {
     if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
@@ -1190,16 +1242,11 @@ async fn profile_submit(
     }
     let totp_on = user.has_totp();
 
-    // A stolen session guessing the current password gets the same brake — in its own bucket, so
-    // fumbling it here can't lock the account out of *logging in*.
-    let attempts = limit::profile_key(&who.username);
-    if let Some(retry) = inner.locked_out(&attempts, peer) {
-        let frag = change_form_html(&who, totp_on, Some(&lockout_message(retry)), None, &csrf);
-        let frag = inner.with_profile_extra(frag, &who).await;
-        return too_many_attempts(retry, (), Html((inner.profile_shell)(&frag, &who)));
-    }
+    // Not lockout-limited: the caller is *authenticated*, so this isn't brute force from outside —
+    // it's someone with a live session, which is a session-theft problem (short TTLs, re-auth before
+    // sensitive changes — TODO.md), not a guessing one. Counting it here would also let a stolen
+    // session lock the real user out of logging in.
     let error = if !verify_password(&user.password_hash, &form.current_password) {
-        inner.record_failure(&attempts, peer);
         Some("Current password is incorrect.")
     } else {
         password_pair_error(&form.new_password, &form.confirm_password)
@@ -1210,7 +1257,6 @@ async fn profile_submit(
         return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
     }
 
-    inner.limiter.clear(&attempts); // the current password was right
     if set_password(&inner.db, &who.username, &form.new_password).await.is_err() {
         let frag = change_form_html(&who, totp_on, Some("Could not change the password."), None, &csrf);
         let frag = inner.with_profile_extra(frag, &who).await;
@@ -1348,7 +1394,6 @@ async fn totp_setup_form(
 async fn totp_setup_submit(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
-    MaybePeer(peer): MaybePeer,
     Form(form): Form<TotpForm>,
 ) -> Response {
     if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
@@ -1367,17 +1412,9 @@ async fn totp_setup_submit(
     let Some(pending) = user.pending_totp_key().map(str::to_string) else {
         return Redirect::to(&inner.profile_path).into_response(); // nothing in progress
     };
-    // Enrolment confirms a 6-digit code too — brake it, in its own bucket.
-    let attempts = limit::enrol_key(&who.username);
-    if let Some(retry) = inner.locked_out(&attempts, peer) {
-        return too_many_attempts(
-            retry,
-            (),
-            render_totp_setup(&inner, &who, &pending, Some(&lockout_message(retry)), &csrf),
-        );
-    }
+    // Not lockout-limited: enrolling is authenticated, and the code being guessed is the caller's own
+    // pending secret — there is nobody else's account to reach by guessing it.
     if !totp::verify(&pending, &form.code) {
-        inner.record_failure(&attempts, peer);
         return render_totp_setup(
             &inner,
             &who,
@@ -1386,7 +1423,6 @@ async fn totp_setup_submit(
             &csrf,
         );
     }
-    inner.limiter.clear(&attempts);
     let mut am: user::ActiveModel = user.into();
     am.totp_secret = Set(Some(pending));
     am.totp_pending = Set(None);
@@ -1867,7 +1903,7 @@ mod tests {
         // The bootstrap `migrate` builds these with IF NOT EXISTS, so re-running on an existing DB
         // won't error ("table already exists"). Verified at the SQL level (no DB needed).
         let stmts = table_create_statements(DbBackend::Sqlite);
-        assert_eq!(stmts.len(), 4, "user, group, user_group, session");
+        assert_eq!(stmts.len(), 6, "user, group, user_group, session + the two lockout tables");
         for mut stmt in stmts {
             stmt.if_not_exists();
             let sql = DbBackend::Sqlite.build(&stmt).sql.to_uppercase();

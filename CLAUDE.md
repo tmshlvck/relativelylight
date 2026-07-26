@@ -115,10 +115,20 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
 - **TOTP 2FA**: users enrol from `/profile` (QR + `otpauth://` URL, verify-before-activate); once on,
   login requires the code at `/login/totp`. Self-disable, plus manager disable for others. Expose a
   password column as a hashed, write-only field with `MetaField::password()`.
-- **Attempt limiting**: every credential check (login, the TOTP step, the profile password, 2FA
-  enrolment) is behind a sliding-window lockout — 10 failures / 15 min per account by default → `429` +
-  `Retry-After`, tune with `.login_limit(max, window_secs)`, add `.login_limit_per_ip(n)` when your app
-  sees real client IPs, `.no_login_limit()` to opt out, `auth.clear_login_attempts(user)` to unlock.
+- **Lockout** (`auth::lockout`): the **unauthenticated** credential checks (`POST /login`, `POST
+  /login/totp`) are braked by two DB-backed counters — by account name and by source address —
+  configured *mandatorily* on `Auth::new(db, Lockout { .. })`. Authenticated checks (`/profile`
+  password, 2FA enrolment) are deliberately **not** limited: that's session theft, not brute force.
+  An app that checks credentials itself must use the same counters, not a second limiter —
+  `auth.username_lockout()` / `auth.ip_lockout()` (`locked` / `record_failure` / `clear`), so one
+  account has one budget everywhere. The unlock is **deleting the row** in the admin panel (register
+  `lockout::username_entity` / `ip_entity`), which is gated, CSRF-checked and audited for free.
+  The per-address half resolves the client with `net::client_ip(trust_proxy, ..)` — `Lockout::trust_proxy`
+  picks socket peer vs left-most `X-Forwarded-For`, and an app should call the same function for its logs
+  and audit rows so one client is one key (`Auth::client_ip(closure)` overrides for CDN/multi-hop). Pruning
+  expired rows — and expired sessions — is `auth::prune(&db, lockout)`, which **the app schedules**;
+  the crate spawns no tasks. Worked examples: `examples/auth`'s `GET /api/whoami` + prune loop,
+  `examples/adminpanel`'s lockout panels.
 - **CSRF**: every form `auth` renders carries a hidden `_csrf` token checked on POST; turn it on for the
   JSON API with `crud.csrf(auth.csrf())` (the admin UI's `fetch` writes then send `X-CSRF-Token`
   automatically). `Authorization`-bearing requests are exempt. See [docs/AUTH.md §7](docs/AUTH.md).
@@ -168,6 +178,8 @@ under `/api/v1` with Swagger at `/docs`.
   adapters, and the `MetaField::validate_str/_int` sugar. Same predicate on CRUD + hand-written APIs.
 - **[docs/PRD.md](docs/PRD.md)** — product overview, module status, roadmap.
 - **[TODO.md](TODO.md)** — the ordered backlog.
+- **[CHANGELOG.md](CHANGELOG.md)** — per-release notes; land user-visible changes under `## Unreleased`
+  as you make them (breaking changes first, with the upgrade step), so a release is a rename + a tag.
 
 ---
 
@@ -196,6 +208,11 @@ add or change functionality:
 - Adding or promoting a **module/feature**? Update the module table + status in `docs/PRD.md`, add a
   pointer in `README.md` and this file's Documentation list, and move any now-shipped item out of
   `TODO.md` (add new follow-ups there with a one-line rationale).
+- Anything a **user would notice** (new API, changed default, fixed bug, breaking behaviour) gets an
+  entry in `CHANGELOG.md` under `## Unreleased` **in the same change** — breaking items first, each with
+  the concrete upgrade step. Releasing is then: rename that heading to `## [x.y.z] — YYYY-MM-DD`, add its
+  compare link, bump `relativelylight/Cargo.toml`, commit `Release vx.y.z`, tag, push the tag. A
+  behaviour break bumps the **minor** while we're pre-1.0 (Cargo treats `0.1.x` as one compatible range).
 - `docs/PRD.md` is **requirements + roadmap only** — no usage tutorials (those live in the guides);
   `README.md` is the user's starting point (what it is + pointers); this file is the using-it/working-on
   orientation. Don't duplicate content across them — cross-link instead.

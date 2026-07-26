@@ -14,16 +14,20 @@ Highest priority first.
   loses their authenticator isn't locked out (today only a manager can disable their 2FA).
 - [ ] **TOTP replay guard.** Reject a code that was already used within its 30s window (track the last
   accepted step per user) to prevent replay inside the skew window.
-- [ ] **Attempt-limiting follow-ups.** The sliding-window lockout ships (AUTH.md §5e), but the counters
-  are **in-memory per process**: add a pluggable store (SeaORM table / Redis) so a multi-replica
-  deployment shares one budget and survives restarts, and flip `login_limit_per_ip` on by default once
-  the trusted-proxy real-ip parsing exists (today it would bucket everyone behind a proxy together).
+- [ ] **Lockout follow-ups.** The two DB-backed counters ship (AUTH.md §5e), durable, shared by every
+  replica and by the app's own credential checks, with the unlock being a row delete in the admin panel.
+  Remaining: **allow-lists** — usernames by regex and addresses by CIDR, so a service account or an
+  office range is never locked out (the two types are separate precisely so these can differ). The
+  client address is the app's to resolve (`Auth::client_ip`), so the real-ip middleware below would
+  only make that wiring optional, not fix a gap.
 - [ ] **CSRF follow-ups.** The double-submit token ships (AUTH.md §7). Remaining: a `Csrf` layer for
   app-owned unsafe routes (today each handler calls `Csrf::verify` itself), and a rejection hook so an
   app can render the 403 in its own shell instead of the built-in page.
-- [ ] **Cross-cutting middleware (AUTH.md §4).** Real-client-IP (trusted-proxy `Forwarded`/
-  `X-Forwarded-For` parsing), structured request logging, and a configurable CORS layer. The examples
-  have a minimal access log; the library should offer these as opt-in layers.
+- [ ] **Cross-cutting middleware (AUTH.md §4).** Client-IP resolution now exists as `net::client_ip`
+  (`trust_proxy` → peer or left-most `X-Forwarded-For`/`X-Real-IP`, IPv4-mapped collapsed), used by the
+  lockout. Remaining: a trusted-proxy **CIDR list** instead of one boolean, RFC 7239 `Forwarded`, a
+  `ClientIp` extractor/layer so apps stop threading `(headers, peer)`, structured request logging, and a
+  configurable CORS layer.
 - [ ] **Session hardening.** Rotate the session id on privilege change (login, 2FA completion),
   optional idle vs. absolute timeout, and "sign out everywhere" (delete a user's sessions). Include
   invalidating a user's **other** sessions when their password is changed or reset by a manager —

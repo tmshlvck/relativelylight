@@ -88,7 +88,7 @@ post.field("title").validate = Some(Box::new(|v| {
 | `ui` | | the web admin components (`crud::ui::Table`, `crud::ui::Admin`) |
 | `openapi` | | runtime OpenAPI 3.1 generation |
 | `csv` | | CSV import/export endpoints |
-| `auth` | | sessions, on-demand login resolution, TOTP 2FA, attempt limiting, a per-model authorization gate |
+| `auth` | | sessions, on-demand login resolution, TOTP 2FA, DB-backed login lockout, a per-model authorization gate |
 | `csrf` | | the double-submit CSRF token (`csrf` module); implied by `auth` |
 | `sso` | | OIDC single sign-on (Google / Okta / corporate) + group mapping (implies `auth`) |
 
@@ -128,6 +128,8 @@ JSON API under `/api/v1` with Swagger at `/docs`.
   (IP/network, ranges, lengths, enums, hostname/FQDN, hex, email/URL, …) and normalizers as typed
   predicates, plus the `MetaField::validate_str/_int` sugar and the crud adapters.
 - **[docs/PRD.md](docs/PRD.md)** — product overview, module status, and roadmap.
+- **[CHANGELOG.md](CHANGELOG.md)** — what changed per release, with the breaking changes and upgrade
+  steps for each.
 - **[AGENTS.md](AGENTS.md)** — orientation for working *on* the library (workspace layout, build/test,
   and the rule to keep the docs above in sync with behavior changes).
 

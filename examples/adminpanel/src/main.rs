@@ -9,6 +9,9 @@
 //! document, and the authn/authz gate. (The `crud-example` is the ungated counterpart.)
 //!
 //! Try:  open http://127.0.0.1:3000/   ·   Swagger at /docs   ·   spec at /openapi.json
+//!
+//!   cargo run -p adminpanel-example -- --set-admin-pw s3cret   # break-glass admin recovery, then exit
+//!   TRUST_PROXY=1 cargo run -p adminpanel-example              # behind a proxy: trust X-Forwarded-For
 
 use askama::Template;
 use axum::extract::{ConnectInfo, Request, State};
@@ -28,6 +31,8 @@ use std::sync::Arc;
 use utoipa::openapi::{InfoBuilder, OpenApiBuilder};
 
 // The superadmin group (configurable). Its members may write; other logged-in users may only read.
+// **One name, used everywhere**: the gates below, `Auth::admin_group`, the boot-time seeder, and
+// break-glass recovery. Let those drift apart and you get an "admin" outside the group the gate checks.
 const ADMIN_GROUP: &str = "admin";
 
 #[derive(Template)]
@@ -90,7 +95,17 @@ fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
                     r#"(v, row) => `<a href="/profile/${row.id}" title="Reset password">${v}</a>`"#,
                 )
             })
-            .entity_with("auth_group", |t| t.title("Groups"));
+            .entity_with("auth_group", |t| t.title("Groups"))
+            .entity_with("auth_username_lockout", |t| {
+                t.title("Locked accounts").description(
+                    "Accounts with recent failed logins. Delete a row to unlock one (the count \
+                     clears itself once the lockout expires).",
+                )
+            })
+            .entity_with("auth_ip_lockout", |t| {
+                t.title("Locked addresses")
+                    .description("Source addresses with recent failed credential checks.")
+            });
     }
     admin
         .separator()
@@ -105,23 +120,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // auth: create the auth tables and seed an admin user in the admin group.
     auth::migrate(&db).await?;
+
+    // The brute-force brake is mandatory — `Auth::new` takes its configuration: 5 failed logins per
+    // account and 15 per source address, both for 5 minutes.
+    let lockout = auth::lockout::Lockout {
+        username_after: 5,
+        username_duration_secs: 300,
+        ip_after: 15,
+        ip_duration_secs: 300,
+        // The socket peer is the client here; `TRUST_PROXY=1` switches to the forwarded hop for a run
+        // behind a reverse proxy (unproxied, that header is attacker-supplied — hence the flag).
+        trust_proxy: matches!(std::env::var("TRUST_PROXY").as_deref(), Ok("1") | Ok("true")),
+    };
+
+    // How an app wires a `--set-admin-pw` CLI flag: **break-glass** admin recovery for an operator who
+    // is locked out — create-or-reset the password, re-activate the account, clear its TOTP 2FA, ensure
+    // membership of ADMIN_GROUP (the same constant the gates use), then exit. Destructive by design, so
+    // operator-run only; the boot-time seeder is `make_admin`, which leaves `is_active` / 2FA alone.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--set-admin-pw") {
+        let pw = args.get(i + 1).map(String::as_str).unwrap_or("");
+        auth::reset_admin_access(&db, ADMIN_GROUP, "admin", pw).await?;
+        println!("admin password set, account enabled, 2FA cleared, added to '{ADMIN_GROUP}'");
+        return Ok(());
+    }
+
     auth::make_admin(&db, ADMIN_GROUP, "admin", "password").await?;
+
+    // Housekeeping is the app's job — the library schedules nothing. `auth::prune` clears expired
+    // sessions and expired lockout rows; run it at startup and on the app's own loop.
+    let prune_db = db.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            ticker.tick().await;
+            if let Err(e) = auth::prune(&prune_db, lockout).await {
+                eprintln!("prune failed: {e}");
+            }
+        }
+    });
     // A second, non-admin user to show the gate at work: `editor` may read everything but write
     // nothing — the panel renders read-only for them (no Create/Edit/Delete) and the API returns 403.
     auth::create_user(&db, "editor", "password").await?;
 
     // authn: on-demand session lookups + login/logout routes, Bootstrap-styled login page. No
     // middleware — gates and page handlers call `auth.identify(&headers)` themselves.
-    let auth = Auth::new(db.clone())
+    let auth = Auth::new(db.clone(), lockout)
         .secure_cookies(false) // local http
         .admin_group(ADMIN_GROUP)
         .totp_issuer("relativelylight admin") // shown in authenticator apps for 2FA
-        // Brute-force brake: 5 failed credential checks per account per 5 minutes (the library default
-        // is 10 / 15 min), plus a per-source-IP cap to catch username spraying. Per-IP is safe to
-        // enable *here* because this example binds directly and serves with connect-info, so the peer
-        // really is the client — behind a reverse proxy it would bucket everyone together (AUTH.md §5e).
-        .login_limit(5, 300)
-        .login_limit_per_ip(15)
         .login_shell(login_shell)
         .profile_shell(profile_shell); // the app's chrome around the library's profile page
 
@@ -198,6 +245,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let admin_gate = Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP]));
     crud.register(auth_user_mm, admin_gate.clone());
     crud.register(auth_group_mm, admin_gate.clone());
+    // The lockout tables — this is what makes the unlock an ordinary, gated, audited DELETE instead of
+    // a bespoke endpoint: an operator sees who is locked out and deletes the row. Counts and
+    // timestamps are maintained by the library, so everything is read-only except the delete.
+    let mut username_lockout_mm = MetaModel::new(auth::lockout::username_entity::Entity);
+    let mut ip_lockout_mm = MetaModel::new(auth::lockout::ip_entity::Entity);
+    for mm in [&mut username_lockout_mm.field("failures"), &mut ip_lockout_mm.field("failures")] {
+        mm.read_only = true;
+    }
+    for mm in
+        [&mut username_lockout_mm.field("last_failure_at"), &mut ip_lockout_mm.field("last_failure_at")]
+    {
+        mm.read_only = true;
+        mm.datetime();
+    }
+    crud.register(username_lockout_mm, admin_gate.clone());
+    crud.register(ip_lockout_mm, admin_gate.clone());
     // CSRF: this API is cookie-authenticated, so every write must echo the double-submit token.
     // Sharing `auth.csrf()` puts the API and the login/profile forms on one token cookie; the panel's
     // `fetch` calls pick it up automatically. See docs/AUTH.md §7.
