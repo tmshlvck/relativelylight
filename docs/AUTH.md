@@ -438,8 +438,14 @@ Lockout { trust_proxy: false, .. }   // exposed directly: the socket peer is the
 Lockout { trust_proxy: true,  .. }   // behind a proxy you control: the left-most X-Forwarded-For hop
 ```
 
-That is [`net::client_ip`](crate::net::client_ip), which the app should call for its own logging, audit
-rows and limits too — then a failed login and a failed API call from one client land on the **same** row,
+That is [`net::client_ip`](crate::net::client_ip) — which reads the **right-most** `X-Forwarded-For`
+entry, the one your proxy appended, because everything to its left is whatever the caller chose to send
+(nginx's `proxy_add_x_forwarded_for`, HAProxy's `option forwardfor` and Caddy all append). Reading the
+left-most entry would let any caller pick its own address and so walk past an admission list, out of a
+lockout, or into someone else's audit row. A proxy that *replaces* the header leaves one entry, where
+both readings agree. Two hops (a CDN in front of your proxy) need the trusted-proxy list of §4.
+
+The app should call the same function for its own logging, audit rows and limits — then a failed login and a failed API call from one client land on the **same** row,
 canonicalized the same way (an IPv4-mapped `::ffff:a.b.c.d` peer and a plain `a.b.c.d` forwarded hop are
 otherwise two different keys).
 

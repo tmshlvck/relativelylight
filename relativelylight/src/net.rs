@@ -5,8 +5,9 @@
 //!
 //! - **Exposed directly** — the socket peer is the client. Forwarded headers are attacker-supplied and
 //!   must be ignored, or a caller picks which address gets rate-limited, logged or locked out.
-//! - **Behind a reverse proxy you control** — the peer is the proxy, and the client is what the proxy
-//!   put in `X-Forwarded-For` / `X-Real-IP`.
+//! - **Behind a reverse proxy you control** — the peer is the proxy, and the client is the address the
+//!   proxy itself appended to `X-Forwarded-For` (the **right-most** entry — see [`client_ip`]), or
+//!   `X-Real-IP`.
 //!
 //! [`client_ip`] is that decision as one function, driven by the `trust_proxy` flag an app almost
 //! certainly already has in its config. `auth` uses it for the per-address half of the lockout
@@ -19,19 +20,30 @@
 //! [`Lockout::ip_allow`](crate::auth::lockout::Lockout::ip_allow); an app should use the same ones for
 //! its own network rules.
 //!
-//! **Scope, deliberately.** The left-most `X-Forwarded-For` entry is taken as the client, with no
-//! trusted-proxy CIDR list and no RFC 7239 `Forwarded` parsing yet — see `docs/AUTH.md` §4 and
-//! `TODO.md`. That is enough for the ordinary "one proxy in front, and it sets the header" case, and it
-//! is safe as long as `trust_proxy` really means "nothing can reach me except that proxy". A future
+//! **Scope, deliberately.** One trusted hop, no trusted-proxy CIDR list and no RFC 7239 `Forwarded`
+//! parsing yet — see `docs/AUTH.md` §4 and `TODO.md`. That covers the ordinary "one proxy in front"
+//! case and is safe as long as `trust_proxy` really means "nothing reaches me except that proxy". A
 //! richer configuration can extend this without changing the call shape.
 
 use http::HeaderMap;
 use ipnet::{IpNet, Ipv4Net};
 use std::net::IpAddr;
 
-/// The client address of a request: the left-most forwarded hop when `trust_proxy` is set and a
-/// forwarded header is present, else the socket `peer`. `None` when neither is available (no
+/// The client address of a request: the **right-most** `X-Forwarded-For` entry when `trust_proxy` is
+/// set (else `X-Real-IP`), and the socket `peer` otherwise. `None` when neither is available (no
 /// connection info and no usable header).
+///
+/// **Right-most, not left-most, and that is the security-relevant part.** A proxy appends the address
+/// *it* observed to whatever the caller already sent — `proxy_add_x_forwarded_for` in nginx, `option
+/// forwardfor` in HAProxy, Caddy's `reverse_proxy` — so the last entry is the one your proxy vouches
+/// for and everything to its left is caller-supplied. Reading the left-most entry would let any caller
+/// pick its own address by sending a header, defeating whatever the address is used for (an admission
+/// list, a lockout, an audit trail). With a proxy that *replaces* the header instead, there is only one
+/// entry and the two readings agree.
+///
+/// The limit of a boolean: it says "exactly one hop I trust". Behind **two** proxies (a CDN in front of
+/// your own), the right-most entry is the inner proxy, not the end user — that needs a trusted-proxy
+/// CIDR list, which is `docs/AUTH.md` §4 and still to come.
 ///
 /// IPv4-mapped IPv6 (`::ffff:192.0.2.1`) is normalized to plain IPv4, so a dual-stack listener and a
 /// proxy that reports plain IPv4 agree on one key for one client.
@@ -40,18 +52,20 @@ use std::net::IpAddr;
 /// use relativelylight::net::client_ip;
 /// # use http::HeaderMap;
 /// let mut headers = HeaderMap::new();
-/// headers.insert("x-forwarded-for", "198.51.100.9, 10.0.0.1".parse().unwrap());
-/// let peer = Some("10.0.0.1".parse().unwrap());
+/// // What an appending proxy produces from a caller that sent "X-Forwarded-For: 198.51.100.9".
+/// headers.insert("x-forwarded-for", "198.51.100.9, 203.0.113.7".parse().unwrap());
+/// let peer = Some("10.0.0.1".parse().unwrap()); // the proxy itself
 ///
-/// // Behind a trusted proxy: believe the header.
-/// assert_eq!(client_ip(true, &headers, peer), "198.51.100.9".parse().ok());
-/// // Exposed directly: the header is attacker-controlled, so it is ignored.
+/// // Behind a trusted proxy: the hop *it* added, not the one the caller claimed.
+/// assert_eq!(client_ip(true, &headers, peer), "203.0.113.7".parse().ok());
+/// // Exposed directly: the header is attacker-controlled, so it is ignored entirely.
 /// assert_eq!(client_ip(false, &headers, peer), "10.0.0.1".parse().ok());
 /// ```
 pub fn client_ip(trust_proxy: bool, headers: &HeaderMap, peer: Option<IpAddr>) -> Option<IpAddr> {
     if trust_proxy {
         if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(ip) = xff.split(',').next().and_then(|f| f.trim().parse::<IpAddr>().ok()) {
+            // Right-most: the hop our own proxy appended. Anything further left came from the caller.
+            if let Some(ip) = xff.rsplit(',').next().and_then(|f| f.trim().parse::<IpAddr>().ok()) {
                 return Some(canonical(ip));
             }
         }
@@ -154,9 +168,9 @@ mod tests {
     #[test]
     fn a_trusted_proxy_supplies_the_client() {
         let peer = ip("10.0.0.1");
-        // Left-most entry of a chain is the original client.
+        // Right-most entry: the hop the proxy appended, not what the caller claimed.
         let chain = headers(&[("x-forwarded-for", " 198.51.100.9 , 10.0.0.2 ")]);
-        assert_eq!(client_ip(true, &chain, peer), ip("198.51.100.9"));
+        assert_eq!(client_ip(true, &chain, peer), ip("10.0.0.2"));
         // X-Real-IP is the fallback when there's no XFF.
         let real = headers(&[("x-real-ip", "198.51.100.10")]);
         assert_eq!(client_ip(true, &real, peer), ip("198.51.100.10"));
@@ -167,6 +181,27 @@ mod tests {
         let junk = headers(&[("x-forwarded-for", "not-an-ip")]);
         assert_eq!(client_ip(true, &junk, peer), peer);
         assert_eq!(client_ip(true, &HeaderMap::new(), peer), peer, "no header at all");
+    }
+
+    #[test]
+    fn a_caller_cannot_choose_its_own_address_behind_an_appending_proxy() {
+        // nginx's `$proxy_add_x_forwarded_for` (and HAProxy's `option forwardfor`, and Caddy) append
+        // what they see to what the caller sent. Reading the left-most entry would hand every caller a
+        // free choice of address — and with it a way past an admission list, out of a lockout, or into
+        // someone else's audit trail. The proxy's own entry is always the last one.
+        let peer = ip("10.0.0.1"); // the proxy
+        for spoof in ["127.0.0.1", "10.0.0.1", "::1", "192.0.2.1, 198.51.100.1"] {
+            let forged = format!("{spoof}, 203.0.113.7"); // proxy appended the real client
+            let h = headers(&[("x-forwarded-for", &forged)]);
+            assert_eq!(
+                client_ip(true, &h, peer),
+                ip("203.0.113.7"),
+                "caller claimed {spoof:?} and must not be believed"
+            );
+        }
+        // A single entry (a proxy that *replaces* the header) is unambiguous either way.
+        let replaced = headers(&[("x-forwarded-for", "203.0.113.7")]);
+        assert_eq!(client_ip(true, &replaced, peer), ip("203.0.113.7"));
     }
 
     #[test]

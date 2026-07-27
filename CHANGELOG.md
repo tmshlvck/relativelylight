@@ -114,6 +114,14 @@ already using `auth`.
 
 ### Security
 
+- **`net::client_ip` reads the right-most `X-Forwarded-For` entry, not the left-most.** A proxy appends
+  the address it observed to whatever the caller sent (nginx `$proxy_add_x_forwarded_for`, HAProxy
+  `option forwardfor`, Caddy), so the left-most entry is caller-controlled: reading it let anyone choose
+  their own address and thereby pass an IP admission list, sit inside a lockout whitelist, dodge a
+  lockout by rotating the value, or file audit rows under someone else's address. Deployments whose
+  proxy *replaces* the header are unaffected (one entry, same answer). If you have two trusted hops, the
+  right-most is now the inner proxy — that case needs the trusted-proxy CIDR list (AUTH.md §4).
+
 - CSRF protection and the login lockout close the two gaps AUTH.md had listed as open. Documented
   limits: per-source-IP counting on *our* login routes only happens once the app supplies a
   `client_ip` resolver, because the library refuses to guess an address it can't trust — behind a reverse
