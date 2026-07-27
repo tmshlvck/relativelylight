@@ -131,6 +131,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The socket peer is the client here; `TRUST_PROXY=1` switches to the forwarded hop for a run
         // behind a reverse proxy (unproxied, that header is attacker-supplied — hence the flag).
         trust_proxy: matches!(std::env::var("TRUST_PROXY").as_deref(), Ok("1") | Ok("true")),
+        // Addresses that are never locked out — an office range, a monitoring probe. Empty here so the
+        // demo can actually lock itself out from localhost; a real app builds it with
+        // `relativelylight::net::parse_nets(&cfg.allow_list)` (v4/v6, bare hosts, CIDRs).
+        ip_allow: Vec::new(),
     };
 
     // How an app wires a `--set-admin-pw` CLI flag: **break-glass** admin recovery for an operator who
@@ -150,11 +154,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Housekeeping is the app's job — the library schedules nothing. `auth::prune` clears expired
     // sessions and expired lockout rows; run it at startup and on the app's own loop.
     let prune_db = db.clone();
+    let prune_lockout = lockout.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
             ticker.tick().await;
-            if let Err(e) = auth::prune(&prune_db, lockout).await {
+            if let Err(e) = auth::prune(&prune_db, &prune_lockout).await {
                 eprintln!("prune failed: {e}");
             }
         }

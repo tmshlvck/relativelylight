@@ -13,6 +13,12 @@
 //! (`docs/AUTH.md` §5e); an app should use the same call for its own logging, audit rows and limits, so
 //! that one client is one key everywhere.
 //!
+//! It also carries the CIDR helpers that go with an address — [`parse_nets`], [`in_nets`] and
+//! [`canonical_net`] — so an allow-list matches whichever way the client arrived: IPv4, IPv6, or the
+//! `::ffff:a.b.c.d` form a dual-stack listener reports. `auth`'s lockout uses them for
+//! [`Lockout::ip_allow`](crate::auth::lockout::Lockout::ip_allow); an app should use the same ones for
+//! its own network rules.
+//!
 //! **Scope, deliberately.** The left-most `X-Forwarded-For` entry is taken as the client, with no
 //! trusted-proxy CIDR list and no RFC 7239 `Forwarded` parsing yet — see `docs/AUTH.md` §4 and
 //! `TODO.md`. That is enough for the ordinary "one proxy in front, and it sets the header" case, and it
@@ -20,6 +26,7 @@
 //! richer configuration can extend this without changing the call shape.
 
 use http::HeaderMap;
+use ipnet::{IpNet, Ipv4Net};
 use std::net::IpAddr;
 
 /// The client address of a request: the left-most forwarded hop when `trust_proxy` is set and a
@@ -72,6 +79,54 @@ pub fn canonical(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// Parse CIDR strings into networks, skipping anything unparseable. A bare address is accepted as a
+/// single host (`/32` or `/128`), and IPv4-mapped IPv6 networks are canonicalized to IPv4 — so a rule
+/// written either way matches a client resolved either way (see [`canonical_net`]).
+///
+/// ```
+/// use relativelylight::net::{in_nets, parse_nets};
+/// let nets = parse_nets(&["10.0.0.0/8".into(), "2001:db8::/32".into(), "::ffff:192.0.2.0/120".into()]);
+/// assert!(in_nets(&nets, "10.9.9.9".parse().unwrap()));
+/// assert!(in_nets(&nets, "2001:db8::1".parse().unwrap()));
+/// assert!(in_nets(&nets, "192.0.2.5".parse().unwrap()), "mapped rule, plain client");
+/// assert!(!in_nets(&nets, "192.168.1.1".parse().unwrap()));
+/// ```
+pub fn parse_nets(cidrs: &[String]) -> Vec<IpNet> {
+    cidrs
+        .iter()
+        .filter_map(|s| {
+            let s = s.trim();
+            s.parse::<IpNet>()
+                .ok()
+                .or_else(|| s.parse::<IpAddr>().ok().map(IpNet::from))
+                .map(canonical_net)
+        })
+        .collect()
+}
+
+/// Whether `ip` falls in any of `nets`. The address is canonicalized first, so an IPv4 client reported
+/// as `::ffff:a.b.c.d` still matches an IPv4 rule.
+pub fn in_nets(nets: &[IpNet], ip: IpAddr) -> bool {
+    let ip = canonical(ip);
+    nets.iter().any(|n| n.contains(&ip))
+}
+
+/// The rule-side counterpart of [`canonical`]: an IPv4-mapped IPv6 network (`::ffff:a.b.c.d/N`, N≥96)
+/// becomes the equivalent IPv4 network (`/N-96`). Genuine IPv6 networks are untouched. Without this, a
+/// rule written in mapped form would never match a client whose address was canonicalized to IPv4.
+pub fn canonical_net(net: IpNet) -> IpNet {
+    if let IpNet::V6(v6) = net {
+        if let Some(v4) = v6.addr().to_ipv4_mapped() {
+            if v6.prefix_len() >= 96 {
+                if let Ok(n) = Ipv4Net::new(v4, v6.prefix_len() - 96) {
+                    return IpNet::V4(n);
+                }
+            }
+        }
+    }
+    net
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +167,33 @@ mod tests {
         let junk = headers(&[("x-forwarded-for", "not-an-ip")]);
         assert_eq!(client_ip(true, &junk, peer), peer);
         assert_eq!(client_ip(true, &HeaderMap::new(), peer), peer, "no header at all");
+    }
+
+    #[test]
+    fn allow_lists_match_across_families_and_representations() {
+        // Every combination that can reach us: a rule in either family or in mapped form, against a
+        // client address that arrived as plain IPv4, real IPv6, or IPv4-mapped IPv6.
+        let nets = parse_nets(&[
+            "10.0.0.0/8".into(),
+            "192.0.2.7".into(),          // bare address → /32
+            "2001:db8::/32".into(),
+            "::ffff:198.51.100.0/120".into(), // mapped rule → 198.51.100.0/24
+            "not-a-cidr".into(),         // junk is skipped, not fatal
+        ]);
+        for (client, expected, what) in [
+            ("10.9.9.9", true, "plain v4 in a v4 rule"),
+            ("::ffff:10.9.9.9", true, "mapped v4 in a v4 rule"),
+            ("192.0.2.7", true, "bare host rule"),
+            ("::ffff:192.0.2.7", true, "mapped client, bare host rule"),
+            ("2001:db8::1", true, "v6 in a v6 rule"),
+            ("198.51.100.9", true, "plain v4 in a *mapped* rule"),
+            ("::ffff:198.51.100.9", true, "mapped v4 in a mapped rule"),
+            ("192.168.1.1", false, "v4 outside every rule"),
+            ("2001:db9::1", false, "v6 outside every rule"),
+        ] {
+            assert_eq!(in_nets(&nets, client.parse().unwrap()), expected, "{what}");
+        }
+        assert!(!in_nets(&[], "10.9.9.9".parse().unwrap()), "an empty list allows nothing");
     }
 
     #[test]

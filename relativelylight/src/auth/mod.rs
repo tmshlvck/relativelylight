@@ -274,7 +274,7 @@ pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> 
 /// row reads as unlocked (and resets itself on the next failure); the rows just accumulate.
 ///
 /// Returns how many rows were deleted, in total.
-pub async fn prune(db: &DatabaseConnection, lockout: lockout::Lockout) -> Result<u64, DbErr> {
+pub async fn prune(db: &DatabaseConnection, lockout: &lockout::Lockout) -> Result<u64, DbErr> {
     let sessions = session::Entity::delete_many()
         .filter(session::Column::ExpiresAt.lt(now_secs()))
         .exec(db)
@@ -284,7 +284,7 @@ pub async fn prune(db: &DatabaseConnection, lockout: lockout::Lockout) -> Result
         lockout::UsernameLockout::new(db.clone(), lockout.username_after, lockout.username_duration_secs)
             .prune()
             .await?;
-    let ips = lockout::IpLockout::new(db.clone(), lockout.ip_after, lockout.ip_duration_secs)
+    let ips = lockout::IpLockout::new(db.clone(), lockout.ip_after, lockout.ip_duration_secs, vec![])
         .prune()
         .await?;
     Ok(sessions + usernames + ips)
@@ -726,7 +726,12 @@ impl Auth {
             lockout.username_after,
             lockout.username_duration_secs,
         );
-        let ips = lockout::IpLockout::new(db.clone(), lockout.ip_after, lockout.ip_duration_secs);
+        let ips = lockout::IpLockout::new(
+            db.clone(),
+            lockout.ip_after,
+            lockout.ip_duration_secs,
+            lockout.ip_allow,
+        );
         Self {
             inner: Arc::new(Inner {
                 db,

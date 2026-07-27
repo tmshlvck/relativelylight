@@ -1421,6 +1421,75 @@ async fn per_ip_limiting_catches_username_spraying_when_the_peer_is_the_client()
         .assert_redirect("/");
 }
 
+#[tokio::test]
+async fn an_allow_listed_address_is_never_locked_out_however_it_arrives() {
+    // The office range / monitoring probe case. The exemption has to hold for every way an address can
+    // reach us — plain v4, real v6, and the IPv4-mapped form a dual-stack listener reports — and for
+    // both the login route and the app's own surfaces, since both go through `IpLockout`.
+    let allow = crate::net::parse_nets(&[
+        "10.0.0.0/8".into(),
+        "2001:db8::/32".into(),
+        "::ffff:198.51.100.0/120".into(), // written mapped; must still match a plain v4 client
+    ]);
+    let fx = Fx::with_lockout(Lockout {
+        username_after: 0, // isolate the address counter
+        ip_after: 2,
+        trust_proxy: true,
+        ip_allow: allow,
+        ..Lockout::default()
+    })
+    .await;
+    fx.user("alice").await;
+    let ips = fx.auth.ip_lockout();
+
+    for exempt in ["10.9.9.9", "::ffff:10.9.9.9", "2001:db8::1", "198.51.100.9", "::ffff:198.51.100.9"] {
+        let addr: std::net::IpAddr = exempt.parse().unwrap();
+        assert!(ips.allowed(addr), "{exempt} is on the list");
+        // Failures are neither counted nor checked, however many arrive…
+        for _ in 0..5 {
+            assert!(!ips.record_failure(Some(addr)).await, "{exempt} never trips");
+            fx.post_forwarded(exempt, "ghost", "wrong").await;
+        }
+        assert_eq!(ips.locked(Some(addr)).await, None, "{exempt} is not locked");
+        // …and a good login from there still works.
+        fx.post_forwarded(exempt, "alice", PW).await.assert_redirect("/");
+    }
+    assert_eq!(
+        lockout::ip_entity::Entity::find().all(&fx.db).await.unwrap().len(),
+        0,
+        "no rows were written for allow-listed addresses"
+    );
+
+    // An address outside every rule still locks, on the same two failures.
+    for _ in 0..2 {
+        fx.post_forwarded("203.0.113.7", "ghost", "wrong").await;
+    }
+    fx.post_forwarded("203.0.113.7", "alice", PW).await.assert_locked_out(900);
+}
+
+#[tokio::test]
+async fn one_client_is_one_row_whether_it_arrives_mapped_or_plain() {
+    // A dual-stack listener reports an IPv4 client as ::ffff:a.b.c.d while a proxy reports a.b.c.d.
+    // Both must spend the same budget, or the limit is silently doubled.
+    let fx = Fx::with_lockout(Lockout {
+        username_after: 0,
+        ip_after: 2,
+        ..Lockout::default()
+    })
+    .await;
+    let ips = fx.auth.ip_lockout();
+    let mapped: std::net::IpAddr = "::ffff:203.0.113.7".parse().unwrap();
+    let plain: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+
+    assert!(!ips.record_failure(Some(mapped)).await);
+    assert!(ips.record_failure(Some(plain)).await, "the second failure trips — one shared row");
+    assert!(ips.locked(Some(mapped)).await.is_some(), "locked when asked in mapped form");
+    assert!(ips.locked(Some(plain)).await.is_some(), "and in plain form");
+    let rows = lockout::ip_entity::Entity::find().all(&fx.db).await.unwrap();
+    assert_eq!(rows.len(), 1, "one row");
+    assert_eq!(rows[0].ip, "203.0.113.7", "stored canonicalized");
+}
+
 // --------- the app's own credential checks, through the same counters ---------
 
 #[tokio::test]
@@ -1500,7 +1569,7 @@ async fn a_limit_of_zero_switches_a_counter_off_and_prune_clears_expired_rows() 
         last_failure_at: Set(now_secs() - 10_000),
     };
     stale.insert(&fx.db).await.expect("stale row");
-    let removed = prune(&fx.db, by_account(2, 900)).await.expect("prune");
+    let removed = prune(&fx.db, &by_account(2, 900)).await.expect("prune");
     assert_eq!(removed, 1, "only the expired row went");
     assert!(fx.lockout_row("alice").await.is_some(), "the live lockout stays");
     fx.try_login("alice").await.assert_locked_out(900);

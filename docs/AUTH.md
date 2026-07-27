@@ -451,6 +451,16 @@ default that is safe for both, which is why it has to be stated.
 For chains stranger than "one proxy sets `X-Forwarded-For`" — several hops to walk, a CDN header like
 `CF-Connecting-IP` — `Auth::client_ip(|headers, peer| ..)` replaces the resolution outright.
 
+**Allow-listing addresses.** `Lockout::ip_allow` takes CIDRs (build it with `net::parse_nets`, which
+also accepts bare addresses) that are never counted and never locked — an office range, a monitoring
+probe, the host a fleet NATs through. It matches across families and representations, so a rule written
+`::ffff:198.51.100.0/120` covers a client that arrives as plain `198.51.100.9`, and vice versa. The
+exemption applies on **every** surface, this module's and the app's, since both go through `IpLockout`.
+
+It does *not* exempt the account counter, and there is deliberately **no username allow-list**: an
+account that can never be locked out is an account whose password can be guessed at forever. The
+address list exists for the opposite reason — so one shared address cannot take everyone down with it.
+
 Setting `ip_after: 0` turns per-address counting off everywhere, leaving the per-account brake — which
 still covers the common case of one account being guessed at, just not spraying across many.
 
@@ -817,7 +827,10 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
     both, `net::client_ip` is unit-tested for chains / `X-Real-IP` / junk / IPv4-mapped collapsing, the
     app's handles
     share the account's row in **both** directions, deleting the row is the unlock, the address counter
-    brakes credentials that name no account, and `prune` drops expired rows while leaving live ones.
+    brakes credentials that name no account, an **allow-listed address is never locked or even written**
+    however it arrives (plain v4, real v6, mapped, and a mapped *rule* against a plain client) while an
+    address outside the list still locks, one client is **one row** whether it arrives mapped or plain,
+    and `prune` drops expired rows while leaving live ones.
   - **CSRF** (§7): every unsafe auth route rejects a missing, cookie-less, header-only, mismatched, or
     blank token with `403` and no cookies set — checked with a *fully authorized manager session*, so
     only the token is missing — and nothing changes behind it; a `GET` form page issues the cookie

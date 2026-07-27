@@ -25,6 +25,7 @@
 //! **Nothing here is scheduled.** Expired rows are harmless (they read as absent and reset themselves
 //! on the next failure), so pruning is the app's housekeeping call — see [`crate::auth::prune`].
 
+use ipnet::IpNet;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{
@@ -32,6 +33,7 @@ use sea_orm::{
     QueryFilter,
 };
 use std::net::IpAddr;
+use std::sync::Arc;
 
 /// How many failures lock a key out, and for how long. Passed to [`Auth::new`](crate::auth::Auth::new)
 /// — the brake is not optional, so there is no way to forget to configure it; `0` failures disables a
@@ -45,7 +47,7 @@ use std::net::IpAddr;
 /// [`trust_proxy`](Self::trust_proxy) (peer vs forwarded header), or a custom
 /// [`Auth::client_ip`](crate::auth::Auth::client_ip) resolver. The app's own surfaces pass an address to
 /// [`IpLockout`] themselves and are unaffected.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Lockout {
     /// Failed logins for one account name before it is locked (`0` = never).
     pub username_after: u32,
@@ -75,6 +77,19 @@ pub struct Lockout {
     /// Exotic setups (several hops, a CDN's own header) override the whole resolution with
     /// [`Auth::client_ip`](crate::auth::Auth::client_ip) instead.
     pub trust_proxy: bool,
+    /// Addresses that are **never** locked out, as CIDRs — your office range, a monitoring probe, the
+    /// host a fleet of devices NATs through. Build it with [`net::parse_nets`](crate::net::parse_nets),
+    /// which accepts bare addresses as single hosts and takes IPv4 and IPv6 (an IPv4-mapped rule
+    /// matches a plain IPv4 client and vice versa, so it cannot matter how the address reached us).
+    ///
+    /// An allow-listed address is neither counted nor checked — on *every* surface, this module's and
+    /// the app's, since both go through [`IpLockout`]. It does not exempt the **account** counter: an
+    /// allow-listed office can still lock one account by guessing at it, which is the point (the
+    /// address list is there so one shared address can't take everyone down with it).
+    ///
+    /// Empty by default. There is deliberately no username allow-list: an account that must never be
+    /// locked out is an account whose password can be guessed at forever.
+    pub ip_allow: Vec<IpNet>,
 }
 
 impl Default for Lockout {
@@ -85,6 +100,7 @@ impl Default for Lockout {
             ip_after: 100,
             ip_duration_secs: 15 * 60,
             trust_proxy: false,
+            ip_allow: Vec::new(),
         }
     }
 }
@@ -238,27 +254,44 @@ pub struct IpLockout {
     db: DatabaseConnection,
     after: u32,
     duration: i64,
+    /// Never-locked-out networks (`Arc` so cloning the handle stays cheap).
+    allow: Arc<Vec<IpNet>>,
 }
 
 impl IpLockout {
-    pub(crate) fn new(db: DatabaseConnection, after: u32, duration_secs: i64) -> Self {
-        Self { db, after, duration: duration_secs.max(1) }
+    pub(crate) fn new(
+        db: DatabaseConnection,
+        after: u32,
+        duration_secs: i64,
+        allow: Vec<IpNet>,
+    ) -> Self {
+        Self { db, after, duration: duration_secs.max(1), allow: Arc::new(allow) }
+    }
+
+    /// Whether this address is on the allow-list, and so never locked out or counted. Also the
+    /// place to look when a lockout "isn't working": an over-broad rule silently exempts everyone.
+    pub fn allowed(&self, ip: IpAddr) -> bool {
+        crate::net::in_nets(&self.allow, ip)
     }
 
     /// Seconds until this address may be checked again, or `None` if it isn't locked (also `None` for
     /// an unknown address — there is nothing to key on). Pass the **real** client address.
     pub async fn locked(&self, ip: Option<IpAddr>) -> Option<i64> {
-        if self.after == 0 {
+        let ip = ip?;
+        if self.after == 0 || self.allowed(ip) {
             return None;
         }
-        let row = ip_entity::Entity::find_by_id(ip?.to_string()).one(&self.db).await.ok()??;
+        let row = ip_entity::Entity::find_by_id(canonical_key(ip)).one(&self.db).await.ok()??;
         retry_after(row.failures, row.last_failure_at, self.after, self.duration)
     }
 
     /// Record one checked-and-rejected credential from this address; returns whether it just locked.
     pub async fn record_failure(&self, ip: Option<IpAddr>) -> bool {
         let (Some(ip), true) = (ip, self.after > 0) else { return false };
-        let (key, now) = (ip.to_string(), now_secs());
+        if self.allowed(ip) {
+            return false; // never counted, so an allow-listed address can never accumulate a lockout
+        }
+        let (key, now) = (canonical_key(ip), now_secs());
         let existing = ip_entity::Entity::find_by_id(key.clone()).one(&self.db).await.ok().flatten();
         let failures = match existing {
             Some(row) if row.failures as u32 >= self.after => return false, // locked: record nothing
@@ -290,7 +323,7 @@ impl IpLockout {
     /// Forget this address's failures. **Not** called on a successful check: one valid credential
     /// shouldn't refund the budget a spraying source is burning.
     pub async fn clear(&self, ip: IpAddr) {
-        let _ = ip_entity::Entity::delete_by_id(ip.to_string()).exec(&self.db).await;
+        let _ = ip_entity::Entity::delete_by_id(canonical_key(ip)).exec(&self.db).await;
     }
 
     /// Delete rows whose lockout has expired (see [`UsernameLockout::prune`]).
@@ -320,6 +353,12 @@ fn retry_after(failures: i32, last_failure_at: i64, after: u32, duration: i64) -
     let expires = last_failure_at + duration;
     let now = now_secs();
     ((failures as u32) >= after && expires > now).then(|| (expires - now).max(1))
+}
+
+/// One address, one row: an IPv4 client seen as `::ffff:a.b.c.d` (dual-stack listener) and the same
+/// client reported as `a.b.c.d` by a proxy must not end up as two keys.
+fn canonical_key(ip: IpAddr) -> String {
+    crate::net::canonical(ip).to_string()
 }
 
 /// Account names are case-folded and length-capped: the key is attacker-supplied (unknown names are

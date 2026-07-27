@@ -28,6 +28,7 @@ totp-rs = { version = "5.7", features = ["qr", "gen_secret"], optional = true } 
 openidconnect = { version = "4", optional = true } # OIDC relying-party (SSO); default async reqwest + rustls
 regex = { version = "1", optional = true }         # SSO username → group mapping rules
 base64 = { version = "0.22", optional = true }     # decode the verified ID-token payload; txn cookie
+ipnet = "2"                      # CIDR allow-lists (net::parse_nets / in_nets, the lockout's ip_allow)
 
 [dev-dependencies]
 tokio = { workspace = true }

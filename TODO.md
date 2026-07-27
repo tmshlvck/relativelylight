@@ -16,10 +16,10 @@ Highest priority first.
   accepted step per user) to prevent replay inside the skew window.
 - [ ] **Lockout follow-ups.** The two DB-backed counters ship (AUTH.md §5e), durable, shared by every
   replica and by the app's own credential checks, with the unlock being a row delete in the admin panel.
-  Remaining: **allow-lists** — usernames by regex and addresses by CIDR, so a service account or an
-  office range is never locked out (the two types are separate precisely so these can differ). The
-  client address is the app's to resolve (`Auth::client_ip`), so the real-ip middleware below would
-  only make that wiring optional, not fix a gap.
+  Address **allow-lists** ship too (`Lockout::ip_allow`, CIDRs across both families and the mapped
+  form). A *username* allow-list was considered and rejected: an account that can never be locked out is
+  an account whose password can be guessed at forever, so if one is ever wanted it needs a better story
+  than "skip the counter" — a raised limit, perhaps.
 - [ ] **CSRF follow-ups.** The double-submit token ships (AUTH.md §7). Remaining: a `Csrf` layer for
   app-owned unsafe routes (today each handler calls `Csrf::verify` itself), and a rejection hook so an
   app can render the 403 in its own shell instead of the built-in page.

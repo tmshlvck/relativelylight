@@ -36,8 +36,10 @@ already using `auth`.
   the caller there is authenticated, which is a session-theft problem, and counting it let a stolen
   session lock the real user out of logging in.
 - **Nothing is scheduled by the crate.** Expired sessions and expired lockout rows are cleared by
-  `auth::prune(&db, lockout)`, which the **app** must call (startup + its own periodic loop). Previously
+  `auth::prune(&db, &lockout)`, which the **app** must call (startup + its own periodic loop). Previously
   the in-memory counters swept themselves; sessions were never cleaned at all.
+- **`Lockout` is `Clone`, not `Copy`** (it carries the allow-list), and `auth::prune` takes it by
+  reference — `clone()` it if you both construct `Auth` and keep a copy for a prune loop.
 - **`auth::set_password` is a reset, not an upsert.** An unknown username is now an `Err` instead of
   creating an account, and it no longer sets `is_active = true`, so a password reset can't silently
   re-open a disabled account. Use `create_user` to create, or the new `reset_admin_access` for
@@ -71,7 +73,12 @@ already using `auth`.
   promised: `net::client_ip(trust_proxy, headers, peer)` picks the socket peer or the left-most
   `X-Forwarded-For` / `X-Real-IP` hop and collapses IPv4-mapped addresses, so one client is one key
   across your logs, audit rows and limits. `Lockout::trust_proxy` feeds it for the login routes, and
-  `Auth::client_ip(closure)` overrides it for stranger chains (several hops, a CDN header).
+  `Auth::client_ip(closure)` overrides it for stranger chains (several hops, a CDN header). The module
+  also carries the CIDR helpers that go with an address — `parse_nets`, `in_nets`, `canonical_net` —
+  which match across both families and the IPv4-mapped form.
+- **`Lockout::ip_allow`** — CIDRs that are never counted and never locked out (an office range, a
+  monitoring probe, a NAT a fleet shares), on every surface at once. No username equivalent, on
+  purpose: an account that can never lock is an account that can be guessed at forever.
 - **`auth::reset_admin_access`** — break-glass admin recovery for a `--set-admin-pw`-style flag: sets
   the password, re-activates the account, clears TOTP, ensures admin-group membership, and refuses SSO
   accounts.

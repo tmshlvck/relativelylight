@@ -125,7 +125,9 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
   `lockout::username_entity` / `ip_entity`), which is gated, CSRF-checked and audited for free.
   The per-address half resolves the client with `net::client_ip(trust_proxy, ..)` — `Lockout::trust_proxy`
   picks socket peer vs left-most `X-Forwarded-For`, and an app should call the same function for its logs
-  and audit rows so one client is one key (`Auth::client_ip(closure)` overrides for CDN/multi-hop). Pruning
+  and audit rows so one client is one key (`Auth::client_ip(closure)` overrides for CDN/multi-hop).
+  `Lockout::ip_allow` (CIDRs via `net::parse_nets`) exempts addresses from locking on every surface;
+  there is no username equivalent by design. Pruning
   expired rows — and expired sessions — is `auth::prune(&db, lockout)`, which **the app schedules**;
   the crate spawns no tasks. Worked examples: `examples/auth`'s `GET /api/whoami` + prune loop,
   `examples/adminpanel`'s lockout panels.

@@ -78,10 +78,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Who the client is, for the per-address half: the socket peer normally, the forwarded hop when
         // this example runs behind a proxy (`TRUST_PROXY=1`). The library resolves it either way.
         trust_proxy: trust_proxy_from_env(),
+        // Addresses that are never locked out — an office range, a monitoring probe. Empty here so the
+        // demo can actually lock itself out from localhost; a real app builds it with
+        // `relativelylight::net::parse_nets(&cfg.allow_list)` (v4/v6, bare hosts, CIDRs).
+        ip_allow: Vec::new(),
     };
     let auth_db = db.clone(); // the app's own endpoint checks passwords itself
     let db_for_prune = db.clone();
-    let auth = Auth::new(db, lockout)
+    let auth = Auth::new(db, lockout.clone())
         .secure_cookies(false) // local http, so no `Secure` attribute
         .admin_group(ADMIN_GROUP)
         .totp_issuer("relativelylight auth demo") // shown in authenticator apps for 2FA
@@ -121,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
             ticker.tick().await;
-            match auth::prune(&prune_db, lockout).await {
+            match auth::prune(&prune_db, &lockout).await {
                 Ok(0) => {}
                 Ok(n) => println!("pruned {n} expired session/lockout rows"),
                 Err(e) => eprintln!("prune failed: {e}"),
