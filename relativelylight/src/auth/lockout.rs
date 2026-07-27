@@ -4,7 +4,7 @@
 //!
 //! Two counters, two tables, two deliberately separate types: [`UsernameLockout`] keyed by account
 //! name and [`IpLockout`] keyed by source address. They do the same arithmetic today and are expected
-//! to diverge (a username allow-list wants regexes, an address allow-list wants CIDRs), so they don't
+//! to diverge (a username whitelist wants regexes, an address whitelist wants CIDRs), so they don't
 //! share an implementation.
 //!
 //! **The rule.** A failure upserts the row (`failures += 1`, `last_failure_at = now`) *unless* the key
@@ -82,14 +82,14 @@ pub struct Lockout {
     /// which accepts bare addresses as single hosts and takes IPv4 and IPv6 (an IPv4-mapped rule
     /// matches a plain IPv4 client and vice versa, so it cannot matter how the address reached us).
     ///
-    /// An allow-listed address is neither counted nor checked — on *every* surface, this module's and
+    /// An whitelisted address is neither counted nor checked — on *every* surface, this module's and
     /// the app's, since both go through [`IpLockout`]. It does not exempt the **account** counter: an
-    /// allow-listed office can still lock one account by guessing at it, which is the point (the
+    /// whitelisted office can still lock one account by guessing at it, which is the point (the
     /// address list is there so one shared address can't take everyone down with it).
     ///
-    /// Empty by default. There is deliberately no username allow-list: an account that must never be
+    /// Empty by default. There is deliberately no username whitelist: an account that must never be
     /// locked out is an account whose password can be guessed at forever.
-    pub ip_allow: Vec<IpNet>,
+    pub ip_whitelist: Vec<IpNet>,
 }
 
 impl Default for Lockout {
@@ -100,7 +100,7 @@ impl Default for Lockout {
             ip_after: 100,
             ip_duration_secs: 15 * 60,
             trust_proxy: false,
-            ip_allow: Vec::new(),
+            ip_whitelist: Vec::new(),
         }
     }
 }
@@ -255,7 +255,7 @@ pub struct IpLockout {
     after: u32,
     duration: i64,
     /// Never-locked-out networks (`Arc` so cloning the handle stays cheap).
-    allow: Arc<Vec<IpNet>>,
+    whitelist: Arc<Vec<IpNet>>,
 }
 
 impl IpLockout {
@@ -263,22 +263,22 @@ impl IpLockout {
         db: DatabaseConnection,
         after: u32,
         duration_secs: i64,
-        allow: Vec<IpNet>,
+        whitelist: Vec<IpNet>,
     ) -> Self {
-        Self { db, after, duration: duration_secs.max(1), allow: Arc::new(allow) }
+        Self { db, after, duration: duration_secs.max(1), whitelist: Arc::new(whitelist) }
     }
 
-    /// Whether this address is on the allow-list, and so never locked out or counted. Also the
+    /// Whether this address is on the whitelist, and so never locked out or counted. Also the
     /// place to look when a lockout "isn't working": an over-broad rule silently exempts everyone.
-    pub fn allowed(&self, ip: IpAddr) -> bool {
-        crate::net::in_nets(&self.allow, ip)
+    pub fn whitelisted(&self, ip: IpAddr) -> bool {
+        crate::net::in_nets(&self.whitelist, ip)
     }
 
     /// Seconds until this address may be checked again, or `None` if it isn't locked (also `None` for
     /// an unknown address — there is nothing to key on). Pass the **real** client address.
     pub async fn locked(&self, ip: Option<IpAddr>) -> Option<i64> {
         let ip = ip?;
-        if self.after == 0 || self.allowed(ip) {
+        if self.after == 0 || self.whitelisted(ip) {
             return None;
         }
         let row = ip_entity::Entity::find_by_id(canonical_key(ip)).one(&self.db).await.ok()??;
@@ -288,8 +288,8 @@ impl IpLockout {
     /// Record one checked-and-rejected credential from this address; returns whether it just locked.
     pub async fn record_failure(&self, ip: Option<IpAddr>) -> bool {
         let (Some(ip), true) = (ip, self.after > 0) else { return false };
-        if self.allowed(ip) {
-            return false; // never counted, so an allow-listed address can never accumulate a lockout
+        if self.whitelisted(ip) {
+            return false; // never counted, so an whitelisted address can never accumulate a lockout
         }
         let (key, now) = (canonical_key(ip), now_secs());
         let existing = ip_entity::Entity::find_by_id(key.clone()).one(&self.db).await.ok().flatten();

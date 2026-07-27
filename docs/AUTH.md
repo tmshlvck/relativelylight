@@ -383,8 +383,8 @@ TOTP enable/disable can be layered on the same hook later; `last_login_at` alrea
 
 The brake in front of the **unauthenticated** credential checks. Two counters, two tables, two
 deliberately separate types (`auth::lockout::{UsernameLockout, IpLockout}`) — they do the same
-arithmetic today and are expected to diverge (a username allow-list wants regexes, an address
-allow-list wants CIDRs).
+arithmetic today and are expected to diverge (a username whitelist wants regexes, an address
+whitelist wants CIDRs).
 
 **The rule.** A checked-and-rejected credential upserts a row (`failures += 1`, `last_failure_at =
 now`) *unless* the key is already at the limit — a locked key records nothing, so an attacker cannot
@@ -451,13 +451,13 @@ default that is safe for both, which is why it has to be stated.
 For chains stranger than "one proxy sets `X-Forwarded-For`" — several hops to walk, a CDN header like
 `CF-Connecting-IP` — `Auth::client_ip(|headers, peer| ..)` replaces the resolution outright.
 
-**Allow-listing addresses.** `Lockout::ip_allow` takes CIDRs (build it with `net::parse_nets`, which
+**Whitelisting addresses.** `Lockout::ip_allow` takes CIDRs (build it with `net::parse_nets`, which
 also accepts bare addresses) that are never counted and never locked — an office range, a monitoring
 probe, the host a fleet NATs through. It matches across families and representations, so a rule written
 `::ffff:198.51.100.0/120` covers a client that arrives as plain `198.51.100.9`, and vice versa. The
 exemption applies on **every** surface, this module's and the app's, since both go through `IpLockout`.
 
-It does *not* exempt the account counter, and there is deliberately **no username allow-list**: an
+It does *not* exempt the account counter, and there is deliberately **no username whitelist**: an
 account that can never be locked out is an account whose password can be guessed at forever. The
 address list exists for the opposite reason — so one shared address cannot take everyone down with it.
 
@@ -827,7 +827,7 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
     both, `net::client_ip` is unit-tested for chains / `X-Real-IP` / junk / IPv4-mapped collapsing, the
     app's handles
     share the account's row in **both** directions, deleting the row is the unlock, the address counter
-    brakes credentials that name no account, an **allow-listed address is never locked or even written**
+    brakes credentials that name no account, an **whitelisted address is never locked or even written**
     however it arrives (plain v4, real v6, mapped, and a mapped *rule* against a plain client) while an
     address outside the list still locks, one client is **one row** whether it arrives mapped or plain,
     and `prune` drops expired rows while leaving live ones.

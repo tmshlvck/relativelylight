@@ -730,7 +730,7 @@ impl Auth {
             db.clone(),
             lockout.ip_after,
             lockout.ip_duration_secs,
-            lockout.ip_allow,
+            lockout.ip_whitelist,
         );
         Self {
             inner: Arc::new(Inner {

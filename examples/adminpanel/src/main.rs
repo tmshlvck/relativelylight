@@ -134,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Addresses that are never locked out — an office range, a monitoring probe. Empty here so the
         // demo can actually lock itself out from localhost; a real app builds it with
         // `relativelylight::net::parse_nets(&cfg.allow_list)` (v4/v6, bare hosts, CIDRs).
-        ip_allow: Vec::new(),
+        ip_whitelist: Vec::new(),
     };
 
     // How an app wires a `--set-admin-pw` CLI flag: **break-glass** admin recovery for an operator who

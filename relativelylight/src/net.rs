@@ -14,7 +14,7 @@
 //! that one client is one key everywhere.
 //!
 //! It also carries the CIDR helpers that go with an address — [`parse_nets`], [`in_nets`] and
-//! [`canonical_net`] — so an allow-list matches whichever way the client arrived: IPv4, IPv6, or the
+//! [`canonical_net`] — so an whitelist matches whichever way the client arrived: IPv4, IPv6, or the
 //! `::ffff:a.b.c.d` form a dual-stack listener reports. `auth`'s lockout uses them for
 //! [`Lockout::ip_allow`](crate::auth::lockout::Lockout::ip_allow); an app should use the same ones for
 //! its own network rules.
@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn allow_lists_match_across_families_and_representations() {
+    fn whitelists_match_across_families_and_representations() {
         // Every combination that can reach us: a rule in either family or in mapped form, against a
         // client address that arrived as plain IPv4, real IPv6, or IPv4-mapped IPv6.
         let nets = parse_nets(&[

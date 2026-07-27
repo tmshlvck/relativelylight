@@ -16,8 +16,8 @@ Highest priority first.
   accepted step per user) to prevent replay inside the skew window.
 - [ ] **Lockout follow-ups.** The two DB-backed counters ship (AUTH.md §5e), durable, shared by every
   replica and by the app's own credential checks, with the unlock being a row delete in the admin panel.
-  Address **allow-lists** ship too (`Lockout::ip_allow`, CIDRs across both families and the mapped
-  form). A *username* allow-list was considered and rejected: an account that can never be locked out is
+  Address **whitelists** ship too (`Lockout::ip_allow`, CIDRs across both families and the mapped
+  form). A *username* whitelist was considered and rejected: an account that can never be locked out is
   an account whose password can be guessed at forever, so if one is ever wanted it needs a better story
   than "skip the counter" — a raised limit, perhaps.
 - [ ] **CSRF follow-ups.** The double-submit token ships (AUTH.md §7). Remaining: a `Csrf` layer for

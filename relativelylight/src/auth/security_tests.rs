@@ -1422,7 +1422,7 @@ async fn per_ip_limiting_catches_username_spraying_when_the_peer_is_the_client()
 }
 
 #[tokio::test]
-async fn an_allow_listed_address_is_never_locked_out_however_it_arrives() {
+async fn a_whitelisted_address_is_never_locked_out_however_it_arrives() {
     // The office range / monitoring probe case. The exemption has to hold for every way an address can
     // reach us — plain v4, real v6, and the IPv4-mapped form a dual-stack listener reports — and for
     // both the login route and the app's own surfaces, since both go through `IpLockout`.
@@ -1435,7 +1435,7 @@ async fn an_allow_listed_address_is_never_locked_out_however_it_arrives() {
         username_after: 0, // isolate the address counter
         ip_after: 2,
         trust_proxy: true,
-        ip_allow: allow,
+        ip_whitelist: allow,
         ..Lockout::default()
     })
     .await;
@@ -1444,7 +1444,7 @@ async fn an_allow_listed_address_is_never_locked_out_however_it_arrives() {
 
     for exempt in ["10.9.9.9", "::ffff:10.9.9.9", "2001:db8::1", "198.51.100.9", "::ffff:198.51.100.9"] {
         let addr: std::net::IpAddr = exempt.parse().unwrap();
-        assert!(ips.allowed(addr), "{exempt} is on the list");
+        assert!(ips.whitelisted(addr), "{exempt} is on the list");
         // Failures are neither counted nor checked, however many arrive…
         for _ in 0..5 {
             assert!(!ips.record_failure(Some(addr)).await, "{exempt} never trips");
@@ -1457,7 +1457,7 @@ async fn an_allow_listed_address_is_never_locked_out_however_it_arrives() {
     assert_eq!(
         lockout::ip_entity::Entity::find().all(&fx.db).await.unwrap().len(),
         0,
-        "no rows were written for allow-listed addresses"
+        "no rows were written for whitelisted addresses"
     );
 
     // An address outside every rule still locks, on the same two failures.

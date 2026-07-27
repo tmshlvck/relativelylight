@@ -38,7 +38,7 @@ already using `auth`.
 - **Nothing is scheduled by the crate.** Expired sessions and expired lockout rows are cleared by
   `auth::prune(&db, &lockout)`, which the **app** must call (startup + its own periodic loop). Previously
   the in-memory counters swept themselves; sessions were never cleaned at all.
-- **`Lockout` is `Clone`, not `Copy`** (it carries the allow-list), and `auth::prune` takes it by
+- **`Lockout` is `Clone`, not `Copy`** (it carries the whitelist), and `auth::prune` takes it by
   reference — `clone()` it if you both construct `Auth` and keep a copy for a prune loop.
 - **`auth::set_password` is a reset, not an upsert.** An unknown username is now an `Err` instead of
   creating an account, and it no longer sets `is_active = true`, so a password reset can't silently
