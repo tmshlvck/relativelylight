@@ -2,7 +2,7 @@
 //! `docs/AUTH.md`. A public page, a `/secret` page gated by login, `/login` + `/logout`, and a
 //! configurable admin group. Also demonstrates the `--set-admin-pw <pw>` break-glass startup path and
 //! an **app-owned credential check** (`/api/whoami`, HTTP Basic) braked with the *same* attempt
-//! counters as the login form via [`Auth::attempts`] — see `brute-force brake` below.
+//! counters as the login form via `Auth::username_lockout` / `Auth::ip_lockout` — see below.
 //!
 //!   cargo run -p auth-example                            # serve; log in as admin / password
 //!   TRUST_PROXY=1 cargo run -p auth-example               # …behind a proxy: believe X-Forwarded-For

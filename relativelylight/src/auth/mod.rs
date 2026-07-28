@@ -997,8 +997,9 @@ impl Auth {
     }
 
     /// The source-address lockout counter — the only brake on credentials that carry no account name
-    /// (a bearer token). Pass the **real** client address; this module's own routes count one only when
-    /// the app has supplied a [`client_ip`](Auth::client_ip) resolver to tell them who that is.
+    /// (a bearer token). Pass the caller's address; in a handler that is
+    /// [`RealIp`](crate::middleware::RealIp), which is the same value this module's own login routes
+    /// count against, so one client has one budget across both.
     pub fn ip_lockout(&self) -> lockout::IpLockout {
         self.inner.ips.clone()
     }

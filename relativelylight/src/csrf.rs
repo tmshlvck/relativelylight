@@ -42,8 +42,9 @@ pub(crate) fn random_token() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Constant-time byte comparison (the length is not secret — tokens are fixed-width).
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+/// Constant-time byte comparison (the length is not secret — tokens are fixed-width). Shared with
+/// `auth::totp`, which compares candidate codes the same way.
+pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

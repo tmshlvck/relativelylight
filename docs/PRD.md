@@ -113,9 +113,11 @@ record needs both *what changed* (old/new row data, seen at the data layer) and 
 type, client IP, seen only at the HTTP layer); no single layer has both.
 
 The always-compiled `observe` seam fires a `WriteEvent` — carrying the change **and** the request
-context (`headers` + socket `peer`) — from each `crud` write handler and each mutating `auth` handler.
-The **app registers one `WriteObserver`** (`Crud::on_write` / `Auth::on_write`, one `Arc` shared by
-both), resolves the actor itself, derives the IP, and **persists the audit row in its own table**.
+context (`headers` + the already-resolved `client_ip`) — from each `crud` write handler and each mutating
+`auth` handler. The **app registers one `WriteObserver`** (`Crud::on_write` / `Auth::on_write`, one `Arc`
+shared by both), resolves the actor itself, and **persists the audit row in its own table**. The address
+needs no deriving: it is the one `middleware::resolve_real_ip` decided, so an audit row, a lockout row and
+an access-log line all name the same client.
 Retention/pruning is the app's responsibility.
 
 ## 5. `time` — timezone-aware presentation ✅

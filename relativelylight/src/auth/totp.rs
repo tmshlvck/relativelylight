@@ -41,7 +41,7 @@ pub(crate) fn verify_step(secret_b32: &str, code: &str) -> Option<i64> {
     let skew = SKEW as i64;
     (base - skew..=base + skew)
         .rev()
-        .find(|&step| ct_eq(totp.generate(step as u64 * STEP).as_bytes(), code.as_bytes()))
+        .find(|&step| crate::csrf::ct_eq(totp.generate(step as u64 * STEP).as_bytes(), code.as_bytes()))
 }
 
 /// Whether `code` is valid for `secret_b32` right now, ignoring the step (used where there is no
@@ -56,19 +56,6 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// Constant-time comparison, so a wrong code leaks nothing through timing. (`totp-rs` does this
-/// internally for `check`; we compare ourselves to learn the matched step, so we must do it too.)
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 /// Enrolment material for a pending secret: the `otpauth://` URL (shown as text) and a QR code as a

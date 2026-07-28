@@ -31,6 +31,8 @@ The crate is **`relativelylight`**, organized into feature-gated modules:
   search→select), boolean switches, bulk actions, CSV, custom cell renderers — plus an `Admin`
   side-panel composing many models into one page.
 - **Runtime OpenAPI 3.1** (`openapi`) with request/response schemas, mergeable into your own document.
+- **Two request-pipeline layers** (`middleware`): `resolve_real_ip`, which decides who the caller is once
+  and is **required**, and `access_log`.
 
 The core is backend- and transport-agnostic; SeaORM is one backend behind a small `Accessor` seam.
 
@@ -64,7 +66,18 @@ let admin_html = relativelylight::crud::ui::Admin::new(crud.engine()).entities()
 // The CRUD routes as an axum Router — merge into your own app.
 let app = axum::Router::new()
     .route("/", axum::routing::get(|| async { /* serve admin_html in your shell */ }))
-    .merge(crud.into_router());
+    .merge(crud.into_router())
+    // REQUIRED, and outermost: resolves the caller's address once into a `RealIp` extension, which the
+    // write handlers, the auth lockout, the access log and your own handlers all read. Without it those
+    // routes answer 500 and say so. `TrustProxy(true)` believes your reverse proxy's forwarded hop.
+    .layer(axum::middleware::from_fn(relativelylight::middleware::access_log))
+    .layer(axum::middleware::from_fn_with_state(
+        relativelylight::middleware::TrustProxy(false),
+        relativelylight::middleware::resolve_real_ip,
+    ));
+
+// …and serve with connection info, so the socket address is available:
+// axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
 ```
 
 That serves `GET/POST /api/v1/{entity}`, `GET/PATCH/DELETE /api/v1/{entity}/{id}`, and

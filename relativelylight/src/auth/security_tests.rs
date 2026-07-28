@@ -2485,12 +2485,15 @@ async fn an_apps_own_middleware_can_supply_the_address() {
     // Note `TrustProxy` is *not* used at all: the app's own resolution replaces it outright.
     let app = auth.routes().layer(axum::middleware::from_fn(
         |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
-            if let Some(ip) = req
+            // The CDN's header first, then — via the public `middleware::client_ip` — the standard rules,
+            // so an app composes with them instead of reimplementing them.
+            let cdn = req
                 .headers()
                 .get("cf-connecting-ip")
                 .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse().ok())
-            {
+                .and_then(|v| v.trim().parse().ok());
+            let ip = cdn.or_else(|| crate::middleware::client_ip(false, req.headers(), None));
+            if let Some(ip) = ip {
                 req.extensions_mut().insert(crate::middleware::RealIp(ip));
             }
             next.run(req).await

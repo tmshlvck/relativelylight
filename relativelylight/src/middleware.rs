@@ -40,18 +40,20 @@ use http::{HeaderMap, StatusCode};
 /// async fn handler(RealIp(ip): RealIp) -> String { format!("hello {ip}") }
 /// ```
 ///
+/// **Always canonical.** [`resolve_real_ip`] folds an IPv4-mapped IPv6 address (`::ffff:a.b.c.d` — what a
+/// dual-stack listener reports for an IPv4 client) to plain IPv4 before inserting it, so downstream code
+/// may compare, key and print this value without normalizing again: one client is one address whether it
+/// arrived over a v4-only socket, a dual-stack one, or a proxy header. The deprecated IPv4-*compatible*
+/// form `::a.b.c.d` is **not** folded — nothing emits it, and treating it as IPv4 would invent an
+/// equivalence its own semantics don't have. `auth`'s lockout canonicalizes again regardless, since an app
+/// may hand it an address that never came through here.
+///
 /// **Extraction fails with `500`** when the extension is missing, i.e. when [`resolve_real_ip`] isn't in
 /// the stack — deliberately, because the alternative is an `Option` that app code turns into
 /// `unwrap_or(127.0.0.1)` and files in an audit row. A misconfiguration you meet on the first request
 /// beats one that quietly writes the wrong address forever.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RealIp(pub IpAddr);
-
-impl std::fmt::Display for RealIp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
 
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for RealIp {
     type Rejection = Response;
@@ -311,9 +313,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ipv4_mapped_addresses_collapse_to_one_form() {
-        let (_, body) = call(app(false), req(&[], Some("::ffff:192.0.2.1"))).await;
-        assert_eq!(body, "192.0.2.1", "a dual-stack listener and a proxy must agree");
+    async fn every_form_an_address_can_arrive_in_lands_on_one_canonical_value() {
+        // The invariant everything downstream leans on: a `RealIp` is **already canonical**, so the
+        // lockout's row key, an audit row and a log line agree whatever the listener or proxy reported.
+        // The three shapes that actually occur, from both a socket and a header:
+        for (peer, expect, what) in [
+            ("192.0.2.1", "192.0.2.1", "IPv4 from a v4-only socket — unchanged"),
+            ("::ffff:192.0.2.1", "192.0.2.1", "IPv4 via a dual-stack socket — folded to v4"),
+            ("2001:db8::1", "2001:db8::1", "a real IPv6 client — untouched"),
+        ] {
+            let (status, body) = call(app(false), req(&[], Some(peer))).await;
+            assert_eq!((status, body.as_str()), (StatusCode::OK, expect), "{what}");
+        }
+        // …and the same folding for an address that arrives in a trusted header rather than the socket,
+        // so a proxy reporting the mapped form can't open a second bucket for one client.
+        for (header, value) in [("x-forwarded-for", "::ffff:192.0.2.1"), ("x-real-ip", "::ffff:192.0.2.1")] {
+            let (_, body) = call(app(true), req(&[(header, value)], Some("10.0.0.1"))).await;
+            assert_eq!(body, "192.0.2.1", "{header} in mapped form must fold too");
+        }
+        // A *mixed* chain: the proxy appended a mapped form of the same client that another request
+        // reported plain. Both must reduce to one address.
+        let (_, body) =
+            call(app(true), req(&[("x-forwarded-for", "9.9.9.9, ::ffff:203.0.113.7")], None)).await;
+        assert_eq!(body, "203.0.113.7");
+
+        // Deliberately *not* folded: the deprecated IPv4-**compatible** form (`::a.b.c.d`, no `ffff`).
+        // `to_ipv4_mapped` matches only the mapped form, and that's the right call — nothing in use emits
+        // the compatible form, and quietly treating `::203.0.113.7` as an IPv4 client would invent an
+        // equivalence the address's own semantics don't have. It stays IPv6, which `IpAddr`'s own
+        // `Display` writes in hex (`::cb00:7107`) rather than the dotted form it was typed in — so this
+        // is also a reminder that the *canonical* text of an address is whatever `IpAddr` says, which is
+        // what the lockout keys on.
+        let (_, body) = call(app(false), req(&[], Some("::203.0.113.7"))).await;
+        assert_eq!(body, "::cb00:7107", "the compatible form stays IPv6, rendered canonically");
     }
 
     #[tokio::test]

@@ -173,7 +173,7 @@ impl UsernameLockout {
         if self.after == 0 {
             return false;
         }
-        let (key, now) = (normalize_username(username), now_secs());
+        let (key, now) = (normalize_username(username), crate::auth::now_secs());
         let existing = username_entity::Entity::find_by_id(key.clone()).one(&self.db).await.ok().flatten();
         let failures = match existing {
             // At or over the limit: leave the row alone. A locked key records nothing, so continued
@@ -218,7 +218,7 @@ impl UsernameLockout {
     /// and resets itself on the next failure) — this just keeps the table, and the admin panel, clean.
     /// Returns the number of rows removed.
     pub async fn prune(&self) -> Result<u64, DbErr> {
-        let cutoff = now_secs() - self.duration;
+        let cutoff = crate::auth::now_secs() - self.duration;
         let res = username_entity::Entity::delete_many()
             .filter(username_entity::Column::LastFailureAt.lt(cutoff))
             .exec(&self.db)
@@ -276,7 +276,7 @@ impl IpLockout {
         if self.whitelisted(ip) {
             return false; // never counted, so an whitelisted address can never accumulate a lockout
         }
-        let (key, now) = (canonical_key(ip), now_secs());
+        let (key, now) = (canonical_key(ip), crate::auth::now_secs());
         let existing = ip_entity::Entity::find_by_id(key.clone()).one(&self.db).await.ok().flatten();
         let failures = match existing {
             Some(row) if row.failures as u32 >= self.after => return false, // locked: record nothing
@@ -313,7 +313,7 @@ impl IpLockout {
 
     /// Delete rows whose lockout has expired (see [`UsernameLockout::prune`]).
     pub async fn prune(&self) -> Result<u64, DbErr> {
-        let cutoff = now_secs() - self.duration;
+        let cutoff = crate::auth::now_secs() - self.duration;
         let res = ip_entity::Entity::delete_many()
             .filter(ip_entity::Column::LastFailureAt.lt(cutoff))
             .exec(&self.db)
@@ -336,7 +336,7 @@ fn retry_after(failures: i32, last_failure_at: i64, after: u32, duration: i64) -
         return None; // counter disabled
     }
     let expires = last_failure_at + duration;
-    let now = now_secs();
+    let now = crate::auth::now_secs();
     ((failures as u32) >= after && expires > now).then(|| (expires - now).max(1))
 }
 
@@ -353,12 +353,6 @@ fn normalize_username(username: &str) -> String {
     lower.chars().take(190).collect()
 }
 
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 #[cfg(test)]
 mod tests {
@@ -369,7 +363,7 @@ mod tests {
 
     #[test]
     fn locks_only_at_the_limit_and_reports_the_wait() {
-        let now = now_secs();
+        let now = crate::auth::now_secs();
         assert_eq!(retry_after(2, now, AFTER, DURATION), None, "under the limit");
         let retry = retry_after(3, now, AFTER, DURATION).expect("locked at the limit");
         assert!((1..=DURATION).contains(&retry), "retry {retry} inside the window");
@@ -382,7 +376,7 @@ mod tests {
 
     #[test]
     fn a_limit_of_zero_never_locks() {
-        assert_eq!(retry_after(1000, now_secs(), 0, DURATION), None);
+        assert_eq!(retry_after(1000, crate::auth::now_secs(), 0, DURATION), None);
     }
 
     #[test]
