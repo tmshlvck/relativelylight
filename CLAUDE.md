@@ -21,7 +21,7 @@ sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 | Feature | Default | Gives you |
 |---|---|---|
 | `crud` | ✅ | the CRUD engine + SeaORM backend (the `crud` module) |
-| `axum` | ✅ | the HTTP router (`Crud::into_router`, `Engine::router`) |
+| `axum` | ✅ | the HTTP router (`Crud::into_router`, `Engine::router`) + the `middleware` module (`resolve_real_ip`, **required**; `access_log`) |
 | `ui` | | the web admin components (`crud::ui::Table`, `crud::ui::Admin`) |
 | `openapi` | | runtime OpenAPI 3.1 (`crud::openapi`) |
 | `csv` | | CSV import/export endpoints |
@@ -139,11 +139,11 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
   `auth.username_lockout()` / `auth.ip_lockout()` (`locked` / `record_failure` / `clear`), so one
   account has one budget everywhere. The unlock is **deleting the row** in the admin panel (register
   `lockout::username_entity` / `ip_entity`), which is gated, CSRF-checked and audited for free.
-  The per-address half resolves the client with `net::client_ip(trust_proxy, ..)` — `Lockout::trust_proxy`
-  picks socket peer vs the **right-most** `X-Forwarded-For` hop (the one your proxy appended; the entries
-  left of it are caller-supplied), and an app should call the same function for its logs
-  and audit rows so one client is one key (`Auth::client_ip(closure)` overrides for CDN/multi-hop).
-  One trusted hop is the **final** design — no CIDR list, no RFC 7239.
+  The per-address half takes the address from `middleware::RealIp` — resolved once, at the edge, by the
+  **mandatory** `middleware::resolve_real_ip` layer, so the lockout, the access log and the audit events
+  can't disagree about who called. One trusted hop is the **final** design — no CIDR list, no RFC 7239, no
+  CDN headers, and no resolver hook: a stranger topology writes its own middleware inserting the same
+  `RealIp`.
   `Lockout::ip_whitelist` (CIDRs via `net::parse_nets`) exempts addresses from locking on every surface;
   there is no username equivalent by design. Pruning
   expired rows — and dead sessions — is `auth.prune()`, which **the app schedules**;
@@ -181,6 +181,26 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
 Full design + wiring: **[docs/AUTH.md](docs/AUTH.md)**.
 
 ## Composing with your app — you own the roots
+
+**One layer is mandatory.** `middleware::resolve_real_ip` resolves the caller's address once, at the
+outermost layer, into a `RealIp` request extension; `auth`'s login routes and the `crud` write handlers
+read it, and answer `500` naming the layer if it isn't there. Everything that needs to know who called —
+the lockout, the access log, the audit events, your own handlers — reads that one value, which is what
+stops them disagreeing:
+
+```rust
+use axum::middleware::{from_fn, from_fn_with_state};
+use relativelylight::middleware::{access_log, resolve_real_ip, TrustProxy};
+
+let app = app
+    .layer(from_fn(access_log))                                     // inner
+    .layer(from_fn_with_state(TrustProxy(cfg.trust_proxy), resolve_real_ip)); // OUTERMOST
+
+axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+```
+
+`Router::layer` wraps, so the **last** layer added runs **first** — `resolve_real_ip` must be last.
+Behind a CDN, write your own middleware inserting a `RealIp` instead; there is no hook, on purpose.
 
 `relativelylight` is always *part of* a larger app:
 

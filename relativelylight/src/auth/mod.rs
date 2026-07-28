@@ -60,6 +60,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use crate::authz::{Authz, Decision, Operation};
+use crate::middleware::RealIp;
 use rand_core::OsRng;
 use sea_orm::sea_query::TableCreateStatement;
 use sea_orm::{
@@ -550,11 +551,6 @@ type ProfileExtra = Arc<
         + Sync,
 >;
 
-/// Resolves the client address of a request — see [`Auth::client_ip`]. The app owns this policy because
-/// only the app knows whether it is behind a proxy and which hop to believe.
-type ClientIpFn =
-    Arc<dyn Fn(&HeaderMap, Option<std::net::SocketAddr>) -> Option<std::net::IpAddr> + Send + Sync>;
-
 /// Checks a **new** password: `(password, username)` → `Ok(())` or a message to show the user. The
 /// username is passed so a policy can refuse a password containing it — that check is cross-field, so a
 /// single-field validator can't do it. See [`Auth::password_policy`] / [`Auth::password_check`].
@@ -588,11 +584,6 @@ struct Inner {
     csrf_cookie: String,
     /// The app's own CSRF rejection page, if any (see [`Auth::csrf_rejection`]).
     csrf_reject: Option<crate::csrf::RejectFn>,
-    /// Whether a proxy's forwarded headers may be believed (see [`lockout::Lockout::trust_proxy`]).
-    trust_proxy: bool,
-    /// An app-supplied override for client-address resolution; `None` → [`crate::net::client_ip`] with
-    /// `trust_proxy` above, which is what nearly every deployment wants (see [`Auth::client_ip`]).
-    client_ip: Option<ClientIpFn>,
     /// The failure counters: DB-backed, shared with the app for credentials this module never sees.
     usernames: lockout::UsernameLockout,
     ips: lockout::IpLockout,
@@ -601,51 +592,24 @@ struct Inner {
 }
 
 impl Inner {
-    /// Whether this account — or, when the peer is trusted as the client, this source address — is
-    /// locked out of credential checks: `Some(retry_after_secs)` if so. Checked *before* the secret is
-    /// looked at, and only on the unauthenticated routes (`/login`, `/login/totp`).
-    async fn locked_out(
-        &self,
-        username: &str,
-        headers: &HeaderMap,
-        peer: Option<std::net::SocketAddr>,
-    ) -> Option<i64> {
+    /// Whether this account — or this source address — is locked out of credential checks:
+    /// `Some(retry_after_secs)` if so. Checked *before* the secret is looked at, and only on the
+    /// unauthenticated routes (`/login`, `/login/totp`). The address comes from
+    /// [`RealIp`](crate::middleware::RealIp), resolved once at the edge.
+    async fn locked_out(&self, username: &str, ip: std::net::IpAddr) -> Option<i64> {
         let by_user = self.usernames.locked(username).await;
-        let by_ip = match self.client_ip(headers, peer) {
-            Some(ip) => self.ips.locked(Some(ip)).await,
-            None => None,
-        };
+        let by_ip = self.ips.locked(Some(ip)).await;
         match (by_user, by_ip) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
         }
     }
 
-    /// Record one failed credential check against the account (and the source address when the peer is
-    /// the client). Only ever called for an attempt we actually *checked*.
-    async fn record_failure(
-        &self,
-        username: &str,
-        headers: &HeaderMap,
-        peer: Option<std::net::SocketAddr>,
-    ) {
+    /// Record one failed credential check, against the account **and** the source address. Only ever
+    /// called for an attempt we actually *checked*.
+    async fn record_failure(&self, username: &str, ip: std::net::IpAddr) {
         self.usernames.record_failure(username).await;
-        if let Some(ip) = self.client_ip(headers, peer) {
-            self.ips.record_failure(Some(ip)).await;
-        }
-    }
-
-    /// The client address to count against: the app's override if it set one, else the built-in
-    /// resolution — the forwarded hop when `trust_proxy`, the socket peer otherwise.
-    fn client_ip(
-        &self,
-        headers: &HeaderMap,
-        peer: Option<std::net::SocketAddr>,
-    ) -> Option<std::net::IpAddr> {
-        match &self.client_ip {
-            Some(f) => f(headers, peer),
-            None => crate::net::client_ip(self.trust_proxy, headers, peer.map(|p| p.ip())),
-        }
+        self.ips.record_failure(Some(ip)).await;
     }
 
     /// Whether a new password is strong enough, per the configured policy (`None` when checking is
@@ -770,7 +734,7 @@ impl Inner {
         key: Option<String>,
         after: serde_json::Value,
         headers: &HeaderMap,
-        peer: Option<std::net::SocketAddr>,
+        client_ip: std::net::IpAddr,
     ) {
         let Some(observer) = &self.observer else { return };
         let ev = crate::observe::WriteEvent {
@@ -781,7 +745,7 @@ impl Inner {
             before: None,
             after: Some(after),
             headers,
-            peer,
+            client_ip,
         };
         observer.on_write(&ev).await;
     }
@@ -800,25 +764,6 @@ async fn stamp_login(db: &DatabaseConnection, user_id: i32, totp_step: Option<i6
         q = q.col_expr(user::Column::TotpLastStep, sea_orm::sea_query::Expr::value(step));
     }
     let _ = q.filter(user::Column::Id.eq(user_id)).exec(db).await;
-}
-
-/// Infallible extractor for the socket peer (real client IP on a direct connection); `None` when the
-/// server wasn't started with connection info. See the crud engine's equivalent.
-struct MaybePeer(Option<std::net::SocketAddr>);
-
-impl<S: Send + Sync> axum::extract::FromRequestParts<S> for MaybePeer {
-    type Rejection = std::convert::Infallible;
-    async fn from_request_parts(
-        parts: &mut axum::http::request::Parts,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        Ok(MaybePeer(
-            parts
-                .extensions
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map(|c| c.0),
-        ))
-    }
 }
 
 /// Wires authn into an app: login/logout routes ([`routes`](Auth::routes)) and on-demand session
@@ -866,8 +811,6 @@ impl Auth {
                 totp_issuer: "relativelylight".into(),
                 csrf_cookie: crate::csrf::Csrf::new().cookie().to_string(),
                 csrf_reject: None,
-                trust_proxy: lockout.trust_proxy,
-                client_ip: None,
                 usernames,
                 ips,
                 password_check: Some(policy_check(crate::validate::PasswordPolicy::recommended())),
@@ -1042,32 +985,6 @@ impl Auth {
     /// give co-hosted apps distinct names.
     pub fn csrf_cookie_name(mut self, name: impl Into<String>) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().csrf_cookie = name.into();
-        self
-    }
-
-    /// **Override** client-address resolution for the per-address half of the lockout (§5e).
-    ///
-    /// You rarely need this: by default the login routes call [`crate::net::client_ip`] with the
-    /// [`trust_proxy`](lockout::Lockout::trust_proxy) flag from [`Lockout`](lockout::Lockout), which
-    /// covers "exposed directly" and "one trusted proxy setting `X-Forwarded-For`". Reach for the
-    /// override when your chain is stranger than that — several hops to walk, a CDN header like
-    /// `CF-Connecting-IP`, or an address you carry in your own middleware:
-    ///
-    /// ```ignore
-    /// .client_ip(|headers, _peer| headers.get("cf-connecting-ip")?.to_str().ok()?.parse().ok())
-    /// ```
-    ///
-    /// Whatever you choose, use the *same* resolution for your logs, audit rows and any limits of your
-    /// own — the audit [`WriteEvent`](crate::observe::WriteEvent) hands you `headers` + `peer` for
-    /// exactly that — so one client is one key everywhere.
-    pub fn client_ip<F>(mut self, resolve: F) -> Self
-    where
-        F: Fn(&HeaderMap, Option<std::net::SocketAddr>) -> Option<std::net::IpAddr>
-            + Send
-            + Sync
-            + 'static,
-    {
-        Arc::get_mut(&mut self.inner).unwrap().client_ip = Some(Arc::new(resolve));
         self
     }
 
@@ -1365,7 +1282,7 @@ async fn login_form(State(inner): State<Arc<Inner>>, headers: HeaderMap, jar: Co
 async fn login_submit(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
-    MaybePeer(peer): MaybePeer,
+    RealIp(client_ip): RealIp,
     jar: CookieJar,
     Form(form): Form<LoginForm>,
 ) -> Response {
@@ -1374,7 +1291,7 @@ async fn login_submit(
         // attempt budget (otherwise cross-site requests could lock a user out).
         return csrf_rejected(&inner);
     }
-    if let Some(retry) = inner.locked_out(&form.username, &headers, peer).await {
+    if let Some(retry) = inner.locked_out(&form.username, client_ip).await {
         // Locked: the password is never looked at, so this costs no argon2 and says nothing about
         // whether the account exists.
         let (token, jar) = csrf_token(&inner, &headers, jar);
@@ -1385,7 +1302,7 @@ async fn login_submit(
         );
     }
     let Some(user) = verify_credentials(&inner, &form.username, &form.password).await else {
-        inner.record_failure(&form.username, &headers, peer).await;
+        inner.record_failure(&form.username, client_ip).await;
         let (token, jar) = csrf_token(&inner, &headers, jar);
         return (
             StatusCode::UNAUTHORIZED,
@@ -1473,7 +1390,7 @@ struct CsrfOnlyForm {
 async fn login_totp_submit(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
-    MaybePeer(peer): MaybePeer,
+    RealIp(client_ip): RealIp,
     jar: CookieJar,
     Form(form): Form<TotpForm>,
 ) -> Response {
@@ -1485,7 +1402,7 @@ async fn login_totp_submit(
     };
     // The second factor shares the account's login bucket: password guessing and code guessing are the
     // same account being attacked, and 6 digits deserve the tighter of the two brakes.
-    if let Some(retry) = inner.locked_out(&user.username, &headers, peer).await {
+    if let Some(retry) = inner.locked_out(&user.username, client_ip).await {
         let (token, jar) = csrf_token(&inner, &headers, jar);
         return too_many_attempts(
             retry,
@@ -1522,7 +1439,7 @@ async fn login_totp_submit(
         used_recovery = ok;
     }
     if !ok {
-        inner.record_failure(&user.username, &headers, peer).await;
+        inner.record_failure(&user.username, client_ip).await;
         let (token, jar) = csrf_token(&inner, &headers, jar);
         return (
             StatusCode::UNAUTHORIZED,
@@ -1642,7 +1559,7 @@ async fn profile_form(
 async fn profile_submit(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
-    MaybePeer(peer): MaybePeer, // for the audit record, not for limiting
+    RealIp(client_ip): RealIp, // for the audit record, not for limiting
     jar: CookieJar,
     Form(form): Form<ChangeForm>,
 ) -> Response {
@@ -1712,7 +1629,7 @@ async fn profile_submit(
             Some(who.id.clone()),
             serde_json::json!({ "password_changed": true, "sessions_revoked": true }),
             &headers,
-            peer,
+            client_ip,
         )
         .await;
     let frag = profile_fragment(&inner, &who, &user, None, Some(msg), &csrf).await;
@@ -1764,7 +1681,7 @@ async fn manage_form(
 async fn manage_submit(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
-    MaybePeer(peer): MaybePeer,
+    RealIp(client_ip): RealIp,
     Path(id): Path<String>,
     Form(form): Form<ResetForm>,
 ) -> Response {
@@ -1856,7 +1773,7 @@ async fn manage_submit(
                 "sessions_revoked": revoked,
             }),
             &headers,
-            peer,
+            client_ip,
         )
         .await;
     let msg = match revoked {
@@ -1989,7 +1906,7 @@ async fn totp_setup_submit(
 async fn recovery_regenerate(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
-    MaybePeer(peer): MaybePeer,
+    RealIp(client_ip): RealIp,
     Form(form): Form<ReauthForm>,
 ) -> Response {
     if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
@@ -2019,7 +1936,7 @@ async fn recovery_regenerate(
                     Some(who.id.clone()),
                     serde_json::json!({ "recovery_codes_reissued": codes.len() }),
                     &headers,
-                    peer,
+                    client_ip,
                 )
                 .await;
             let frag = recovery_codes_html(
@@ -2048,7 +1965,7 @@ async fn recovery_regenerate(
 async fn sessions_revoke(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
-    MaybePeer(peer): MaybePeer,
+    RealIp(client_ip): RealIp,
     Form(form): Form<CsrfOnlyForm>,
 ) -> Response {
     if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
@@ -2075,7 +1992,7 @@ async fn sessions_revoke(
             Some(who.id.clone()),
             serde_json::json!({ "sessions_revoked": revoked }),
             &headers,
-            peer,
+            client_ip,
         )
         .await;
     let msg = match revoked {

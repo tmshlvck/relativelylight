@@ -14,6 +14,7 @@ For the concrete backlog see **[../TODO.md](../TODO.md)**.
 | **`crud`** (§1) | SeaORM entities → JSON CRUD + machine-readable metadata API | ✅ implemented | [CRUD.md](CRUD.md) |
 | **`crud::ui`** (§2) | auto-generated web admin: table, create/edit form, side-panel, bulk + CSV | ✅ implemented | [CRUD.md → Web admin](CRUD.md#web-admin-ui) |
 | **`auth`** (§3) | user/group model, sessions, login, TOTP 2FA, OIDC SSO, per-model `Authz` gate | 🟡 major slice done | [AUTH.md](AUTH.md) |
+| **`middleware`** | `resolve_real_ip` (required — the caller's address, resolved once into a `RealIp` extension) + `access_log` | ✅ | [AUTH.md §4](AUTH.md) |
 | **`observe`** (§4) | write-observer hook for audit logging (change + request context) | ✅ implemented | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
 | **`time`** (§5) | timezone-aware display of UTC timestamps (helpers + `$store.tz` + picker) | ✅ implemented | [TIME.md](TIME.md) |
 | **`validate`** | reusable typed field validators + normalizers, shared by CRUD and hand-written APIs | ✅ implemented | [DATAINPUT.md](DATAINPUT.md) |
@@ -99,8 +100,8 @@ non-manager profile writes, each gate preset) are covered by an automated negati
 [AUTH.md §10a](AUTH.md).
 
 **Roadmap / deferred (see [../TODO.md](../TODO.md) for the ordered backlog):**
-re-auth through the IdP for SSO accounts, breached-password screening, a `ClientIp`
-extractor / request-logging / CORS layers, and app-issued API tokens. **PassKeys/WebAuthn** is parked at
+re-auth through the IdP for SSO accounts, breached-password screening, a CORS layer, and app-issued API
+tokens. (Client-IP resolution and the access log shipped as `middleware`.) **PassKeys/WebAuthn** is parked at
 **milestone 0.3+** (nothing needs it yet; it stays the only answer to real-time phishing), and
 **row-level authorization** is filed as *transformative* — it reshapes the `Authz` trait rather than
 extending it, so it waits for a requirement an app can't meet in its own handler.

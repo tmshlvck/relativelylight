@@ -46,6 +46,37 @@ already using `auth`.
   break-glass recovery. (`a4f14a7`)
 - **An empty string submitted for a nullable column is stored as `NULL`**, not `""` (text / uuid / date
   / datetime; `NOT NULL` columns keep `""`). Opt out per field with `blank_is_null = false`. (`8419948`)
+- **One middleware is now required: `middleware::resolve_real_ip`.** It resolves the caller's address once,
+  at the outermost layer, into a `RealIp` request extension; `auth`'s login routes and the `crud` write
+  handlers read it and answer `500` (naming the missing layer) without it. Add it, outermost, and serve with
+  connection info:
+  ```rust
+  use axum::middleware::{from_fn, from_fn_with_state};
+  use relativelylight::middleware::{access_log, resolve_real_ip, TrustProxy};
+
+  let app = app
+      .layer(from_fn(access_log))                                        // inner
+      .layer(from_fn_with_state(TrustProxy(cfg.trust_proxy), resolve_real_ip)); // OUTERMOST
+  axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+  ```
+  `Router::layer` wraps, so the **last** layer added runs **first**.
+- **`Lockout::trust_proxy` is gone** — the flag moved to `TrustProxy` on the middleware, where a
+  request-level concern belongs. Delete the field from your `Lockout { .. }` and pass it to the layer.
+- **`Auth::client_ip(closure)` is gone**, with no replacement hook — and none is needed. A topology stranger
+  than one proxy (a CDN, `CF-Connecting-IP`) is served by writing your own middleware that inserts the same
+  `RealIp` extension; every consumer then reads it without knowing anything changed. That's four lines
+  instead of a config surface, and it works for consumers `Auth` never knew about.
+- **`net::client_ip` moved to `middleware::client_ip`** — resolution is the middleware's job, so the policy
+  lives with it. `net` keeps the address *vocabulary* both it and the lockout need (`canonical`,
+  `canonical_net`, `parse_nets`, `in_nets`).
+- **`observe::WriteEvent::peer` → `client_ip: IpAddr`** — already resolved, so an audit row records the same
+  address the lockout counted and the access log printed, instead of each observer re-deriving one from
+  `headers` and a proxy policy it had to know about.
+- **Strongly recommended for your own code**: delete whatever you use to resolve a client address and read
+  `RealIp` instead (extract it in a handler, or `WriteEvent::client_ip` in an observer), and replace a
+  hand-rolled access-log middleware with `middleware::access_log`. All four of this repo's examples did
+  exactly that, and it fixed real bugs in them: they logged the socket peer while the lockout counted the
+  forwarded hop, so a log line and the event it described named different clients.
 - **A new table, `auth_totp_recovery`** (§5i), in `table_create_statements` — an app with its own
   migrations needs a step for it. Don't register the entity in an admin panel: every row is a hash of a
   credential. Codes are issued *with* an enrolment, so an account that enrolled under an earlier version
@@ -123,6 +154,12 @@ already using `auth`.
   rows, scheduled by the app (both examples run it hourly). The free `auth::prune(&db, lockout)` still
   works but sees only the absolute session deadline, since it has no `Auth` to read `session_idle_secs`
   from; prefer the method.
+- **`relativelylight::middleware`** — `resolve_real_ip` (above), the `RealIp` extractor, `TrustProxy`, and
+  `access_log`: one line per request on stderr with the resolved address, method, path, status and latency.
+  The log carries **no principal**, deliberately — that would mean an `Auth::identify` (session + user +
+  groups) on every request, and the audit hook already answers who-changed-what. Without an address it logs
+  `-` and warns once rather than failing the request; `auth` is the surface that hard-fails, because there a
+  missing address silently degrades the lockout.
 - **`csrf::enforce` — the CSRF check as a layer**, so an app's own unsafe routes don't each call
   `Csrf::verify`: `.layer(from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce))`. Safe methods and
   `Authorization`-bearing requests pass; otherwise it takes the `X-CSRF-Token` header, or — for

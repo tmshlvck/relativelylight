@@ -13,10 +13,9 @@
 //! Try:  open http://127.0.0.1:3001/  (watch the server console as you change the picker)
 
 use askama::Template;
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::State;
 use axum::http::StatusCode;
-use axum::middleware::Next;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::{Json, Router};
 use relativelylight::authz::Open;
@@ -84,7 +83,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/me/timezone", get(get_user_tz).put(set_user_tz))
         .with_state(app);
 
-    let app_router = ui.merge(crud.into_router()).layer(axum::middleware::from_fn(access_log));
+    let app_router = ui.merge(crud.into_router()).layer(axum::middleware::from_fn(relativelylight::middleware::access_log))
+        // One resolution of the caller's address for the whole app (see relativelylight::middleware).
+        .layer(axum::middleware::from_fn_with_state(
+            relativelylight::middleware::TrustProxy(false),
+            relativelylight::middleware::resolve_real_ip,
+        ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3001").await?;
     println!("time example on  http://127.0.0.1:3001/   (change the picker → watch this console)");
@@ -129,11 +133,4 @@ fn server_timezone() -> String {
         }
     }
     "UTC".into()
-}
-
-async fn access_log(ConnectInfo(addr): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
-    let (method, uri) = (req.method().clone(), req.uri().clone());
-    let res = next.run(req).await;
-    println!("{} {} {} -> {}", addr.ip(), method, uri, res.status().as_u16());
-    res
 }

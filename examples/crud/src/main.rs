@@ -9,10 +9,9 @@ use relativelylight::authz::Open;
 use relativelylight::crud::ui::Table;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::validate;
-use axum::extract::{ConnectInfo, Path, Request, State};
+use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
-use axum::middleware::Next;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::Router;
 use model::{author, post, profile, tag, user};
@@ -153,7 +152,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(app);
 
     let app_router =
-        ui.merge(crud.into_router()).layer(axum::middleware::from_fn(access_log));
+        ui.merge(crud.into_router()).layer(axum::middleware::from_fn(relativelylight::middleware::access_log))
+        // One resolution of the caller's address for the whole app (see relativelylight::middleware).
+        .layer(axum::middleware::from_fn_with_state(
+            relativelylight::middleware::TrustProxy(false),
+            relativelylight::middleware::resolve_real_ip,
+        ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     println!("relativelylight on   http://127.0.0.1:3000/");
@@ -161,15 +165,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("JSON API under  http://127.0.0.1:3000/api/v1");
     axum::serve(listener, app_router.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
-}
-
-/// Access log: one line per request — source IP, method, URI, and HTTP status.
-async fn access_log(ConnectInfo(addr): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
-    let method = req.method().clone();
-    let uri = req.uri().clone();
-    let res = next.run(req).await;
-    println!("{} {} {} -> {}", addr.ip(), method, uri, res.status().as_u16());
-    res
 }
 
 async fn home(State(app): State<Arc<App>>) -> impl IntoResponse {

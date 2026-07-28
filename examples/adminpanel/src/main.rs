@@ -14,9 +14,8 @@
 //!   TRUST_PROXY=1 cargo run -p adminpanel-example              # behind a proxy: trust X-Forwarded-For
 
 use askama::Template;
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
@@ -122,6 +121,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // auth: create the auth tables and seed an admin user in the admin group.
     auth::migrate(&db).await?;
 
+    // Who the client is, decided **once** for the whole app and handed to the middleware below. Unset,
+    // the socket peer is the client; `TRUST_PROXY=1` believes the proxy's forwarded hop (unproxied, that
+    // header is attacker-supplied — hence the flag). Nothing else in this app resolves an address.
+    let trust_proxy = matches!(std::env::var("TRUST_PROXY").as_deref(), Ok("1") | Ok("true"));
+
     // The brute-force brake is mandatory — `Auth::new` takes its configuration: 5 failed logins per
     // account and 15 per source address, both for 5 minutes.
     let lockout = auth::lockout::Lockout {
@@ -129,9 +133,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         username_duration_secs: 300,
         ip_after: 15,
         ip_duration_secs: 300,
-        // The socket peer is the client here; `TRUST_PROXY=1` switches to the forwarded hop for a run
-        // behind a reverse proxy (unproxied, that header is attacker-supplied — hence the flag).
-        trust_proxy: matches!(std::env::var("TRUST_PROXY").as_deref(), Ok("1") | Ok("true")),
         // Addresses that are never locked out — an office range, a monitoring probe. Empty here so the
         // demo can actually lock itself out from localhost; a real app builds it with
         // `relativelylight::net::parse_nets(&cfg.allow_list)` (v4/v6, bare hosts, CIDRs).
@@ -344,7 +345,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_router = ui
         .merge(auth.routes())
         .merge(engine.router())
-        .layer(axum::middleware::from_fn(access_log));
+        .layer(axum::middleware::from_fn(relativelylight::middleware::access_log))
+        // The caller's address, resolved **once** at the outermost layer: the access log, `auth`'s
+        // lockout and the audit events all read that one value, so they can't disagree about who called.
+        // `TRUST_PROXY=1` believes the proxy's forwarded hop; unset, the socket peer is the client
+        // (unproxied, those headers are attacker-supplied — hence the flag). Mandatory: without this
+        // layer `auth`'s login routes answer 500 and say what to add.
+        .layer(axum::middleware::from_fn_with_state(
+            relativelylight::middleware::TrustProxy(trust_proxy),
+            relativelylight::middleware::resolve_real_ip,
+        ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     println!("Admin panel on  http://127.0.0.1:3000/   (admin/password = read-write · editor/password = read-only)");
@@ -353,15 +363,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ConnectInfo gives the middleware the peer socket address for the access log.
     axum::serve(listener, app_router.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
-}
-
-/// Access log: one line per request — source IP, method, URI, and HTTP status.
-async fn access_log(ConnectInfo(addr): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
-    let method = req.method().clone();
-    let uri = req.uri().clone();
-    let res = next.run(req).await;
-    println!("{} {} {} -> {}", addr.ip(), method, uri, res.status().as_u16());
-    res
 }
 
 // Requires a logged-in user: resolve the session on demand, redirect anonymous visitors to the login

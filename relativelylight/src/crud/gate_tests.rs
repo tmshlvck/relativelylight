@@ -133,7 +133,19 @@ fn build(gate: Arc<dyn Authz>, csrf: Option<crate::csrf::Csrf>) -> (axum::Router
     if let Some(csrf) = csrf {
         engine.set_csrf(csrf);
     }
-    (Arc::new(engine).router(), calls)
+    // The address-resolving layer is mandatory for any app using this crate — the engine's write
+    // handlers take a `RealIp` for the audit event — so the fixture wires it like a real app.
+    let router = Arc::new(engine).router().layer(axum::middleware::from_fn_with_state(
+        crate::middleware::TrustProxy(false),
+        crate::middleware::resolve_real_ip,
+    ));
+    (router, calls)
+}
+
+/// Give a request the connection info a real server supplies, so `resolve_real_ip` can do its job.
+fn with_peer(req: &mut Request<Body>) {
+    let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(addr));
 }
 
 /// A request with an arbitrary set of extra headers (for the CSRF token / Bearer cases).
@@ -152,7 +164,9 @@ async fn send_with(
     for (name, value) in headers {
         b = b.header(*name, *value);
     }
-    let res = app.clone().oneshot(b.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    let mut req = b.body(Body::from(body.to_string())).unwrap();
+    with_peer(&mut req);
+    let res = app.clone().oneshot(req).await.unwrap();
     let status = res.status();
     let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
     (status, String::from_utf8_lossy(&bytes).into_owned())
@@ -167,7 +181,9 @@ async fn send(app: &axum::Router, method: &str, uri: &str, body: &str, cookie: O
     if let Some(c) = cookie {
         b = b.header(header::COOKIE, c);
     }
-    let res = app.clone().oneshot(b.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    let mut req = b.body(Body::from(body.to_string())).unwrap();
+    with_peer(&mut req);
+    let res = app.clone().oneshot(req).await.unwrap();
     let status = res.status();
     let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
     (status, String::from_utf8_lossy(&bytes).into_owned())
@@ -276,6 +292,12 @@ async fn login(auth: &Auth, username: &str) -> String {
         .header(header::COOKIE, format!("{}={csrf}", auth.csrf().cookie()))
         .body(Body::from(format!("username={username}&password=pw&_csrf={csrf}")))
         .unwrap();
+    let auth_app = auth_app.layer(axum::middleware::from_fn_with_state(
+        crate::middleware::TrustProxy(false),
+        crate::middleware::resolve_real_ip,
+    ));
+    let mut req = req;
+    with_peer(&mut req);
     let res = auth_app.oneshot(req).await.unwrap();
     assert!(res.status().is_redirection(), "login failed for {username}");
     let name = auth.session_cookie_name();

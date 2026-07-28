@@ -555,23 +555,10 @@ mod tests {
 #[cfg(feature = "axum")]
 mod http {
     use super::{Engine, Error, ListQuery};
-    use axum::extract::{ConnectInfo, FromRequestParts, Path, Query, State};
-    use axum::http::request::Parts;
+    use crate::middleware::RealIp;
+    use axum::extract::{Path, Query, State};
     use axum::http::HeaderMap;
-    use std::net::SocketAddr;
 
-    /// Infallible extractor for the socket peer address: `Some` when the server was started with
-    /// connection info (`into_make_service_with_connect_info`), else `None`. Unlike
-    /// `Option<ConnectInfo<_>>` (not an axum 0.8 extractor), this never rejects, so it's safe on apps
-    /// that don't use connect-info.
-    struct MaybePeer(Option<SocketAddr>);
-
-    impl<S: Send + Sync> FromRequestParts<S> for MaybePeer {
-        type Rejection = std::convert::Infallible;
-        async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-            Ok(MaybePeer(parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0)))
-        }
-    }
     use axum::http::StatusCode;
     use axum::response::{IntoResponse, Response};
     use axum::routing::get;
@@ -729,20 +716,20 @@ mod http {
     async fn create(
         State(e): St,
         headers: HeaderMap,
-        MaybePeer(peer): MaybePeer,
+        RealIp(client_ip): RealIp,
         Path(entity): Path<String>,
         Json(body): Json<Value>,
     ) -> std::result::Result<(StatusCode, Json<Value>), Error> {
         authorize_write(&e, Operation::Create, &entity, &headers).await?;
         let created = e.create(&entity, &body).await?;
-        notify(&e, Operation::Create, &entity, None, None, Some(&created), &headers, peer).await;
+        notify(&e, Operation::Create, &entity, None, None, Some(&created), &headers, client_ip).await;
         Ok((StatusCode::CREATED, Json(created)))
     }
 
     async fn update(
         State(e): St,
         headers: HeaderMap,
-        MaybePeer(peer): MaybePeer,
+        RealIp(client_ip): RealIp,
         Path((entity, pk)): Path<(String, String)>,
         Json(body): Json<Value>,
     ) -> std::result::Result<Json<Value>, Error> {
@@ -750,20 +737,20 @@ mod http {
         // Snapshot the prior state for the audit event (best-effort).
         let before = e.get(&entity, &pk).await.ok();
         let updated = e.update(&entity, &pk, &body).await?;
-        notify(&e, Operation::Update, &entity, Some(&pk), before.as_ref(), Some(&updated), &headers, peer).await;
+        notify(&e, Operation::Update, &entity, Some(&pk), before.as_ref(), Some(&updated), &headers, client_ip).await;
         Ok(Json(updated))
     }
 
     async fn delete_one(
         State(e): St,
         headers: HeaderMap,
-        MaybePeer(peer): MaybePeer,
+        RealIp(client_ip): RealIp,
         Path((entity, pk)): Path<(String, String)>,
     ) -> std::result::Result<Json<Value>, Error> {
         authorize_write(&e, Operation::Delete, &entity, &headers).await?;
         // `delete` returns the deleted row — that is the "before" state.
         let deleted = e.delete(&entity, &pk).await?;
-        notify(&e, Operation::Delete, &entity, Some(&pk), Some(&deleted), None, &headers, peer).await;
+        notify(&e, Operation::Delete, &entity, Some(&pk), Some(&deleted), None, &headers, client_ip).await;
         Ok(Json(deleted))
     }
 
@@ -771,14 +758,14 @@ mod http {
     async fn delete_many(
         State(e): St,
         headers: HeaderMap,
-        MaybePeer(peer): MaybePeer,
+        RealIp(client_ip): RealIp,
         Path(entity): Path<String>,
         Query(params): Query<HashMap<String, String>>,
     ) -> std::result::Result<Json<Value>, Error> {
         authorize_write(&e, Operation::Delete, &entity, &headers).await?;
         let res = e.delete_where(&entity, &parse_list_query(params)).await?;
         // Bulk delete: record the affected count, not every row.
-        notify(&e, Operation::Delete, &entity, None, Some(&res), None, &headers, peer).await;
+        notify(&e, Operation::Delete, &entity, None, Some(&res), None, &headers, client_ip).await;
         Ok(Json(res))
     }
 
@@ -792,7 +779,7 @@ mod http {
         before: Option<&Value>,
         after: Option<&Value>,
         headers: &HeaderMap,
-        peer: Option<SocketAddr>,
+        client_ip: std::net::IpAddr,
     ) {
         let Some(observer) = e.observer.as_ref() else {
             return;
@@ -805,7 +792,7 @@ mod http {
             before: before.cloned(),
             after: after.cloned(),
             headers,
-            peer,
+            client_ip,
         };
         observer.on_write(&ev).await;
     }

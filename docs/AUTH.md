@@ -19,7 +19,7 @@ per-request UI control-hiding via `Admin`/`Table::render_for` — **double-submi
 **lockout** on the unauthenticated credential checks (§5e: two DB-backed counters, by account name and
 by source address, shared with the app's own credential checks and cleared by deleting a row in the
 admin panel). **Not yet:** the
-CORS/logging middleware (client-IP resolution is shipped as `net::client_ip` — §4), PassKeys. The rest of this doc is the design these grow into.
+a CORS layer (client-IP resolution and the access log are shipped as middleware — §4), PassKeys. The rest of this doc is the design these grow into.
 
 The login, password-change, and 2FA pages are plain **MPA `<form>` posts** — no JS (the enrolment QR
 is a server-rendered inline PNG). The library renders the form fragment (Bootstrap-friendly classes);
@@ -112,16 +112,23 @@ lifetime.
 
 All optional, all applied by the app; defaults chosen for "safe but works out of the box".
 
-- **Real client IP** — **shipped** as [`relativelylight::net::client_ip`](../relativelylight/src/net.rs):
-  a `trust_proxy` flag selects the socket peer or the **right-most** `X-Forwarded-For` hop (falling back
-  to `X-Real-IP`), IPv4-mapped addresses collapse to IPv4, and `auth`'s lockout uses it (§5e). The
-  boolean is **final**: a trusted-proxy CIDR list and RFC 7239 `Forwarded` parsing were both considered
-  and rejected — one trusted hop is exactly what a firewalled port behind nginx/Caddy or a cluster
-  ingress is, and anything stranger (a CDN ahead of your own proxy, `CF-Connecting-IP`) overrides the
-  resolution wholesale with `Auth::client_ip` rather than describing a chain in config. Still wanted: a
-  `ClientIp` extractor / layer so an app doesn't thread `(headers, peer)` by hand.
-- **Request logging** — one structured line per request: method, path, status, latency, client IP,
-  and principal (user id / "anon"). Built on `tower_http::trace` or a thin custom layer.
+- **Real client IP** — **shipped** as
+  [`middleware::resolve_real_ip`](../relativelylight/src/middleware.rs), and **mandatory**: it resolves the
+  caller once at the outermost layer into a `RealIp` request extension, and every consumer in the crate
+  reads that one value. `TrustProxy(false)` means the socket peer; `TrustProxy(true)` means the **right-most**
+  `X-Forwarded-For` hop, falling back to `X-Real-IP` and then the peer — the two headers nginx, Caddy and
+  HAProxy actually set. Anything in the crate that needs an address takes the extension, so `auth`'s login
+  routes and the `crud` write handlers answer `500` (naming the missing layer) if it isn't installed.
+  **No hook, no per-consumer config**: a stranger topology — a CDN ahead of your proxy, `CF-Connecting-IP` —
+  is served by writing your own middleware that inserts the same `RealIp`, which every consumer then reads
+  without knowing. Reading CDN headers *by default* was rejected: nginx and friends don't strip them, so a
+  client behind such a proxy could forge one and beat the proxy's honest `X-Forwarded-For`.
+- **Request logging** — **shipped** as [`middleware::access_log`](../relativelylight/src/middleware.rs):
+  one line per request with the resolved address, method, path, status and latency, on stderr. It carries
+  **no principal**, deliberately — naming the user means an `Auth::identify` (session + user + groups) on
+  *every* request, a large bill for a log field, and the write side is already better served by the audit
+  hook (§5d). Put it inside `resolve_real_ip`; without an address it logs `-` and warns once rather than
+  failing the request, because an app shouldn't fall over when a log field is unavailable.
 - **CORS** — `tower_http::cors::CorsLayer`. **Open by default** (any origin, credentials off); the
   app narrows to an allow-list of origins (turning credentials on when it does, required for
   cookie-auth cross-origin).
@@ -448,7 +455,8 @@ from its **mutating handlers**, so auth-table changes made *outside* the crud en
 - `POST /profile` — password change (`source = "auth-profile"`).
 - `POST /profile/{id}` — a manager reset (`source = "auth-admin"`).
 
-Each event carries the request `headers` + socket `peer` (so the app resolves the actor and client IP)
+Each event carries the request `headers` + the resolved `client_ip` (so the app resolves the actor; the
+address is already decided — §4)
 and an `after` payload describing *what* changed — **never a secret**: password hashes and TOTP secrets
 are redacted (e.g. `{"password_changed": true}`). Register the sink with `Auth::on_write(observer)`;
 share one `Arc` with `Crud::on_write` so a single audit sink covers both surfaces:
@@ -518,29 +526,29 @@ callers too, which matters when your users share one (CGNAT, an office NAT).
 which one applies is a security boundary, so it is a config flag rather than a guess:
 
 ```rust
-Lockout { trust_proxy: false, .. }   // exposed directly: the socket peer is the client
-Lockout { trust_proxy: true,  .. }   // behind a proxy you control: the right-most X-Forwarded-For hop
+TrustProxy(false)   // exposed directly: the socket peer is the client
+TrustProxy(true)    // behind a proxy you control: the right-most X-Forwarded-For hop
 ```
 
-That is [`net::client_ip`](crate::net::client_ip) — which reads the **right-most** `X-Forwarded-For`
+That is `middleware::resolve_real_ip` — which reads the **right-most** `X-Forwarded-For`
 entry, the one your proxy appended, because everything to its left is whatever the caller chose to send
 (nginx's `proxy_add_x_forwarded_for`, HAProxy's `option forwardfor` and Caddy all append). Reading the
 left-most entry would let any caller pick its own address and so walk past an admission list, out of a
 lockout, or into someone else's audit row. A proxy that *replaces* the header leaves one entry, where
 both readings agree. Two hops (a CDN in front of your own proxy) are out of scope for the flag by
-design — override the resolution with `Auth::client_ip` there (§4).
+design — write your own middleware inserting `RealIp` there (§4).
 
 The app should call the same function for its own logging, audit rows and limits — then a failed login and a failed API call from one client land on the **same** row,
 canonicalized the same way (an IPv4-mapped `::ffff:a.b.c.d` peer and a plain `a.b.c.d` forwarded hop are
 otherwise two different keys).
 
-Get the flag wrong in either direction and it bites: unproxied with `trust_proxy: true`, a caller picks
-whose address gets locked out by sending a header; proxied with `trust_proxy: false`, every user is
+Get the flag wrong in either direction and it bites: unproxied with `TrustProxy(true)`, a caller picks
+whose address gets locked out by sending a header; proxied with `TrustProxy(false)`, every user is
 bucketed under the proxy's address, where a hundred failures lock your whole login form. There is no
 default that is safe for both, which is why it has to be stated.
 
 For chains stranger than "one proxy sets `X-Forwarded-For`" — several hops to walk, a CDN header like
-`CF-Connecting-IP` — `Auth::client_ip(|headers, peer| ..)` replaces the resolution outright.
+`CF-Connecting-IP` — your own middleware inserting a `RealIp` replaces the resolution outright.
 
 **Whitelisting addresses.** `Lockout::ip_whitelist` takes CIDRs (build it with `net::parse_nets`, which
 also accepts bare addresses) that are never counted and never locked — an office range, a monitoring
@@ -1176,10 +1184,11 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
     expiry can't be pushed out), the TOTP step shares the account's row (a correct code refused while
     locked, password login locked with it), **the authenticated checks — profile password and 2FA
     enrolment — are not limited at all** and write no rows, **CSRF-rejected posts spend no budget**,
-    forwarded headers are ignored unless `trust_proxy` is set (a spoofed `X-Forwarded-For` is not
-    counted; the peer is) and believed when it is (the forwarded hop is locked, another client behind
-    the same proxy isn't, and the proxy's own address never is), a custom `client_ip` resolver overrides
-    both, `net::client_ip` is unit-tested for chains / `X-Real-IP` / junk / IPv4-mapped collapsing, the
+    forwarded headers are ignored unless the middleware is told to trust a proxy (a spoofed
+    `X-Forwarded-For` is not counted; the peer is) and believed when it is (the forwarded hop is locked,
+    another client behind the same proxy isn't, and the proxy's own address never is), **an app's own
+    middleware can supply the address instead** (a CDN header, with `TrustProxy` unused — the escape hatch
+    that replaced the deleted resolver hook), the
     app's handles
     share the account's row in **both** directions, deleting the row is the unlock, the address counter
     brakes credentials that name no account, an **whitelisted address is never locked or even written**
@@ -1302,9 +1311,10 @@ don't follow.
 9. **Session lifetime** — ✅ **two clocks** (§5f): an absolute deadline (7 days) plus an idle timeout
    (8 hours, `session_idle_secs(0)` to disable), the id rotated on privilege gain, and a password change
    or manager reset revoking the user's other sessions.
-10. **Client IP** — ✅ a **`trust_proxy` boolean**, one trusted hop, reading the **right-most**
-    `X-Forwarded-For` entry (§4). A trusted-proxy CIDR list and RFC 7239 `Forwarded` were considered and
-    rejected; stranger chains override with `Auth::client_ip`.
+10. **Client IP** — ✅ resolved **once, by mandatory middleware** into a `RealIp` extension (§4), with a
+    **`trust_proxy` boolean**: one trusted hop, the **right-most** `X-Forwarded-For` entry. A trusted-proxy
+    CIDR list, RFC 7239 `Forwarded` and CDN headers were all considered and rejected; a stranger topology
+    is served by an app-supplied middleware inserting the same extension, which is why there is no hook.
 
 ## 12. Open (later)
 

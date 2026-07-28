@@ -6,12 +6,14 @@
 //! at the HTTP layer). Neither SeaORM's `ActiveModelBehavior` nor a plain tower layer sees both. So
 //! the library fires a [`WriteEvent`] at the points that do — each `crud` write handler and each
 //! mutating `auth` handler — carrying the change **and** the request context ([`headers`] +
-//! [`peer`]). The app registers one [`WriteObserver`] (via `Crud::on_write` / `Auth::on_write`),
-//! resolves the actor itself (e.g. `auth.identify(ev.headers)`), derives the client IP from
-//! `headers`/`peer`, and persists a row in its own audit table.
+//! [`client_ip`]). The app registers one [`WriteObserver`] (via `Crud::on_write` / `Auth::on_write`),
+//! resolves the actor itself (e.g. `auth.identify(ev.headers)`), and persists a row in its own audit
+//! table. The address arrives **already resolved** — see
+//! [`middleware::resolve_real_ip`](crate::middleware::resolve_real_ip) — so every audit row names the
+//! same client the lockout and the access log did.
 //!
 //! [`headers`]: WriteEvent::headers
-//! [`peer`]: WriteEvent::peer
+//! [`client_ip`]: WriteEvent::client_ip
 //!
 //! **Times are UTC.** The library stores/returns timestamps as `i64` Unix seconds (UTC); an audit
 //! sink should do the same. (Presenting them in the viewer's local/preferred timezone is a frontend
@@ -21,7 +23,7 @@ use crate::authz::Operation;
 use async_trait::async_trait;
 use http::HeaderMap;
 use serde_json::Value;
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 /// A committed state-changing write, handed to the registered [`WriteObserver`]. Borrows the request
@@ -42,11 +44,13 @@ pub struct WriteEvent<'a> {
     pub before: Option<Value>,
     /// New row state where known (create/update); `None` on delete.
     pub after: Option<Value>,
-    /// The request headers — resolve the actor (`auth.identify`) and read `X-Forwarded-For` from here.
+    /// The request headers — resolve the actor from here (`auth.identify`).
     pub headers: &'a HeaderMap,
-    /// The socket peer address, when the server was started with connection info — the real client IP
-    /// for a *direct* (non-proxied) connection. Combine with `headers` + a trusted-proxy policy.
-    pub peer: Option<SocketAddr>,
+    /// The caller's address, already resolved by
+    /// [`middleware::resolve_real_ip`](crate::middleware::resolve_real_ip) — so an audit row records the
+    /// **same** address the lockout counted and the access log printed, rather than each observer
+    /// re-deriving one from `headers` and a proxy policy it has to know about.
+    pub client_ip: IpAddr,
 }
 
 /// A sink for [`WriteEvent`]s. Register one with `Crud::on_write` and/or `Auth::on_write`; the same

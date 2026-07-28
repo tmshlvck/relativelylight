@@ -14,15 +14,14 @@
 //! `auth::prune` (expired sessions + expired lockout rows), and a real app would register the two
 //! lockout entities in its admin panel so an operator can see who is locked out and clear a row.
 
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Form, Router};
 use axum_extra::extract::CookieJar;
 use relativelylight::auth::lockout::{IpLockout, Lockout, UsernameLockout};
-use relativelylight::net::client_ip;
+use relativelylight::middleware::RealIp;
 use relativelylight::auth::sso::{Sso, SsoButton, SsoProvider};
 use relativelylight::auth::{self, Auth, Identity};
 use sea_orm::{ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter};
@@ -75,9 +74,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         username_duration_secs: 300,
         ip_after: 15,
         ip_duration_secs: 300,
-        // Who the client is, for the per-address half: the socket peer normally, the forwarded hop when
-        // this example runs behind a proxy (`TRUST_PROXY=1`). The library resolves it either way.
-        trust_proxy: trust_proxy_from_env(),
         // Addresses that are never locked out — an office range, a monitoring probe. Empty here so the
         // demo can actually lock itself out from localhost; a real app builds it with
         // `relativelylight::net::parse_nets(&cfg.allow_list)` (v4/v6, bare hosts, CIDRs).
@@ -145,7 +141,16 @@ from this site. Reload the page and try again.</div>
     if let Some(sso) = &sso {
         app = app.merge(sso.routes()); // /sso/{provider}/login + /callback
     }
-    let app = app.layer(axum::middleware::from_fn(access_log));
+    // The caller's address is resolved **once**, at the outermost layer, and read from there by the
+    // access log, `auth`'s lockout, the audit events and this app's own `/api/whoami` — so all four name
+    // the same client. This app used to resolve it in three places with two copies of the proxy flag; the
+    // layer is what makes that impossible. Mandatory: `auth`'s login routes 500 without it.
+    let app = app
+        .layer(axum::middleware::from_fn(relativelylight::middleware::access_log))
+        .layer(axum::middleware::from_fn_with_state(
+            relativelylight::middleware::TrustProxy(trust_proxy_from_env()),
+            relativelylight::middleware::resolve_real_ip,
+        ));
 
     // Housekeeping is the **app's** job — the library schedules nothing. `Auth::prune` deletes dead
     // sessions (absolute *and* idle expiry — it knows this `Auth`'s configuration, which the free
@@ -221,14 +226,6 @@ fn sso_buttons_html(buttons: &[SsoButton]) -> String {
 }
 
 /// Access log: one line per request — source IP, method, URI, and HTTP status.
-async fn access_log(ConnectInfo(addr): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
-    let method = req.method().clone();
-    let uri = req.uri().clone();
-    let res = next.run(req).await;
-    println!("{} {} {} -> {}", addr.ip(), method, uri, res.status().as_u16());
-    res
-}
-
 async fn public() -> Html<String> {
     Html(page(
         "Public page",
@@ -373,7 +370,7 @@ struct AppState {
 /// checked and rejected, clear the account on success.
 async fn whoami(
     State(app): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    RealIp(ip): RealIp,
     headers: HeaderMap,
 ) -> Response {
     // A request with no credential at all is a plain 401 — never counted, or an anonymous scanner
@@ -381,11 +378,9 @@ async fn whoami(
     let Some((username, password)) = basic_auth(&headers) else {
         return unauthorized("send HTTP Basic credentials");
     };
-    // The *same* resolution the login route uses, so a client that fails here and fails there lands on
-    // one row: `relativelylight::net::client_ip` with this app's proxy flag.
-    let ip: Option<IpAddr> = client_ip(trust_proxy_from_env(), &headers, Some(peer.ip()));
-
-    if let Some(retry) = locked(&app, &username, ip).await {
+    // No resolution to do and no proxy flag to remember: `RealIp` is the address the middleware already
+    // worked out, which is by construction the one `/login` counted against. That's the point of it.
+    if let Some(retry) = locked(&app, &username, Some(ip)).await {
         // Refused without looking at the password: no argon2 work, and no hint about the account.
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -407,9 +402,9 @@ async fn whoami(
     let ok = user.as_ref().is_some_and(|u| auth::verify_password(&u.password_hash, &password));
     if !ok {
         let by_user = app.usernames.record_failure(&username).await;
-        let by_ip = app.ips.record_failure(ip).await;
+        let by_ip = app.ips.record_failure(Some(ip)).await;
         if by_user || by_ip {
-            println!("locked out: {username} / {} (too many failed checks)", peer.ip());
+            println!("locked out: {username} / {ip} (too many failed checks)");
         }
         return unauthorized("bad credentials");
     }

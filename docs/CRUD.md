@@ -554,7 +554,7 @@ pub struct WriteEvent<'a> {
     pub before: Option<Value>,  // prior row (update/delete); None on create
     pub after: Option<Value>,   // new row (create/update); None on delete
     pub headers: &'a HeaderMap, // resolve the actor (auth.identify) + read X-Forwarded-For
-    pub peer: Option<SocketAddr>, // socket peer (real client IP on a direct connection)
+    pub client_ip: IpAddr,        // the caller, already resolved by middleware::resolve_real_ip
 }
 
 let mut crud = Crud::new(db, "/api/v1");
@@ -566,7 +566,8 @@ Notes: the observer runs **after commit** (a failed write fires nothing); `befor
 best-effort pre-fetch; a **bulk delete** reports the affected count in `after` (`{"deleted": N}`), not
 every row, so a "delete all" can't blow up the audit. The library provides only the hook and the
 `WriteEvent` type — the app owns the audit **table**, resolves the actor from `headers` (e.g.
-`auth.identify`), derives the IP from `headers`/`peer`, writes the row, and handles retention. The same
+`auth.identify`), writes the row, and handles retention — the address arrives already resolved, so every
+audit row names the same client the lockout counted and the access log printed. The same
 `Arc` can also be handed to `Auth::on_write` (see [AUTH.md](AUTH.md)) so one sink captures both the
 auto-CRUD and the auth surfaces. **Times are UTC** (`i64` Unix seconds) — see the timezone note in
 [PRD.md](PRD.md).

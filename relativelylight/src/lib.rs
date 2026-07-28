@@ -28,9 +28,16 @@ pub mod authz;
 /// The write-observer hook for audit logging: [`WriteEvent`](observe::WriteEvent) +
 /// [`WriteObserver`](observe::WriteObserver), fired by `crud` and `auth` write paths with the request
 /// context so the app can record who/what/from-where. Always compiled.
-/// Client-address resolution (`trust_proxy` → socket peer vs forwarded headers) — used by `auth`'s
-/// lockout and available to the app for its own logging and limits, so one client is one key.
+/// Client-address resolution (`trust_proxy` → socket peer vs forwarded headers). The primitive behind
+/// [`middleware::resolve_real_ip`]; apps use the middleware, not this, so one client is one address
+/// everywhere. Also carries the CIDR helpers.
 pub mod net;
+
+/// The request-pipeline layers: [`resolve_real_ip`](middleware::resolve_real_ip), which resolves the
+/// caller's address once into a [`RealIp`](middleware::RealIp) extension and is **required** by anything
+/// in this crate that needs to know who is calling, and [`access_log`](middleware::access_log).
+#[cfg(feature = "axum")]
+pub mod middleware;
 
 pub mod observe;
 

@@ -63,11 +63,29 @@ impl Fx {
         Fx::build(lockout, |a| a).await
     }
 
+    /// As [`Fx::new`] but behind a **trusted proxy**, so the middleware believes forwarded headers.
+    async fn behind_proxy(lockout: Lockout) -> Fx {
+        Fx::build_with(lockout, |a| a, true).await
+    }
+
     async fn build(lockout: Lockout, configure: impl FnOnce(Auth) -> Auth) -> Fx {
+        Fx::build_with(lockout, configure, false).await
+    }
+
+    async fn build_with(
+        lockout: Lockout,
+        configure: impl FnOnce(Auth) -> Auth,
+        trust_proxy: bool,
+    ) -> Fx {
         let db = Database::connect("sqlite::memory:").await.expect("sqlite in-memory");
         migrate(&db).await.expect("migrate");
         let auth = configure(Auth::new(db.clone(), lockout).secure_cookies(false));
-        let app = auth.routes();
+        // The address-resolving layer, exactly as an app must apply it — `auth`'s login routes answer
+        // 500 without it, so every test here is also a standing check that it's wired.
+        let app = auth.routes().layer(axum::middleware::from_fn_with_state(
+            crate::middleware::TrustProxy(trust_proxy),
+            crate::middleware::resolve_real_ip,
+        ));
         Fx { db, auth, app }
     }
 
@@ -260,7 +278,14 @@ impl Fx {
         b
     }
 
-    async fn send(&self, req: Request<Body>) -> Resp {
+    async fn send(&self, mut req: Request<Body>) -> Resp {
+        // A real server always supplies this (`into_make_service_with_connect_info`), and without it the
+        // address middleware correctly refuses the request — so the fixture supplies it too, unless a
+        // test deliberately set its own.
+        if req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().is_none() {
+            let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
+            req.extensions_mut().insert(axum::extract::ConnectInfo(addr));
+        }
         let res = self.app.clone().oneshot(req).await.expect("router response");
         let status = res.status();
         let headers = res.headers().clone();
@@ -2413,7 +2438,7 @@ async fn enrolment_codes_are_not_limited_either() {
 async fn forwarded_headers_are_ignored_unless_the_app_trusts_a_proxy() {
     // The security-critical direction: unproxied, `X-Forwarded-For` is attacker-supplied, so a caller
     // must not be able to choose whose address gets locked out. Failures are counted against the peer.
-    let fx = Fx::with_lockout(Lockout { ip_after: 2, trust_proxy: false, ..Lockout::default() }).await;
+    let fx = Fx::with_lockout(Lockout { ip_after: 2, ..Lockout::default() }).await;
     fx.user("alice").await;
 
     for _ in 0..2 {
@@ -2429,10 +2454,9 @@ async fn forwarded_headers_are_ignored_unless_the_app_trusts_a_proxy() {
 #[tokio::test]
 async fn a_trusted_proxy_makes_the_forwarded_hop_the_subject() {
     // The proxied deployment: one flag, and the library resolves the client itself.
-    let fx = Fx::with_lockout(Lockout {
+    let fx = Fx::behind_proxy(Lockout {
         username_after: 100,
         ip_after: 2,
-        trust_proxy: true,
         ..Lockout::default()
     })
     .await;
@@ -2449,27 +2473,44 @@ async fn a_trusted_proxy_makes_the_forwarded_hop_the_subject() {
 }
 
 #[tokio::test]
-async fn a_custom_resolver_overrides_the_built_in_one() {
-    // For chains stranger than "one proxy sets X-Forwarded-For" — here a CDN's own header, with
-    // `trust_proxy` left off to prove the override wins outright.
-    let fx = Fx::build(
-        Lockout { username_after: 100, ip_after: 2, trust_proxy: false, ..Lockout::default() },
-        |a| {
-            a.client_ip(|headers, _peer| {
-                headers.get("cf-connecting-ip")?.to_str().ok()?.trim().parse().ok()
-            })
+async fn an_apps_own_middleware_can_supply_the_address() {
+    // There is no resolver hook any more, and this is why one isn't needed: for a topology stranger than
+    // "one proxy sets X-Forwarded-For" — here a CDN's own header — the app writes four lines of
+    // middleware that insert the same `RealIp`, and every consumer (the lockout, the audit events, its
+    // own handlers) reads it without knowing anything changed.
+    let db = Database::connect("sqlite::memory:").await.expect("sqlite in-memory");
+    migrate(&db).await.expect("migrate");
+    let lockout = Lockout { username_after: 100, ip_after: 2, ..Lockout::default() };
+    let auth = Auth::new(db.clone(), lockout).secure_cookies(false);
+    // Note `TrustProxy` is *not* used at all: the app's own resolution replaces it outright.
+    let app = auth.routes().layer(axum::middleware::from_fn(
+        |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
+            if let Some(ip) = req
+                .headers()
+                .get("cf-connecting-ip")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse().ok())
+            {
+                req.extensions_mut().insert(crate::middleware::RealIp(ip));
+            }
+            next.run(req).await
         },
-    )
-    .await;
+    ));
+    let fx = Fx { db, auth, app };
     fx.user("alice").await;
 
     for _ in 0..2 {
         fx.post_cdn("198.51.100.9", "ghost", "wrong").await;
     }
-    assert!(fx.auth.ip_lockout().locked("198.51.100.9".parse().ok()).await.is_some());
+    assert!(
+        fx.auth.ip_lockout().locked("198.51.100.9".parse().ok()).await.is_some(),
+        "the CDN's address is what got counted"
+    );
     fx.post_cdn("198.51.100.9", "alice", PW).await.assert_locked_out(900);
+    // A different client through the same CDN is unaffected…
     fx.post_cdn("203.0.113.7", "alice", PW).await.assert_redirect("/");
-    assert_eq!(fx.auth.ip_lockout().locked("127.0.0.1".parse().ok()).await, None, "peer not counted");
+    // …and the socket peer was never the subject, since the app's middleware never looks at it.
+    assert_eq!(fx.auth.ip_lockout().locked("127.0.0.1".parse().ok()).await, None);
 }
 
 #[tokio::test]
@@ -2518,10 +2559,9 @@ async fn a_whitelisted_address_is_never_locked_out_however_it_arrives() {
         "2001:db8::/32".into(),
         "::ffff:198.51.100.0/120".into(), // written mapped; must still match a plain v4 client
     ]);
-    let fx = Fx::with_lockout(Lockout {
+    let fx = Fx::behind_proxy(Lockout {
         username_after: 0, // isolate the address counter
         ip_after: 2,
-        trust_proxy: true,
         ip_whitelist: allow,
         ..Lockout::default()
     })

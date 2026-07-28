@@ -1,89 +1,18 @@
-//! `relativelylight::net` — resolving a request's **client address**.
+//! `relativelylight::net` — the **address vocabulary** shared by everything that handles a client IP:
+//! canonicalization (`canonical`, `canonical_net`) and CIDR matching (`parse_nets`, `in_nets`).
 //!
-//! Every deployment answers "who is calling?" one of two ways, and the difference is a security
-//! boundary, not a preference:
+//! Deliberately no *policy* — resolving "who is calling" is
+//! [`middleware::resolve_real_ip`](crate::middleware::resolve_real_ip)'s job, and it lives there because
+//! it needs a request. What is left here is the part two unrelated consumers both need and neither should
+//! own: the middleware canonicalizes the address it resolves, and `auth`'s lockout canonicalizes the key it
+//! writes and matches [`Lockout::ip_whitelist`](crate::auth::lockout::Lockout::ip_whitelist) against it.
 //!
-//! - **Exposed directly** — the socket peer is the client. Forwarded headers are attacker-supplied and
-//!   must be ignored, or a caller picks which address gets rate-limited, logged or locked out.
-//! - **Behind a reverse proxy you control** — the peer is the proxy, and the client is the address the
-//!   proxy itself appended to `X-Forwarded-For` (the **right-most** entry — see [`client_ip`]), or
-//!   `X-Real-IP`.
-//!
-//! [`client_ip`] is that decision as one function, driven by the `trust_proxy` flag an app almost
-//! certainly already has in its config. `auth` uses it for the per-address half of the lockout
-//! (`docs/AUTH.md` §5e); an app should use the same call for its own logging, audit rows and limits, so
-//! that one client is one key everywhere.
-//!
-//! It also carries the CIDR helpers that go with an address — [`parse_nets`], [`in_nets`] and
-//! [`canonical_net`] — so an whitelist matches whichever way the client arrived: IPv4, IPv6, or the
-//! `::ffff:a.b.c.d` form a dual-stack listener reports. `auth`'s lockout uses them for
-//! [`Lockout::ip_whitelist`](crate::auth::lockout::Lockout::ip_whitelist); an app should use the same
-//! ones for its own network rules.
-//!
-//! **Scope: one trusted hop, and that is a decision, not a gap.** A boolean covers the deployments that
-//! actually exist here — a firewalled port behind nginx or Caddy, an ingress in front of a cluster — and
-//! it is safe exactly when `trust_proxy` means what it says: nothing reaches the app except that proxy.
-//! A trusted-proxy CIDR list was considered and **rejected**: it would replace this signature (and
-//! [`Lockout::trust_proxy`](crate::auth::lockout::Lockout::trust_proxy)) with a configuration nobody
-//! here needs, and the awkward cases it would serve — a CDN ahead of your own proxy, a provider's own
-//! header — are better served by overriding the whole resolution via
-//! [`Auth::client_ip`](crate::auth::Auth::client_ip), which already exists. RFC 7239 `Forwarded` parsing
-//! is likewise not supported; nothing in the wild sends it in preference to `X-Forwarded-For`.
+//! The canonicalization matters more than it looks: a dual-stack listener reports an IPv4 client as
+//! `::ffff:a.b.c.d` while a proxy reports `a.b.c.d`. Without folding those together, one client gets two
+//! lockout rows and a whitelist rule written one way misses a client that arrived the other.
 
-use http::HeaderMap;
 use ipnet::{IpNet, Ipv4Net};
 use std::net::IpAddr;
-
-/// The client address of a request: the **right-most** `X-Forwarded-For` entry when `trust_proxy` is
-/// set (else `X-Real-IP`), and the socket `peer` otherwise. `None` when neither is available (no
-/// connection info and no usable header).
-///
-/// **Right-most, not left-most, and that is the security-relevant part.** A proxy appends the address
-/// *it* observed to whatever the caller already sent — `proxy_add_x_forwarded_for` in nginx, `option
-/// forwardfor` in HAProxy, Caddy's `reverse_proxy` — so the last entry is the one your proxy vouches
-/// for and everything to its left is caller-supplied. Reading the left-most entry would let any caller
-/// pick its own address by sending a header, defeating whatever the address is used for (an admission
-/// list, a lockout, an audit trail). With a proxy that *replaces* the header instead, there is only one
-/// entry and the two readings agree.
-///
-/// The limit of a boolean: it says "exactly one hop I trust". Behind **two** proxies (a CDN in front of
-/// your own), the right-most entry is the inner proxy, not the end user — that needs a trusted-proxy
-/// CIDR list, which is `docs/AUTH.md` §4 and still to come.
-///
-/// IPv4-mapped IPv6 (`::ffff:192.0.2.1`) is normalized to plain IPv4, so a dual-stack listener and a
-/// proxy that reports plain IPv4 agree on one key for one client.
-///
-/// ```
-/// use relativelylight::net::client_ip;
-/// # use http::HeaderMap;
-/// let mut headers = HeaderMap::new();
-/// // What an appending proxy produces from a caller that sent "X-Forwarded-For: 198.51.100.9".
-/// headers.insert("x-forwarded-for", "198.51.100.9, 203.0.113.7".parse().unwrap());
-/// let peer = Some("10.0.0.1".parse().unwrap()); // the proxy itself
-///
-/// // Behind a trusted proxy: the hop *it* added, not the one the caller claimed.
-/// assert_eq!(client_ip(true, &headers, peer), "203.0.113.7".parse().ok());
-/// // Exposed directly: the header is attacker-controlled, so it is ignored entirely.
-/// assert_eq!(client_ip(false, &headers, peer), "10.0.0.1".parse().ok());
-/// ```
-pub fn client_ip(trust_proxy: bool, headers: &HeaderMap, peer: Option<IpAddr>) -> Option<IpAddr> {
-    if trust_proxy {
-        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            // Right-most: the hop our own proxy appended. Anything further left came from the caller.
-            if let Some(ip) = xff.rsplit(',').next().and_then(|f| f.trim().parse::<IpAddr>().ok()) {
-                return Some(canonical(ip));
-            }
-        }
-        if let Some(ip) = headers
-            .get("x-real-ip")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<IpAddr>().ok())
-        {
-            return Some(canonical(ip));
-        }
-    }
-    peer.map(canonical)
-}
 
 /// Normalize an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to plain IPv4; anything else unchanged.
 /// A dual-stack listener reports IPv4 clients in the mapped form, so without this the same client can
@@ -154,61 +83,6 @@ mod tests {
         s.parse().ok()
     }
 
-    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
-        let mut h = HeaderMap::new();
-        for (k, v) in pairs {
-            h.insert(*k, v.parse().unwrap());
-        }
-        h
-    }
-
-    #[test]
-    fn an_untrusted_deployment_ignores_forwarded_headers() {
-        // The security-critical direction: a client must not be able to choose its own identity.
-        let h = headers(&[("x-forwarded-for", "9.9.9.9"), ("x-real-ip", "8.8.8.8")]);
-        assert_eq!(client_ip(false, &h, ip("203.0.113.7")), ip("203.0.113.7"));
-        assert_eq!(client_ip(false, &h, None), None, "and no peer means no address at all");
-    }
-
-    #[test]
-    fn a_trusted_proxy_supplies_the_client() {
-        let peer = ip("10.0.0.1");
-        // Right-most entry: the hop the proxy appended, not what the caller claimed.
-        let chain = headers(&[("x-forwarded-for", " 198.51.100.9 , 10.0.0.2 ")]);
-        assert_eq!(client_ip(true, &chain, peer), ip("10.0.0.2"));
-        // X-Real-IP is the fallback when there's no XFF.
-        let real = headers(&[("x-real-ip", "198.51.100.10")]);
-        assert_eq!(client_ip(true, &real, peer), ip("198.51.100.10"));
-        // XFF wins when both are present.
-        let both = headers(&[("x-forwarded-for", "198.51.100.9"), ("x-real-ip", "198.51.100.10")]);
-        assert_eq!(client_ip(true, &both, peer), ip("198.51.100.9"));
-        // Garbage falls back to the peer rather than dropping the address.
-        let junk = headers(&[("x-forwarded-for", "not-an-ip")]);
-        assert_eq!(client_ip(true, &junk, peer), peer);
-        assert_eq!(client_ip(true, &HeaderMap::new(), peer), peer, "no header at all");
-    }
-
-    #[test]
-    fn a_caller_cannot_choose_its_own_address_behind_an_appending_proxy() {
-        // nginx's `$proxy_add_x_forwarded_for` (and HAProxy's `option forwardfor`, and Caddy) append
-        // what they see to what the caller sent. Reading the left-most entry would hand every caller a
-        // free choice of address — and with it a way past an admission list, out of a lockout, or into
-        // someone else's audit trail. The proxy's own entry is always the last one.
-        let peer = ip("10.0.0.1"); // the proxy
-        for spoof in ["127.0.0.1", "10.0.0.1", "::1", "192.0.2.1, 198.51.100.1"] {
-            let forged = format!("{spoof}, 203.0.113.7"); // proxy appended the real client
-            let h = headers(&[("x-forwarded-for", &forged)]);
-            assert_eq!(
-                client_ip(true, &h, peer),
-                ip("203.0.113.7"),
-                "caller claimed {spoof:?} and must not be believed"
-            );
-        }
-        // A single entry (a proxy that *replaces* the header) is unambiguous either way.
-        let replaced = headers(&[("x-forwarded-for", "203.0.113.7")]);
-        assert_eq!(client_ip(true, &replaced, peer), ip("203.0.113.7"));
-    }
-
     #[test]
     fn whitelists_match_across_families_and_representations() {
         // Every combination that can reach us: a rule in either family or in mapped form, against a
@@ -239,11 +113,10 @@ mod tests {
     #[test]
     fn ipv4_mapped_addresses_collapse_to_one_key() {
         // A dual-stack listener reports IPv4 clients as ::ffff:a.b.c.d; a proxy reports a.b.c.d. Both
-        // must be the same key, or one client gets two lockout rows.
-        assert_eq!(client_ip(false, &HeaderMap::new(), ip("::ffff:192.0.2.1")), ip("192.0.2.1"));
-        let h = headers(&[("x-forwarded-for", "::ffff:192.0.2.1")]);
-        assert_eq!(client_ip(true, &h, None), ip("192.0.2.1"));
+        // must canonicalize to the same key, or one client gets two lockout rows.
+        assert_eq!(canonical(ip("::ffff:192.0.2.1").unwrap()), ip("192.0.2.1").unwrap());
+        assert_eq!(canonical(ip("192.0.2.1").unwrap()), ip("192.0.2.1").unwrap(), "idempotent");
         // Real IPv6 is untouched.
-        assert_eq!(client_ip(false, &HeaderMap::new(), ip("2001:db8::1")), ip("2001:db8::1"));
+        assert_eq!(canonical(ip("2001:db8::1").unwrap()), ip("2001:db8::1").unwrap());
     }
 }

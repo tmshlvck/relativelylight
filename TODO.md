@@ -38,15 +38,14 @@ Highest priority first.
   because buffering an upload to find a token is worse than asking that surface to send the header. If a
   real app hits it (a file upload from a JS-less form), the fix is a streaming pre-scan that stops at the
   first non-field part: a chunk of work for a narrow case, so it waits for the case.
-- [ ] **Cross-cutting middleware (AUTH.md §4).** Client-IP resolution ships as `net::client_ip`
-  (`trust_proxy` → peer or the **right-most** `X-Forwarded-For` hop / `X-Real-IP`, IPv4-mapped collapsed),
-  used by the lockout. A trusted-proxy **CIDR list** and RFC 7239 `Forwarded` were considered and
-  **rejected**: one trusted hop is exactly what a firewalled port behind nginx/Caddy or a cluster ingress
-  is, the boolean is a permanent part of the API, and stranger chains (a CDN ahead of your own proxy, a
-  provider header) override the resolution wholesale with `Auth::client_ip` — which already exists, and
-  costs no configuration surface for the deployments that don't need it. Remaining: a
-  `ClientIp` extractor/layer so apps stop threading `(headers, peer)`, structured request logging, and a
-  configurable CORS layer.
+- [ ] **A CORS layer (AUTH.md §4)** — the last of the cross-cutting middleware. Client-IP resolution and the
+  access log **shipped** as `middleware::resolve_real_ip` (mandatory, one `RealIp` extension read by every
+  consumer) and `middleware::access_log`; the `trust_proxy` boolean is final, and there is deliberately no
+  resolver hook — a stranger topology writes its own middleware inserting the same extension. What remains
+  is CORS, which needs none of that (it is about `Origin`): a thin `tower_http::cors` wrapper with defaults
+  that suit a cookie-auth app, i.e. *not* `Any` with credentials on, which the spec forbids and browsers
+  reject. Also still open: an access-log line that can name the principal without paying an `identify` per
+  request, which needs a way for a handler to hand back the identity it already resolved.
 - [ ] **Breached-password screening.** The policy ships (`validate::PasswordPolicy`, AUTH.md §5g:
   length-first, no composition rules, on by default on both surfaces, opt-out two ways). Its
   common-value list is deliberately a **floor** — a few dozen perennial values plus keyboard walks,
