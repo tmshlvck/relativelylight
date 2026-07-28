@@ -31,14 +31,21 @@ use openidconnect::{
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
 };
 use regex::Regex;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::sea_query::{Expr, Func};
+use sea_orm::{ActiveModelTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::auth::{session_cookie, user, Auth};
 
 const TXN_COOKIE: &str = "rl_sso_txn"; // short-lived cookie carrying the in-flight login transaction
+
+/// How long a provider's discovery document (and the signing keys it carries) is reused before being
+/// re-fetched. An hour: metadata is near-static, and providers that rotate signing keys publish the new
+/// one well before retiring the old, so a stale hour cannot orphan a live token. See [`Discovery`].
+const DISCOVERY_TTL: Duration = Duration::from_secs(3600);
 
 /// One OIDC provider the app offers (Google, Okta, a corporate IdP …). Secrets and the group-claim
 /// table are configured at app start.
@@ -140,11 +147,35 @@ pub struct Sso {
     /// Global `username-regexp → [groups]` table (union'd with each provider's claim table).
     pub(crate) username_rules: Vec<(Regex, Vec<String>)>,
     pub(crate) providers: Vec<SsoProvider>,
+    /// Shared discovery cache + HTTP client (see [`Discovery`]). `Arc` so cloning `Sso` — which
+    /// [`routes`](Sso::routes) does — shares one cache rather than starting a fresh one per clone.
+    discovery: Arc<Mutex<Discovery>>,
+}
+
+/// The per-provider discovery cache and the HTTP client used to populate it.
+///
+/// Both exist to stop `login` and `callback` re-fetching `/.well-known/openid-configuration` on **every
+/// request**, which cost two extra round-trips per sign-in, made sign-in fail whenever the provider's
+/// discovery endpoint was briefly slow, and — since `/sso/{key}/login` needs no authentication — let
+/// anyone turn a loop of requests into a flood of outbound traffic aimed at the provider, with your own
+/// rate limit as the casualty.
+#[derive(Default)]
+struct Discovery {
+    /// Built once and reused, so TLS setup and the connection pool aren't thrown away per request.
+    http: Option<reqwest::Client>,
+    /// `provider key → (fetched_at, metadata)`, valid for [`DISCOVERY_TTL`].
+    meta: HashMap<String, (Instant, CoreProviderMetadata)>,
 }
 
 impl Sso {
     pub fn new(auth: &Auth) -> Self {
-        Self { auth: auth.clone(), base_path: "/sso".into(), username_rules: Vec::new(), providers: Vec::new() }
+        Self {
+            auth: auth.clone(),
+            base_path: "/sso".into(),
+            username_rules: Vec::new(),
+            providers: Vec::new(),
+            discovery: Arc::new(Mutex::new(Discovery::default())),
+        }
     }
 
     /// Route prefix for the SSO endpoints (default `"/sso"` → `/sso/{key}/login`, `/sso/{key}/callback`).
@@ -264,19 +295,50 @@ struct CallbackQuery {
     error: Option<String>,
 }
 
-/// Discover the provider metadata + parse the redirect URL + build an HTTP client. (The OIDC client
-/// itself is constructed inline in each handler — openidconnect's endpoint typestate can't be named
-/// through a `fn` return.)
-async fn discover(p: &SsoProvider) -> Result<(CoreProviderMetadata, RedirectUrl, reqwest::Client), String> {
-    let http = reqwest::ClientBuilder::new()
-        .redirect(reqwest::redirect::Policy::none()) // never follow redirects (SSRF hardening)
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
+/// The provider metadata (cached, see [`Discovery`]) + the parsed redirect URL + the shared HTTP client.
+/// (The OIDC client itself is constructed inline in each handler — openidconnect's endpoint typestate
+/// can't be named through a `fn` return.)
+async fn discover(
+    sso: &Sso,
+    p: &SsoProvider,
+) -> Result<(CoreProviderMetadata, RedirectUrl, reqwest::Client), String> {
+    let redirect = RedirectUrl::new(p.redirect_url.clone()).map_err(|e| format!("redirect url: {e}"))?;
+
+    // Take the client and any live cache entry under the lock, then release it — the fetch below must
+    // not hold a std::sync::Mutex across an await.
+    let (http, cached) = {
+        let mut d = sso.discovery.lock().map_err(|_| "discovery cache poisoned".to_string())?;
+        if d.http.is_none() {
+            d.http = Some(
+                reqwest::ClientBuilder::new()
+                    // Never follow redirects: the URLs here come from configuration and from the
+                    // provider's own metadata, so a redirect is something to refuse, not to chase
+                    // into the network we happen to be inside (SSRF hardening).
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(|e| format!("http client: {e}"))?,
+            );
+        }
+        let http = d.http.clone().expect("just built");
+        let fresh = d
+            .meta
+            .get(&p.key)
+            .filter(|(at, _)| at.elapsed() < DISCOVERY_TTL)
+            .map(|(_, m)| m.clone());
+        (http, fresh)
+    };
+    if let Some(meta) = cached {
+        return Ok((meta, redirect, http));
+    }
+
     let issuer = IssuerUrl::new(p.issuer.clone()).map_err(|e| format!("issuer url: {e}"))?;
     let meta = CoreProviderMetadata::discover_async(issuer, &http)
         .await
         .map_err(|e| format!("discovery: {e}"))?;
-    let redirect = RedirectUrl::new(p.redirect_url.clone()).map_err(|e| format!("redirect url: {e}"))?;
+    // A concurrent miss may have inserted already; both fetched the same document, so either wins.
+    if let Ok(mut d) = sso.discovery.lock() {
+        d.meta.insert(p.key.clone(), (Instant::now(), meta.clone()));
+    }
     Ok((meta, redirect, http))
 }
 
@@ -286,7 +348,7 @@ async fn login(State(sso): State<Arc<Sso>>, Path(provider): Path<String>, jar: C
     let Some(p) = sso.find_provider(&provider) else {
         return (StatusCode::NOT_FOUND, "unknown SSO provider").into_response();
     };
-    let (meta, redirect, _http) = match discover(p).await {
+    let (meta, redirect, _http) = match discover(&sso, p).await {
         Ok(x) => x,
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("SSO provider unavailable: {e}")).into_response(),
     };
@@ -325,27 +387,33 @@ async fn callback(
     jar: CookieJar,
     Query(q): Query<CallbackQuery>,
 ) -> Response {
+    // Built first and returned on **every** exit: whatever happened, this transaction is finished, and a
+    // rejected one left in place would otherwise sit in the browser for the rest of its ten minutes.
+    let clear = jar.clone().remove(Cookie::build(TXN_COOKIE).path("/").build());
+
     if let Some(err) = q.error {
-        return (StatusCode::BAD_REQUEST, format!("SSO error from provider: {err}")).into_response();
+        return (StatusCode::BAD_REQUEST, clear, format!("SSO error from provider: {err}")).into_response();
     }
     let (Some(code), Some(state)) = (q.code, q.state) else {
-        return (StatusCode::BAD_REQUEST, "missing code/state").into_response();
+        return (StatusCode::BAD_REQUEST, clear, "missing code/state").into_response();
     };
     let Some(txn) = read_txn(&sso, &jar) else {
-        return (StatusCode::BAD_REQUEST, "no or invalid SSO transaction").into_response();
+        return (StatusCode::BAD_REQUEST, clear, "no or invalid SSO transaction").into_response();
     };
     // CSRF: the returned state must match what we issued, for the same provider.
     if txn.provider != provider || txn.csrf != state {
-        return (StatusCode::BAD_REQUEST, "SSO state mismatch").into_response();
+        return (StatusCode::BAD_REQUEST, clear, "SSO state mismatch").into_response();
     }
     let Some(p) = sso.find_provider(&provider) else {
-        return (StatusCode::NOT_FOUND, "unknown SSO provider").into_response();
+        return (StatusCode::NOT_FOUND, clear, "unknown SSO provider").into_response();
     };
-    let clear = jar.clone().remove(Cookie::build(TXN_COOKIE).path("/").build());
 
-    let (meta, redirect, http) = match discover(p).await {
+    let (meta, redirect, http) = match discover(&sso, p).await {
         Ok(x) => x,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("SSO provider unavailable: {e}")).into_response(),
+        Err(e) => {
+            return (StatusCode::BAD_GATEWAY, clear, format!("SSO provider unavailable: {e}"))
+                .into_response()
+        }
     };
     let client = CoreClient::from_provider_metadata(
         meta,
@@ -357,24 +425,35 @@ async fn callback(
     let token = match client.exchange_code(AuthorizationCode::new(code)) {
         Ok(r) => match r.set_pkce_verifier(PkceCodeVerifier::new(txn.pkce)).request_async(&http).await {
             Ok(t) => t,
-            Err(e) => return (StatusCode::BAD_GATEWAY, format!("token exchange failed: {e}")).into_response(),
+            Err(e) => {
+                return (StatusCode::BAD_GATEWAY, clear, format!("token exchange failed: {e}"))
+                    .into_response()
+            }
         },
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("token request: {e}")).into_response(),
+        Err(e) => {
+            return (StatusCode::BAD_GATEWAY, clear, format!("token request: {e}")).into_response()
+        }
     };
     let Some(id_token) = token.id_token() else {
-        return (StatusCode::BAD_GATEWAY, "provider returned no ID token").into_response();
+        return (StatusCode::BAD_GATEWAY, clear, "provider returned no ID token").into_response();
     };
     // SECURITY: verify signature, issuer, audience, expiry, and the nonce we bound.
     let verifier = client.id_token_verifier();
     if let Err(e) = id_token.claims(&verifier, &Nonce::new(txn.nonce)) {
-        return (StatusCode::BAD_GATEWAY, format!("ID token verification failed: {e}")).into_response();
+        return (StatusCode::BAD_GATEWAY, clear, format!("ID token verification failed: {e}"))
+            .into_response();
     }
     // The token is verified; read the (already-authenticated) payload for the configured claims.
     let Some(payload) = id_token_payload(id_token) else {
-        return (StatusCode::BAD_GATEWAY, "could not read ID token claims").into_response();
+        return (StatusCode::BAD_GATEWAY, clear, "could not read ID token claims").into_response();
     };
     let Some(username) = payload.get(&p.username_claim).and_then(|v| v.as_str()) else {
-        return (StatusCode::BAD_GATEWAY, format!("ID token has no '{}' claim", p.username_claim)).into_response();
+        return (
+            StatusCode::BAD_GATEWAY,
+            clear,
+            format!("ID token has no '{}' claim", p.username_claim),
+        )
+            .into_response();
     };
     let claim_values = p
         .groups_claim
@@ -412,12 +491,16 @@ async fn resolve_user(
     if let Err(e) = super::valid_username(username) {
         return Err((StatusCode::BAD_GATEWAY, format!("ID token username claim is invalid: {e}")));
     }
-    let existing = user::Entity::find()
-        .filter(user::Column::Username.eq(username))
-        .one(db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    if let Some(u) = existing {
+    if let Some(u) = find_user_ci(db, username).await? {
+        // `is_active` first, and before anything is written. The password path refuses a disabled
+        // account in `verify_credentials`; refusing it here too is what makes "disable this account"
+        // mean the same thing on both doors. Without it an SSO login for a disabled user went on to
+        // reconcile their groups, stamp `last_login_at`, and mint a session row — none of which
+        // authenticated anything (`identify` re-checks `is_active`), but all of which wrote a login that
+        // never happened into the account and the audit trail.
+        if !u.is_active {
+            return Err((StatusCode::FORBIDDEN, "account is disabled".into()));
+        }
         return match u.sso_key() {
             Some(key) if key == p.key => Ok(u),
             Some(_) => Err((StatusCode::FORBIDDEN, "account is bound to a different SSO provider".into())),
@@ -427,7 +510,7 @@ async fn resolve_user(
     if !p.auto_register {
         return Err((StatusCode::FORBIDDEN, "no such SSO account — an admin must create it first".into()));
     }
-    user::ActiveModel {
+    let created = user::ActiveModel {
         username: Set(username.to_string()),
         password_hash: Set(String::new()), // no password → no local login
         is_active: Set(true),
@@ -435,8 +518,44 @@ async fn resolve_user(
         ..Default::default()
     }
     .insert(db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+    .await;
+    match created {
+        Ok(u) => Ok(u),
+        // Two first logins for the same new user can race on the unique index. The loser re-reads
+        // rather than failing: the row the winner wrote is the row it wanted.
+        Err(_) => match find_user_ci(db, username).await? {
+            Some(u) if u.is_active => Ok(u),
+            Some(_) => Err((StatusCode::FORBIDDEN, "account is disabled".into())),
+            None => Err((StatusCode::INTERNAL_SERVER_ERROR, "could not create the SSO account".into())),
+        },
+    }
+}
+
+/// Find a user by username, **case-insensitively** — the SSO path only.
+///
+/// The username arrives as a provider claim, and providers are not consistent about case: an IdP that
+/// emits `Alice@corp.com` where it once emitted `alice@corp.com` would otherwise miss the existing
+/// account, and with auto-registration on it would create a second one — two accounts, two group sets,
+/// one human. Matching case-insensitively also means a local account can still be *recognised* (and so
+/// correctly refused) whatever case the claim arrives in.
+///
+/// Ties are broken by lowest id and are only possible for rows that predate this: nothing here creates a
+/// pair differing solely by case. Local password login still matches exactly — changing that is a
+/// behaviour break for every existing account, and is not this function's business.
+async fn find_user_ci(
+    db: &sea_orm::DatabaseConnection,
+    username: &str,
+) -> Result<Option<user::Model>, (StatusCode, String)> {
+    user::Entity::find()
+        .filter(
+            Expr::expr(Func::lower(Expr::col(user::Column::Username))).eq(username.to_lowercase()),
+        )
+        .order_by_asc(user::Column::Id)
+        .one(db)
+        .await
+        // Deliberately generic: this reaches an unauthenticated caller, and a `DbErr` renders as SQL and
+        // schema detail.
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "account lookup failed".into()))
 }
 
 /// Make the user's group memberships exactly `desired` (add missing, remove extras).
@@ -469,6 +588,18 @@ fn id_token_payload(id_token: &openidconnect::core::CoreIdToken) -> Option<serde
 
 /// Build the short-lived transaction cookie (base64 JSON; HttpOnly; SameSite=Lax so it survives the
 /// top-level redirect back from the provider).
+///
+/// **Why it isn't signed, deliberately.** The cookie carries the `state`, the `nonce` and the PKCE
+/// verifier in the clear, so the `state` check compares two values that both came from the same cookie:
+/// anyone able to *write* a cookie for this host can supply a transaction of their choosing. Signing it
+/// would prevent forgery — and buy nothing, because an attacker never needs to forge one. `GET
+/// {base}/{key}/login` hands a genuine, freshly-minted transaction to whoever asks, so they can obtain a
+/// valid cookie together with its matching `state`/`nonce`/verifier and plant *that*. A key to manage,
+/// for no change in what an attacker can do.
+///
+/// So the protection rests on the same assumption as the double-submit CSRF token (`docs/AUTH.md` §7):
+/// a cross-site attacker can neither read your cookies nor set one for your host. What the assumption
+/// buys, and what it costs if it fails, is written down in §5b.
 fn txn_cookie(sso: &Sso, txn: &Txn) -> Cookie<'static> {
     let json = serde_json::to_vec(txn).unwrap_or_default();
     let value = URL_SAFE_NO_PAD.encode(json);

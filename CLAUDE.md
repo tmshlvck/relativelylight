@@ -147,8 +147,12 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
 - **SSO / OIDC** (feature `sso`): `auth::sso::Sso` adds Google / Okta / corporate sign-in
   (`/sso/{provider}/login` + `/callback`). Local groups come from a **union** of a global
   username-regexp table and a per-provider claim table, reconciled onto the user each login. Optional
-  per-provider auto-registration; SSO accounts have no local password/2FA. Configure `Auth` **fully
-  before** cloning it into `Sso::new(&auth)`.
+  per-provider auto-registration; SSO accounts have no local password/2FA — and no local *reset* either,
+  self-service or manager. Configure `Auth` **fully before** cloning it into `Sso::new(&auth)`.
+  The username claim is matched **case-insensitively** (a provider that changes case must not acquire a
+  second account); a **disabled** account is refused, as on the password door; provider discovery is cached
+  for an hour. The callback's rejection paths are tested against a **fake IdP** (`auth/sso_tests.rs`) — a
+  live provider can't be asked for an expired token or one signed by the wrong key.
 
 Full design + wiring: **[docs/AUTH.md](docs/AUTH.md)**.
 

@@ -81,7 +81,8 @@ a per-model `Authz` gate with presets (`Open` / `UserReadWrite` / `UserReadGroup
 password change; **TOTP 2FA**
 (enrol/verify/login/disable, single-use codes); **OIDC SSO** (feature `sso`: Google / Okta / corporate,
 claim→group
-mapping, optional auto-registration); **double-submit CSRF protection** (feature `csrf`: always on for
+mapping, optional auto-registration, cached provider discovery, and a callback whose rejection paths are
+tested against a fake IdP); **double-submit CSRF protection** (feature `csrf`: always on for
 the login/profile forms, `Crud::csrf` for the API); **attempt limiting** on the unauthenticated
 credential checks (DB-backed lockout → 429, by account name and by source address, both mandatory, the
 unlock being a row delete in the admin panel); **session lifetime + revocation** (absolute *and* idle

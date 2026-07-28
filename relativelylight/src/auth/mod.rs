@@ -36,6 +36,10 @@ mod security_tests;
 pub mod session;
 #[cfg(feature = "sso")]
 pub mod sso;
+
+/// The OIDC callback's rejection paths, driven against a fake identity provider (feature `sso`).
+#[cfg(all(test, feature = "sso"))]
+mod sso_tests;
 mod totp;
 pub mod user;
 pub mod user_group;

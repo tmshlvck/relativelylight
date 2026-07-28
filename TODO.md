@@ -58,14 +58,25 @@ Highest priority first.
   planned `required` metadata; "must not contain the username" is inherently cross-field
   (`validate_row`, not this validator); and NIST SP 800-63B discourages composition rules in favour of
   length + a breached-password list, so a length-only + blocklist preset is worth offering as well.
-- [ ] **Guard the manager reset on SSO accounts.** `POST /profile/{id}` writes a local password hash
-  onto an `sso_provider` account (login is still refused, so it's hygiene, not a bypass) — refuse it
-  the way the self-service page already does.
+- [ ] **Sign or otherwise bind the SSO transaction cookie — only if the assumption stops holding.**
+  Analysed and **deferred with cause** (AUTH.md §5b): `state`/`nonce`/PKCE ride in an unsigned cookie, so
+  anyone able to *write* a cookie for the host can plant a transaction and produce a login CSRF (the victim
+  signed in as the attacker). Signing was considered and rejected — `/sso/{key}/login` hands a genuine
+  transaction to anyone who asks, so an attacker plants a validly signed one instead and nothing changes.
+  It rests on the same assumption as the double-submit CSRF token. If a deployment ever *can't* hold that
+  assumption (a shared registrable domain, http), the fix isn't a signature — it's binding the transaction
+  to something server-side, which means state the module currently doesn't keep.
 
 ## Auth features
 
-- [ ] **SSO / OIDC follow-ups.** Base OIDC ships (feature `sso`, AUTH.md §5b). Remaining: cache
-  provider discovery (currently fetched per-request); verify the callback against a live IdP.
+- [ ] **SSO / OIDC follow-ups.** Base OIDC ships (feature `sso`, AUTH.md §5b), and so now do the two
+  follow-ups that were listed here: provider discovery is **cached** (one hour, per provider, keys
+  included), and the callback is **covered by tests** — against a fake IdP on a loopback port rather than a
+  live one, which is what makes the rejection paths (wrong key, wrong audience, wrong issuer, expired,
+  replayed nonce) testable at all (AUTH.md §10a). Remaining, none of it urgent: refresh-token handling and
+  `userinfo` (we read claims from the ID token only, which is enough for username + groups), RP-initiated
+  logout at the provider (`end_session_endpoint`), and a smoke test against a real IdP as a *release* step
+  rather than a CI one.
 - [ ] **PassKeys / WebAuthn** as an additional second factor / passwordless — **milestone 0.3+**, not
   before. Deliberately parked: the enterprise apps driving this crate authenticate against passwords +
   TOTP (or their IdP via `sso`), so nothing needs it today, and it's a large surface — a `webauthn-rs`

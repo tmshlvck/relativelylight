@@ -380,10 +380,43 @@ let sso = Sso::new(&auth)                                   // build auth fully 
 let app = app.merge(sso.routes());
 ```
 
-> **Verification note.** The login→provider redirect (discovery, PKCE, `state`, `nonce`, the
-> transaction cookie) is verified end-to-end against Google's live discovery; the group-mapping and
-> reconciliation logic is unit-tested. The **callback** (code exchange + ID-token verification) can't
-> be exercised here without real provider credentials + user consent — test it against your own IdP.
+**Account resolution.** The username claim is matched **case-insensitively**, because providers are not
+consistent about case and an IdP that switched from `alice@corp` to `Alice@corp` would otherwise miss the
+existing account and — with auto-registration on — create a second one: two rows, two group sets, one
+human. A pre-created account keeps its own spelling; ties (rows differing only in case, which nothing
+here creates) go to the lowest id. Local password login still matches **exactly** — changing that would
+be a behaviour break for every existing account. The refusals are the same whatever the case: a local
+account is recognised as local, and an account bound to another provider as bound.
+
+A **disabled** account (`is_active = false`) is refused, before anything is written — the same rule
+`verify_credentials` applies to password login, so that deactivating an account means the same thing on
+both doors. (It was already impossible to *act* as a disabled user, since `identify` re-checks the flag,
+but the login used to get as far as reconciling groups and stamping `last_login_at`.)
+
+**Discovery is cached** per provider for an hour, along with the signing keys it carries. Before that it
+was fetched on *every* request — twice per sign-in — which cost two extra round-trips, failed the whole
+sign-in whenever the provider's endpoint was briefly slow, and, since `/sso/{key}/login` needs no
+authentication, let anyone aim a flood of outbound requests at your provider by looping on it. An hour is
+safe for key rotation: providers publish a new signing key well before retiring the old one.
+
+> **The transaction cookie is not signed — and signing it would not help.** `state`, `nonce` and the PKCE
+> verifier ride in a `HttpOnly` cookie as base64 JSON, so the `state` check compares two values that both
+> came from that cookie. Anyone who can **write** a cookie for your host (a sibling-host XSS,
+> cookie-tossing, an active attacker on plain http) can therefore supply a transaction of their choosing
+> and complete a login in the victim's browser — *login CSRF*: the victim ends up signed in as the
+> **attacker's** identity. Note the direction: the attacker gains none of the victim's access; the harm is
+> a victim who acts inside an account someone else controls.
+>
+> Signing the cookie would stop forgery and change nothing here, because forgery isn't needed:
+> `/sso/{key}/login` hands a genuine transaction to whoever asks, so an attacker can plant a validly
+> signed one of their own. The protection therefore rests on the same assumption as the double-submit
+> CSRF token (§7) — a cross-site attacker can neither read your cookies nor set one for your host — which
+> in practice means HTTPS (ideally HSTS), no XSS, and not sharing a registrable domain with something you
+> don't trust.
+
+> **Verification.** The callback is covered by an automated suite (`auth/sso_tests.rs`) that runs the
+> shipped client against a **fake IdP** on a loopback port — real discovery over HTTP, real RSA
+> signatures — so every rejection path is exercised in CI. See §10a.
 
 ## 5c. Lifecycle timestamps — implemented
 
@@ -965,6 +998,26 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
     rotates the token; even a correct TOTP code is refused without one; logout clears the cookie; an
     `Authorization`-bearing request is exempt; and a configured cookie name means the default name no
     longer satisfies the check.
+- **`auth/sso_tests.rs`** (feature `sso`) — the **OIDC callback**, against a **fake IdP** on a loopback
+  port serving a discovery document, a JWKS and a token endpoint that mints ID tokens to order. The client
+  side is the shipped code: real discovery over HTTP, real RSA signature verification. A live provider was
+  rejected as the target — it can't run in CI, can't be asked for an expired token or one signed by the
+  wrong key, and would make the suite depend on someone else's uptime, so the negative cases (the whole
+  point) would go untested.
+  A full sign-in is the positive control — session cookie set, account auto-registered as external with no
+  local password, `last_login_at` stamped, groups the union of a username rule and a claim rule, the
+  transaction cookie cleared — and against it: a callback with **no transaction cookie**, a forged /
+  truncated / missing `state`, a missing `code`, a provider-reported `error`, and a transaction opened at
+  one provider presented at **another**; an ID token **signed by a key outside the JWKS**, for another
+  **audience**, from another **issuer**, **expired**, bound to another **nonce**, carrying an empty nonce,
+  or absent entirely; a token missing the configured **username claim**, or carrying one that can't be an
+  identity key (empty, blank, containing a space or tab); an unknown account with **auto-registration
+  off**; a **disabled** account (with re-activation as the control); a **local password account**, which
+  cannot be taken over through SSO; and an account **bound to a different provider**. Every rejection is
+  checked for *no session cookie and no session row*, and for leaving the account's binding and stamps
+  untouched. Two behaviours are asserted directly rather than assumed: the username claim resolves
+  **case-insensitively** (no lower-cased duplicate account, still exactly one row), and **discovery is
+  fetched once** and reused across sign-ins (counted at the fake IdP).
 - **`crud/gate_tests.rs`** — the API enforcement point, over the real engine router with a stub
   `Accessor` that counts calls: every route authorizes with the right `Operation`, `NeedsLogin` → 401
   and `Denied` → 403 with a JSON error body, a rejected request **never reaches the backend** (so a
@@ -979,9 +1032,10 @@ Each group carries a positive control (a correct login, a correct TOTP code, an 
 mistake that breaks *everything* can't make the negatives pass vacuously.
 
 **Not covered by tests** (and open in [TODO.md](../TODO.md)): re-authentication before disabling 2FA /
-changing a password, TOTP recovery codes, and the SSO callback (see the verification note in §5b). One
-rough edge the review turned up is filed there too: the manager reset isn't refused for SSO targets the
-way the self-service page is (it writes a local hash that still can't log in).
+changing a password, and TOTP recovery codes — neither of which exists yet. What the SSO suite
+deliberately doesn't reach: the *provider's* own behaviour (consent screens, refresh tokens, userinfo),
+and the browser-side redirect to the authorization endpoint, which is a `Location` header we assert but
+don't follow.
 
 ## 11. Decisions (confirmed)
 

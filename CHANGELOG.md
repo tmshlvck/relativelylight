@@ -133,6 +133,12 @@ already using `auth`.
   demonstrate the same discipline: one `ADMIN_GROUP` constant drives the gate, `Auth::admin_group`, the
   boot-time seeder *and* the recovery path (they must never drift apart — an "admin" outside the group
   the gate checks can't administer anything).
+- **An SSO callback test suite** (`auth/sso_tests.rs`, feature `sso`) — the shipped OIDC client driven
+  against a **fake identity provider** on a loopback port (real discovery over HTTP, real RSA signatures),
+  so the callback's rejection paths run in CI: no transaction cookie, forged/truncated/missing `state`, a
+  transaction cashed in at another provider, and ID tokens signed by an untrusted key or carrying the wrong
+  audience, wrong issuer, an expired `exp`, or another nonce — plus disabled, local, and wrongly-bound
+  accounts. A live IdP can't produce those cases; that's why the fake one exists. See AUTH.md §10a.
 - **Negative-path test suites** (`auth/security_tests.rs`, `crud/gate_tests.rs`) — the shipped routers
   driven over in-memory SQLite, asserting the rejections: bad credentials, unusable sessions, wrong
   TOTP codes, non-manager profile writes, every gate preset's decision, and that a denied request never
@@ -147,6 +153,27 @@ already using `auth`.
   authenticator can produce, and burned the attempt-limit budget trying. (`c9d8957`)
 - **A manager password reset silently re-enabled a disabled account** (`set_password` set
   `is_active = true`). (`a4f14a7`)
+- **SSO ignored `is_active`.** A **disabled** account could complete an OIDC login: it never authenticated
+  (`identify` re-checks the flag) but the callback still reconciled the account's groups, stamped
+  `last_login_at`, and minted a session row — so "disable this account" meant one thing on the password
+  door and another on the SSO door, and the audit trail recorded a login that never happened.
+- **Provider discovery was fetched on every request**, twice per sign-in. It is now cached per provider for
+  an hour (signing keys included). Besides the two round-trips, this made a sign-in fail whenever the
+  provider's discovery endpoint was briefly slow, and — since `/sso/{key}/login` needs no authentication —
+  let anyone turn a request loop into a flood of outbound traffic aimed at your provider.
+- **A database error during SSO account lookup was returned verbatim** to an unauthenticated caller,
+  putting SQL and schema detail in an HTTP response body. It is now a generic message.
+- **A rejected SSO callback left its transaction cookie in place** for the rest of its ten minutes; every
+  exit now clears it.
+- **The SSO username claim is matched case-insensitively.** A provider that changed the case of what it
+  emits would otherwise miss the existing account and, with auto-registration on, create a second one —
+  two rows and two group sets for one person. Local password login still matches exactly.
+- **Two concurrent first logins for the same new SSO user** raced on the unique index and produced a 500;
+  the loser now re-reads the row the winner wrote.
+- **A manager's password reset is refused for an SSO account**, the way the self-service page already
+  refused itself, and `GET /profile/{id}` shows a notice instead of a reset form. It was never a bypass
+  (`verify_credentials` refuses any `sso_provider` account) but it stored a hash that could never
+  authenticate and read, in the audit trail, like a real credential.
 - **Chrome re-offered the last-created account's password** on every subsequent save in the admin
   modal, because the secret stayed in a hidden input. (`98f4964`)
 

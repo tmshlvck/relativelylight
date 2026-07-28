@@ -35,6 +35,10 @@ tokio = { workspace = true }
 sea-orm = { workspace = true, features = ["sqlx-sqlite", "runtime-tokio-rustls"] } # in-memory SQLite for the auth/engine tests
 tower = { version = "0.5", features = ["util"] }  # ServiceExt::oneshot — drive the routers without a socket
 axum = "0.8"
+# The fake OIDC provider the SSO callback tests run against (auth/sso_tests.rs): a signing key generated
+# per test process, and the timestamps an ID token's claims are built from.
+rsa = { version = "0.9", features = ["std"] }
+chrono = "0.4"
 
 [features]
 default = ["crud", "axum"]
