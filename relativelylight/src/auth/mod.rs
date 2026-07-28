@@ -551,6 +551,11 @@ type ProfileExtra = Arc<
 type ClientIpFn =
     Arc<dyn Fn(&HeaderMap, Option<std::net::SocketAddr>) -> Option<std::net::IpAddr> + Send + Sync>;
 
+/// Checks a **new** password: `(password, username)` → `Ok(())` or a message to show the user. The
+/// username is passed so a policy can refuse a password containing it — that check is cross-field, so a
+/// single-field validator can't do it. See [`Auth::password_policy`] / [`Auth::password_check`].
+type PasswordCheck = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
+
 struct Inner {
     db: DatabaseConnection,
     admin_group: String,
@@ -585,6 +590,8 @@ struct Inner {
     /// The failure counters: DB-backed, shared with the app for credentials this module never sees.
     usernames: lockout::UsernameLockout,
     ips: lockout::IpLockout,
+    /// Strength check for a new password; `None` disables it (see [`Auth::password_policy`]).
+    password_check: Option<PasswordCheck>,
 }
 
 impl Inner {
@@ -633,6 +640,12 @@ impl Inner {
             Some(f) => f(headers, peer),
             None => crate::net::client_ip(self.trust_proxy, headers, peer.map(|p| p.ip())),
         }
+    }
+
+    /// Whether a new password is strong enough, per the configured policy (`None` when checking is
+    /// switched off). The username is passed as context so a password containing it is refused.
+    fn password_error(&self, password: &str, username: &str) -> Option<String> {
+        self.password_check.as_ref().and_then(|c| c(password, username).err())
     }
 
     /// Whether this session is still alive on **both** clocks: inside its absolute deadline, and used
@@ -808,6 +821,7 @@ impl Auth {
                 client_ip: None,
                 usernames,
                 ips,
+                password_check: Some(policy_check(crate::validate::PasswordPolicy::recommended())),
             }),
         }
     }
@@ -907,6 +921,47 @@ impl Auth {
     /// `session_ttl_secs` is legal but pointless, as the absolute deadline always wins.
     pub fn session_idle_secs(mut self, secs: i64) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().idle_secs = secs.max(0);
+        self
+    }
+
+    /// The password strength policy applied to a **new** password on this module's own pages — `POST
+    /// /profile` (self-service) and `POST /profile/{id}` (a manager's reset, so the reset isn't a way
+    /// around the rule).
+    ///
+    /// **On by default**, at [`PasswordPolicy::recommended`](crate::validate::PasswordPolicy::recommended)
+    /// — ≥ 12 characters, screened against common values and trivial patterns, and (here, where the
+    /// account is known) against the **username**. Two ways out, because a library shouldn't dictate
+    /// this:
+    ///
+    /// ```ignore
+    /// use relativelylight::validate::PasswordPolicy;
+    /// auth.password_policy(PasswordPolicy::nist_minimum())         // a different preset
+    /// auth.password_policy(PasswordPolicy::from_level(cfg.level))  // …driven by your config
+    /// auth.password_policy(PasswordPolicy::recommended().block(["acmecorp"]))  // …with your words
+    /// auth.password_policy(None)                                   // off entirely
+    /// auth.password_check(|pw, user| my_own_rules(pw, user))       // your own predicate
+    /// ```
+    ///
+    /// It governs **typed input, not code**: `create_user` / `set_password` / `make_admin` /
+    /// `reset_admin_access` are unaffected, so a seeder or a break-glass CLI still sets whatever the
+    /// operator says. Wire the same policy into the admin UI / JSON API separately — that's a `crud`
+    /// field validator, `user.field("password_hash").validate_str(validate::optional(Box::new(
+    /// validate::password(policy))))`, as `examples/adminpanel` does. Both surfaces need it, or
+    /// whichever one you skip becomes the way around the other.
+    pub fn password_policy(mut self, policy: impl Into<Option<crate::validate::PasswordPolicy>>) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().password_check = policy.into().map(policy_check);
+        self
+    }
+
+    /// Replace the password check with your own predicate: `(password, username) → Result<(), String>`,
+    /// where the `Err` is shown to the user. Overrides [`password_policy`](Auth::password_policy)
+    /// entirely — use it for a rule the policy can't express (a corpus lookup, an HTTP call to a
+    /// breached-password service, a per-group rule).
+    pub fn password_check<F>(mut self, check: F) -> Self
+    where
+        F: Fn(&str, &str) -> Result<(), String> + Send + Sync + 'static,
+    {
+        Arc::get_mut(&mut self.inner).unwrap().password_check = Some(Arc::new(check));
         self
     }
 
@@ -1427,13 +1482,19 @@ async fn profile_submit(
     // it's someone with a live session, which is a session-theft problem (short TTLs, re-auth before
     // sensitive changes — TODO.md), not a guessing one. Counting it here would also let a stolen
     // session lock the real user out of logging in.
-    let error = if !verify_password(&user.password_hash, &form.current_password) {
-        Some("Current password is incorrect.")
+    let error: Option<String> = if !verify_password(&user.password_hash, &form.current_password) {
+        Some("Current password is incorrect.".into())
+    } else if let Some(msg) = password_pair_error(&form.new_password, &form.confirm_password) {
+        Some(msg.into())
     } else {
-        password_pair_error(&form.new_password, &form.confirm_password)
+        // Strength last: the pair check's "they don't match" is more useful than a strength complaint
+        // about a value the user may have mistyped anyway.
+        inner
+            .password_error(&form.new_password, &who.username)
+            .map(|e| format!("Your new password {e}."))
     };
     if let Some(msg) = error {
-        let frag = change_form_html(&who, totp_on, Some(msg), None, &csrf);
+        let frag = change_form_html(&who, totp_on, Some(&msg), None, &csrf);
         let frag = inner.with_profile_extra(frag, &who).await;
         return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
     }
@@ -1543,8 +1604,17 @@ async fn manage_submit(
         return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
     }
 
-    if let Some(msg) = password_pair_error(&form.new_password, &form.confirm_password) {
-        let frag = reset_form_html(&id, &target.username, totp_on, Some(msg), None, &csrf);
+    // The same policy as the self-service page, against the *target's* username — a manager's reset
+    // must not be a way around the rule the user themselves has to satisfy.
+    let error: Option<String> = password_pair_error(&form.new_password, &form.confirm_password)
+        .map(String::from)
+        .or_else(|| {
+            inner
+                .password_error(&form.new_password, &target.username)
+                .map(|e| format!("The new password {e}."))
+        });
+    if let Some(msg) = error {
+        let frag = reset_form_html(&id, &target.username, totp_on, Some(&msg), None, &csrf);
         return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
     }
     if set_password(&inner.db, &target.username, &form.new_password).await.is_err() {
@@ -1800,6 +1870,12 @@ async fn target_user(inner: &Inner, id: &str) -> Option<user::Model> {
 }
 
 /// Shared validation for the new/confirm password pair.
+/// Adapt a [`PasswordPolicy`](crate::validate::PasswordPolicy) into the stored check, passing the
+/// account's username as context so a password containing it is refused.
+fn policy_check(policy: crate::validate::PasswordPolicy) -> PasswordCheck {
+    Arc::new(move |password: &str, username: &str| policy.check(password, &[username]))
+}
+
 fn password_pair_error(new: &str, confirm: &str) -> Option<&'static str> {
     if new.is_empty() {
         Some("New password cannot be empty.")

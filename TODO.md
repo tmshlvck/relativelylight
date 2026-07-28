@@ -36,28 +36,15 @@ Highest priority first.
   costs no configuration surface for the deployments that don't need it. Remaining: a
   `ClientIp` extractor/layer so apps stop threading `(headers, peer)`, structured request logging, and a
   configurable CORS layer.
-- [ ] **Password-complexity validator (`validate::password`) — low priority.** Nothing enforces password
-  strength today: not the admin UI, not the JSON API, and not `POST /profile` (`password_pair_error` only
-  checks non-empty + match). The `crud` pipeline is already the right shape — the order is **coerce →
-  validate → transform** (`MetaModel::prepare_write`, CRUD.md § Validation), so a field validator sees the
-  **plaintext** before `MetaField::password()`'s argon2 `on_write` hashes it, and
-  `user.field("password_hash").validate_str(validate::password(..))` needs no engine change. Wanted: a
-  `PasswordPolicy { min_len, require_upper, require_digit, require_special, blocklist }` plus three
-  presets, so an app maps a config value (`password_level = 2`) onto one:
-  1. ≥ 6 chars with at least one capital **or** digit;
-  2. ≥ 8 chars with capitals, digits **and** specials;
-  3. as (2), plus reject anything containing `password`, `user`, `auth`, `123`, … (case-insensitive
-     substring).
-  **Applies to a non-empty value only** — an empty secret keeps its existing meaning (blank on edit =
-  "keep current", blank on create = login disabled), so the policy wraps in `validate::optional`.
-  **One policy, both surfaces:** the *same* validator must run in the Admin UI/API (where the app
-  chooses it per model) *and* on the self-service profile page — otherwise `/profile` stays a way around
-  the rule. That means a home in `auth` too (`Auth::password_policy(..)`, honoured by `POST /profile`
-  and, if it should apply there, `set_password`/`create_user`). Notes: a field validator only runs when
-  the field is *present* in the body, so "a password is required" still needs `validate_row` or the
-  planned `required` metadata; "must not contain the username" is inherently cross-field
-  (`validate_row`, not this validator); and NIST SP 800-63B discourages composition rules in favour of
-  length + a breached-password list, so a length-only + blocklist preset is worth offering as well.
+- [ ] **Breached-password screening.** The policy ships (`validate::PasswordPolicy`, AUTH.md §5g:
+  length-first, no composition rules, on by default on both surfaces, opt-out two ways). Its
+  common-value list is deliberately a **floor** — a few dozen perennial values plus keyboard walks,
+  matched whole. The real control NIST asks for is a check against **breach data**, which means either a
+  local corpus (tens of MB, so a data file or a feature-gated download, not a `const`) or an online
+  lookup (HIBP's k-anonymity range API — a network call per password change, and a dependency an app may
+  not want). Both are app-level decisions, which is why `Auth::password_check(closure)` exists; the open
+  question is whether a *helper* for the HIBP form is worth shipping behind a feature, given it needs an
+  HTTP client and a caching story.
 - [ ] **Sign or otherwise bind the SSO transaction cookie — only if the assumption stops holding.**
   Analysed and **deferred with cause** (AUTH.md §5b): `state`/`nonce`/PKCE ride in an unsigned cookie, so
   anyone able to *write* a cookie for the host can plant a transaction and produce a login CSRF (the victim

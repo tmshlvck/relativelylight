@@ -86,7 +86,7 @@ core):
 
 | Feature | Pulls in | Gates |
 |---|---|---|
-| — (always) | `std::net` only | `ipv4`, `ipv6`, `ip`, `*_network`, `int_range`/`int_min`/`int_max`, `float_range`, `port`, `length`/`length_bytes`, `non_empty`, `one_of`/`one_of_ci`, `hex`/`hex_len`, `hostname`, `fqdn`, `dns_name`, `email`, `url`/`url_scheme`, `uuid`, the combinators, and `normalize::*` |
+| — (always) | `std::net` only | `ipv4`, `ipv6`, `ip`, `*_network`, `int_range`/`int_min`/`int_max`, `float_range`, `port`, `length`/`length_bytes`, `non_empty`, `one_of`/`one_of_ci`, `hex`/`hex_len`, `hostname`, `fqdn`, `dns_name`, `email`, `url`/`url_scheme`, `uuid`, `password`/`PasswordPolicy`, the combinators, and `normalize::*` |
 | `validate-regex` | `regex` (already an optional dep) | `regex_match` (the escape hatch) |
 | `validate-base64` | `base64` (already an optional dep) | `base64`, `base64_url` |
 
@@ -144,6 +144,37 @@ never a flag.
 | `url` | `fn(&str) -> Result<(),String>` | scheme + `://` + authority, restricted to `http`/`https` by default; `url_scheme(&[..])` factory to widen. Hand-rolled, std-only (see § 6). |
 | `base64` | `fn(&str) -> Result<(),String>` *(feature `validate-base64`)* | standard alphabet, valid padding (DNSKEY `public_key`). `base64_url` variant. |
 | `uuid` | `fn(&str) -> Result<(),String>` | 8-4-4-4-12 hex; std-only, no `uuid` crate needed. |
+
+### Passwords
+
+| Validator | Signature | Semantics |
+|---|---|---|
+| `password` | `fn(PasswordPolicy) -> impl Fn(&str) -> Result<(),String>` | a [`PasswordPolicy`] as a string predicate, for the crud write path. **Wrap in `optional`** where blank has a meaning (it does on `MetaField::password()`: blank on create = no password, blank on edit = keep current). |
+| `PasswordPolicy::check` | `fn(&self, &str, &[&str]) -> Result<(),String>` | the policy itself; the second argument is context words to reject as substrings (`auth` passes the account's username, which a single-field validator can't know). |
+
+`PasswordPolicy` is **length-first with composition rules off**, per NIST SP 800-63B: screen for length
+and against known-bad values, and don't require character-class mixtures — users satisfy `upper + digit +
+special` with `Password1!`, so the rule costs usability and buys a search space every cracking ruleset
+already covers. The flags exist for audits that insist (`legacy_composition()`); no other preset sets them.
+
+| preset | length | screening | composition |
+|---|---|---|---|
+| `nist_minimum()` | ≥ 8 | common values, patterns, context words | — |
+| `recommended()` *(`Default`)* | ≥ 12 | same | — |
+| `legacy_composition()` | ≥ 12 | same | upper + lower + digit + symbol |
+
+`from_level(1|2|3)` maps a config integer onto them (anything else → `recommended()`, so a typo doesn't
+weaken the policy). Every preset also imposes a **maximum** length — a bound is a security control, since
+the value reaches argon2 and hashing an unbounded input burns CPU per request — rejects control
+characters, and rejects patterns (one repeated character, or any run of six consecutive characters).
+Everything printable is otherwise allowed, including spaces and emoji, and nothing is truncated. The
+built-in common-value list is a **floor, not a breach corpus**: matched whole (after folding, stripping a
+digit/symbol tail, and undoubling), so `Password1!` and `passwordpassword` are caught while `abc`/`user`
+don't reject every passphrase containing them. Real breach screening means a corpus or HIBP's k-anonymity
+API — app-level, so not built in; add words via `blocklist` or replace the check.
+
+`auth` applies this to `/profile` and a manager's reset by default and can be opted out of two ways — see
+[AUTH.md §5g](AUTH.md), which also explains why both this surface *and* the admin form need wiring.
 
 ### DNS-shaped (domain-specific but unavoidable in a DNS control plane)
 

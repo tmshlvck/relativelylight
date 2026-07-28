@@ -72,6 +72,14 @@ already using `auth`.
   about 90 seconds, however many times they were presented. A replayed code is now refused exactly like a
   wrong one — and, deliberately, is *reported* like one, so a captured code isn't confirmed as genuine.
   Test suites that reuse one code for two logins in the same 30-second step will need a fresh code.
+- **`POST /profile` and `POST /profile/{id}` now enforce a password policy**, at
+  `PasswordPolicy::recommended()`: at least 12 characters, not a common value, no six-character run, and
+  not containing the account's own username. A password your users could set before may be refused now.
+  `Auth::password_policy(None)` restores the old behaviour exactly; `PasswordPolicy::nist_minimum()` is
+  the gentler middle (8 characters, still screened). Note that the **admin UI / JSON API is not covered
+  automatically** — that's a `crud` field validator you wire per model (AUTH.md §5g), and leaving it
+  unwired leaves an operator-facing way around the rule. Tests and seeders that set short passwords
+  through `create_user` / `set_password` are unaffected: the policy governs typed input, not code.
 - **Source-level:** `MetaField` gained public fields (`nullable`, `blank_is_null`) and
   `crud::ColumnMeta::Field` gained `nullable` — struct-literal construction and exhaustive matches need
   updating, which matters if you implement the `Accessor` seam yourself. `crud::Error` gained a `Csrf`
@@ -98,6 +106,26 @@ already using `auth`.
   rows, scheduled by the app (both examples run it hourly). The free `auth::prune(&db, lockout)` still
   works but sees only the absolute session deadline, since it has no `Auth` to read `session_idle_secs`
   from; prefer the method.
+- **`validate::PasswordPolicy` + `validate::password(policy)`** — password strength as a reusable
+  predicate: **length-first with composition rules off**, per NIST SP 800-63B (requiring
+  `upper + digit + special` gets you `Password1!`, so it costs usability and buys nothing a cracking
+  ruleset doesn't already cover). Presets `nist_minimum()` (≥ 8), `recommended()` (≥ 12, the `Default`)
+  and `legacy_composition()` (≥ 12 plus the character classes, for audits that insist), plus
+  `from_level(1|2|3)` to map a config integer. Every preset also bounds the **maximum** length (the value
+  reaches argon2, so an unbounded input is a CPU bill), rejects control characters, screens a built-in
+  list of common values (matched whole after folding, tail-stripping and undoubling, so `Password1!` and
+  `passwordpassword` are caught) plus your own `blocklist` words as substrings, and rejects one repeated
+  character or any run of six consecutive characters. Spaces, punctuation and emoji are all allowed;
+  nothing is truncated.
+- **`Auth::password_policy(..)` / `Auth::password_check(..)`** — the policy applied to `POST /profile`
+  **and** a manager's `POST /profile/{id}`, with the account's **username** as a context word (a
+  cross-field check no single-field validator can do). **On by default** at `recommended()`; opt out with
+  `password_policy(None)`, another preset, or your own closure. It governs *typed input only* —
+  `create_user`/`set_password`/`make_admin`/`reset_admin_access` are unaffected, so a seeder or
+  break-glass CLI still sets whatever the operator says. The admin UI / JSON API is a **separate** wiring
+  (`field("password_hash").validate_str(validate::optional(Box::new(validate::password(policy))))`); skip
+  either surface and it becomes the way around the other. `examples/adminpanel` drives both from one
+  `PASSWORD_LEVEL` env value, `0` switching them off together. See AUTH.md §5g.
 - **`Auth::session_idle_secs(secs)`** — the idle session clock (default 8 hours, `0` to disable), backed
   by `auth_session.last_seen_at` and refreshed lazily (at most once a minute per session, so resolving an
   identity stays a read on almost every request). AUTH.md §5f.

@@ -111,7 +111,15 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
   `GroupReadWrite::new(&auth, ["admin"])` (group-only, read *and* write). Or implement `authz::Authz`
   yourself. The engine maps a gate's `Decision` to `200`/`401`/`403`.
 - **Profile / password**: `/profile` lets any user change their own password; a manager (a
-  profile-manager group, default `[admin_group]`) resets others at `/profile/{id}`.
+  profile-manager group, default `[admin_group]`) resets others at `/profile/{id}`. Both screen the new
+  password against a **`validate::PasswordPolicy`** — on by default at `recommended()` (≥ 12 chars,
+  common-value + pattern + username screening, **no** composition rules, per NIST SP 800-63B). Opt out
+  with `Auth::password_policy(None)` / another preset / `from_level(n)`, or replace it with
+  `Auth::password_check(closure)`. It governs **typed input only** — `create_user`/`set_password`/
+  `make_admin` are exempt, so a seeder or break-glass CLI still works. Wire the *same* policy into the
+  admin form separately (`field("password_hash").validate_str(validate::optional(Box::new(
+  validate::password(policy))))`) or that surface becomes the way around it — `examples/adminpanel`
+  drives both from one `PASSWORD_LEVEL` value. See [docs/AUTH.md §5g](docs/AUTH.md).
 - **TOTP 2FA**: users enrol from `/profile` (QR + `otpauth://` URL, verify-before-activate); once on,
   login requires the code at `/login/totp`. Self-disable, plus manager disable for others. A code is
   single-use (`auth_user.totp_last_step` records the step it spent — RFC 6238 §5.2; hide the column in an

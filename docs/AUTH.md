@@ -646,6 +646,72 @@ name can keep it locked by failing on purpose, and now that the rows are durable
 clears it. That is why the lock is short, lifts on its own, and can be cleared from the admin panel.
 The alternative — progressive delays — holds a server task open per attempt, which is its own risk.
 
+## 5g. Password strength — implemented
+
+`Auth` screens a **new** password on its own pages — `POST /profile` and a manager's `POST /profile/{id}`
+— against a [`validate::PasswordPolicy`](DATAINPUT.md). **On by default**, at
+`PasswordPolicy::recommended()`.
+
+**Length first, composition rules off.** That follows NIST SP 800-63B, which recommends screening for
+length and against known-bad values and explicitly advises *against* requiring character-class mixtures:
+users satisfy `upper + digit + special` with `Password1!` and `Summer2024!`, so the rule costs usability
+and buys a search space every cracking ruleset already covers. The flags exist
+(`PasswordPolicy::legacy_composition()`) because audits still ask for them; no other preset sets them.
+
+| preset | length | screening | composition |
+|---|---|---|---|
+| `nist_minimum()` | ≥ 8 | common values, patterns, context words | — |
+| `recommended()` *(default)* | ≥ 12 | same | — |
+| `legacy_composition()` | ≥ 12 | same | upper + lower + digit + symbol |
+
+`PasswordPolicy::from_level(1\|2\|3)` maps a config integer onto those, so an app can expose
+`password_level` and be done; an unrecognised value lands on `recommended()` rather than the weakest one.
+
+What every preset enforces: a minimum **and a maximum** length (a bound is a security control — the value
+is fed to argon2, and hashing an unbounded input burns CPU per request), no control characters, and
+screening against a built-in list of common values (matched whole, after folding and stripping a
+digit/symbol tail, so `Password1!` is caught), your own `blocklist` words (matched as substrings — the app
+name, a product name), and patterns (one repeated character, or any run of six consecutive characters like
+`123456`). Everything printable is allowed — spaces, punctuation, emoji — and nothing is truncated.
+
+On this surface the policy also gets the **username** as context, so a password containing it is refused.
+That check is inherently cross-field, which is why a single-field `crud` validator can't do it.
+
+**The built-in list is a floor, not a breach corpus** — a few dozen perennial values plus keyboard walks.
+Real breach screening means a local corpus or an online service (HIBP's k-anonymity API); that's an
+app-level dependency and a network call, so it isn't built in. Add your own via `blocklist`, or replace
+the check entirely.
+
+**Opt out, two ways** — a library shouldn't dictate this:
+
+```rust
+use relativelylight::validate::PasswordPolicy;
+auth.password_policy(PasswordPolicy::nist_minimum())        // another preset
+auth.password_policy(PasswordPolicy::from_level(cfg.level)) // …from your config
+auth.password_policy(PasswordPolicy::recommended().block(["acmecorp"]))
+auth.password_policy(None)                                  // off
+auth.password_check(|pw, username| my_rules(pw, username))  // your own predicate, replaces the policy
+```
+
+**It governs typed input, not code.** `create_user` / `set_password` / `make_admin` /
+`reset_admin_access` are unaffected, so a seeder or a break-glass CLI still sets whatever the operator
+says — if the policy governed those, a deployment could be left with no way to set a first password.
+
+**Both surfaces or neither.** `Auth` covers its own pages; the admin UI and JSON API are a separate
+`crud` field validator, and whichever you skip becomes the way around the other:
+
+```rust
+user_mm.field("password_hash").password();
+user_mm.field("password_hash")
+    .validate_str(validate::optional(Box::new(validate::password(policy))));
+```
+
+`optional` matters: blank has a meaning on that column (blank on create = no password / login disabled,
+blank on edit = keep the current one), and without it "leave blank" becomes a validation error. The crud
+pipeline is **coerce → validate → transform**, so the validator sees the plaintext before
+`MetaField::password()`'s argon2 hook hashes it — no engine change needed. `examples/adminpanel` wires
+both halves from one `PASSWORD_LEVEL` env value, `0` switching them off together.
+
 ## 6. authz — the gate
 
 The gate trait lives in **`relativelylight::authz`** — always compiled, independent of the `auth`
@@ -975,6 +1041,15 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
     however it arrives (plain v4, real v6, mapped, and a mapped *rule* against a plain client) while an
     address outside the list still locks, one client is **one row** whether it arrives mapped or plain,
     and `prune` drops expired rows while leaving live ones.
+  - **password strength** (§5g): the default policy refuses a short password, a common value (including
+    one doubled, or with a digit/symbol tail), a value containing a six-character run, and one containing
+    the account's **own username** — on the self-service page *and* on a manager's reset, since the reset
+    has no current-password check and would otherwise be the easier way round. Each rejection is checked
+    to leave the old password working and the new one unstored. All three escapes are exercised: policy
+    `None` accepts `hunter2`, a looser preset accepts ten characters while still screening common values,
+    and a custom `password_check` closure replaces the policy and sees the username. The library helpers
+    (`create_user` / `set_password`) are proved **not** to be governed by it, with a real login as the
+    control.
   - **session lifetime & revocation** (§5f): an **idle** session is refused while still inside its
     absolute deadline, and an absolutely-expired one is refused despite a fresh `last_seen_at` — so
     neither clock can be mistaken for the other; using a session advances the idle stamp, a *recent*

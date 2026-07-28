@@ -27,6 +27,7 @@ use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::crud::ui::Admin;
 use relativelylight::time::{TzPicker, JS as TIME_JS};
+use relativelylight::validate;
 use std::sync::Arc;
 use utoipa::openapi::{InfoBuilder, OpenApiBuilder};
 
@@ -153,7 +154,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A second, non-admin user to show the gate at work: `editor` may read everything but write
     // nothing — the panel renders read-only for them (no Create/Edit/Delete) and the API returns 403.
+    // Note the asymmetry, which is deliberate: these seeded passwords would be **refused** by the policy
+    // configured below if they were typed into a form, but `make_admin` / `create_user` are the app's own
+    // code — a seeder, a break-glass CLI — and the policy governs typed input only. If it governed these
+    // too, a deployment could be left with no way to set a first password at all.
     auth::create_user(&db, "editor", "password").await?;
+
+    // **One password policy, both surfaces.** Decided here because it is wanted in two places: `Auth`
+    // applies it to /profile (self-service and a manager's reset), and the `auth_user` admin form gets
+    // the same rule as a field validator further down. Skip either and it becomes the way around the
+    // other.
+    //
+    // Driven by one config value, which is also the opt-out: PASSWORD_LEVEL=0 turns checking off
+    // entirely, 1 = NIST's floor (≥ 8 characters), 2 = the library default (≥ 12), 3 = adds the
+    // character-class rules an audit sometimes demands (see the docs on why that's offered rather than
+    // recommended). An app wanting a rule the policy can't express — a breached-password corpus, a
+    // per-group rule — passes its own closure to `Auth::password_check` instead.
+    let password_level: u8 =
+        std::env::var("PASSWORD_LEVEL").ok().and_then(|s| s.parse().ok()).unwrap_or(2);
+    let password_policy = (password_level > 0).then(|| {
+        // The app's own name is worth blocking: "adminpanel2024" satisfies every length rule ever
+        // written and is the first thing anyone tries against this deployment.
+        validate::PasswordPolicy::from_level(password_level).block(["adminpanel", "relativelylight"])
+    });
 
     // authn: on-demand session lookups + login/logout routes, Bootstrap-styled login page. No
     // middleware — gates and page handlers call `auth.identify(&headers)` themselves.
@@ -161,6 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .secure_cookies(false) // local http
         .admin_group(ADMIN_GROUP)
         .totp_issuer("relativelylight admin") // shown in authenticator apps for 2FA
+        .password_policy(password_policy.clone()) // `None` (level 0) switches the check off
         // Two session clocks: an absolute lifetime, and an idle one that expires a session nobody has
         // used. The idle window is what bounds a stolen cookie — the library's defaults are 7 days and
         // 8 hours; a back-office that lives in a browser tab all day wants roughly this.
@@ -198,9 +222,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     auth_user_mm.field("password_hash").password();
     auth_user_mm.field("password_hash").description = Some(
         "Optional. Leave blank to create an account with no password (password login disabled). \
-         On edit, blank keeps the current password."
+         On edit, blank keeps the current password. At least 12 characters, and not a common one."
             .into(),
     );
+    // The admin-form half of the policy decided above (the `Auth` half is on the builder). The pipeline
+    // is coerce → validate → transform, so this validator sees the **plaintext** the form submitted,
+    // before `.password()`'s argon2 hook hashes it. `optional` is what keeps blank meaningful (blank on
+    // create = no password / login disabled; blank on edit = keep the current one) — without it, "leave
+    // blank to keep the current password" would become a validation error.
+    if let Some(policy) = password_policy.clone() {
+        auth_user_mm
+            .field("password_hash")
+            .validate_str(validate::optional(Box::new(validate::password(policy))));
+    }
     // The TOTP secret columns are secrets — never expose them in reads/writes/metadata. (2FA is
     // managed from the profile page, not the crud form.)
     auth_user_mm.field("totp_secret").hidden = true;

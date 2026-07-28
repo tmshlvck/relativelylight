@@ -20,13 +20,20 @@
 use super::*;
 use crate::auth::lockout::Lockout;
 use crate::authz::{Decision, Operation};
+use crate::validate::PasswordPolicy;
 use axum::body::Body;
 use axum::http::{header, Request};
 use sea_orm::Database;
 use tower::ServiceExt; // oneshot
 
 const PW: &str = "correct-horse-battery-staple";
-const OTHER_PW: &str = "hunter2";
+/// A second *acceptable* password. It has to satisfy the default policy (§5g) like any other — the
+/// suite changes passwords constantly, and a fixture the policy refuses would fail every one of those
+/// tests for the wrong reason.
+const OTHER_PW: &str = "trombone-hedgehog-marmalade";
+/// A password the default policy refuses, for the tests that are *about* the policy: seven characters,
+/// and `hunter` with a digit stuck on the end is on the common-value list twice over.
+const WEAK_PW: &str = "hunter2";
 /// The CSRF token the fixture's posts carry. Double-submit is stateless — what matters is that the
 /// cookie and the submitted value agree, so a test can pick the value.
 const CSRF: &str = "5cbf19b46ff34d0a8de0dcbe12b6b7e2c0c1a5f4b3e2d1c0b9a8978685746352";
@@ -945,6 +952,193 @@ async fn password_change_rejects_an_empty_or_mismatched_new_password() {
     assert_eq!(res.status, StatusCode::OK);
     assert!(fx.password_works("alice", OTHER_PW).await);
     assert!(!fx.password_works("alice", PW).await, "the old password must stop working");
+}
+
+#[tokio::test]
+async fn the_password_policy_applies_to_the_self_service_page() {
+    // On by default: a weak password is refused, and refused *without writing* — the old one still works.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+
+    for (weak, why) in [
+        (WEAK_PW, "too short and a common value"),
+        ("shortish", "under twelve characters"),
+        ("passwordpassword", "a common value doubled"),
+        ("abcdef-quintessence", "contains a run"),
+        ("alice-in-wonderland", "contains the username"),
+    ] {
+        let res = fx
+            .post(
+                "/profile",
+                &form(&[
+                    ("current_password", PW),
+                    ("new_password", weak),
+                    ("confirm_password", weak),
+                ]),
+                Some(&cookie),
+            )
+            .await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{weak:?} ({why}) must be refused");
+        assert!(fx.password_works("alice", PW).await, "{weak:?}: the old password must still work");
+        assert!(!fx.password_works("alice", weak).await, "{weak:?}: must not be stored");
+    }
+    // Control: an acceptable password still goes through, so the policy isn't refusing everything.
+    let res = fx
+        .post(
+            "/profile",
+            &form(&[
+                ("current_password", PW),
+                ("new_password", OTHER_PW),
+                ("confirm_password", OTHER_PW),
+            ]),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert!(fx.password_works("alice", OTHER_PW).await);
+}
+
+#[tokio::test]
+async fn the_password_policy_applies_to_a_managers_reset_too() {
+    // Otherwise the reset route is the way around the rule the user has to satisfy — and it's the route
+    // with *no* current-password check, so it would be the easier way.
+    let fx = Fx::with(|a| a.admin_group("admin")).await;
+    fx.user_in("boss", "admin").await;
+    let victim = fx.user("victim").await;
+    let cookie = fx.cookie(&fx.session_for("boss").await);
+
+    for weak in [WEAK_PW, "victim-of-fashion"] {
+        let res = fx
+            .post(
+                &format!("/profile/{victim}"),
+                &form(&[("new_password", weak), ("confirm_password", weak)]),
+                Some(&cookie),
+            )
+            .await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{weak:?} must be refused");
+        assert!(!fx.password_works("victim", weak).await, "{weak:?}: must not be stored");
+    }
+    // …including the username check, which uses the **target's** name, not the manager's.
+    let res = fx
+        .post(
+            &format!("/profile/{victim}"),
+            &form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "control: a good password is accepted");
+    assert!(fx.password_works("victim", OTHER_PW).await);
+}
+
+#[tokio::test]
+async fn the_password_policy_can_be_loosened_replaced_or_switched_off() {
+    // A library shouldn't dictate this, so all three ways out have to actually work.
+    //
+    // Each part checks its **rejections first and its acceptance last**: a successful change rotates the
+    // caller's session (see `changing_your_password_signs_out_every_other_session`), so a POST made after
+    // one with the same cookie would be answered as anonymous — a redirect, not the verdict under test.
+    //
+    // 1. Off entirely — `hunter2` is accepted, which is the app's choice to make.
+    let fx = Fx::with(|a| a.password_policy(None)).await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    // The pair check is *not* part of the policy, so it still applies with the policy off.
+    let res = fx
+        .post(
+            "/profile",
+            &form(&[("current_password", PW), ("new_password", "a"), ("confirm_password", "b")]),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST, "mismatched pair is still refused");
+    let res = fx
+        .post(
+            "/profile",
+            &form(&[
+                ("current_password", PW),
+                ("new_password", WEAK_PW),
+                ("confirm_password", WEAK_PW),
+            ]),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "policy off: {}", res.body);
+    assert!(fx.password_works("alice", WEAK_PW).await);
+
+    // 2. A looser preset: eight characters, still screened for common values.
+    let fx = Fx::with(|a| a.password_policy(PasswordPolicy::nist_minimum())).await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    // The screening survives the looser length…
+    let res = fx
+        .post(
+            "/profile",
+            &form(&[
+                ("current_password", PW),
+                ("new_password", "password1"),
+                ("confirm_password", "password1"),
+            ]),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST, "a common value is still refused");
+    // …while ten characters, which the default would refuse, is now fine.
+    let mid = "mangosteen";
+    let res = fx
+        .post(
+            "/profile",
+            &form(&[("current_password", PW), ("new_password", mid), ("confirm_password", mid)]),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "nist_minimum accepts ten characters: {}", res.body);
+    assert!(fx.password_works("alice", mid).await);
+
+    // 3. An app's own predicate, replacing the policy outright — and it sees the username.
+    let fx = Fx::with(|a| {
+        a.password_check(|pw, username| {
+            if pw.contains(username) {
+                Err("must not contain your name".into())
+            } else if pw.len() < 4 {
+                Err("must be at least 4 characters".into())
+            } else {
+                Ok(())
+            }
+        })
+    })
+    .await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    for (pw, ok) in [("xy", false), ("alice1234", false), ("wxyz", true)] {
+        let res = fx
+            .post(
+                "/profile",
+                &form(&[("current_password", PW), ("new_password", pw), ("confirm_password", pw)]),
+                Some(&cookie),
+            )
+            .await;
+        let expected = if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST };
+        assert_eq!(res.status, expected, "custom check on {pw:?}: {}", res.body);
+        if ok {
+            assert!(fx.password_works("alice", pw).await, "{pw:?} should have been stored");
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_password_policy_does_not_govern_the_library_helpers() {
+    // `create_user` / `set_password` / `make_admin` are called by the app's own code — a seeder, a
+    // break-glass CLI — not by a person typing into a form. The policy governs typed input; if it
+    // governed these, a deployment could be left with no way to set a password at all.
+    let fx = Fx::new().await;
+    create_user(&fx.db, "seeded", WEAK_PW).await.expect("create_user ignores the policy");
+    assert!(fx.password_works("seeded", WEAK_PW).await);
+    set_password(&fx.db, "seeded", "short").await.expect("set_password ignores the policy");
+    assert!(fx.password_works("seeded", "short").await);
+    // And the account really can log in with it, so this isn't a write that produces a dead credential.
+    let res = fx.post("/login", &form(&[("username", "seeded"), ("password", "short")]), None).await;
+    res.assert_redirect("/");
 }
 
 #[tokio::test]
