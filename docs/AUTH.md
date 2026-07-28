@@ -112,11 +112,14 @@ lifetime.
 
 All optional, all applied by the app; defaults chosen for "safe but works out of the box".
 
-- **Real client IP** — **partly shipped** as [`relativelylight::net::client_ip`](../relativelylight/src/net.rs):
-  a `trust_proxy` flag selects the socket peer or the left-most `X-Forwarded-For` / `X-Real-IP` hop,
-  IPv4-mapped addresses collapse to IPv4, and `auth`'s lockout uses it (§5e). Still to come: a
-  trusted-proxy CIDR list rather than one boolean, RFC 7239 `Forwarded`, and a `ClientIp` extractor /
-  layer so an app doesn't thread `(headers, peer)` by hand.
+- **Real client IP** — **shipped** as [`relativelylight::net::client_ip`](../relativelylight/src/net.rs):
+  a `trust_proxy` flag selects the socket peer or the **right-most** `X-Forwarded-For` hop (falling back
+  to `X-Real-IP`), IPv4-mapped addresses collapse to IPv4, and `auth`'s lockout uses it (§5e). The
+  boolean is **final**: a trusted-proxy CIDR list and RFC 7239 `Forwarded` parsing were both considered
+  and rejected — one trusted hop is exactly what a firewalled port behind nginx/Caddy or a cluster
+  ingress is, and anything stranger (a CDN ahead of your own proxy, `CF-Connecting-IP`) overrides the
+  resolution wholesale with `Auth::client_ip` rather than describing a chain in config. Still wanted: a
+  `ClientIp` extractor / layer so an app doesn't thread `(headers, peer)` by hand.
 - **Request logging** — one structured line per request: method, path, status, latency, client IP,
   and principal (user id / "anon"). Built on `tower_http::trace` or a thin custom layer.
 - **CORS** — `tower_http::cors::CorsLayer`. **Open by default** (any origin, credentials off); the
@@ -130,14 +133,16 @@ All optional, all applied by the app; defaults chosen for "safe but works out of
 SeaORM models (the app runs the migration / `create_table_from_entity`):
 
 - **`user`** — `id`, `username` (unique), `password_hash`, `is_active`, and the TOTP 2FA columns
-  `totp_secret` / `totp_pending` (nullable base32; §5a). (An OIDC-subject column can be added later,
+  `totp_secret` / `totp_pending` (nullable base32) + `totp_last_step` (the replay guard; §5a). (An
+  OIDC-subject column can be added later,
   additively.) `username` is validated at every creation path (`create_user`, and the SSO
   auto-register path) by `auth::valid_username` — non-empty, ≤ 254 bytes, no spaces/control chars
   (permissive enough for email-style names). Wire the same check into the admin form:
   `user_mm.field("username").validate_str(relativelylight::auth::valid_username)`. Group names get
   `auth::valid_group_name` (via `ensure_group`).
 - **`group`** + **`user_group`** (N:M) — group membership drives authz.
-- **`session`** — `id` (opaque token), `user_id`, `expires_at`, and `awaiting_totp` (a
+- **`session`** — `id` (opaque token), `user_id`, `expires_at` (the **absolute** deadline),
+  `last_seen_at` (the **idle** clock; §5f), and `awaiting_totp` (a
   half-authenticated session — password ok, second factor pending; §5a).
 
 These are ordinary `crud`-registerable entities (so the admin can manage users/groups), with
@@ -145,10 +150,19 @@ These are ordinary `crud`-registerable entities (so the admin can manage users/g
 
 ### Database schema & migrations
 
-`auth::migrate(&db)` creates the four tables **if they don't already exist** — a bootstrap for a fresh
+`auth::migrate(&db)` creates the six tables **if they don't already exist** — a bootstrap for a fresh
 DB or the examples, safe to call on every start. It is **not** a migration engine: it only *creates*
 missing tables, so it won't add columns when you upgrade the library (e.g. the TOTP / SSO columns on
 `auth_user`) or otherwise evolve the schema.
+
+> **Upgrading to 0.2.0** adds two columns to existing tables, which `migrate` will *not* create for you:
+> ```sql
+> ALTER TABLE auth_session ADD COLUMN last_seen_at BIGINT NOT NULL DEFAULT 0;  -- idle clock (§5f)
+> ALTER TABLE auth_user    ADD COLUMN totp_last_step BIGINT NULL;              -- replay guard (§5a)
+> ```
+> The `DEFAULT 0` on `last_seen_at` makes every pre-existing session read as idle-expired, so everyone
+> signs in again once — the safe direction. Backfill it to `strftime('%s','now')` (or your dialect's
+> equivalent) instead if you'd rather not log your users out on deploy.
 
 For anything long-lived, drive the schema with **`sea-orm-migration`** — SeaORM's alembic-equivalent:
 versioned `up`/`down` migrations, applied once and tracked in a `seaql_migrations` table. Fold the auth
@@ -164,7 +178,8 @@ struct InitAuth;
 #[async_trait::async_trait]
 impl MigrationTrait for InitAuth {
     async fn up(&self, m: &SchemaManager) -> Result<(), DbErr> {
-        // auth_user / auth_group / auth_user_group / auth_session — from the library entities.
+        // auth_user / auth_group / auth_user_group / auth_session + the two lockout tables —
+        // from the library entities.
         for stmt in relativelylight::auth::table_create_statements(m.get_database_backend()) {
             m.create_table(stmt).await?;
         }
@@ -172,7 +187,14 @@ impl MigrationTrait for InitAuth {
         Ok(())
     }
     async fn down(&self, m: &SchemaManager) -> Result<(), DbErr> {
-        for t in ["auth_session", "auth_user_group", "auth_group", "auth_user"] {
+        for t in [
+            "auth_ip_lockout",
+            "auth_username_lockout",
+            "auth_session",
+            "auth_user_group",
+            "auth_group",
+            "auth_user",
+        ] {
             m.drop_table(Table::drop().table(Alias::new(t)).to_owned()).await?;
         }
         Ok(())
@@ -209,7 +231,9 @@ migration; when a later library version adds a column, add your own `ALTER TABLE
   (default `[admin_group]`, override with `Auth::profile_managers([..])`); a caller may always manage
   their own, and `/profile/{self}` redirects to `/profile`. `Auth::can_manage_others(&who)` tells the
   app whether to surface an admin-only "reset password" link. The **admin group name is configurable**
-  (default `"admin"`). Both paths write **only the password hash** — see the helper contract below.
+  (default `"admin"`). Both paths write **only the password hash** — see the helper contract below — and
+  both **revoke sessions**: the self-service page replaces the caller's session and deletes their others,
+  a manager's reset deletes all of the target's (§5f).
 
 ### Admin helpers — who may re-open an account
 
@@ -244,7 +268,8 @@ has 2FA enabled, a correct password isn't enough — they must also enter the 6-
 authenticator app. Defaults are the widely-compatible SHA1 / 6 digits / 30s step / ±1 skew.
 
 **Data.** Two nullable base32 columns on `user`: `totp_secret` (the **active** secret — its presence
-means 2FA is on) and `totp_pending` (a secret mid-enrolment, not yet confirmed). One flag on
+means 2FA is on) and `totp_pending` (a secret mid-enrolment, not yet confirmed), plus `totp_last_step`
+(the replay guard, below). One flag on
 `session`: `awaiting_totp` — a session created after a correct password but before the second factor.
 `Auth::identify` treats an `awaiting_totp` session as **anonymous**, so the user is not logged in until
 the code is confirmed.
@@ -253,8 +278,26 @@ the code is confirmed.
 - no 2FA → create a normal session, redirect `/`.
 - 2FA on → create an `awaiting_totp` session (cookie set, but grants nothing), redirect `/login/totp`.
   `GET /login/totp` shows the code form; `POST /login/totp` verifies the code against the pending
-  session's user and, on success, clears `awaiting_totp` (the session becomes a real login) → `/`. A
+  session's user and, on success, **rotates the session id** (§5f) into a full login → `/`. A
   wrong code → 401, re-render.
+
+**Replay guard (RFC 6238 §5.2).** A code is valid for its own 30-second step *and* the two neighbours
+(±1 skew for clock drift), so the same six digits work for about 90 seconds. `totp_last_step` records
+the step each accepted code belonged to, and a later code must match a **strictly greater** step — so a
+code can be used exactly once. Enrolment spends a step too, or the code that confirmed setup would still
+work at `/login/totp` afterwards. Turning 2FA off clears the guard in the same write that clears the
+secret; leaving a stale ceiling would silently refuse the first codes of a re-enrolment.
+
+A replayed code is refused with the *same* message as a wrong one — "already used" would confirm to
+someone holding a captured code that they hold a real one — and it counts against the account's lockout
+budget like any other failure.
+
+Be clear about what this does and doesn't buy, because the headline TOTP threat is **not** on the list.
+Real-time phishing (an Evilginx-style proxy) relays the victim's code to the real server *once*, so
+there is no second use to reject; the guard is powerless there, and only phishing-resistant factors
+(WebAuthn — see §8) help. What it does close is reuse of a code the victim genuinely spent, by someone
+who also has the password: a shoulder-surf, a screen share, a code read aloud on a support call, a
+mistyped-into-the-wrong-window code. Narrow, but the standard requires it and it costs one column.
 
 **Enrolment (self-service, verify-before-activate).** `GET /profile/totp` mints a fresh secret, stores
 it as `totp_pending`, and shows **both** a QR code (a server-rendered inline PNG — no JS) **and** the
@@ -271,7 +314,8 @@ an empty text input in an admin form is exactly how that value appears.
 **Disable.** `POST /profile/totp/disable` turns off the caller's own 2FA. A **manager** (a
 profile-manager group, §5) can disable *another* user's 2FA via `POST /profile/{id}/totp/disable`
 (shown on the `/profile/{id}` page) — but managers can never *set up* 2FA for someone else, since
-enrolment needs that user's device. Disabling clears both `totp_secret` and `totp_pending`.
+enrolment needs that user's device. Disabling clears `totp_secret`, `totp_pending` **and**
+`totp_last_step`.
 
 The profile page (`GET /profile`) shows a 2FA section reflecting the current state: a "Set up 2FA"
 link when off, or a "Disable 2FA" button when on.
@@ -435,7 +479,7 @@ which one applies is a security boundary, so it is a config flag rather than a g
 
 ```rust
 Lockout { trust_proxy: false, .. }   // exposed directly: the socket peer is the client
-Lockout { trust_proxy: true,  .. }   // behind a proxy you control: the left-most X-Forwarded-For hop
+Lockout { trust_proxy: true,  .. }   // behind a proxy you control: the right-most X-Forwarded-For hop
 ```
 
 That is [`net::client_ip`](crate::net::client_ip) — which reads the **right-most** `X-Forwarded-For`
@@ -443,7 +487,8 @@ entry, the one your proxy appended, because everything to its left is whatever t
 (nginx's `proxy_add_x_forwarded_for`, HAProxy's `option forwardfor` and Caddy all append). Reading the
 left-most entry would let any caller pick its own address and so walk past an admission list, out of a
 lockout, or into someone else's audit row. A proxy that *replaces* the header leaves one entry, where
-both readings agree. Two hops (a CDN in front of your proxy) need the trusted-proxy list of §4.
+both readings agree. Two hops (a CDN in front of your own proxy) are out of scope for the flag by
+design — override the resolution with `Auth::client_ip` there (§4).
 
 The app should call the same function for its own logging, audit rows and limits — then a failed login and a failed API call from one client land on the **same** row,
 canonicalized the same way (an IPv4-mapped `::ffff:a.b.c.d` peer and a plain `a.b.c.d` forwarded hop are
@@ -457,7 +502,7 @@ default that is safe for both, which is why it has to be stated.
 For chains stranger than "one proxy sets `X-Forwarded-For`" — several hops to walk, a CDN header like
 `CF-Connecting-IP` — `Auth::client_ip(|headers, peer| ..)` replaces the resolution outright.
 
-**Whitelisting addresses.** `Lockout::ip_allow` takes CIDRs (build it with `net::parse_nets`, which
+**Whitelisting addresses.** `Lockout::ip_whitelist` takes CIDRs (build it with `net::parse_nets`, which
 also accepts bare addresses) that are never counted and never locked — an office range, a monitoring
 probe, the host a fleet NATs through. It matches across families and representations, so a rule written
 `::ffff:198.51.100.0/120` covers a client that arrives as plain `198.51.100.9`, and vice versa. The
@@ -499,10 +544,64 @@ other write. No bespoke endpoint, no CLI, no shelling into the host. `examples/a
 both as read-only-plus-delete panels.
 
 **Housekeeping is the app's.** Nothing in this crate schedules anything — no background task, no timer.
-`auth::prune(&db, lockout)` deletes expired sessions *and* expired lockout rows from both tables; call
-it at startup and from whatever periodic loop the app already has (both examples do). Skipping it is
-safe: an expired session never authenticates and an expired lockout row reads as unlocked and resets
+`Auth::prune()` deletes dead sessions *and* expired lockout rows from both tables; call
+it at startup and from whatever periodic loop the app already has (both examples do). Prefer it over the
+free `auth::prune(&db, lockout)`, which takes no `Auth` and so can only see the absolute session deadline,
+not the idle one (§5f). Skipping either is
+safe: a dead session never authenticates and an expired lockout row reads as unlocked and resets
 itself on the next failure — the rows just accumulate.
+
+## 5f. Session lifetime & revocation — implemented
+
+A session is a row, so revoking one is a `DELETE` and there is no token to keep believing after the
+fact. That's the whole advantage over a JWT (§3), and this section is what the module does with it.
+
+**Two clocks, both enforced at `identify`.**
+
+| clock | column | configured by | default | what it bounds |
+|---|---|---|---|---|
+| absolute | `expires_at` | `Auth::session_ttl_secs` | 7 days | how long a session can *ever* live, however busy |
+| idle | `last_seen_at` | `Auth::session_idle_secs` | 8 hours | how long an *unused* session survives |
+
+The idle clock is the one that bounds a stolen cookie: without it an attacker who lifts a cookie has the
+full absolute window, whether or not the victim ever comes back. `session_idle_secs(0)` switches it off
+and leaves exactly the pre-0.2.0 behaviour. The absolute deadline always wins — a session used a second
+ago but past `expires_at` is dead.
+
+`last_seen_at` is refreshed **lazily**: a read only writes when the stamp is more than a minute stale.
+That matters because `identify` is called once per gated model — an `Admin` page with five tables
+resolves the caller five times — so an eager refresh would turn one page render into five writes.
+
+**`Auth::identify(&headers) -> Option<Identity>` does not change**, and shouldn't: it stays a cheap call
+that needs no response to write into. Everything that changes a session **id** happens inside a POST
+handler that already owns its response.
+
+**Rotation on privilege gain.** Password login can't be fixated — it always mints a new row with a
+server-generated id, so a cookie value an attacker chose is never elevated. The gap was the *second*
+factor, which used to flip `awaiting_totp` on the same id: an attacker who knew the password could take
+a half-authenticated session, write its cookie into the victim's browser (cookie-tossing from a sibling
+host, or an XSS — neither `Secure` nor `SameSite` stops that), send them to `/login/totp`, and inherit a
+full session the moment the victim typed their own code. Confirming the second factor now issues a **new
+id** and deletes the old row, so the attacker is left holding a token that no longer exists. The CSRF
+token rotates with it.
+
+**A password change signs out everything else.** The commonest reason to change a password is "I think
+someone else is in my account", and a session that outlives the credential that created it defeats
+exactly that. So `POST /profile` mints one fresh session for the caller and **deletes every other
+session they hold** — including their own previous id, since that's one of the values that might have
+been copied. A manager's reset at `POST /profile/{id}` deletes **all** of the target's sessions (there is
+no session of theirs to spare).
+
+**On demand.** `POST /profile/sessions/revoke` — the "Sign out other sessions" button on the profile
+page — deletes the caller's other sessions and keeps the one they're using. The app-facing forms are
+`Auth::revoke_sessions(user_id)` and `Auth::revoke_other_sessions(user_id, keep)`; call them when *your*
+code decides a user's sessions are void (you disabled the account, a group sync removed their access, an
+operator hit a force-logout). Note that `is_active = false` already denies every request at `identify`,
+so revoking there is tidiness rather than enforcement.
+
+**Not yet.** Re-authentication before sensitive changes (a fresh password or code before disabling 2FA)
+is still open — see `TODO.md`. Until it lands, a stolen *live* session can still turn 2FA off, which is
+why the idle window matters.
 
 **Durable and shared, on purpose.** The rows survive a restart (a deploy must not hand every attacker a
 fresh budget) and every replica sees the same counts. The cost is a write per *failed* check and a read
@@ -585,7 +684,7 @@ What the app writes to wire it all up — the library gives login routes, the ga
 builders, and on-demand `identify`; the app composes them (it still owns the router):
 
 ```rust
-use relativelylight::auth::{Auth, GroupReadWrite, UserReadGroupWrite};
+use relativelylight::auth::{lockout::Lockout, Auth, GroupReadWrite, UserReadGroupWrite};
 use relativelylight::authz::Open;
 use relativelylight::crud::seaorm::Crud;
 use std::sync::Arc;
@@ -593,9 +692,11 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 
 // 1. authn: SeaORM-backed sessions + login/logout/password. Cheap to clone (Arc inside).
-let auth = Auth::new(db.clone())
+//    The brute-force brake is a `new` argument, not a builder call — it isn't optional (§5e).
+let auth = Auth::new(db.clone(), Lockout::default())
     .admin_group("admin")        // group that may reset others' passwords (configurable)
-    .secure_cookies(true);       // false for local http
+    .secure_cookies(true)        // false for local http
+    .session_idle_secs(8 * 3600); // idle timeout inside the 7-day absolute one (§5f); 0 disables
 
 // 2. crud: each model registered with its gate. Share one gate via Arc, or vary per model.
 let content = Arc::new(UserReadGroupWrite::new(&auth, ["editors", "admin"]));
@@ -624,7 +725,8 @@ async fn admin_page(headers: HeaderMap, State(app): State<AppState>) -> Response
 ```
 
 `auth.routes()` are the login/logout/password endpoints. Anything the app wants to leave open (e.g.
-`/metrics`) simply never calls `identify`.
+`/metrics`) simply never calls `identify`. The one thing the app must **schedule** is housekeeping:
+`auth.prune()` on its own loop (§5f/§5e) — the crate spawns no tasks.
 
 ## 7. CSRF — implemented (double-submit token, feature `csrf`)
 
@@ -696,7 +798,10 @@ if !auth.csrf().verify(&headers, form.csrf.as_deref()) { return StatusCode::FORB
 
 - **TOTP 2FA — done (§5a).** Implemented as an `awaiting_totp` session flag + `totp_secret` on the
   user. **PassKeys/WebAuthn** would slot in similarly (a session assurance level a policy can require
-  for sensitive models).
+  for sensitive models) — parked at **milestone 0.3+**: nothing driving the crate needs it yet, and it is
+  a large surface (a credentials table, browser ceremonies, and an assurance level that would likely add
+  a field to `Identity`). It remains the only real answer to real-time phishing, which TOTP and its
+  replay guard do not address.
 - **OIDC SSO — done (§5b, feature `sso`).** The callback creates a `session` for the mapped user —
   the same session model. Group memberships come from the username/claim mapping tables.
 - **App API tokens:** the app issues tokens and adds an **identity source** that maps a Bearer token →
@@ -837,6 +942,22 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
     however it arrives (plain v4, real v6, mapped, and a mapped *rule* against a plain client) while an
     address outside the list still locks, one client is **one row** whether it arrives mapped or plain,
     and `prune` drops expired rows while leaving live ones.
+  - **session lifetime & revocation** (§5f): an **idle** session is refused while still inside its
+    absolute deadline, and an absolutely-expired one is refused despite a fresh `last_seen_at` — so
+    neither clock can be mistaken for the other; using a session advances the idle stamp, a *recent*
+    stamp is deliberately **not** rewritten (the lazy-refresh guarantee), and `session_idle_secs(0)`
+    leaves an untouched session valid to its absolute deadline. Completing the second factor **changes
+    the session id**: the half-authenticated token is deleted rather than elevated (the planted-cookie
+    fixation path), and the new one identifies. A password change deletes every other session the user
+    holds *and* rotates the caller's own id, leaving them a working replacement and other users
+    untouched; a manager's reset deletes all of the target's; `POST /profile/sessions/revoke` deletes
+    the caller's others while keeping the one in use, and is CSRF-checked like every unsafe route.
+    `Auth::prune` collects idle-dead and expired rows and spares live ones.
+  - **TOTP replay** (§5a): the same code is refused the second time — with the *same* wording as a wrong
+    code, leaving the replaying session half-authenticated and the recorded step unmoved — while the
+    matched step itself is unit-tested (the current step and both skew neighbours resolve to their own
+    step, two steps out matches nothing), and disabling 2FA clears the guard so a re-enrolment isn't
+    refused by a stale ceiling.
   - **CSRF** (§7): every unsafe auth route rejects a missing, cookie-less, header-only, mismatched, or
     blank token with `403` and no cookies set — checked with a *fully authorized manager session*, so
     only the token is missing — and nothing changes behind it; a `GET` form page issues the cookie
@@ -858,11 +979,9 @@ Each group carries a positive control (a correct login, a correct TOTP code, an 
 mistake that breaks *everything* can't make the negatives pass vacuously.
 
 **Not covered by tests** (and open in [TODO.md](../TODO.md)): re-authentication before disabling 2FA /
-changing a password, TOTP replay
-inside the skew window, session-id rotation on privilege change and invalidating a user's *other*
-sessions after a password change, and the SSO callback (see the verification note in §5b). One rough
-edge the review turned up is filed there too: the manager reset isn't refused for SSO targets the way
-the self-service page is (it writes a local hash that still can't log in).
+changing a password, TOTP recovery codes, and the SSO callback (see the verification note in §5b). One
+rough edge the review turned up is filed there too: the manager reset isn't refused for SSO targets the
+way the self-service page is (it writes a local hash that still can't log in).
 
 ## 11. Decisions (confirmed)
 
@@ -882,13 +1001,26 @@ the self-service page is (it writes a local hash that still can't log in).
    manager disable (§5a); PassKeys/WebAuthn remain future.
 7. **SSO** — ✅ **OIDC** (feature `sso`) for Google / Okta / corporate, with username- and claim-based
    group mapping (union + reconcile) and optional per-provider auto-registration (§5b).
-8. **Attempt limiting** — ✅ **in-memory sliding-window lockout** (429 + `Retry-After`) on every
-   credential check (§5e); per-account on by default, per-source-IP opt-in until real-ip parsing lands.
+8. **Attempt limiting** — ✅ **DB-backed lockout** (429 + `Retry-After`) on the *unauthenticated*
+   credential checks (§5e), by account name and by source address, both mandatory in `Auth::new`; the
+   unlock is deleting the row in the admin panel. Authenticated checks are deliberately unlimited.
+9. **Session lifetime** — ✅ **two clocks** (§5f): an absolute deadline (7 days) plus an idle timeout
+   (8 hours, `session_idle_secs(0)` to disable), the id rotated on privilege gain, and a password change
+   or manager reset revoking the user's other sessions.
+10. **Client IP** — ✅ a **`trust_proxy` boolean**, one trusted hop, reading the **right-most**
+    `X-Forwarded-For` entry (§4). A trusted-proxy CIDR list and RFC 7239 `Forwarded` were considered and
+    rejected; stranger chains override with `Auth::client_ip`.
 
 ## 12. Open (later)
 
-- Row-level authorization (per-row read checks / list filters — the gate seeing the row/query).
+- Row-level authorization (per-row read checks / list filters — the gate seeing the row/query). Filed
+  under *Transformative* in `TODO.md`: it reshapes the one trait apps implement by hand, so it needs
+  **additional** `Authz` methods with defaults rather than a changed `authorize` signature, `Decision`
+  must stay fieldless, and the list-filter half reaches into `ListQuery`/`Accessor` too. Deferred until a
+  requirement arrives that an app can't meet in its own handler.
 - PassKeys/WebAuthn, app-issued API tokens (extra principal source) — §8.
-- Session store scaling (shared store) if the app runs multiple instances.
-- Security hardening — login attempt rate-limiting/lockout, CSRF, TOTP recovery codes, re-auth before
-  sensitive changes (see `TODO.md`). SSO: cache provider discovery instead of per-request.
+- Security hardening — **TOTP recovery codes** and **re-auth before sensitive changes** are the two that
+  remain (see `TODO.md`); lockout (§5e), CSRF (§7) and session lifetime/revocation (§5f) have landed.
+  SSO: cache provider discovery instead of per-request.
+- Session store scaling: sessions are already shared across replicas (they're rows), so this is a
+  performance question — the per-request read, and the lazy idle-refresh write — not a correctness one.

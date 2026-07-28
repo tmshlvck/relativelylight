@@ -274,6 +274,12 @@ pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> 
 /// row reads as unlocked (and resets itself on the next failure); the rows just accumulate.
 ///
 /// Returns how many rows were deleted, in total.
+///
+/// **Prefer [`Auth::prune`]** if you have an `Auth` to hand. This function sees only the **absolute**
+/// session deadline; it takes no `Auth`, so it cannot know your
+/// [`session_idle_secs`](Auth::session_idle_secs) and will leave idle-expired rows in place until their
+/// absolute deadline passes. Those rows never authenticate either way — it's a tidiness difference, not
+/// a security one.
 pub async fn prune(db: &DatabaseConnection, lockout: &lockout::Lockout) -> Result<u64, DbErr> {
     let sessions = session::Entity::delete_many()
         .filter(session::Column::ExpiresAt.lt(now_secs()))
@@ -548,7 +554,10 @@ struct Inner {
     login_path: String,
     profile_path: String,
     secure_cookies: bool,
+    /// The **absolute** session lifetime (see [`Auth::session_ttl_secs`]).
     ttl_secs: i64,
+    /// The **idle** session lifetime, `0` = no idle timeout (see [`Auth::session_idle_secs`]).
+    idle_secs: i64,
     /// Optional audit sink; fired from the mutating auth handlers (password change, manager reset).
     observer: Option<Arc<dyn crate::observe::WriteObserver>>,
     /// Wraps the login-form fragment into a full page. Default: a minimal unstyled document; set
@@ -622,6 +631,43 @@ impl Inner {
         }
     }
 
+    /// Whether this session is still alive on **both** clocks: inside its absolute deadline, and used
+    /// within the idle window (when one is configured). Says nothing about `awaiting_totp` — the callers
+    /// differ on whether a half-authenticated session is what they want.
+    fn session_live(&self, session: &session::Model) -> bool {
+        let now = now_secs();
+        if session.expires_at < now {
+            return false;
+        }
+        self.idle_secs == 0 || session.last_seen_at + self.idle_secs >= now
+    }
+
+    /// Push a live session's idle clock forward — but only once the stamp is [`IDLE_REFRESH_GRACE`]
+    /// stale, so the common case stays a read. A no-op when the idle clock is off, which is what keeps
+    /// `idle_secs = 0` exactly as cheap as before this existed.
+    async fn touch_session(&self, session: &session::Model) {
+        let now = now_secs();
+        if self.idle_secs == 0 || now - session.last_seen_at < IDLE_REFRESH_GRACE {
+            return;
+        }
+        // Best-effort and racy on purpose: two concurrent requests writing the same near-identical
+        // timestamp is harmless, and a lost update just means the next request tries again.
+        let _ = session::Entity::update_many()
+            .col_expr(session::Column::LastSeenAt, sea_orm::sea_query::Expr::value(now))
+            .filter(session::Column::Id.eq(session.id.clone()))
+            .exec(&self.db)
+            .await;
+    }
+
+    /// Delete a user's sessions, optionally sparing one id (the caller's own). Returns how many went.
+    async fn revoke_sessions(&self, user_id: i32, keep: Option<&str>) -> u64 {
+        let mut q = session::Entity::delete_many().filter(session::Column::UserId.eq(user_id));
+        if let Some(id) = keep {
+            q = q.filter(session::Column::Id.ne(id.to_string()));
+        }
+        q.exec(&self.db).await.map(|r| r.rows_affected).unwrap_or(0)
+    }
+
     /// The CSRF checker for this app: the configured cookie name, `Secure` and the lifetime tracking
     /// the session cookie, so a live session always has a usable token.
     fn csrf(&self) -> crate::csrf::Csrf {
@@ -678,12 +724,17 @@ impl Inner {
 
 /// Stamp a user's `last_login_at` (UTC Unix seconds). Uses a set-based update so it doesn't bump
 /// `updated_at` (a login isn't a content change) or re-run the row hook.
-async fn stamp_last_login(db: &DatabaseConnection, user_id: i32) {
-    let _ = user::Entity::update_many()
-        .col_expr(user::Column::LastLoginAt, sea_orm::sea_query::Expr::value(now_secs()))
-        .filter(user::Column::Id.eq(user_id))
-        .exec(db)
-        .await;
+/// Stamp `last_login_at`, and — when the login went through the second factor — the TOTP step it spent,
+/// so the same code can't be replayed. One statement for both: the replay guard lives on `auth_user`
+/// precisely so that recording it costs no extra round-trip, and so that
+/// [`clear_totp`] can reset it in the same write that removes the secret.
+async fn stamp_login(db: &DatabaseConnection, user_id: i32, totp_step: Option<i64>) {
+    let mut q = user::Entity::update_many()
+        .col_expr(user::Column::LastLoginAt, sea_orm::sea_query::Expr::value(now_secs()));
+    if let Some(step) = totp_step {
+        q = q.col_expr(user::Column::TotpLastStep, sea_orm::sea_query::Expr::value(step));
+    }
+    let _ = q.filter(user::Column::Id.eq(user_id)).exec(db).await;
 }
 
 /// Infallible extractor for the socket peer (real client IP on a direct connection); `None` when the
@@ -741,6 +792,7 @@ impl Auth {
                 profile_path: "/profile".into(),
                 secure_cookies: true,
                 ttl_secs: 7 * 24 * 3600,
+                idle_secs: 8 * 3600,
                 observer: None,
                 login_shell: Arc::new(default_login_shell),
                 profile_shell: Arc::new(default_profile_shell),
@@ -828,9 +880,29 @@ impl Auth {
         self
     }
 
-    /// Session lifetime in seconds (default 7 days).
+    /// The **absolute** session lifetime in seconds (default 7 days) — the deadline stamped once when
+    /// the session is created and never moved, so a session dies at that instant however actively it has
+    /// been used. It is also the session cookie's `Max-Age`. Pair it with
+    /// [`session_idle_secs`](Auth::session_idle_secs), which expires an *unused* session sooner.
     pub fn session_ttl_secs(mut self, secs: i64) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().ttl_secs = secs;
+        self
+    }
+
+    /// The **idle** session lifetime in seconds — how long a session survives without being used
+    /// (default `8 * 3600`, eight hours; `0` disables the idle clock and leaves only the absolute one).
+    ///
+    /// This is what limits the damage from a stolen cookie: an attacker who lifts one has until the
+    /// victim's session goes quiet, not the full week of
+    /// [`session_ttl_secs`](Auth::session_ttl_secs). The clock is `auth_session.last_seen_at`, refreshed
+    /// **lazily** — at most once a minute per session — so resolving an identity stays a pure read on
+    /// almost every request, which matters because a gated page resolves it once *per model* it renders.
+    ///
+    /// Both clocks apply: a session must be inside the absolute deadline **and** have been used within
+    /// the idle window. Set this above your longest plausible "reading a page" gap; setting it above
+    /// `session_ttl_secs` is legal but pointless, as the absolute deadline always wins.
+    pub fn session_idle_secs(mut self, secs: i64) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().idle_secs = secs.max(0);
         self
     }
 
@@ -927,14 +999,58 @@ impl Auth {
         self.inner.can_manage_others(who)
     }
 
+    /// Sign a user out **everywhere**: delete every session row they hold. Returns how many were
+    /// deleted. The next request on any of those cookies is anonymous — there is no revocation list to
+    /// consult and nothing to expire, which is the advantage of server-side sessions over a JWT.
+    ///
+    /// The built-in pages call this for you where it matters (a password change, a manager's reset).
+    /// Call it yourself when *your* code decides a user's sessions are void — you disabled the account,
+    /// an SSO group sync removed their access, or an operator hit a "force logout" button. Note that
+    /// deactivating an account (`is_active = false`) already denies every request at
+    /// [`identify`](Auth::identify), so this is about tidiness there rather than enforcement.
+    pub async fn revoke_sessions(&self, user_id: i32) -> u64 {
+        self.inner.revoke_sessions(user_id, None).await
+    }
+
+    /// As [`revoke_sessions`](Auth::revoke_sessions), but spares the session `keep` — "sign out my
+    /// *other* devices", the form that doesn't log the caller out mid-request. Pass the session cookie's
+    /// value ([`session_cookie_name`](Auth::session_cookie_name) tells you which cookie to read).
+    pub async fn revoke_other_sessions(&self, user_id: i32, keep: &str) -> u64 {
+        self.inner.revoke_sessions(user_id, Some(keep)).await
+    }
+
+    /// Housekeeping for **this** `Auth`'s configuration: delete dead sessions — on either clock, so
+    /// idle-expired rows go too — and expired lockout rows. Returns the total deleted.
+    ///
+    /// Prefer this over the free [`prune`] function, which knows only the absolute deadline (it takes no
+    /// `Auth`, so it can't see [`session_idle_secs`](Auth::session_idle_secs)). **Nothing here is
+    /// scheduled** — call it at startup and from your own periodic loop.
+    pub async fn prune(&self) -> Result<u64, DbErr> {
+        let now = now_secs();
+        let mut cond = sea_orm::Condition::any().add(session::Column::ExpiresAt.lt(now));
+        if self.inner.idle_secs > 0 {
+            cond = cond.add(session::Column::LastSeenAt.lt(now - self.inner.idle_secs));
+        }
+        let sessions =
+            session::Entity::delete_many().filter(cond).exec(&self.inner.db).await?.rows_affected;
+        let usernames = self.inner.usernames.prune().await?;
+        let ips = self.inner.ips.prune().await?;
+        Ok(sessions + usernames + ips)
+    }
+
     /// The auth pages, to merge into your router:
     /// - `GET/POST /login` and `GET/POST /login/totp` — password, then the TOTP second factor when the
     ///   user has 2FA enabled.
     /// - `GET /logout`.
     /// - `GET/POST /profile` — change your own password + manage your own 2FA.
     /// - `GET/POST /profile/totp` + `POST /profile/totp/disable` — enrol in / disable your own 2FA.
+    /// - `POST /profile/sessions/revoke` — sign out your *other* sessions.
     /// - `GET/POST /profile/{id}` — a manager resets another user's password.
     /// - `POST /profile/{id}/totp/disable` — a manager disables another user's 2FA.
+    ///
+    /// These paths are the module's, so don't also route them yourself — axum panics on an overlap at
+    /// merge time. Change where they live with [`login_path`](Auth::login_path)'s and
+    /// [`profile_path`](Auth::profile_path)'s configuration, or nest the whole thing under a prefix.
     pub fn routes(&self) -> Router {
         Router::new()
             .route("/login", get(login_form).post(login_submit))
@@ -943,6 +1059,7 @@ impl Auth {
             .route("/profile", get(profile_form).post(profile_submit))
             .route("/profile/totp", get(totp_setup_form).post(totp_setup_submit))
             .route("/profile/totp/disable", post(totp_self_disable))
+            .route("/profile/sessions/revoke", post(sessions_revoke))
             .route("/profile/{id}", get(manage_form).post(manage_submit))
             .route("/profile/{id}/totp/disable", post(totp_manage_disable))
             .with_state(self.inner.clone())
@@ -951,6 +1068,12 @@ impl Auth {
     /// The logged-in [`Identity`] for a request, resolved from its session cookie (session → user →
     /// groups, one DB round-trip), or `None` if anonymous / expired / inactive. This is the whole of
     /// authn: call it from a gate or a page handler; nothing is injected into the request.
+    ///
+    /// Takes only the headers and returns only an identity — **by design**, and worth preserving: a
+    /// gated page resolves the caller once per model it renders, so this has to stay cheap, and anything
+    /// that needed to set a cookie here would have to change every call site. The idle clock is refreshed
+    /// with a lazy DB write ([`session_idle_secs`](Auth::session_idle_secs)) precisely so that it doesn't;
+    /// the session **id** only ever changes inside a POST handler that already owns its response.
     pub async fn identify(&self, headers: &HeaderMap) -> Option<Identity> {
         let jar = CookieJar::from_headers(headers);
         let token = jar.get(&self.inner.cookie_name)?.value().to_string();
@@ -960,16 +1083,23 @@ impl Auth {
 
 // ===================== Internals =====================
 
+/// How stale `last_seen_at` must be before a read bothers to refresh it. Identity is resolved once per
+/// gated model, so a page rendering five tables resolves it five times; without this grace every one of
+/// those reads would become a write.
+const IDLE_REFRESH_GRACE: i64 = 60;
+
 async fn identity_from(inner: &Inner, token: &str) -> Option<Identity> {
     let session = session::Entity::find_by_id(token.to_string()).one(&inner.db).await.ok()??;
-    if session.expires_at < now_secs() || session.awaiting_totp {
-        return None; // expired, or password-verified but the TOTP second factor is still pending
+    if !inner.session_live(&session) || session.awaiting_totp {
+        return None; // expired (either clock), or the TOTP second factor is still pending
     }
     let user = user::Entity::find_by_id(session.user_id).one(&inner.db).await.ok()??;
     if !user.is_active {
         return None;
     }
     let groups = groups_of(&inner.db, user.id).await;
+    // The session was used: push the idle clock forward, but only once the last stamp has gone stale.
+    inner.touch_session(&session).await;
     Some(Identity { id: user.id.to_string(), username: user.username, groups })
 }
 
@@ -990,15 +1120,47 @@ async fn verify_credentials(inner: &Inner, username: &str, password: &str) -> Op
 /// ok, TOTP pending) — [`identity_from`] rejects such sessions until the code is confirmed.
 async fn create_session(inner: &Inner, user_id: i32, awaiting_totp: bool) -> Option<String> {
     let token = new_token();
+    let now = now_secs();
     session::ActiveModel {
         id: Set(token.clone()),
         user_id: Set(user_id),
-        expires_at: Set(now_secs() + inner.ttl_secs),
+        expires_at: Set(now + inner.ttl_secs),
+        last_seen_at: Set(now),
         awaiting_totp: Set(awaiting_totp),
     }
     .insert(&inner.db)
     .await
     .ok()?;
+    Some(token)
+}
+
+/// Give a user exactly **one** live session, freshly minted: everything else they hold is deleted.
+/// Returns the new token, to be written into the caller's cookie.
+///
+/// This is what a password change should do, and today's most useful reason to change a password is
+/// "someone else is in my account". Rotating only the caller's own id would leave the intruder's
+/// session untouched; deleting every session including the caller's own would sign them out of the page
+/// they are reading. So: mint one, drop the rest.
+async fn resession(inner: &Inner, user_id: i32) -> Option<String> {
+    let token = create_session(inner, user_id, false).await?;
+    inner.revoke_sessions(user_id, Some(&token)).await;
+    Some(token)
+}
+
+/// Replace a session with a fresh id, carrying its user across and clearing `awaiting_totp` — the
+/// **privilege-change rotation**. Returns the new token.
+///
+/// Rotating here is what stops a **planted half-authenticated cookie** from being elevated. Password
+/// login can't be fixated (it always mints a new row), but confirming the second factor used to flip
+/// `awaiting_totp` on the *same* id: an attacker who knew the password could take a pending session,
+/// write its cookie into the victim's browser (cookie-tossing from a sibling host, or an XSS — neither
+/// `Secure` nor `SameSite` prevents that), point them at `/login/totp`, and inherit a fully
+/// authenticated session the moment the victim typed their own code. A new id leaves the attacker
+/// holding a token that was deleted.
+async fn rotate_session(inner: &Inner, old: session::Model) -> Option<String> {
+    let token = create_session(inner, old.user_id, false).await?;
+    // Best-effort: a surviving old row is half-authenticated, so it grants nothing either way.
+    let _ = session::Entity::delete_by_id(old.id).exec(&inner.db).await;
     Some(token)
 }
 
@@ -1064,8 +1226,9 @@ async fn login_submit(
     let dest = if needs_totp {
         "/login/totp"
     } else {
-        // Login is complete (no 2FA) — stamp last_login now (the TOTP path stamps on confirm).
-        stamp_last_login(&inner.db, user.id).await;
+        // Login is complete (no 2FA) — stamp last_login now (the TOTP path stamps on confirm, with the
+        // step it spent).
+        stamp_login(&inner.db, user.id, None).await;
         "/"
     };
     (jar, Redirect::to(dest)).into_response()
@@ -1126,7 +1289,12 @@ async fn login_totp_submit(
             Html((inner.login_shell)(&totp_login_html(Some(&lockout_message(retry)), &token))),
         );
     }
-    let ok = user.totp_key().is_some_and(|s| totp::verify(s, &form.code));
+    // Two conditions, one answer: the code must be valid *and* must not have been spent already. A
+    // replayed code is a failed check as far as the caller (and the lockout) is concerned — saying
+    // "that code was already used" would tell an attacker holding a captured code that it was the right
+    // one, which is precisely what they don't know yet.
+    let step = user.totp_key().and_then(|s| totp::verify_step(s, &form.code));
+    let ok = step.is_some_and(|step| user.totp_step_ok(step));
     if !ok {
         inner.record_failure(&user.username, &headers, peer).await;
         let (token, jar) = csrf_token(&inner, &headers, jar);
@@ -1137,14 +1305,17 @@ async fn login_totp_submit(
         )
             .into_response();
     }
-    let mut am: session::ActiveModel = session.into();
-    am.awaiting_totp = Set(false);
-    let _ = am.update(&inner.db).await;
-    stamp_last_login(&inner.db, user.id).await; // second factor confirmed → login complete
+    // The second factor is confirmed, so the session gains full privilege — which means a **new id**
+    // (see `rotate_session`), a new CSRF token, and the spent step recorded so this code can't be used
+    // again inside its ±1-step window.
+    let Some(token) = rotate_session(&inner, session).await else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
+    };
+    stamp_login(&inner.db, user.id, step).await;
     inner.usernames.clear(&user.username).await;
-    // The session just gained full privilege — rotate the CSRF token with it.
     let (_, csrf_cookie) = inner.csrf().issue();
-    (jar.add(csrf_cookie), Redirect::to("/")).into_response()
+    let jar = jar.add(session_cookie(&inner, token)).add(csrf_cookie);
+    (jar, Redirect::to("/")).into_response()
 }
 
 /// Resolve the half-authenticated session (password ok, TOTP pending) and its user from the cookie.
@@ -1226,6 +1397,7 @@ async fn profile_submit(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
     MaybePeer(peer): MaybePeer, // for the audit record, not for limiting
+    jar: CookieJar,
     Form(form): Form<ChangeForm>,
 ) -> Response {
     if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
@@ -1268,19 +1440,34 @@ async fn profile_submit(
         return (StatusCode::INTERNAL_SERVER_ERROR, Html((inner.profile_shell)(&frag, &who)))
             .into_response();
     }
+    // The password is changed, so every session it ever unlocked is void: mint one fresh session for
+    // the caller and delete the rest. Without this, a password changed *because* someone else got in
+    // leaves that someone else logged in — the cookie outlives the credential that produced it.
+    // The rendered form must carry whichever token the response's cookie ends up holding, or the next
+    // post fails its own double-submit check.
+    let (msg, jar, csrf) = match resession(&inner, user.id).await {
+        Some(token) => {
+            let (csrf, csrf_cookie) = inner.csrf().issue(); // new session ⇒ new CSRF token
+            let jar = jar.add(session_cookie(&inner, token)).add(csrf_cookie);
+            ("Your password has been changed. Any other sessions have been signed out.", jar, csrf)
+        }
+        // The password *did* change, so don't claim otherwise; the caller's session simply wasn't
+        // rotated. Their old cookie still works, which is no worse than before.
+        None => ("Your password has been changed.", jar, csrf),
+    };
     inner
         .notify(
             "auth-profile",
             "auth_user",
             Some(who.id.clone()),
-            serde_json::json!({ "password_changed": true }),
+            serde_json::json!({ "password_changed": true, "sessions_revoked": true }),
             &headers,
             peer,
         )
         .await;
-    let frag = change_form_html(&who, totp_on, None, Some("Your password has been changed."), &csrf);
+    let frag = change_form_html(&who, totp_on, None, Some(msg), &csrf);
     let frag = inner.with_profile_extra(frag, &who).await;
-    Html((inner.profile_shell)(&frag, &who)).into_response()
+    (jar, Html((inner.profile_shell)(&frag, &who))).into_response()
 }
 
 /// `GET /profile/{id}` — a manager's reset form for another user (self → own page; not a manager →
@@ -1304,8 +1491,12 @@ async fn manage_form(
         return (StatusCode::NOT_FOUND, "No such user").into_response();
     };
     let (token, jar) = csrf_token(&inner, &headers, jar);
-    let frag =
-        reset_form_html(&id, &target.username, target.has_totp(), None, None, &token);
+    // Don't offer a reset form for an account whose password lives at the identity provider — the POST
+    // refuses it, so a form here would only ever produce an error.
+    let frag = match target.sso_key() {
+        Some(provider) => sso_managed_html(&target.username, provider),
+        None => reset_form_html(&id, &target.username, target.has_totp(), None, None, &token),
+    };
     (jar, Html((inner.profile_shell)(&frag, &who))).into_response()
 }
 
@@ -1335,6 +1526,19 @@ async fn manage_submit(
     };
     let totp_on = target.has_totp();
 
+    // An SSO account has no local password to set, so refuse rather than store a hash that can never
+    // authenticate — the same rule the self-service page applies to itself. Writing one was never a
+    // bypass (`verify_credentials` refuses any `sso_provider` account), but it left a dead credential in
+    // the row and read, to anyone looking at the audit trail, as if the account now had a password.
+    if let Some(provider) = target.sso_key() {
+        let msg = format!(
+            "{} signs in through {provider} (single sign-on) — its password is managed there, not here.",
+            target.username
+        );
+        let frag = reset_form_html(&id, &target.username, totp_on, Some(&msg), None, &csrf);
+        return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
+    }
+
     if let Some(msg) = password_pair_error(&form.new_password, &form.confirm_password) {
         let frag = reset_form_html(&id, &target.username, totp_on, Some(msg), None, &csrf);
         return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
@@ -1351,17 +1555,30 @@ async fn manage_submit(
         return (StatusCode::INTERNAL_SERVER_ERROR, Html((inner.profile_shell)(&frag, &who)))
             .into_response();
     }
+    // A manager resets a password for one of two reasons — the user is locked out, or the account is
+    // suspected compromised. The second reason makes signing the target out everywhere mandatory: none
+    // of *their* sessions belongs to the credential that exists now. Unlike the self-service path there
+    // is no session to spare, so all of them go.
+    let revoked = inner.revoke_sessions(target.id, None).await;
     inner
         .notify(
             "auth-admin",
             "auth_user",
             Some(id.clone()),
-            serde_json::json!({ "password_reset_by_manager": true, "by": who.username }),
+            serde_json::json!({
+                "password_reset_by_manager": true,
+                "by": who.username,
+                "sessions_revoked": revoked,
+            }),
             &headers,
             peer,
         )
         .await;
-    let msg = format!("Password reset for {}.", target.username);
+    let msg = match revoked {
+        0 => format!("Password reset for {}.", target.username),
+        1 => format!("Password reset for {} and 1 session signed out.", target.username),
+        n => format!("Password reset for {} and {n} sessions signed out.", target.username),
+    };
     let frag = reset_form_html(&id, &target.username, totp_on, None, Some(&msg), &csrf);
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
@@ -1419,7 +1636,7 @@ async fn totp_setup_submit(
     };
     // Not lockout-limited: enrolling is authenticated, and the code being guessed is the caller's own
     // pending secret — there is nobody else's account to reach by guessing it.
-    if !totp::verify(&pending, &form.code) {
+    let Some(step) = totp::verify_step(&pending, &form.code) else {
         return render_totp_setup(
             &inner,
             &who,
@@ -1427,15 +1644,62 @@ async fn totp_setup_submit(
             Some("That code didn't match. Try again."),
             &csrf,
         );
-    }
+    };
     let mut am: user::ActiveModel = user.into();
     am.totp_secret = Set(Some(pending));
     am.totp_pending = Set(None);
+    // The confirming code is spent too — otherwise the code just typed here would still work at
+    // /login/totp for the rest of its window, which is the same replay by a different door.
+    am.totp_last_step = Set(Some(step));
     if am.update(&inner.db).await.is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not enable 2FA").into_response();
     }
     let frag =
         change_form_html(&who, true, None, Some("Two-factor authentication is now enabled."), &csrf);
+    Html((inner.profile_shell)(&frag, &who)).into_response()
+}
+
+/// `POST /profile/sessions/revoke` — the caller signs out every session **except this one**.
+async fn sessions_revoke(
+    State(inner): State<Arc<Inner>>,
+    headers: HeaderMap,
+    MaybePeer(peer): MaybePeer,
+    Form(form): Form<CsrfOnlyForm>,
+) -> Response {
+    if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
+        return csrf_rejected(&inner);
+    }
+    let csrf = inner.csrf().token(&headers).unwrap_or_default();
+    let Some(who) = identity_of(&inner, &headers).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let Some(user) = current_user(&inner, &who).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    // Spare the caller's own session — identified by the cookie they just used, so a race with their own
+    // logout can at worst spare a row that's about to be deleted anyway.
+    let current = CookieJar::from_headers(&headers)
+        .get(&inner.cookie_name)
+        .map(|c| c.value().to_string())
+        .unwrap_or_default();
+    let revoked = inner.revoke_sessions(user.id, Some(&current)).await;
+    inner
+        .notify(
+            "auth-profile",
+            "auth_user",
+            Some(who.id.clone()),
+            serde_json::json!({ "sessions_revoked": revoked }),
+            &headers,
+            peer,
+        )
+        .await;
+    let msg = match revoked {
+        0 => "This is your only session — nothing else to sign out.".to_string(),
+        1 => "1 other session signed out.".to_string(),
+        n => format!("{n} other sessions signed out."),
+    };
+    let frag = change_form_html(&who, user.has_totp(), None, Some(&msg), &csrf);
+    let frag = inner.with_profile_extra(frag, &who).await;
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
@@ -1498,11 +1762,14 @@ async fn current_user(inner: &Inner, who: &Identity) -> Option<user::Model> {
     user_by_id(&inner.db, id).await
 }
 
-/// Clear both the active and pending TOTP secrets on a user (best-effort).
+/// Clear both the active and pending TOTP secrets on a user, and the replay guard with them
+/// (best-effort). The step **must** go in the same write: leaving a stale ceiling behind would silently
+/// reject the first codes of a later re-enrolment, for as long as it took the clock to catch up.
 async fn clear_totp(inner: &Inner, user: user::Model) {
     let mut am: user::ActiveModel = user.into();
     am.totp_secret = Set(None);
     am.totp_pending = Set(None);
+    am.totp_last_step = Set(None);
     let _ = am.update(&inner.db).await;
 }
 
@@ -1670,6 +1937,7 @@ fn change_form_html(
 ) -> String {
     let alert = alert_html(error, success);
     let twofa = twofa_self_section(totp_on, csrf);
+    let sessions = sessions_self_section(csrf);
     let csrf_input = crate::csrf::Csrf::hidden_input(csrf);
     format!(
         r#"<h1 class="h5 mb-3">Change your password</h1>
@@ -1692,8 +1960,26 @@ fn change_form_html(
   <button class="btn btn-primary" type="submit">Change password</button>
 </form>
 <hr class="my-4">
-{twofa}"#,
+{twofa}
+<hr class="my-4">
+{sessions}"#,
         user = esc(&who.username),
+    )
+}
+
+/// The self sessions section: sign out everywhere else. Deliberately *other* sessions only — a button
+/// that logged you out of the page you just clicked it on would be useless, and the honest case for it
+/// ("I left myself logged in on a shared machine") wants exactly this shape.
+fn sessions_self_section(csrf: &str) -> String {
+    format!(
+        r#"<h2 class="h6">Other sessions</h2>
+<p class="text-muted small mb-2">Signed in somewhere you'd rather not be — a shared or lost device? Sign
+out everywhere except here.</p>
+<form method="post" action="/profile/sessions/revoke">
+  {csrf_input}
+  <button class="btn btn-outline-secondary btn-sm" type="submit">Sign out other sessions</button>
+</form>"#,
+        csrf_input = crate::csrf::Csrf::hidden_input(csrf),
     )
 }
 
@@ -1715,6 +2001,19 @@ fn twofa_self_section(on: bool, csrf: &str) -> String {
 <a class="btn btn-outline-primary btn-sm" href="/profile/totp">Set up 2FA</a>"#
             .to_string()
     }
+}
+
+/// The **manager's** view of an SSO account: a notice in place of the reset form, since neither the
+/// password nor the second factor is ours to set (`sso_profile_html` is the self view of the same fact).
+fn sso_managed_html(username: &str, provider: &str) -> String {
+    format!(
+        r#"<h1 class="h5 mb-3">Manage {user}</h1>
+<div class="alert alert-info mb-0">This account signs in through <strong>{prov}</strong> (single
+sign-on). Its password and two-factor settings are managed by the identity provider — there is nothing to
+reset here. Group memberships come from the SSO mapping and are reconciled at each login.</div>"#,
+        user = esc(username),
+        prov = esc(provider),
+    )
 }
 
 /// The profile fragment for an SSO account: a read-only notice — password, 2FA, and groups are all

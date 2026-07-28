@@ -4,6 +4,9 @@
 //! TOTP 2FA columns (nullable, both hold a base32 secret): `totp_secret` is the **active** secret —
 //! when set, a valid code is required at login; `totp_pending` is a secret mid-setup, not yet
 //! confirmed. Both are secrets and must never be exposed in reads (mark them `hidden` on the model).
+//! `totp_last_step` is the **replay guard** — the last accepted 30-second step, which a later code must
+//! exceed (RFC 6238 §5.2). Not a secret (TOTP's security doesn't rest on step secrecy, and it is a
+//! coarser version of `last_login_at`), but operator noise worth hiding all the same.
 //! As with `sso_provider`, a **blank** secret counts as *no* secret: a `Some("")` written by an admin
 //! form (or a CSV import) would otherwise demand a login code that can never verify, locking the
 //! account out for good. Ask [`Model::totp_key`] / [`Model::has_totp`] / [`Model::pending_totp_key`].
@@ -28,6 +31,11 @@ pub struct Model {
     pub is_active: bool,
     pub totp_secret: Option<String>,
     pub totp_pending: Option<String>,
+    /// The last TOTP step accepted for this account (Unix seconds / 30), or `None` if 2FA has never
+    /// been used. A submitted code must match a step **strictly greater** than this one, so a code
+    /// cannot be used twice inside its ±1-step validity window. Cleared whenever 2FA is turned off, so
+    /// a re-enrolment never inherits a stale ceiling. See [`Model::totp_step_ok`].
+    pub totp_last_step: Option<i64>,
     pub sso_provider: Option<String>,
     /// Row lifecycle timestamps — Unix seconds, **UTC**. `created_at`/`updated_at` are maintained by
     /// the `before_save` hook; `last_login_at` is stamped by the login flow (`None` until first login).
@@ -65,6 +73,13 @@ impl Model {
     /// away, so a blank `totp_pending` isn't mistaken for a half-finished setup).
     pub fn pending_totp_key(&self) -> Option<&str> {
         self.totp_pending.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
+
+    /// Whether a code matching `step` may still be accepted: the replay guard (RFC 6238 §5.2). A step
+    /// at or below [`totp_last_step`](Model::totp_last_step) has already been spent, so the same code
+    /// (or an older one still inside the skew window) is refused; a never-used account accepts anything.
+    pub fn totp_step_ok(&self, step: i64) -> bool {
+        self.totp_last_step.is_none_or(|last| step > last)
     }
 }
 

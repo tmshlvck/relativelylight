@@ -46,10 +46,37 @@ already using `auth`.
   break-glass recovery. (`a4f14a7`)
 - **An empty string submitted for a nullable column is stored as `NULL`**, not `""` (text / uuid / date
   / datetime; `NOT NULL` columns keep `""`). Opt out per field with `blank_is_null = false`. (`8419948`)
+- **Two new columns on existing auth tables.** `auth_session.last_seen_at` (the idle clock) and
+  `auth_user.totp_last_step` (the TOTP replay guard). `auth::migrate` only ever *creates* missing tables,
+  so an existing database needs the `ALTER TABLE`s itself:
+  ```sql
+  ALTER TABLE auth_session ADD COLUMN last_seen_at BIGINT NOT NULL DEFAULT 0;
+  ALTER TABLE auth_user    ADD COLUMN totp_last_step BIGINT NULL;
+  ```
+  With `DEFAULT 0` every existing session reads as idle-expired and everyone signs in once more — the
+  safe direction. Backfill `last_seen_at` to "now" instead if you'd rather not. If you register
+  `auth_user` in an admin panel, mark the new column `hidden` (see `examples/adminpanel`).
+- **Sessions now expire when idle**, after 8 hours by default, *inside* the unchanged 7-day absolute
+  lifetime. `Auth::session_ttl_secs` keeps its exact meaning (the absolute deadline, and the cookie's
+  `Max-Age`); the new clock is `Auth::session_idle_secs`, and `session_idle_secs(0)` restores the old
+  behaviour exactly. Both are enforced by `Auth::identify`.
+- **Completing the TOTP second factor changes the session id.** `POST /login/totp` now issues a new
+  session and deletes the half-authenticated one instead of promoting it in place. A browser follows the
+  `Set-Cookie` and notices nothing; a **script that holds the cookie value across the 2FA step** must
+  re-read it from the response.
+- **Changing a password signs out that user's other sessions**, and a manager's reset at
+  `POST /profile/{id}` signs out *all* of the target's. Previously a stolen cookie survived the password
+  change meant to evict it. A script that keeps a session across its own password change must re-read
+  the cookie (`POST /profile` returns a replacement).
+- **A TOTP code can only be used once** (RFC 6238 §5.2). Codes were valid for their whole ±1-step window,
+  about 90 seconds, however many times they were presented. A replayed code is now refused exactly like a
+  wrong one — and, deliberately, is *reported* like one, so a captured code isn't confirmed as genuine.
+  Test suites that reuse one code for two logins in the same 30-second step will need a fresh code.
 - **Source-level:** `MetaField` gained public fields (`nullable`, `blank_is_null`) and
   `crud::ColumnMeta::Field` gained `nullable` — struct-literal construction and exhaustive matches need
   updating, which matters if you implement the `Accessor` seam yourself. `crud::Error` gained a `Csrf`
-  variant.
+  variant. `session::Model` and `user::Model` each gained a public field (above), so struct-literal
+  construction of those needs updating too.
 
 ### Added
 
@@ -67,16 +94,27 @@ already using `auth`.
   app makes *itself* (API tokens, HTTP Basic on a machine endpoint). One account has one budget across
   every surface, and one row delete frees all of them. Worked example: `examples/auth`'s
   `GET /api/whoami`.
-- **`auth::prune(&db, lockout)`** — one housekeeping call for expired sessions *and* expired lockout
-  rows, scheduled by the app (both examples run it hourly).
-- **`relativelylight::net`** — client-address resolution, the first piece of the real-ip work AUTH.md §4
-  promised: `net::client_ip(trust_proxy, headers, peer)` picks the socket peer or the left-most
-  `X-Forwarded-For` / `X-Real-IP` hop and collapses IPv4-mapped addresses, so one client is one key
+- **`Auth::prune()`** — one housekeeping call for dead sessions (**both** clocks) *and* expired lockout
+  rows, scheduled by the app (both examples run it hourly). The free `auth::prune(&db, lockout)` still
+  works but sees only the absolute session deadline, since it has no `Auth` to read `session_idle_secs`
+  from; prefer the method.
+- **`Auth::session_idle_secs(secs)`** — the idle session clock (default 8 hours, `0` to disable), backed
+  by `auth_session.last_seen_at` and refreshed lazily (at most once a minute per session, so resolving an
+  identity stays a read on almost every request). AUTH.md §5f.
+- **`Auth::revoke_sessions(user_id)` / `Auth::revoke_other_sessions(user_id, keep)`** — sign a user out
+  everywhere, or everywhere but here. Call them when *your* code decides a user's sessions are void (an
+  account you disabled, a group sync that removed access, an operator's force-logout button).
+- **"Sign out other sessions" on `/profile`** (`POST /profile/sessions/revoke`) — the self-service form of
+  the above, CSRF-checked like every other unsafe auth route. If your app already routes that path,
+  rename it: axum panics on an overlap when `auth.routes()` is merged.
+- **`relativelylight::net`** — client-address resolution, the real-ip work AUTH.md §4
+  promised: `net::client_ip(trust_proxy, headers, peer)` picks the socket peer or the **right-most**
+  `X-Forwarded-For` hop (falling back to `X-Real-IP`) and collapses IPv4-mapped addresses, so one client is one key
   across your logs, audit rows and limits. `Lockout::trust_proxy` feeds it for the login routes, and
   `Auth::client_ip(closure)` overrides it for stranger chains (several hops, a CDN header). The module
   also carries the CIDR helpers that go with an address — `parse_nets`, `in_nets`, `canonical_net` —
   which match across both families and the IPv4-mapped form.
-- **`Lockout::ip_allow`** — CIDRs that are never counted and never locked out (an office range, a
+- **`Lockout::ip_whitelist`** — CIDRs that are never counted and never locked out (an office range, a
   monitoring probe, a NAT a fleet shares), on every surface at once. No username equivalent, on
   purpose: an account that can never lock is an account that can be guessed at forever.
 - **`auth::reset_admin_access`** — break-glass admin recovery for a `--set-admin-pw`-style flag: sets
@@ -120,7 +158,19 @@ already using `auth`.
   their own address and thereby pass an IP admission list, sit inside a lockout whitelist, dodge a
   lockout by rotating the value, or file audit rows under someone else's address. Deployments whose
   proxy *replaces* the header are unaffected (one entry, same answer). If you have two trusted hops, the
-  right-most is now the inner proxy — that case needs the trusted-proxy CIDR list (AUTH.md §4).
+  right-most is the inner proxy — override the resolution with `Auth::client_ip` there. A trusted-proxy
+  CIDR list was considered and rejected; `trust_proxy: bool` is the permanent shape (AUTH.md §4).
+
+- **Session fixation at the second factor is closed.** `POST /login/totp` used to elevate the same session
+  id from half- to fully-authenticated. An attacker who knew the password could obtain a pending session,
+  plant its cookie in the victim's browser (cookie-tossing from a sibling host, or an XSS — `Secure` and
+  `SameSite` don't prevent either), send them to `/login/totp`, and inherit a full session as soon as the
+  victim entered their own code. The id is now rotated and the old row deleted.
+
+- **A password change now evicts the sessions it was meant to evict**, and a TOTP code can no longer be
+  replayed within its ~90-second validity window. Both are documented in AUTH.md §5f / §5a — including
+  what the replay guard does *not* buy: real-time phishing proxies relay a code once, so they are
+  unaffected, and only a phishing-resistant factor (WebAuthn) addresses them.
 
 - CSRF protection and the login lockout close the two gaps AUTH.md had listed as open. Documented
   limits: per-source-IP counting on *our* login routes only happens once the app supplies a

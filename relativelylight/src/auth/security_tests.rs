@@ -263,11 +263,25 @@ impl Fx {
 }
 
 /// Insert a session row directly — the only way to forge the states a client can't reach through the
-/// login flow (expired, half-authenticated, orphaned).
+/// login flow (expired, half-authenticated, orphaned). `last_seen_at` is stamped *now*, so the idle
+/// clock is satisfied and the row's liveness turns purely on `expires_at`;
+/// [`create_idle_session_row`] is the variant for testing the other clock.
 async fn create_session_row(
     db: &DatabaseConnection,
     user_id: i32,
     expires_at: i64,
+    awaiting_totp: bool,
+) -> String {
+    create_session_row_seen(db, user_id, expires_at, now_secs(), awaiting_totp).await
+}
+
+/// As [`create_session_row`], but with an explicit `last_seen_at` — for driving the **idle** timeout
+/// independently of the absolute one.
+async fn create_session_row_seen(
+    db: &DatabaseConnection,
+    user_id: i32,
+    expires_at: i64,
+    last_seen_at: i64,
     awaiting_totp: bool,
 ) -> String {
     let token = new_token();
@@ -275,6 +289,7 @@ async fn create_session_row(
         id: Set(token.clone()),
         user_id: Set(user_id),
         expires_at: Set(expires_at),
+        last_seen_at: Set(last_seen_at),
         awaiting_totp: Set(awaiting_totp),
     }
     .insert(db)
@@ -360,6 +375,79 @@ async fn expired_session_does_not_identify() {
     // The boundary: expiry in the future still works, so the check isn't rejecting everything.
     let live = create_session_row(&fx.db, id, now_secs() + 60, false).await;
     assert!(fx.identify_token(&live).await.is_some());
+}
+
+#[tokio::test]
+async fn an_idle_session_does_not_identify_even_inside_its_absolute_deadline() {
+    // The two clocks are independent, and this is the one that limits a stolen cookie: the absolute
+    // deadline is a week away, but nobody has used the session for longer than the idle window.
+    let fx = Fx::with(|a| a.session_idle_secs(600)).await;
+    let id = fx.user("alice").await;
+    let far = now_secs() + 7 * 24 * 3600;
+
+    let idle = create_session_row_seen(&fx.db, id, far, now_secs() - 601, false).await;
+    assert!(fx.identify_token(&idle).await.is_none(), "past the idle window: must not authenticate");
+    // Controls: just inside the window still works, and so does the same row once it's been touched.
+    let fresh = create_session_row_seen(&fx.db, id, far, now_secs() - 599, false).await;
+    assert!(fx.identify_token(&fresh).await.is_some(), "inside the idle window");
+
+    // And the absolute deadline still wins over a busy session — a session used a second ago but past
+    // its expiry is dead, or the absolute cap would be unenforceable.
+    let expired = create_session_row_seen(&fx.db, id, now_secs() - 1, now_secs(), false).await;
+    assert!(fx.identify_token(&expired).await.is_none(), "absolute expiry beats a fresh last_seen");
+}
+
+#[tokio::test]
+async fn using_a_session_pushes_the_idle_clock_forward() {
+    // Otherwise an idle timeout would log out an actively working user at a fixed interval.
+    let fx = Fx::with(|a| a.session_idle_secs(600)).await;
+    let id = fx.user("alice").await;
+    // Stale enough to be refreshed (past IDLE_REFRESH_GRACE) but still inside the idle window.
+    let stale_stamp = now_secs() - 120;
+    let token = create_session_row_seen(&fx.db, id, now_secs() + 3600, stale_stamp, false).await;
+
+    assert!(fx.identify_token(&token).await.is_some(), "still live");
+    let seen = fx.session_row(&token).await.unwrap().last_seen_at;
+    assert!(seen > stale_stamp, "last_seen_at must advance: {seen} vs {stale_stamp}");
+
+    // But a *recent* stamp is left alone — identity is resolved once per gated model, so refreshing on
+    // every read would turn one page render into several writes.
+    let recent = now_secs() - 1;
+    let token = create_session_row_seen(&fx.db, id, now_secs() + 3600, recent, false).await;
+    assert!(fx.identify_token(&token).await.is_some());
+    assert_eq!(
+        fx.session_row(&token).await.unwrap().last_seen_at,
+        recent,
+        "a fresh stamp must not be rewritten"
+    );
+}
+
+#[tokio::test]
+async fn the_idle_clock_is_off_when_it_is_configured_off() {
+    // `session_idle_secs(0)` must be exactly the old behaviour: only the absolute deadline applies.
+    let fx = Fx::with(|a| a.session_idle_secs(0)).await;
+    let id = fx.user("alice").await;
+    let ancient = create_session_row_seen(&fx.db, id, now_secs() + 3600, 0, false).await;
+    assert!(
+        fx.identify_token(&ancient).await.is_some(),
+        "with no idle clock, an untouched session stays valid to its absolute deadline"
+    );
+}
+
+#[tokio::test]
+async fn prune_collects_idle_dead_sessions_and_spares_live_ones() {
+    let fx = Fx::with(|a| a.session_idle_secs(600)).await;
+    let id = fx.user("alice").await;
+    let far = now_secs() + 7 * 24 * 3600;
+    let idle = create_session_row_seen(&fx.db, id, far, now_secs() - 601, false).await;
+    let live = create_session_row_seen(&fx.db, id, far, now_secs(), false).await;
+    let expired = create_session_row(&fx.db, id, now_secs() - 1, false).await;
+
+    fx.auth.prune().await.expect("prune");
+
+    assert!(fx.session_row(&idle).await.is_none(), "idle-dead row collected");
+    assert!(fx.session_row(&expired).await.is_none(), "absolutely-expired row collected");
+    assert!(fx.session_row(&live).await.is_some(), "a live session must survive pruning");
 }
 
 #[tokio::test]
@@ -570,19 +658,120 @@ async fn totp_step_rejects_a_wrong_or_foreign_code() {
 
 #[tokio::test]
 async fn totp_step_completes_the_session_on_the_right_code() {
-    // The control for the two tests above: the same flow with the correct code does log in.
+    // The control for the two tests above: the same flow with the correct code does log in — and the
+    // session it lands on is a **new** one (see the rotation test below).
     let fx = Fx::new().await;
     fx.user("alice").await;
     let secret = fx.enable_totp("alice").await;
 
     let res = fx.post("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
-    let token = res.session_token(fx.auth.session_cookie_name()).unwrap();
+    let pending = res.session_token(fx.auth.session_cookie_name()).unwrap();
     let res = fx
-        .post("/login/totp", &form(&[("code", &totp::current_code(&secret))]), Some(&fx.cookie(&token)))
+        .post(
+            "/login/totp",
+            &form(&[("code", &totp::current_code(&secret))]),
+            Some(&fx.cookie(&pending)),
+        )
         .await;
     res.assert_redirect("/");
+    let token = res.session_token(fx.auth.session_cookie_name()).expect("a rotated session cookie");
     assert!(!fx.session_row(&token).await.unwrap().awaiting_totp);
     assert_eq!(fx.identify_token(&token).await.map(|w| w.username), Some("alice".into()));
+}
+
+#[tokio::test]
+async fn completing_the_second_factor_rotates_the_session_id() {
+    // Session fixation at the 2FA step. Password login can't be fixated (it always mints a fresh row),
+    // but confirming the second factor used to elevate the *same* id — so an attacker who knew the
+    // password could take a half-authenticated token, plant its cookie in the victim's browser, send
+    // them to /login/totp, and inherit a full session the moment the victim typed their own code.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let secret = fx.enable_totp("alice").await;
+
+    // The attacker's half-authenticated session, obtained with the stolen password.
+    let res = fx.post("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
+    let planted = res.session_token(fx.auth.session_cookie_name()).unwrap();
+    assert!(fx.session_row(&planted).await.unwrap().awaiting_totp, "half-authenticated as set up");
+
+    // The victim, holding that planted cookie, completes their own second factor.
+    let res = fx
+        .post(
+            "/login/totp",
+            &form(&[("code", &totp::current_code(&secret))]),
+            Some(&fx.cookie(&planted)),
+        )
+        .await;
+    res.assert_redirect("/");
+
+    // The planted token is gone, not elevated — the attacker's copy authenticates nothing.
+    let issued = res.session_token(fx.auth.session_cookie_name()).expect("a new session cookie");
+    assert_ne!(issued, planted, "the session id must change on privilege gain");
+    assert!(fx.session_row(&planted).await.is_none(), "the planted row must be deleted");
+    assert!(fx.identify_token(&planted).await.is_none(), "the planted token must be dead");
+    // And the victim is properly logged in on the new one (so the negative isn't vacuous).
+    assert_eq!(fx.identify_token(&issued).await.map(|w| w.username), Some("alice".into()));
+}
+
+#[tokio::test]
+async fn a_totp_code_cannot_be_used_twice() {
+    // The replay guard (RFC 6238 §5.2). A code stays valid for ±1 step — about 90 seconds — so without
+    // this, anyone who observes a code the victim actually used (a shoulder-surf, a screen share, a code
+    // read out on a support call) and who also has the password can log in on it before it ages out.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let secret = fx.enable_totp("alice").await;
+    let code = totp::current_code(&secret);
+
+    // First use: accepted, and the spent step is recorded on the account.
+    let res = fx.post("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
+    let pending = res.session_token(fx.auth.session_cookie_name()).unwrap();
+    let res =
+        fx.post("/login/totp", &form(&[("code", &code)]), Some(&fx.cookie(&pending))).await;
+    res.assert_redirect("/");
+    let spent = fx.row("alice").await.totp_last_step.expect("the accepted step is recorded");
+
+    // Second use of the *same* code, on a fresh half-authenticated session: refused, and refused with
+    // the same wording as a wrong code — "already used" would confirm to a captor that they hold a
+    // genuine code.
+    let res = fx.post("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
+    let replay = res.session_token(fx.auth.session_cookie_name()).unwrap();
+    let res = fx.post("/login/totp", &form(&[("code", &code)]), Some(&fx.cookie(&replay))).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED, "a replayed code must be refused");
+    assert!(res.body.contains("Invalid code"), "and must not admit the code was real: {}", res.body);
+    assert!(
+        fx.session_row(&replay).await.unwrap().awaiting_totp,
+        "the replaying session stays half-authenticated"
+    );
+    assert!(fx.identify_token(&replay).await.is_none(), "so it grants nothing");
+    assert_eq!(fx.row("alice").await.totp_last_step, Some(spent), "the guard didn't move");
+}
+
+#[tokio::test]
+async fn disabling_2fa_clears_the_replay_guard() {
+    // A stale step would outlive the secret and silently reject the first codes of a re-enrolment, for
+    // as long as it took the clock to pass the old ceiling.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let secret = fx.enable_totp("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+
+    // Spend a step through a real login so the guard is genuinely set.
+    let res = fx.post("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
+    let pending = res.session_token(fx.auth.session_cookie_name()).unwrap();
+    fx.post(
+        "/login/totp",
+        &form(&[("code", &totp::current_code(&secret))]),
+        Some(&fx.cookie(&pending)),
+    )
+    .await;
+    assert!(fx.row("alice").await.totp_last_step.is_some(), "guard set by the login");
+
+    let res = fx.post("/profile/totp/disable", &form(&[]), Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    let row = fx.row("alice").await;
+    assert!(row.totp_secret.is_none(), "2FA off");
+    assert!(row.totp_last_step.is_none(), "and the replay guard cleared with it");
 }
 
 #[tokio::test]
@@ -756,6 +945,97 @@ async fn password_change_rejects_an_empty_or_mismatched_new_password() {
     assert_eq!(res.status, StatusCode::OK);
     assert!(fx.password_works("alice", OTHER_PW).await);
     assert!(!fx.password_works("alice", PW).await, "the old password must stop working");
+}
+
+#[tokio::test]
+async fn changing_your_password_signs_out_every_other_session() {
+    // The most common reason to change a password is "I think someone else is in my account", and a
+    // cookie that outlives the credential that produced it defeats exactly that. So: the other sessions
+    // die, and the caller's own id is rotated (their old cookie was one of the ones that might be copied).
+    let fx = Fx::new().await;
+    let id = fx.user("alice").await;
+    let mine = fx.session_for("alice").await;
+    let elsewhere = fx.session_for("alice").await; // a laptop, or the intruder
+    let other_user = fx.user("bob").await;
+    let bobs = fx.session_for("bob").await;
+
+    let res = fx
+        .post(
+            "/profile",
+            &form(&[
+                ("current_password", PW),
+                ("new_password", OTHER_PW),
+                ("confirm_password", OTHER_PW),
+            ]),
+            Some(&fx.cookie(&mine)),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert!(fx.password_works("alice", OTHER_PW).await, "control: the password did change");
+
+    assert!(fx.session_row(&elsewhere).await.is_none(), "the other session must be deleted");
+    assert!(fx.identify_token(&elsewhere).await.is_none(), "and must authenticate nothing");
+    assert!(fx.session_row(&mine).await.is_none(), "the caller's old id is rotated away too");
+    // The caller is handed a working replacement, so they aren't logged out mid-page.
+    let issued = res.session_token(fx.auth.session_cookie_name()).expect("a replacement cookie");
+    assert_ne!(issued, mine);
+    assert_eq!(fx.identify_token(&issued).await.map(|w| w.username), Some("alice".into()));
+    // Nobody else is touched.
+    assert!(fx.identify_token(&bobs).await.is_some(), "another user's session must be untouched");
+    let _ = (id, other_user);
+}
+
+#[tokio::test]
+async fn a_manager_reset_signs_the_target_out_everywhere() {
+    // The other half: a manager resetting a password for a suspected-compromised account must not leave
+    // the intruder's session live. Here there is no session to spare — all of the target's go.
+    let fx = Fx::with(|a| a.admin_group("admin")).await;
+    fx.user_in("boss", "admin").await;
+    let victim = fx.user("victim").await;
+    let victims = fx.session_for("victim").await;
+    let bosses = fx.session_for("boss").await;
+
+    let res = fx
+        .post(
+            &format!("/profile/{victim}"),
+            &form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
+            Some(&fx.cookie(&bosses)),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert!(fx.password_works("victim", OTHER_PW).await, "control: the reset happened");
+    assert!(fx.session_row(&victims).await.is_none(), "the target's session must be deleted");
+    assert!(fx.identify_token(&victims).await.is_none());
+    assert!(fx.identify_token(&bosses).await.is_some(), "the manager stays signed in");
+}
+
+#[tokio::test]
+async fn sign_out_other_sessions_keeps_the_caller_and_needs_a_csrf_token() {
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let mine = fx.session_for("alice").await;
+    let elsewhere = fx.session_for("alice").await;
+    fx.user("bob").await;
+    let bobs = fx.session_for("bob").await;
+
+    // The control that the feature is actually reachable: the profile page renders the form.
+    let page = fx.get("/profile", Some(&fx.cookie(&mine))).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("/profile/sessions/revoke"), "the profile page must offer it");
+    assert!(page.body.contains("Sign out other sessions"), "with a label: {}", page.body);
+
+    // Unsafe route, so it is CSRF-checked like every other one — a cross-site post must not be able to
+    // sign someone out of their devices.
+    let res = fx.post_raw("/profile/sessions/revoke", "", Some(&fx.cookie(&mine))).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "no token, no revocation");
+    assert!(fx.session_row(&elsewhere).await.is_some(), "and nothing was deleted");
+
+    let res = fx.post("/profile/sessions/revoke", &form(&[]), Some(&fx.cookie(&mine))).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert!(fx.session_row(&elsewhere).await.is_none(), "the other session goes");
+    assert!(fx.session_row(&mine).await.is_some(), "the caller's own session stays");
+    assert!(fx.identify_token(&mine).await.is_some(), "so the page they're on keeps working");
+    assert!(fx.identify_token(&bobs).await.is_some(), "another user is untouched");
 }
 
 #[tokio::test]
@@ -1003,14 +1283,23 @@ async fn an_sso_account_cannot_set_a_local_password_or_enrol_2fa() {
 
 #[tokio::test]
 async fn a_manager_reset_cannot_turn_an_sso_account_into_a_password_login() {
-    // The manager reset route doesn't refuse SSO targets the way the self-service page does (see
-    // TODO.md), so it does write a local hash. What must hold regardless: `verify_credentials`
-    // refuses a password login for any `sso_provider` account, so that write can't become a bypass.
+    // A manager's reset is **refused** for an SSO target, the way the self-service page refuses itself:
+    // there is no local password to set, so storing a hash would only leave a dead credential in the row
+    // that reads like a real one. And the defence behind it must hold regardless — `verify_credentials`
+    // refuses a password login for any `sso_provider` account — so even a hash written some other way
+    // (an admin-panel edit, a CSV import) can't become a bypass.
     let fx = Fx::new().await;
     let sso = fx.user("federated").await;
+    let before = fx.row("federated").await.password_hash;
     fx.make_sso("federated", "okta").await;
     fx.user_in("admin", "admin").await;
     let cookie = fx.cookie(&fx.session_for("admin").await);
+
+    // The GET offers a notice, not a reset form — a form here could only ever error.
+    let page = fx.get(&format!("/profile/{sso}"), Some(&cookie)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("okta"), "the provider is named: {}", page.body);
+    assert!(!page.body.contains("new_password"), "no reset form for an SSO account: {}", page.body);
 
     let res = fx
         .post(
@@ -1019,14 +1308,30 @@ async fn a_manager_reset_cannot_turn_an_sso_account_into_a_password_login() {
             Some(&cookie),
         )
         .await;
-    assert_eq!(res.status, StatusCode::OK);
-    assert!(fx.row("federated").await.is_sso(), "the account stays external");
+    assert_eq!(res.status, StatusCode::BAD_REQUEST, "the reset must be refused");
+    assert!(res.body.contains("single sign-on"), "and say why: {}", res.body);
+    let row = fx.row("federated").await;
+    assert!(row.is_sso(), "the account stays external");
+    assert_eq!(row.password_hash, before, "and its stored hash is untouched");
+
     for password in [PW, OTHER_PW] {
         let res =
             fx.post("/login", &form(&[("username", "federated"), ("password", password)]), None).await;
         assert_eq!(res.status, StatusCode::UNAUTHORIZED, "SSO accounts never log in by password");
         assert!(res.session_token(fx.auth.session_cookie_name()).is_none());
     }
+
+    // Control: a *local* target is still resettable through the same route.
+    let local = fx.user("local").await;
+    let res = fx
+        .post(
+            &format!("/profile/{local}"),
+            &form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert!(fx.password_works("local", OTHER_PW).await, "the guard didn't break the normal path");
 }
 
 #[tokio::test]
@@ -1593,6 +1898,7 @@ fn unsafe_routes(other_id: i32) -> Vec<(String, String)> {
         ),
         ("/profile/totp".into(), form(&[("code", "000000")])),
         ("/profile/totp/disable".into(), String::new()),
+        ("/profile/sessions/revoke".into(), String::new()),
         (format!("/profile/{other_id}"), form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)])),
         (format!("/profile/{other_id}/totp/disable"), String::new()),
     ]

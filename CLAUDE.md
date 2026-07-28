@@ -113,7 +113,9 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
 - **Profile / password**: `/profile` lets any user change their own password; a manager (a
   profile-manager group, default `[admin_group]`) resets others at `/profile/{id}`.
 - **TOTP 2FA**: users enrol from `/profile` (QR + `otpauth://` URL, verify-before-activate); once on,
-  login requires the code at `/login/totp`. Self-disable, plus manager disable for others. Expose a
+  login requires the code at `/login/totp`. Self-disable, plus manager disable for others. A code is
+  single-use (`auth_user.totp_last_step` records the step it spent — RFC 6238 §5.2; hide the column in an
+  admin panel). Expose a
   password column as a hashed, write-only field with `MetaField::password()`.
 - **Lockout** (`auth::lockout`): the **unauthenticated** credential checks (`POST /login`, `POST
   /login/totp`) are braked by two DB-backed counters — by account name and by source address —
@@ -124,13 +126,21 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
   account has one budget everywhere. The unlock is **deleting the row** in the admin panel (register
   `lockout::username_entity` / `ip_entity`), which is gated, CSRF-checked and audited for free.
   The per-address half resolves the client with `net::client_ip(trust_proxy, ..)` — `Lockout::trust_proxy`
-  picks socket peer vs left-most `X-Forwarded-For`, and an app should call the same function for its logs
+  picks socket peer vs the **right-most** `X-Forwarded-For` hop (the one your proxy appended; the entries
+  left of it are caller-supplied), and an app should call the same function for its logs
   and audit rows so one client is one key (`Auth::client_ip(closure)` overrides for CDN/multi-hop).
-  `Lockout::ip_allow` (CIDRs via `net::parse_nets`) exempts addresses from locking on every surface;
+  One trusted hop is the **final** design — no CIDR list, no RFC 7239.
+  `Lockout::ip_whitelist` (CIDRs via `net::parse_nets`) exempts addresses from locking on every surface;
   there is no username equivalent by design. Pruning
-  expired rows — and expired sessions — is `auth::prune(&db, lockout)`, which **the app schedules**;
+  expired rows — and dead sessions — is `auth.prune()`, which **the app schedules**;
   the crate spawns no tasks. Worked examples: `examples/auth`'s `GET /api/whoami` + prune loop,
   `examples/adminpanel`'s lockout panels.
+- **Sessions** (`docs/AUTH.md` §5f): two clocks — `session_ttl_secs` (absolute, 7 days) and
+  `session_idle_secs` (idle, 8 hours; `0` disables), both enforced by `identify`, the idle stamp
+  refreshed lazily so a read stays a read. The session id **rotates** when the second factor completes
+  (a planted half-authenticated cookie can't be elevated), a **password change or manager reset revokes
+  the user's other sessions**, and `/profile` carries a "Sign out other sessions" button
+  (`Auth::revoke_sessions` / `revoke_other_sessions` for your own code).
 - **CSRF**: every form `auth` renders carries a hidden `_csrf` token checked on POST; turn it on for the
   JSON API with `crud.csrf(auth.csrf())` (the admin UI's `fetch` writes then send `X-CSRF-Token`
   automatically). `Authorization`-bearing requests are exempt. See [docs/AUTH.md §7](docs/AUTH.md).

@@ -151,19 +151,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     auth::make_admin(&db, ADMIN_GROUP, "admin", "password").await?;
 
-    // Housekeeping is the app's job — the library schedules nothing. `auth::prune` clears expired
-    // sessions and expired lockout rows; run it at startup and on the app's own loop.
-    let prune_db = db.clone();
-    let prune_lockout = lockout.clone();
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
-        loop {
-            ticker.tick().await;
-            if let Err(e) = auth::prune(&prune_db, &prune_lockout).await {
-                eprintln!("prune failed: {e}");
-            }
-        }
-    });
     // A second, non-admin user to show the gate at work: `editor` may read everything but write
     // nothing — the panel renders read-only for them (no Create/Edit/Delete) and the API returns 403.
     auth::create_user(&db, "editor", "password").await?;
@@ -174,8 +161,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .secure_cookies(false) // local http
         .admin_group(ADMIN_GROUP)
         .totp_issuer("relativelylight admin") // shown in authenticator apps for 2FA
+        // Two session clocks: an absolute lifetime, and an idle one that expires a session nobody has
+        // used. The idle window is what bounds a stolen cookie — the library's defaults are 7 days and
+        // 8 hours; a back-office that lives in a browser tab all day wants roughly this.
+        .session_ttl_secs(7 * 24 * 3600)
+        .session_idle_secs(8 * 3600)
         .login_shell(login_shell)
         .profile_shell(profile_shell); // the app's chrome around the library's profile page
+
+    // Housekeeping is the app's job — the library schedules nothing. `Auth::prune` clears dead sessions
+    // (on either clock) and expired lockout rows; run it at startup and on the app's own loop.
+    let prune_auth = auth.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            ticker.tick().await;
+            if let Err(e) = prune_auth.prune().await {
+                eprintln!("prune failed: {e}");
+            }
+        }
+    });
 
     let author_mm = MetaModel::new(author::Entity);
     let user_mm = MetaModel::new(user::Entity);
@@ -200,6 +205,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // managed from the profile page, not the crud form.)
     auth_user_mm.field("totp_secret").hidden = true;
     auth_user_mm.field("totp_pending").hidden = true;
+    // `totp_last_step` is the replay guard (the last 30s step accepted for this account). Not a secret,
+    // but nothing an operator should see or edit — the library maintains it, and hand-editing it either
+    // lets a code be replayed or locks the user out of their own authenticator for a while.
+    auth_user_mm.field("totp_last_step").hidden = true;
     // New accounts are active by default (so a freshly created user with a password can log in).
     auth_user_mm.field("is_active").default = Some(serde_json::json!(true));
     // Lifecycle timestamps are maintained by the library (hooks / login flow) — show, don't edit.

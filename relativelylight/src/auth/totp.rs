@@ -22,13 +22,53 @@ pub(crate) fn generate_secret() -> String {
     Secret::generate_secret().to_encoded().to_string()
 }
 
-/// Whether `code` is valid for `secret_b32` right now (issuer/account don't affect the code, but a
-/// well-formed `TOTP` is needed to check). Whitespace in the code is ignored.
+/// The **step** `code` matched for `secret_b32` right now, or `None` if it matched nothing
+/// (issuer/account don't affect the code, but a well-formed `TOTP` is needed to check). Whitespace in
+/// the code is ignored.
+///
+/// Returning the step rather than a bool is what makes the replay guard possible: the caller records it
+/// on the account and refuses anything that doesn't *advance* it
+/// ([`user::Model::totp_step_ok`](crate::auth::user::Model::totp_step_ok)). `totp-rs`' own `check` /
+/// `check_current` apply the ±[`SKEW`] window internally and answer yes/no, so they can't say *which*
+/// of the three acceptable codes was presented — hence the explicit loop over candidate steps here.
+///
+/// Candidates are tried newest-first, so if two adjacent steps somehow yield the same six digits (a
+/// ~1-in-10⁶ coincidence) the guard advances as far as it legitimately can.
+pub(crate) fn verify_step(secret_b32: &str, code: &str) -> Option<i64> {
+    let totp = build("rl", "rl", secret_b32)?;
+    let code = code.trim();
+    let base = (now_secs() / STEP) as i64;
+    let skew = SKEW as i64;
+    (base - skew..=base + skew)
+        .rev()
+        .find(|&step| ct_eq(totp.generate(step as u64 * STEP).as_bytes(), code.as_bytes()))
+}
+
+/// Whether `code` is valid for `secret_b32` right now, ignoring the step (used where there is no
+/// account to record a step against — the enrolment check re-reads it via [`verify_step`]).
+#[cfg(test)]
 pub(crate) fn verify(secret_b32: &str, code: &str) -> bool {
-    match build("rl", "rl", secret_b32) {
-        Some(totp) => totp.check_current(code.trim()).unwrap_or(false),
-        None => false,
+    verify_step(secret_b32, code).is_some()
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Constant-time comparison, so a wrong code leaks nothing through timing. (`totp-rs` does this
+/// internally for `check`; we compare ourselves to learn the matched step, so we must do it too.)
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
     }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Enrolment material for a pending secret: the `otpauth://` URL (shown as text) and a QR code as a
@@ -66,6 +106,30 @@ mod tests {
         assert!(!verify(&secret, "000000"));
         assert!(!verify(&secret, "not-a-code"));
         assert!(!verify("not-base32!!", &code)); // bad secret → never verifies
+    }
+
+    #[test]
+    fn the_matched_step_is_the_current_one_and_neighbours_are_accepted() {
+        // The replay guard is only as good as this: the step returned must be the one the code belongs
+        // to, or a spent code could be recorded under a step that doesn't block its reuse.
+        let secret = generate_secret();
+        let totp = build("relativelylight", "alice", &secret).unwrap();
+        let now = now_secs();
+        let base = (now / STEP) as i64;
+
+        assert_eq!(verify_step(&secret, &totp.generate(now)), Some(base), "the current step");
+        // Clock drift in both directions is still accepted (SKEW = 1), each under its own step.
+        for offset in [-1i64, 1] {
+            let step = base + offset;
+            let code = totp.generate(step as u64 * STEP);
+            assert_eq!(verify_step(&secret, &code), Some(step), "step {offset:+} must match itself");
+        }
+        // Two steps out is outside the window, and nonsense matches nothing.
+        for step in [base - 2, base + 2] {
+            assert_eq!(verify_step(&secret, &totp.generate(step as u64 * STEP)), None, "outside skew");
+        }
+        assert_eq!(verify_step(&secret, "000000"), None);
+        assert_eq!(verify_step("not-base32!!", &totp.generate(now)), None, "bad secret");
     }
 
     #[test]

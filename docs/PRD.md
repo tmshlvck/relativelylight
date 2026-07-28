@@ -79,18 +79,25 @@ Identity is resolved **on demand** (no middleware, nothing injected into the req
 a per-model `Authz` gate with presets (`Open` / `UserReadWrite` / `UserReadGroupWrite` /
 `PublicReadGroupWrite` / `GroupReadWrite`) wired into `crud` (→ 401/403); self-service profile with
 password change; **TOTP 2FA**
-(enrol/verify/login/disable); **OIDC SSO** (feature `sso`: Google / Okta / corporate, claim→group
+(enrol/verify/login/disable, single-use codes); **OIDC SSO** (feature `sso`: Google / Okta / corporate,
+claim→group
 mapping, optional auto-registration); **double-submit CSRF protection** (feature `csrf`: always on for
-the login/profile forms, `Crud::csrf` for the API); **attempt limiting** on every credential check
-(sliding-window lockout → 429, per account by default, per source IP opt-in); UTC lifecycle timestamps
+the login/profile forms, `Crud::csrf` for the API); **attempt limiting** on the unauthenticated
+credential checks (DB-backed lockout → 429, by account name and by source address, both mandatory, the
+unlock being a row delete in the admin panel); **session lifetime + revocation** (absolute *and* idle
+clocks, id rotation when the second factor completes, a password change or manager reset signing the
+user's other sessions out, "sign out other sessions" on `/profile`); UTC lifecycle timestamps
 on the auth entities. The rejection
-paths (bad credentials, unusable sessions, wrong TOTP codes, non-manager profile writes, each gate
-preset) are covered by an automated negative-path suite — [AUTH.md §10a](AUTH.md).
+paths (bad credentials, unusable sessions, wrong TOTP codes, replayed codes, idle/expired sessions,
+non-manager profile writes, each gate preset) are covered by an automated negative-path suite —
+[AUTH.md §10a](AUTH.md).
 
-**Roadmap / deferred (see [../TODO.md](../TODO.md) for the ordered backlog):** a shared/durable store
-for the attempt counters, re-auth before sensitive changes, TOTP recovery codes + replay
-guard, session hardening, cross-cutting real-IP/CORS layers, **PassKeys/WebAuthn**, app-issued API
-tokens, and row-level authorization.
+**Roadmap / deferred (see [../TODO.md](../TODO.md) for the ordered backlog):** re-auth before sensitive
+changes, TOTP recovery codes, a password-complexity policy, a CSRF layer + rejection hook, a `ClientIp`
+extractor / request-logging / CORS layers, and app-issued API tokens. **PassKeys/WebAuthn** is parked at
+**milestone 0.3+** (nothing needs it yet; it stays the only answer to real-time phishing), and
+**row-level authorization** is filed as *transformative* — it reshapes the `Authz` trait rather than
+extending it, so it waits for a requirement an app can't meet in its own handler.
 
 ## 4. `observe` — the write-observer / audit hook ✅
 

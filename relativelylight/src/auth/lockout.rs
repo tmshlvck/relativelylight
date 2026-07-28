@@ -70,12 +70,16 @@ pub struct Lockout {
     /// `false` (the default) means the login routes count the **socket peer**, which is correct for a
     /// directly exposed app and the only safe reading there: forwarded headers are attacker-supplied,
     /// so trusting them would let a caller choose whose address gets locked out. `true` means the
-    /// left-most `X-Forwarded-For` (or `X-Real-IP`) entry is the client — set it **only** if nothing
+    /// **right-most** `X-Forwarded-For` entry — the hop your own proxy appended, the only one it vouches
+    /// for — or `X-Real-IP` when there is no chain. Set it **only** if nothing
     /// can reach the app except your proxy, and remember that leaving it `false` behind a proxy buckets
     /// every user under the proxy's address, where a hundred failures lock your whole login form.
     ///
-    /// Exotic setups (several hops, a CDN's own header) override the whole resolution with
-    /// [`Auth::client_ip`](crate::auth::Auth::client_ip) instead.
+    /// A boolean is the **whole** configuration by design — it says "one hop I trust", which is what a
+    /// firewalled port behind nginx/Caddy or an ingress in front of a cluster actually is. Anything
+    /// stranger (a CDN ahead of your own proxy, a provider header like `CF-Connecting-IP`) overrides the
+    /// resolution outright with [`Auth::client_ip`](crate::auth::Auth::client_ip) rather than trying to
+    /// describe the chain here.
     pub trust_proxy: bool,
     /// Addresses that are **never** locked out, as CIDRs — your office range, a monitoring probe, the
     /// host a fleet of devices NATs through. Build it with [`net::parse_nets`](crate::net::parse_nets),

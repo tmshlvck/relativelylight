@@ -84,10 +84,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ip_whitelist: Vec::new(),
     };
     let auth_db = db.clone(); // the app's own endpoint checks passwords itself
-    let db_for_prune = db.clone();
-    let auth = Auth::new(db, lockout.clone())
+    let auth = Auth::new(db, lockout)
         .secure_cookies(false) // local http, so no `Secure` attribute
         .admin_group(ADMIN_GROUP)
+        // Session clocks left at the library defaults: 7 days absolute, 8 hours idle. Changing your
+        // password (or a manager resetting it) signs every other session out; "Sign out other sessions"
+        // on /profile does it on demand. See `session_ttl_secs` / `session_idle_secs`.
         .totp_issuer("relativelylight auth demo") // shown in authenticator apps for 2FA
         .login_shell(move |form| bootstrap_login(form, &sso_buttons))
         .profile_shell(bootstrap_profile);
@@ -116,18 +118,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let app = app.layer(axum::middleware::from_fn(access_log));
 
-    // Housekeeping is the **app's** job — the library schedules nothing. `auth::prune` deletes expired
-    // sessions and expired lockout rows (both counters); run it once at startup and then on whatever
-    // loop the app already has. Skipping it is safe, just untidy: an expired session never
+    // Housekeeping is the **app's** job — the library schedules nothing. `Auth::prune` deletes dead
+    // sessions (absolute *and* idle expiry — it knows this `Auth`'s configuration, which the free
+    // `auth::prune(&db, &lockout)` can't) plus expired lockout rows; run it once at startup and then on
+    // whatever loop the app already has. Skipping it is safe, just untidy: a dead session never
     // authenticates and an expired lockout row reads as unlocked.
-    let prune_db = db_for_prune.clone();
+    let prune_auth = auth.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
             ticker.tick().await;
-            match auth::prune(&prune_db, &lockout).await {
+            match prune_auth.prune().await {
                 Ok(0) => {}
-                Ok(n) => println!("pruned {n} expired session/lockout rows"),
+                Ok(n) => println!("pruned {n} dead session/lockout rows"),
                 Err(e) => eprintln!("prune failed: {e}"),
             }
         }

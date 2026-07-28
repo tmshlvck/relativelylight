@@ -17,13 +17,18 @@
 //! It also carries the CIDR helpers that go with an address — [`parse_nets`], [`in_nets`] and
 //! [`canonical_net`] — so an whitelist matches whichever way the client arrived: IPv4, IPv6, or the
 //! `::ffff:a.b.c.d` form a dual-stack listener reports. `auth`'s lockout uses them for
-//! [`Lockout::ip_allow`](crate::auth::lockout::Lockout::ip_allow); an app should use the same ones for
-//! its own network rules.
+//! [`Lockout::ip_whitelist`](crate::auth::lockout::Lockout::ip_whitelist); an app should use the same
+//! ones for its own network rules.
 //!
-//! **Scope, deliberately.** One trusted hop, no trusted-proxy CIDR list and no RFC 7239 `Forwarded`
-//! parsing yet — see `docs/AUTH.md` §4 and `TODO.md`. That covers the ordinary "one proxy in front"
-//! case and is safe as long as `trust_proxy` really means "nothing reaches me except that proxy". A
-//! richer configuration can extend this without changing the call shape.
+//! **Scope: one trusted hop, and that is a decision, not a gap.** A boolean covers the deployments that
+//! actually exist here — a firewalled port behind nginx or Caddy, an ingress in front of a cluster — and
+//! it is safe exactly when `trust_proxy` means what it says: nothing reaches the app except that proxy.
+//! A trusted-proxy CIDR list was considered and **rejected**: it would replace this signature (and
+//! [`Lockout::trust_proxy`](crate::auth::lockout::Lockout::trust_proxy)) with a configuration nobody
+//! here needs, and the awkward cases it would serve — a CDN ahead of your own proxy, a provider's own
+//! header — are better served by overriding the whole resolution via
+//! [`Auth::client_ip`](crate::auth::Auth::client_ip), which already exists. RFC 7239 `Forwarded` parsing
+//! is likewise not supported; nothing in the wild sends it in preference to `X-Forwarded-For`.
 
 use http::HeaderMap;
 use ipnet::{IpNet, Ipv4Net};
