@@ -48,8 +48,10 @@ already using `auth`.
   / datetime; `NOT NULL` columns keep `""`). Opt out per field with `blank_is_null = false`. (`8419948`)
 - **A new table, `auth_totp_recovery`** (§5i), in `table_create_statements` — an app with its own
   migrations needs a step for it. Don't register the entity in an admin panel: every row is a hash of a
-  credential. Note the upgrade gap: an account that enrolled in 2FA under an earlier version has **no**
-  recovery codes until it generates a set from `/profile` (filed in TODO).
+  credential. Codes are issued *with* an enrolment, so an account that enrolled under an earlier version
+  has **none** until it generates a set from `/profile` — where the section says so plainly. Nothing
+  backfills them, deliberately: a set appearing mid-login would be a worse surprise than an honest
+  "None left", and `recovery::issue` is there for an app that wants to do it itself.
 - **Two new columns on existing auth tables.** `auth_session.last_seen_at` (the idle clock) and
   `auth_user.totp_last_step` (the TOTP replay guard). `auth::migrate` only ever *creates* missing tables,
   so an existing database needs the `ALTER TABLE`s itself:
