@@ -89,11 +89,13 @@ adding to it.)
 
 ## crud / engine
 
-> **Land the `MetaField` / `ColumnMeta::Field` additions together, in one release.** Both items below add
-> public fields to those two types, which is a source break for exhaustive matches and struct literals —
-> i.e. for anyone implementing the `Accessor` seam. One combined break costs a reader one upgrade note;
-> three dribbled-out ones cost three. If the `Form` component's per-field widget override (below) is
-> wanted too, it belongs in the same batch.
+> **`MetaField` is now `#[non_exhaustive]`, so adding to *it* is free** — the batching that used to be
+> needed for these items applies only to `ColumnMeta::Field`, whose *variant* can't be non-exhaustive
+> without making the `Accessor` seam unimplementable out of crate (see its doc comment). So: adding a
+> `MetaField` knob is no longer a break; publishing it through `ColumnMeta` still is. Since there are no
+> out-of-crate `Accessor` implementations today, that break currently costs nobody — but it is the reason
+> to publish `required` and `options` in the same release *if* both are wanted, rather than a reason to
+> rush either.
 
 - [ ] **Enum `options`.** SeaORM reports `ColumnType::Enum { name, variants }`, so the variant list is
   **introspectable** — auto-discovered, no per-model code, consistent with the rest of the crate. Today

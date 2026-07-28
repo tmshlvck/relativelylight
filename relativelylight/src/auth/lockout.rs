@@ -47,7 +47,11 @@ use std::sync::Arc;
 /// arrives as [`RealIp`](crate::middleware::RealIp), resolved once at the edge by
 /// [`resolve_real_ip`](crate::middleware::resolve_real_ip), which every consumer in this crate shares. An
 /// app's own surfaces pass an address to [`IpLockout`] themselves.
+/// **`#[non_exhaustive]`**: start from [`Lockout::default`] and set what you want, either by assignment
+/// or with the builders below. A struct literal would break the day this grows a knob, and it has already
+/// lost one (`trust_proxy` moved to the address middleware).
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Lockout {
     /// Failed logins for one account name before it is locked (`0` = never).
     pub username_after: u32,
@@ -87,6 +91,31 @@ impl Default for Lockout {
             ip_duration_secs: 15 * 60,
             ip_whitelist: Vec::new(),
         }
+    }
+}
+
+impl Lockout {
+    /// Failures per **account name** before it locks, and for how long (`0` failures = never lock).
+    pub fn accounts(mut self, after: u32, duration_secs: i64) -> Self {
+        self.username_after = after;
+        self.username_duration_secs = duration_secs;
+        self
+    }
+
+    /// Failures per **source address** before it locks, and for how long (`0` = never). Keep this looser
+    /// than the account limit: a locked address turns away valid callers too, and your users may share one
+    /// (CGNAT, an office NAT).
+    pub fn addresses(mut self, after: u32, duration_secs: i64) -> Self {
+        self.ip_after = after;
+        self.ip_duration_secs = duration_secs;
+        self
+    }
+
+    /// Addresses never locked out, as CIDRs — see [`ip_whitelist`](Lockout::ip_whitelist). Build the list
+    /// with [`net::parse_nets`](crate::net::parse_nets).
+    pub fn whitelist(mut self, nets: Vec<ipnet::IpNet>) -> Self {
+        self.ip_whitelist = nets;
+        self
     }
 }
 

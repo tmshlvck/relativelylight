@@ -133,7 +133,7 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
   an admin panel (every row is a credential hash).
 - **Lockout** (`auth::lockout`): the **unauthenticated** credential checks (`POST /login`, `POST
   /login/totp`) are braked by two DB-backed counters — by account name and by source address —
-  configured *mandatorily* on `Auth::new(db, Lockout { .. })`. Authenticated checks (`/profile`
+  configured *mandatorily* on `Auth::new(db, Lockout::default().accounts(..).addresses(..))`. Authenticated checks (`/profile`
   password, 2FA enrolment) are deliberately **not** limited: that's session theft, not brute force.
   An app that checks credentials itself must use the same counters, not a second limiter —
   `auth.username_lockout()` / `auth.ip_lockout()` (`locked` / `record_failure` / `clear`), so one

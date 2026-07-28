@@ -69,16 +69,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The brute-force brake is mandatory — `Auth::new` takes its configuration. Here: 5 failed logins
     // per account and 15 per source address, both for 5 minutes (the library defaults are 10 / 100 per
     // 15 min).
-    let lockout = Lockout {
-        username_after: 5,
-        username_duration_secs: 300,
-        ip_after: 15,
-        ip_duration_secs: 300,
-        // Addresses that are never locked out — an office range, a monitoring probe. Empty here so the
-        // demo can actually lock itself out from localhost; a real app builds it with
-        // `relativelylight::net::parse_nets(&cfg.allow_list)` (v4/v6, bare hosts, CIDRs).
-        ip_whitelist: Vec::new(),
-    };
+    // `Lockout` is `#[non_exhaustive]`: start from the defaults and set what you mean. The whitelist
+    // (an office range, a monitoring probe) is left empty so the demo can lock itself out from localhost;
+    // a real app passes `relativelylight::net::parse_nets(&cfg.allow_list)` to `.whitelist(..)`.
+    let lockout = Lockout::default().accounts(5, 300).addresses(15, 300);
     let auth_db = db.clone(); // the app's own endpoint checks passwords itself
     let auth = Auth::new(db, lockout)
         .secure_cookies(false) // local http, so no `Secure` attribute

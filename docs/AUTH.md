@@ -502,13 +502,14 @@ key for `duration` after the last one"** — a decaying window, not a strict sli
 way to end up with an unbraked login by forgetting one:
 
 ```rust
-let auth = Auth::new(db, Lockout {
-    username_after: 10,          // failed logins per account before it locks (0 = off)
-    username_duration_secs: 900,
-    ip_after: 100,               // failed checks per source address (0 = off)
-    ip_duration_secs: 900,
-});
-// Lockout::default() is exactly the values above.
+// `Lockout` is #[non_exhaustive]: build from the defaults, which are exactly the values below.
+let auth = Auth::new(db, Lockout::default()
+    .accounts(10, 900)     // failed logins per account before it locks, and for how long (0 = off)
+    .addresses(100, 900)); // …and per source address (0 = off)
+
+// The fields are public too, so assignment works where a builder would read worse:
+let mut lockout = Lockout::default();
+lockout.ip_whitelist = relativelylight::net::parse_nets(&cfg.office_ranges);
 ```
 
 `*_after: 0` switches a counter off completely — nothing is read, nothing is written. A `*_duration_secs`

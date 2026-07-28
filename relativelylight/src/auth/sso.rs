@@ -273,7 +273,9 @@ pub(crate) fn group_diff(
 
 // ===================== OIDC flow (Authorization Code + PKCE) =====================
 
-/// A login button for the app's login page.
+/// A login button for the app's login page. Deliberately **not** `#[non_exhaustive]`: an app builds these
+/// itself when it needs the button list before `Sso` exists (the login shell is configured on `Auth`,
+/// which `Sso` then clones — see `examples/auth`), and two display fields aren't worth a constructor.
 pub struct SsoButton {
     pub label: String,
     pub url: String,

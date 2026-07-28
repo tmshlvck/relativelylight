@@ -74,7 +74,13 @@ const DEFAULT_COOKIE: &str = "rl_session";
 
 /// A logged-in identity, resolved on demand by [`Auth::identify`] from the session cookie. It is a
 /// plain return value — nothing injects it into the request.
+///
+/// **`#[non_exhaustive]` with [`Identity::new`]**, because this is the type most likely to grow: an
+/// assurance level once PassKeys land, an auth-source marker once API tokens do. Reading it is
+/// unaffected; the constructor is there for the cases that legitimately build one — a test double, or a
+/// custom identity source of your own.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Identity {
     pub id: String,
     pub username: String,
@@ -82,6 +88,11 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// An identity from its parts. `id` is the `auth_user` primary key as a string.
+    pub fn new(id: impl Into<String>, username: impl Into<String>, groups: Vec<String>) -> Self {
+        Self { id: id.into(), username: username.into(), groups }
+    }
+
     /// Whether this identity belongs to the named group.
     pub fn in_group(&self, group: &str) -> bool {
         self.groups.iter().any(|g| g == group)

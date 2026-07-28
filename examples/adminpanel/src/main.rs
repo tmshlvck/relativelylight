@@ -128,16 +128,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The brute-force brake is mandatory — `Auth::new` takes its configuration: 5 failed logins per
     // account and 15 per source address, both for 5 minutes.
-    let lockout = auth::lockout::Lockout {
-        username_after: 5,
-        username_duration_secs: 300,
-        ip_after: 15,
-        ip_duration_secs: 300,
-        // Addresses that are never locked out — an office range, a monitoring probe. Empty here so the
-        // demo can actually lock itself out from localhost; a real app builds it with
-        // `relativelylight::net::parse_nets(&cfg.allow_list)` (v4/v6, bare hosts, CIDRs).
-        ip_whitelist: Vec::new(),
-    };
+    // Built from the defaults, since `Lockout` is `#[non_exhaustive]` — a struct literal would break the
+    // day it grows a knob. Whitelisted addresses (an office range, a monitoring probe) are left empty so
+    // the demo can actually lock itself out from localhost; a real app would pass
+    // `relativelylight::net::parse_nets(&cfg.allow_list)` to `.whitelist(..)`.
+    let lockout = auth::lockout::Lockout::default().accounts(5, 300).addresses(15, 300);
 
     // How an app wires a `--set-admin-pw` CLI flag: **break-glass** admin recovery for an operator who
     // is locked out — create-or-reset the password, re-activate the account, clear its TOTP 2FA, ensure

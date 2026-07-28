@@ -41,6 +41,7 @@ pub type RowValidator =
     Box<dyn Fn(&Map<String, Value>) -> std::result::Result<(), ValidationErrors> + Send + Sync>;
 
 /// A scalar field of an entity (config the user may tweak via `MetaModel::field`).
+#[non_exhaustive]
 pub struct MetaField {
     // Informational — set by introspection:
     pub name: String,
@@ -167,6 +168,9 @@ impl MetaField {
 }
 
 /// A relation of an entity (config the user may tweak via `MetaModel::relation`).
+/// Per-relation config. **`#[non_exhaustive]`** — reach one through
+/// [`MetaModel::relation`](MetaModel::relation) and assign, as with [`MetaField`].
+#[non_exhaustive]
 pub struct MetaRelation {
     pub name: String,
     pub target: String, // target table name (the engine maps it to the target's slug)

@@ -128,6 +128,27 @@ already using `auth`.
   automatically** — that's a `crud` field validator you wire per model (AUTH.md §5g), and leaving it
   unwired leaves an operator-facing way around the rule. Tests and seeders that set short passwords
   through `create_user` / `set_password` are unaffected: the policy governs typed input, not code.
+- **The public data types are `#[non_exhaustive]`**, so that *this* is the last release in which adding a
+  field or a variant to them is a breaking change. Affected: `Lockout`, `Identity`, `MetaField`,
+  `MetaRelation`, `ListQuery`, `ValidationErrors`, `Page`, `RowItem`, `PasswordPolicy`, `WriteEvent`, and
+  the `Error`, `ColumnMeta`, `LogicalType` and `FieldDisplay` enums. What that means for you:
+  - a **struct literal** from outside the crate no longer compiles. Build from `Default` (or the
+    constructor) and assign, or use a builder: `Lockout::default().accounts(5, 300).addresses(15, 300)` —
+    the two new fluent setters — replaces `Lockout { .. }`. `Identity::new`, `Page::new` and
+    `RowItem::new` are new for the same reason; `ValidationErrors::new` already existed.
+  - a **`match`** on `Error`, `ColumnMeta`, `LogicalType` or `FieldDisplay` needs a `_` arm.
+  Deliberately *not* marked: `RealIp` and `TrustProxy` (an app constructs those — a custom
+  address-resolving middleware inserts a `RealIp`, which is the documented escape hatch), `SsoButton` (an
+  app builds its own button list before `Sso` exists), the SeaORM entity `Model`s (the derive needs them
+  exhaustive; `ActiveModel` is the write path anyway), and `Operation`/`Decision`, which are closed sets by
+  design — forcing a wildcard arm on a three-variant `Decision` would cost every gate author something for
+  no expected gain.
+  One limit worth knowing: `#[non_exhaustive]` on `ColumnMeta` covers new **variants**, not new **fields**
+  in `ColumnMeta::Field`. Marking a *variant* non-exhaustive would stop an out-of-crate `Accessor` from
+  constructing one at all, which is that trait's whole job — so the planned `required` / enum `options`
+  additions are still a source break for an external backend or an exhaustive match. Making that free
+  needs each variant's payload moved into its own non-exhaustive struct, which is worth doing the day a
+  second backend exists.
 - **Source-level:** `MetaField` gained public fields (`nullable`, `blank_is_null`) and
   `crud::ColumnMeta::Field` gained `nullable` — struct-literal construction and exhaustive matches need
   updating, which matters if you implement the `Accessor` seam yourself. `crud::Error` gained a `Csrf`

@@ -28,6 +28,10 @@ use std::sync::Arc;
 
 /// A committed state-changing write, handed to the registered [`WriteObserver`]. Borrows the request
 /// pieces (the observer reads what it needs synchronously and must not retain the references).
+///
+/// **`#[non_exhaustive]`**: an observer *reads* these, and this crate constructs them, so marking it
+/// costs you nothing and means a field added later (a request id, a trace context) isn't a break.
+#[non_exhaustive]
 pub struct WriteEvent<'a> {
     /// Which surface produced it — `"crud"` (the auto-CRUD API/admin) or an `auth` handler
     /// (`"auth-profile"`, `"auth-login"`, `"auth-admin"`, …). Apps use their own labels for their

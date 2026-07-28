@@ -289,6 +289,7 @@ pub fn url_scheme(schemes: &'static [&'static str]) -> impl Fn(&str) -> Result<(
 /// assert!(p.check("acmecorp-payroll-1", &["acmecorp"]).is_err());
 /// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct PasswordPolicy {
     /// Minimum length in **characters** (not bytes), so a non-ASCII password isn't judged by its
     /// UTF-8 size. NIST's floor for a user-chosen secret is 8; 12 is the sensible default.

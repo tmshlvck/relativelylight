@@ -15,8 +15,10 @@ use std::sync::Arc;
 
 // ===================== Errors =====================
 
-/// Structured validation errors: field-keyed + cross-field/general messages.
+/// Structured validation errors: field-keyed + cross-field/general messages. **`#[non_exhaustive]`** —
+/// build one with [`ValidationErrors::new`], which was always the intended path.
 #[derive(Debug, Default, Serialize)]
+#[non_exhaustive]
 pub struct ValidationErrors {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub fields: BTreeMap<String, String>,
@@ -39,7 +41,11 @@ impl ValidationErrors {
     }
 }
 
+/// An engine failure, as the HTTP layer renders it. **`#[non_exhaustive]`**: variants do get added
+/// (`Csrf` was, this cycle), so a `match` on this in your code wants a `_` arm and then won't break when
+/// the next one arrives.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Backend(String),
     NotFound,
@@ -95,8 +101,11 @@ pub enum LogicalType {
 /// Optional presentation hint overriding how the UI renders a field (the default is derived from the
 /// [`LogicalType`]). The stored value, validation, and OpenAPI schema are unaffected — only the admin
 /// table cell and form input change.
+/// **`#[non_exhaustive]`**, for the same reason as [`LogicalType`]: more of these are likely (currency,
+/// percentage, …), and an out-of-crate `match` shouldn't break when one arrives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum FieldDisplay {
     /// An integer column holding **Unix seconds (UTC)**: the cell shows a readable UTC datetime and
     /// the form offers a datetime picker (edited in UTC), storing back the integer seconds.
@@ -119,6 +128,15 @@ pub enum Cardinality {
 /// metadata**. The `Accessor` produces these; the `Engine` renders them into `_meta` JSON (adding
 /// URLs) and OpenAPI, and the UI uses them to build tables and forms. Relations carry no resolution
 /// mechanics anymore — the backend resolves them and embeds `{id, label}` into the row.
+///
+/// **`#[non_exhaustive]` covers new *variants*, not new *fields* — and that limit is deliberate.** A
+/// `#[non_exhaustive]` enum *variant* cannot be constructed from another crate at all, which would make
+/// [`Accessor`] unimplementable outside this one; since producing these values is the whole job of that
+/// trait, the variants stay open. So adding a field here (the planned `required` / enum `options` — see
+/// `TODO.md`) is still a source break for an out-of-crate `Accessor` or an exhaustive `match`. Making
+/// *that* free would mean moving each variant's payload into its own non-exhaustive struct with a
+/// constructor, which is worth doing the day a second backend exists and not before.
+#[non_exhaustive]
 pub enum ColumnMeta {
     Field {
         name: String,
@@ -148,7 +166,11 @@ pub enum ColumnMeta {
     },
 }
 
+/// A list / bulk-delete query. **`#[non_exhaustive]`** — start from
+/// [`Default`](ListQuery::default) and assign what you need, so a field added later (a cursor, say)
+/// doesn't break you.
 #[derive(Debug, Default, Clone)]
+#[non_exhaustive]
 pub struct ListQuery {
     /// Search: `Some(col)` filters a column with LIKE, `None` is full-text across text columns.
     pub search: Vec<(Option<String>, String)>,
@@ -166,17 +188,40 @@ pub struct ListQuery {
 }
 
 /// One row in a listing: its id, display label, and (unless terse) the finished row object.
+///
+/// **`#[non_exhaustive]` plus a constructor**, because an [`Accessor`] outside this crate has to be able
+/// to produce one — marking it non-exhaustive without [`RowItem::new`] would make the seam
+/// unimplementable, which is the opposite of the point.
+#[non_exhaustive]
 pub struct RowItem {
     pub id: Value,
     pub label: String,
     pub row: Option<Value>,
 }
 
+impl RowItem {
+    /// A listing row: primary key, display label, and the finished row — `None` when the caller asked
+    /// for a terse listing (a relation picker, which needs only id + label).
+    pub fn new(id: Value, label: String, row: Option<Value>) -> Self {
+        Self { id, label, row }
+    }
+}
+
+/// One page of a listing. **`#[non_exhaustive]`** with a constructor, for the same reason as
+/// [`RowItem`].
+#[non_exhaustive]
 pub struct Page {
     pub total: u64,
     pub page: u64,
     pub per_page: u64,
     pub data: Vec<RowItem>,
+}
+
+impl Page {
+    /// `total` counts every *matching* row, not the rows in `data`, so a client can size a pager.
+    pub fn new(total: u64, page: u64, per_page: u64, data: Vec<RowItem>) -> Self {
+        Self { total, page, per_page, data }
+    }
 }
 
 // ===================== Shared helpers =====================
