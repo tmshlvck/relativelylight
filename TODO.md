@@ -31,9 +31,13 @@ Highest priority first.
   form). A *username* whitelist was considered and rejected: an account that can never be locked out is
   an account whose password can be guessed at forever, so if one is ever wanted it needs a better story
   than "skip the counter" — a raised limit, perhaps.
-- [ ] **CSRF follow-ups.** The double-submit token ships (AUTH.md §7). Remaining: a `Csrf` layer for
-  app-owned unsafe routes (today each handler calls `Csrf::verify` itself), and a rejection hook so an
-  app can render the 403 in its own shell instead of the built-in page.
+- [ ] **CSRF follow-ups — both listed items have shipped** (AUTH.md §7): `csrf::enforce` is the layer for
+  app-owned unsafe routes, and `Auth::csrf_rejection` / `Csrf::on_reject` is the rejection hook, shared by
+  the library's forms and the layer. What's left is a deliberate gap: the layer reads the `X-CSRF-Token`
+  header and, for URL-encoded bodies under 64 KiB, the `_csrf` field — a **multipart** body is not parsed,
+  because buffering an upload to find a token is worse than asking that surface to send the header. If a
+  real app hits it (a file upload from a JS-less form), the fix is a streaming pre-scan that stops at the
+  first non-field part: a chunk of work for a narrow case, so it waits for the case.
 - [ ] **Cross-cutting middleware (AUTH.md §4).** Client-IP resolution ships as `net::client_ip`
   (`trust_proxy` → peer or the **right-most** `X-Forwarded-For` hop / `X-Real-IP`, IPv4-mapped collapsed),
   used by the lockout. A trusted-proxy **CIDR list** and RFC 7239 `Forwarded` were considered and

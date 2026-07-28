@@ -83,7 +83,8 @@ password change; **TOTP 2FA**
 claim→group
 mapping, optional auto-registration, cached provider discovery, and a callback whose rejection paths are
 tested against a fake IdP); **double-submit CSRF protection** (feature `csrf`: always on for
-the login/profile forms, `Crud::csrf` for the API); **attempt limiting** on the unauthenticated
+the login/profile forms, `Crud::csrf` for the API, a `csrf::enforce` layer for the app's own routes, and an
+app-supplied rejection page); **attempt limiting** on the unauthenticated
 credential checks (DB-backed lockout → 429, by account name and by source address, both mandatory, the
 unlock being a row delete in the admin panel); **session lifetime + revocation** (absolute *and* idle
 clocks, id rotation when the second factor completes, a password change or manager reset signing the
@@ -98,7 +99,7 @@ non-manager profile writes, each gate preset) are covered by an automated negati
 [AUTH.md §10a](AUTH.md).
 
 **Roadmap / deferred (see [../TODO.md](../TODO.md) for the ordered backlog):**
-re-auth through the IdP for SSO accounts, breached-password screening, a CSRF layer + rejection hook, a `ClientIp`
+re-auth through the IdP for SSO accounts, breached-password screening, a `ClientIp`
 extractor / request-logging / CORS layers, and app-issued API tokens. **PassKeys/WebAuthn** is parked at
 **milestone 0.3+** (nothing needs it yet; it stays the only answer to real-time phishing), and
 **row-level authorization** is filed as *transformative* — it reshapes the `Authz` trait rather than

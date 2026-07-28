@@ -54,14 +54,34 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// Renders the response for a rejected request — see [`Csrf::on_reject`].
+#[cfg(feature = "axum")]
+pub(crate) type RejectFn =
+    std::sync::Arc<dyn Fn() -> axum::response::Response + Send + Sync + 'static>;
+
 /// The double-submit CSRF checker: a cookie name + the cookie attributes to issue it with. Cheap to
 /// clone; hold one per app (`Auth::csrf()` builds the one `auth` uses, so handing that to
 /// `Crud::csrf` keeps both surfaces on the same cookie).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Csrf {
     cookie: String,
     secure: bool,
     ttl_secs: i64,
+    /// The app's own rejection page, if it set one ([`Csrf::on_reject`]).
+    #[cfg(feature = "axum")]
+    pub(crate) reject: Option<RejectFn>,
+}
+
+// Hand-written because the rejection hook is a closure: `#[derive(Debug)]` can't see through it, and a
+// `Csrf` that stopped being `Debug` would be an annoying break for anyone logging their config.
+impl std::fmt::Debug for Csrf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("Csrf");
+        s.field("cookie", &self.cookie).field("secure", &self.secure).field("ttl_secs", &self.ttl_secs);
+        #[cfg(feature = "axum")]
+        s.field("on_reject", &self.reject.as_ref().map(|_| "<set>").unwrap_or("<default>"));
+        s.finish()
+    }
 }
 
 impl Default for Csrf {
@@ -73,7 +93,13 @@ impl Default for Csrf {
 impl Csrf {
     /// A checker with the defaults: cookie `rl_csrf`, `Secure`, 7-day lifetime.
     pub fn new() -> Self {
-        Self { cookie: DEFAULT_COOKIE.into(), secure: true, ttl_secs: 7 * 24 * 3600 }
+        Self {
+            cookie: DEFAULT_COOKIE.into(),
+            secure: true,
+            ttl_secs: 7 * 24 * 3600,
+            #[cfg(feature = "axum")]
+            reject: None,
+        }
     }
 
     /// Token cookie name (default `"rl_csrf"`). Give co-hosted apps distinct names — same-host apps
@@ -158,6 +184,47 @@ impl Csrf {
         format!(r#"<input type="hidden" name="{FIELD}" value="{}">"#, escape_attr(token))
     }
 
+    /// Render the rejection page **yourself**, instead of the built-in bare 403.
+    ///
+    /// The default is deliberately shell-less and static: a rejected request hasn't proved it came from
+    /// this site, so nothing about the caller is rendered and no cookies are set. That's safe but
+    /// jarring in an app with its own chrome — this hook lets you keep the chrome without giving any of
+    /// that up, provided your closure follows the same rules (don't name the user, don't set cookies,
+    /// keep the status a `403`).
+    ///
+    /// The hook is shared: set it on the `Csrf` you hand to [`Auth::csrf_rejection`] and it covers the
+    /// login/profile pages, [`enforce`] on your own routes, and anywhere you call
+    /// [`reject`](Csrf::reject) directly. It does **not** apply to the `crud` JSON API, which answers a
+    /// machine with `403 {"error":"csrf token missing or invalid"}` — an HTML shell there would be wrong.
+    ///
+    /// [`Auth::csrf_rejection`]: crate::auth::Auth::csrf_rejection
+    #[cfg(feature = "axum")]
+    pub fn on_reject<F>(mut self, render: F) -> Self
+    where
+        F: Fn() -> axum::response::Response + Send + Sync + 'static,
+    {
+        self.reject = Some(std::sync::Arc::new(render));
+        self
+    }
+
+    /// The response for a request that failed the check: the app's [`on_reject`](Csrf::on_reject) page
+    /// if it set one, else a bare, shell-less `403`.
+    #[cfg(feature = "axum")]
+    pub fn reject(&self) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        if let Some(render) = &self.reject {
+            return render();
+        }
+        (
+            http::StatusCode::FORBIDDEN,
+            [(http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            r#"<!doctype html><meta charset="utf-8"><title>Security check failed</title>
+<main><h1>Security check failed</h1>
+<p>This form was stale, or the request didn't come from this site. Reload the page and try again.</p></main>"#,
+        )
+            .into_response()
+    }
+
     fn cookie_for(&self, token: String) -> Cookie<'static> {
         // Readable by JS on purpose (the `fetch` clients echo it); the *session* cookie stays HttpOnly.
         Cookie::build((self.cookie.clone(), token))
@@ -168,6 +235,119 @@ impl Csrf {
             .max_age(time::Duration::seconds(self.ttl_secs))
             .build()
     }
+}
+
+/// The largest form body [`enforce`] will buffer to look for a `_csrf` field. Generous for a form, small
+/// enough that the layer can't be used to make a server hold arbitrary memory; a bigger unsafe request
+/// (a file upload) must carry the token in the [`HEADER`] instead.
+#[cfg(feature = "axum")]
+const MAX_BUFFERED_FORM: usize = 64 * 1024;
+
+/// Middleware that enforces the double-submit token on **your own** unsafe routes, so each handler
+/// doesn't have to call [`Csrf::verify`] itself. Wire it with axum's `from_fn_with_state`:
+///
+/// ```ignore
+/// use axum::middleware::from_fn_with_state;
+///
+/// let guarded = Router::new()
+///     .route("/account/delete", post(delete_account))
+///     .route("/api-token/rotate", post(rotate_token))
+///     .layer(from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce));
+/// ```
+///
+/// Pass the **same** `Csrf` the rest of the app uses (`auth.csrf()`), or the cookie names won't match.
+/// Apply it to a `Router` holding only the routes you want guarded: it rejects *any* unsafe request that
+/// arrives without a token, which is the point, and would therefore break an endpoint that is meant to
+/// take a Bearer credential from a non-browser client — though those are exempt anyway (see below).
+///
+/// **What it checks**, in order:
+/// - **Safe methods pass** untouched (`GET`, `HEAD`, `OPTIONS`, `TRACE`) — there is nothing to protect.
+/// - **`Authorization`-bearing requests pass**: an API credential isn't ambient, so a cross-site request
+///   can't borrow it (the same exemption [`Csrf::verify`] makes).
+/// - the [`X-CSRF-Token`](HEADER) header, for `fetch`/XHR clients;
+/// - failing that, and **only** for `application/x-www-form-urlencoded` bodies under
+///   [`MAX_BUFFERED_FORM`], the [`_csrf`](FIELD) field — the body is buffered, checked, and handed on
+///   intact, so a plain MPA `<form>` post works without the handler doing anything.
+///
+/// A multipart form is *not* parsed: give those the header, or check them in the handler. Everything else
+/// gets [`Csrf::reject`], so your [`on_reject`](Csrf::on_reject) page applies here too.
+#[cfg(feature = "axum")]
+pub async fn enforce(
+    axum::extract::State(csrf): axum::extract::State<Csrf>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use http::Method;
+    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE) {
+        return next.run(req).await;
+    }
+    // The header form needs no body, so try it first and leave the request untouched.
+    if csrf.verify(req.headers(), None) {
+        return next.run(req).await;
+    }
+    if !is_urlencoded_form(req.headers()) {
+        return csrf.reject();
+    }
+    // A form post: buffer, read `_csrf`, then rebuild the request so the handler still sees its body.
+    let (parts, body) = req.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_BUFFERED_FORM).await else {
+        return csrf.reject(); // unreadable or over the cap — either way we can't find a token
+    };
+    let token = form_field(&bytes, FIELD);
+    if !csrf.verify(&parts.headers, token.as_deref()) {
+        return csrf.reject();
+    }
+    next.run(axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))).await
+}
+
+/// Whether the body is a URL-encoded form (ignoring any `; charset=…` parameter).
+#[cfg(feature = "axum")]
+fn is_urlencoded_form(headers: &HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/x-www-form-urlencoded"))
+        .unwrap_or(false)
+}
+
+/// Pull one field out of a URL-encoded body. Hand-rolled for the same reason as the rest of this crate's
+/// small parsers: it is a dozen lines and saves a dependency, and a token is hex so the only decoding
+/// that matters is `+` and `%XX`.
+#[cfg(feature = "axum")]
+fn form_field(body: &[u8], name: &str) -> Option<String> {
+    let body = std::str::from_utf8(body).ok()?;
+    for pair in body.split('&') {
+        let (k, v) = pair.split_once('=')?;
+        if percent_decode(k) == name {
+            return Some(percent_decode(v));
+        }
+    }
+    None
+}
+
+#[cfg(feature = "axum")]
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    Some(b) => {
+                        out.push(b);
+                        i += 2;
+                    }
+                    None => out.push(b'%'),
+                }
+            }
+            b => out.push(b),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn header_token(headers: &HeaderMap) -> Option<String> {
@@ -261,6 +441,58 @@ mod tests {
             assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
             assert!(seen.insert(t), "tokens must never repeat");
         }
+    }
+
+    #[test]
+    fn form_bodies_are_parsed_enough_to_find_the_token() {
+        // Only enough URL-decoding to find `_csrf` among whatever else the form sent.
+        let body = b"name=alice&_csrf=deadbeef&note=hi+there";
+        assert_eq!(form_field(body, FIELD).as_deref(), Some("deadbeef"));
+        assert_eq!(form_field(b"_csrf=abc", FIELD).as_deref(), Some("abc"));
+        assert_eq!(form_field(b"a=1&b=2", FIELD), None, "absent field");
+        assert_eq!(form_field(b"", FIELD), None);
+        // Percent- and plus-decoding, on both sides of the pair.
+        assert_eq!(form_field(b"%5Fcsrf=x", "_csrf").as_deref(), Some("x"), "encoded name");
+        assert_eq!(percent_decode("a+b%20c"), "a b c");
+        assert_eq!(percent_decode("100%"), "100%", "a trailing % is not an escape");
+        assert_eq!(percent_decode("%zz"), "%zz", "invalid hex is left alone");
+
+        assert!(is_urlencoded_form(&{
+            let mut h = HeaderMap::new();
+            h.insert(http::header::CONTENT_TYPE, "application/x-www-form-urlencoded".parse().unwrap());
+            h
+        }));
+        assert!(is_urlencoded_form(&{
+            let mut h = HeaderMap::new();
+            h.insert(
+                http::header::CONTENT_TYPE,
+                "Application/X-WWW-Form-Urlencoded; charset=utf-8".parse().unwrap(),
+            );
+            h
+        }), "case and parameters must not matter");
+        assert!(!is_urlencoded_form(&{
+            let mut h = HeaderMap::new();
+            h.insert(http::header::CONTENT_TYPE, "multipart/form-data; boundary=x".parse().unwrap());
+            h
+        }));
+        assert!(!is_urlencoded_form(&HeaderMap::new()), "no content-type is not a form");
+    }
+
+    #[test]
+    fn the_rejection_hook_replaces_the_built_in_page() {
+        use axum::response::IntoResponse;
+        let default = Csrf::new().reject();
+        assert_eq!(default.status(), http::StatusCode::FORBIDDEN);
+
+        let custom = Csrf::new()
+            .on_reject(|| (http::StatusCode::FORBIDDEN, "in my own shell").into_response());
+        let res = custom.reject();
+        assert_eq!(res.status(), http::StatusCode::FORBIDDEN, "still a 403");
+        // The hook travels with a clone, which is how it reaches `enforce` and the auth routes.
+        assert!(custom.clone().reject.is_some());
+        // `Debug` still works, which the derive couldn't have given us with a closure in there.
+        assert!(format!("{custom:?}").contains("<set>"));
+        assert!(format!("{:?}", Csrf::new()).contains("<default>"));
     }
 
     #[test]

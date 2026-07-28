@@ -977,6 +977,138 @@ async fn enrol_with_codes(fx: &Fx, username: &str, cookie: &str) -> (String, Vec
 }
 
 #[tokio::test]
+async fn the_csrf_layer_guards_an_apps_own_routes() {
+    // `csrf::enforce` is how an app stops writing `Csrf::verify` in every handler. Driven here over a
+    // router that isn't ours, because that's the whole point of it.
+    use axum::routing::{get, post};
+    let csrf = crate::csrf::Csrf::new().secure(false);
+    let (token, _) = csrf.issue();
+    let cookie = format!("{}={token}", csrf.cookie());
+
+    // The handler echoes its body, so a buffered-and-rebuilt request is visibly still intact.
+    let app = axum::Router::new()
+        .route("/safe", get(|| async { "read" }))
+        .route("/write", post(|body: String| async move { format!("wrote:{body}") }))
+        .layer(axum::middleware::from_fn_with_state(csrf.clone(), crate::csrf::enforce));
+
+    let send = |req: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let res = app.oneshot(req).await.expect("response");
+            let status = res.status();
+            let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.expect("body");
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+    };
+    let post_req = |body: &str, extra: Vec<(&'static str, String)>| {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/write")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        for (k, v) in extra {
+            b = b.header(k, v);
+        }
+        b.body(Body::from(body.to_string())).unwrap()
+    };
+
+    // A safe method is never challenged — there is nothing to protect.
+    let (status, body) = send(Request::builder().uri("/safe").body(Body::empty()).unwrap()).await;
+    assert_eq!((status, body.as_str()), (StatusCode::OK, "read"));
+
+    // The header form, for a `fetch` client.
+    let (status, body) = send(post_req(
+        "a=1",
+        vec![("cookie", cookie.clone()), ("x-csrf-token", token.clone())],
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "matching header must pass");
+    assert_eq!(body, "wrote:a=1", "and the body must reach the handler untouched");
+
+    // The form-field form, for a plain MPA `<form>` — the case that needs the body buffered *and* handed
+    // on. If the rebuild were wrong, the handler would see an empty body and this would catch it.
+    let form_body = format!("name=alice&_csrf={token}&note=hi+there");
+    let (status, body) = send(post_req(&form_body, vec![("cookie", cookie.clone())])).await;
+    assert_eq!(status, StatusCode::OK, "matching _csrf field must pass");
+    assert_eq!(body, format!("wrote:{form_body}"), "the whole body survives the check");
+
+    // The refusals.
+    for (what, body, headers) in [
+        ("no token at all", "a=1".to_string(), vec![("cookie", cookie.clone())]),
+        ("no cookie", "a=1".to_string(), vec![("x-csrf-token", token.clone())]),
+        (
+            "a mismatched header",
+            "a=1".to_string(),
+            vec![("cookie", cookie.clone()), ("x-csrf-token", "b".repeat(64))],
+        ),
+        ("a mismatched field", format!("_csrf={}", "b".repeat(64)), vec![("cookie", cookie.clone())]),
+        ("an empty field", "_csrf=".to_string(), vec![("cookie", cookie.clone())]),
+    ] {
+        let (status, _) = send(post_req(&body, headers)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{what} must be refused");
+    }
+
+    // A Bearer request is exempt: an API credential isn't ambient, so there is nothing to borrow.
+    let (status, _) =
+        send(post_req("a=1", vec![("authorization", "Bearer abc".into())])).await;
+    assert_eq!(status, StatusCode::OK, "a Bearer client needs no token");
+
+    // A body the layer won't buffer (multipart) can still use the header, but not a field.
+    let multipart = Request::builder()
+        .method("POST")
+        .uri("/write")
+        .header(header::CONTENT_TYPE, "multipart/form-data; boundary=xyz")
+        .header("cookie", cookie.clone())
+        .body(Body::from(format!("--xyz\r\n_csrf={token}\r\n--xyz--")))
+        .unwrap();
+    let (status, _) = send(multipart).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "multipart is not parsed for a token");
+
+    // Over the buffering cap: refused rather than read into memory.
+    let huge = format!("_csrf={token}&pad={}", "x".repeat(70 * 1024));
+    let (status, _) = send(post_req(&huge, vec![("cookie", cookie.clone())])).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "an oversized form body must not be buffered");
+
+    // And the app's own rejection page is used when it set one.
+    let custom = crate::csrf::Csrf::new()
+        .secure(false)
+        .on_reject(|| (StatusCode::FORBIDDEN, "my own shell").into_response());
+    let app = axum::Router::new()
+        .route("/write", post(|| async { "ok" }))
+        .layer(axum::middleware::from_fn_with_state(custom, crate::csrf::enforce));
+    let res = app
+        .oneshot(Request::builder().method("POST").uri("/write").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
+    assert_eq!(String::from_utf8_lossy(&body), "my own shell", "the hook renders the refusal");
+}
+
+#[tokio::test]
+async fn the_rejection_hook_covers_the_modules_own_forms() {
+    // One closure, both surfaces: an app that styles its 403 shouldn't have to do it twice.
+    let fx = Fx::with(|a| {
+        a.csrf_rejection(|| {
+            (StatusCode::FORBIDDEN, Html("<main>app-styled refusal</main>")).into_response()
+        })
+    })
+    .await;
+    fx.user("alice").await;
+
+    // A post with no token to one of *our* routes now renders the app's page, not the built-in one.
+    let res = fx.post_raw("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    assert!(res.body.contains("app-styled refusal"), "expected the app's page: {}", res.body);
+    assert!(!res.body.contains("Security check failed"), "not the built-in one");
+    // Still a no-op: a refused login must not have created anything.
+    assert_eq!(session::Entity::find().all(&fx.db).await.unwrap().len(), 0, "no session created");
+    assert!(fx.lockout_row("alice").await.is_none(), "and must not spend the attempt budget");
+
+    // The same handle is what `csrf::enforce` would use, so the app's page reaches its own routes too.
+    assert!(fx.auth.csrf().reject.is_some());
+}
+
+#[tokio::test]
 async fn enrolment_issues_recovery_codes_shown_once_and_stored_hashed() {
     let fx = Fx::new().await;
     let id = fx.user("alice").await;

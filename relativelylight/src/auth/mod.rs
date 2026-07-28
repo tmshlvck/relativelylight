@@ -586,6 +586,8 @@ struct Inner {
     totp_issuer: String,
     /// Name of the double-submit CSRF cookie (see [`crate::csrf`]).
     csrf_cookie: String,
+    /// The app's own CSRF rejection page, if any (see [`Auth::csrf_rejection`]).
+    csrf_reject: Option<crate::csrf::RejectFn>,
     /// Whether a proxy's forwarded headers may be believed (see [`lockout::Lockout::trust_proxy`]).
     trust_proxy: bool,
     /// An app-supplied override for client-address resolution; `None` → [`crate::net::client_ip`] with
@@ -730,10 +732,14 @@ impl Inner {
     /// The CSRF checker for this app: the configured cookie name, `Secure` and the lifetime tracking
     /// the session cookie, so a live session always has a usable token.
     fn csrf(&self) -> crate::csrf::Csrf {
-        crate::csrf::Csrf::new()
+        let mut csrf = crate::csrf::Csrf::new()
             .cookie_name(self.csrf_cookie.clone())
             .secure(self.secure_cookies)
-            .ttl_secs(self.ttl_secs)
+            .ttl_secs(self.ttl_secs);
+        // Carried on the handle rather than applied at the call sites, so the app's page covers this
+        // module's forms, `csrf::enforce` on the app's own routes, and any `Csrf::reject` it calls itself.
+        csrf.reject = self.csrf_reject.clone();
+        csrf
     }
 
     /// The groups that may reset *other* users' passwords: the configured manager groups, defaulting
@@ -859,6 +865,7 @@ impl Auth {
                 profile_managers: None,
                 totp_issuer: "relativelylight".into(),
                 csrf_cookie: crate::csrf::Csrf::new().cookie().to_string(),
+                csrf_reject: None,
                 trust_proxy: lockout.trust_proxy,
                 client_ip: None,
                 usernames,
@@ -1010,6 +1017,24 @@ impl Auth {
     /// Session cookie name (default `"rl_session"`). Set from a constant or config on startup.
     pub fn cookie_name(mut self, name: impl Into<String>) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().cookie_name = name.into();
+        self
+    }
+
+    /// Render the **CSRF rejection page** yourself, in your own shell, instead of the built-in bare 403.
+    ///
+    /// Applies to every form this module renders *and* to [`csrf::enforce`](crate::csrf::enforce) on your
+    /// own routes, because the closure travels on the [`csrf()`](Auth::csrf) handle. Keep the same
+    /// discipline the default has: a rejected request hasn't proved it came from your site, so don't name
+    /// the user, don't set cookies, and keep the status a `403`.
+    ///
+    /// ```ignore
+    /// .csrf_rejection(|| (StatusCode::FORBIDDEN, Html(my_shell("Security check failed", BODY))).into_response())
+    /// ```
+    pub fn csrf_rejection<F>(mut self, render: F) -> Self
+    where
+        F: Fn() -> Response + Send + Sync + 'static,
+    {
+        Arc::get_mut(&mut self.inner).unwrap().csrf_reject = Some(Arc::new(render));
         self
     }
 
@@ -2262,6 +2287,10 @@ fn lockout_message(retry_after: i64) -> String {
 /// deliberately shell-less and static — we don't know that the caller is who they claim, so we render
 /// nothing about them and set no cookies. A user who hit it with a stale tab just reloads.
 fn csrf_rejected(inner: &Inner) -> Response {
+    // The app's page when it set one (`Auth::csrf_rejection`), else the built-in below.
+    if let Some(render) = &inner.csrf_reject {
+        return render();
+    }
     let login = esc(&inner.login_path);
     (
         StatusCode::FORBIDDEN,

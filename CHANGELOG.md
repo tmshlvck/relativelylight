@@ -123,6 +123,16 @@ already using `auth`.
   rows, scheduled by the app (both examples run it hourly). The free `auth::prune(&db, lockout)` still
   works but sees only the absolute session deadline, since it has no `Auth` to read `session_idle_secs`
   from; prefer the method.
+- **`csrf::enforce` — the CSRF check as a layer**, so an app's own unsafe routes don't each call
+  `Csrf::verify`: `.layer(from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce))`. Safe methods and
+  `Authorization`-bearing requests pass; otherwise it takes the `X-CSRF-Token` header, or — for
+  `application/x-www-form-urlencoded` bodies under 64 KiB — the `_csrf` field, buffering the body and handing
+  it to the handler intact so a plain MPA `<form>` post needs nothing from the handler. Multipart bodies are
+  deliberately not parsed (an upload shouldn't be buffered to find a token); send the header there.
+- **`Auth::csrf_rejection(closure)` / `Csrf::on_reject(closure)`** — render the CSRF `403` in your own shell
+  instead of the built-in bare page. One closure covers the library's forms *and* `csrf::enforce`, because it
+  travels on the `csrf()` handle; it does not apply to the `crud` JSON API, which is answering a machine.
+  `Csrf` keeps its `Debug` (hand-written now, since a closure can't be derived through).
 - **`auth::recovery` — TOTP recovery codes.** Ten single-use codes, issued **with** the 2FA enrolment and
   shown once, submitted in a `recovery_code` field at `POST /login/totp` when the authenticator isn't
   available (no new login route; a recovery login lands on `/profile`, since re-enrolling is what that user

@@ -163,7 +163,11 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
   (`Auth::revoke_sessions` / `revoke_other_sessions` for your own code).
 - **CSRF**: every form `auth` renders carries a hidden `_csrf` token checked on POST; turn it on for the
   JSON API with `crud.csrf(auth.csrf())` (the admin UI's `fetch` writes then send `X-CSRF-Token`
-  automatically). `Authorization`-bearing requests are exempt. See [docs/AUTH.md §7](docs/AUTH.md).
+  automatically). For **your own** unsafe routes use the layer —
+  `.layer(from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce))` — which takes the header or a
+  `_csrf` field (URL-encoded bodies under 64 KiB; multipart isn't parsed) and hands the body on intact.
+  `Auth::csrf_rejection(closure)` renders the 403 in your own shell, covering the library's forms and the
+  layer at once. `Authorization`-bearing requests are exempt. See [docs/AUTH.md §7](docs/AUTH.md).
 - **SSO / OIDC** (feature `sso`): `auth::sso::Sso` adds Google / Okta / corporate sign-in
   (`/sso/{provider}/login` + `/callback`). Local groups come from a **union** of a global
   username-regexp table and a per-provider claim table, reconciled onto the user each login. Optional

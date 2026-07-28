@@ -958,7 +958,7 @@ An unsafe request presents it in either:
 |---|---|---|
 | `Auth::routes()` — `/login`, `/login/totp`, `/profile*` | **always on** | `403` + a bare "Security check failed" page |
 | the `crud` JSON API | **opt-in**: `crud.csrf(auth.csrf())` | `403 {"error":"csrf token missing or invalid"}` |
-| your own handlers | call `Csrf::verify` yourself | yours |
+| your own unsafe routes | **`csrf::enforce`** as a layer, or call `Csrf::verify` yourself | the shared page (see below) |
 
 On the auth routes the check runs **first** — before the password comparison, before any DB work — so a
 forged post costs nothing and can't be used as an argon2 amplifier. Same in the engine: the CSRF check
@@ -970,11 +970,43 @@ precedes the gate, so a forged write never reaches a session lookup, let alone t
 request can't borrow it and there's nothing to protect. This keeps a token-based API unburdened (and
 holds the door open for the app-issued API tokens of §8).
 
+**A layer for your own routes.** Rather than calling `Csrf::verify` in every handler, put
+`csrf::enforce` in front of the ones that need it:
+
+```rust
+use axum::middleware::from_fn_with_state;
+
+let guarded = Router::new()
+    .route("/account/delete", post(delete_account))
+    .route("/api-token/rotate", post(rotate_token))
+    .with_state(state)
+    .layer(from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce));
+```
+
+Pass the **same** `auth.csrf()` handle, or the cookie names won't agree. Keep it on a `Router` holding
+only the routes you want guarded — it refuses *every* unsafe request that arrives without a token, which
+is the point, and so does not belong in front of an endpoint meant for non-browser clients (those are
+exempt anyway, being `Authorization`-bearing).
+
+It checks, in order: safe methods pass; `Authorization`-bearing requests pass; the `X-CSRF-Token` header;
+and failing that, for `application/x-www-form-urlencoded` bodies **under 64 KiB**, the `_csrf` field — the
+body is buffered, checked, and handed to the handler intact, so a plain MPA `<form>` post needs nothing
+from the handler. A **multipart** body is deliberately *not* parsed (an upload shouldn't be buffered to
+find a token): send the header there, or check it in the handler. `examples/auth` guards its
+`POST /api-token/rotate` this way.
+
+**Your own rejection page.** The built-in `403` is shell-less and static on purpose: a rejected request
+hasn't proved it came from your site, so nothing about the caller is rendered and no cookies are set.
+`Auth::csrf_rejection(|| ..)` (or `Csrf::on_reject`) replaces it with your own, and because the closure
+travels on the `csrf()` handle, one setting covers the library's forms **and** `csrf::enforce` on your
+routes. Keep the same discipline: don't name the user, don't set cookies, stay a `403`. It deliberately
+does **not** apply to the `crud` JSON API, which is answering a machine.
+
 **Wiring it up.** `auth`'s own pages need nothing. For the API, hand the engine the same checker so both
 surfaces share one cookie:
 
 ```rust
-let auth = Auth::new(db.clone()).secure_cookies(false);   // configure Auth fully first
+let auth = Auth::new(db.clone(), Lockout::default()).secure_cookies(false); // configure Auth fully first
 let mut crud = Crud::new(db, "/api/v1");
 crud.register(post, gate);
 crud.csrf(auth.csrf());          // writes now require X-CSRF-Token
@@ -1044,7 +1076,10 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   in the app's chrome via `profile_shell`. It also carries the worked example of **re-authentication for an
   app's own sensitive action** (§5h): `POST /api-token/rotate`, reached from a form on `/secret`, resolves
   the caller, calls `Auth::reauthenticate` with whatever the form submitted, and returns the refusal
-  *before* anything is written — the order that makes a rejection a no-op. Plus the `--set-admin-pw` break-glass startup path
+  *before* anything is written — the order that makes a rejection a no-op. That route also shows the
+  **CSRF layer** (§7): it sits in its own `Router` behind `csrf::enforce`, so the handler never mentions
+  CSRF, and the app sets `csrf_rejection` so a refusal — there or on the library's own forms — renders in
+  its Bootstrap shell. Plus the `--set-admin-pw` break-glass startup path
   (`reset_admin_access`; the demo admin is seeded with `make_admin`). **Attempt limiting** is tuned down
   to 5 failures / 5 minutes per account with a 15-per-IP cap (§5e) and verified end-to-end: the 5th bad
   password locks the account (`429` + `Retry-After: ~298`, the correct password refused with it), and

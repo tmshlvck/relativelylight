@@ -91,6 +91,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // password (or a manager resetting it) signs every other session out; "Sign out other sessions"
         // on /profile does it on demand. See `session_ttl_secs` / `session_idle_secs`.
         .totp_issuer("relativelylight auth demo") // shown in authenticator apps for 2FA
+        // The CSRF refusal, in this app's own shell instead of the library's bare page. One closure
+        // covers the library's forms *and* `csrf::enforce` on the routes above, because it travels on the
+        // `auth.csrf()` handle. Same discipline as the default: no user named, no cookies set, still 403.
+        .csrf_rejection(|| {
+            (
+                StatusCode::FORBIDDEN,
+                Html(page(
+                    "Security check failed",
+                    r#"<div class="alert alert-danger">That form was stale, or the request didn't come
+from this site. Reload the page and try again.</div>
+<a class="btn btn-outline-secondary btn-sm" href="/">Start over</a>"#,
+                )),
+            )
+                .into_response()
+        })
         .login_shell(move |form| bootstrap_login(form, &sso_buttons))
         .profile_shell(bootstrap_profile);
 
@@ -107,13 +122,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         usernames: auth.username_lockout(),
         ips: auth.ip_lockout(),
     };
+    // The app's own **unsafe** routes, behind `csrf::enforce` — the layer form of the check, so the
+    // handler doesn't call `Csrf::verify` itself. It takes the *same* `auth.csrf()` handle the library's
+    // forms use, so one cookie serves both, and it accepts either the `X-CSRF-Token` header (a `fetch`
+    // client) or the `_csrf` field of a form post. Kept in its own Router so the layer guards exactly
+    // these routes: it refuses every unsafe request without a token, which is not what you want in front
+    // of, say, `/api/whoami`.
+    let guarded = Router::new()
+        // An app-owned **sensitive** action: CSRF-checked by the layer, then identity-checked by
+        // `Auth::reauthenticate` inside the handler (see `rotate_api_token`).
+        .route("/api-token/rotate", post(rotate_api_token))
+        .with_state(state.clone())
+        .layer(axum::middleware::from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce));
+
     let mut app = Router::new()
         .route("/", get(public))
         .route("/secret", get(secret)) // gated on demand (see `secret`)
         .route("/api/whoami", get(whoami)) // the app's own credential check (see `whoami`)
-        // An app-owned **sensitive** action, gated by `Auth::reauthenticate` (see `rotate_api_token`).
-        .route("/api-token/rotate", post(rotate_api_token))
         .with_state(state)
+        .merge(guarded)
         .merge(auth.routes()); // /login, /logout, /profile (password + 2FA), /login/totp
     if let Some(sso) = &sso {
         app = app.merge(sso.routes()); // /sso/{provider}/login + /callback
@@ -221,7 +248,14 @@ async fn secret(State(app): State<AppState>, headers: HeaderMap, jar: CookieJar)
     };
     let name = auth.session_cookie_name();
     let cookie = jar.get(name).map(|c| c.value().to_string()).unwrap_or_default();
-    Html(page(
+    // This page renders a form that posts to a CSRF-guarded route, so it needs a token: `ensure` reuses
+    // the request's if it has one and mints one otherwise, handing back the cookie to set in that case.
+    let (csrf_token, csrf_cookie) = auth.csrf().ensure(&headers);
+    let jar = match csrf_cookie {
+        Some(c) => jar.add(c),
+        None => jar,
+    };
+    let body = Html(page(
         "Protected page",
         &format!(
             r#"<p>Signed in as <b>{}</b> — groups: [{}].</p>
@@ -236,6 +270,7 @@ shouldn't be enough for — a stolen cookie <em>is</em> a live session. So the a
 they are present, with <code>Auth::reauthenticate</code>: the same factors the library's own sensitive
 pages take (your password, or a fresh 2FA code), and the same single-use rule for codes.</p>
 <form method="post" action="/api-token/rotate">
+  {csrf_input}
   <div class="mb-2" style="max-width:22rem">
     <label class="form-label small" for="rot-pw">Your current password</label>
     <input class="form-control form-control-sm" id="rot-pw" name="current_password" type="password"
@@ -251,9 +286,10 @@ pages take (your password, or a fresh 2FA code), and the same single-use rule fo
             who.username,
             who.groups.join(", "),
             cookie,
+            csrf_input = relativelylight::csrf::Csrf::hidden_input(&csrf_token),
         ),
-    ))
-    .into_response()
+    ));
+    (jar, body).into_response()
 }
 
 /// What an app's own sensitive route submits: the caller's re-authentication. (A real one would carry a
