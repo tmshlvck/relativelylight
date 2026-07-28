@@ -30,6 +30,9 @@ pub mod group;
 /// Lockout (§5e): the two DB-backed failure counters — by account name and by source address —
 /// braking the unauthenticated credential checks, here and in the app.
 pub mod lockout;
+/// TOTP **recovery codes** (§5i): single-use codes that get a user back in when the authenticator is
+/// gone, issued at enrolment and regenerable from the profile page.
+pub mod recovery;
 /// Negative-path (rejection) tests for the auth surface — see the module's own docs.
 #[cfg(test)]
 mod security_tests;
@@ -269,6 +272,7 @@ pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> 
         schema.create_table_from_entity(session::Entity),
         schema.create_table_from_entity(lockout::username_entity::Entity),
         schema.create_table_from_entity(lockout::ip_entity::Entity),
+        schema.create_table_from_entity(recovery::entity::Entity),
     ]
 }
 
@@ -1198,6 +1202,7 @@ impl Auth {
     /// - `GET /logout`.
     /// - `GET/POST /profile` — change your own password + manage your own 2FA.
     /// - `GET/POST /profile/totp` + `POST /profile/totp/disable` — enrol in / disable your own 2FA.
+    /// - `POST /profile/totp/recovery` — replace your recovery codes (§5i).
     /// - `POST /profile/sessions/revoke` — sign out your *other* sessions.
     /// - `GET/POST /profile/{id}` — a manager resets another user's password.
     /// - `POST /profile/{id}/totp/disable` — a manager disables another user's 2FA.
@@ -1213,6 +1218,7 @@ impl Auth {
             .route("/profile", get(profile_form).post(profile_submit))
             .route("/profile/totp", get(totp_setup_form).post(totp_setup_submit))
             .route("/profile/totp/disable", post(totp_self_disable))
+            .route("/profile/totp/recovery", post(recovery_regenerate))
             .route("/profile/sessions/revoke", post(sessions_revoke))
             .route("/profile/{id}", get(manage_form).post(manage_submit))
             .route("/profile/{id}/totp/disable", post(totp_manage_disable))
@@ -1408,6 +1414,11 @@ async fn login_totp_form(
 struct TotpForm {
     /// At `/login/totp`, the code for the account's active secret. At `/profile/totp`, the code for the
     /// **pending** secret being enrolled — which is why re-authentication there needs its own fields.
+    ///
+    /// Defaulted rather than required: since a recovery code can satisfy `/login/totp` instead (§5i), a
+    /// client that sends only `recovery_code` deserves the ordinary answer, not a 422 about a field it
+    /// had no reason to include.
+    #[serde(default)]
     code: String,
     /// Re-authentication for `/profile/totp` (§5h); unused at `/login/totp`, where the password was just
     /// checked a moment ago.
@@ -1417,6 +1428,10 @@ struct TotpForm {
     /// existing 2FA setup. A first enrolment has no active secret, so the password is the factor.
     #[serde(default)]
     totp_code: String,
+    /// A single-use **recovery code** (§5i), accepted at `/login/totp` in place of `code` when the
+    /// authenticator is gone. Unused at `/profile/totp`.
+    #[serde(default)]
+    recovery_code: String,
     #[serde(default, rename = "_csrf")]
     csrf: Option<String>,
 }
@@ -1453,12 +1468,34 @@ async fn login_totp_submit(
             Html((inner.login_shell)(&totp_login_html(Some(&lockout_message(retry)), &token))),
         );
     }
+    // An empty submission presents **no credential**, so it is not a failed check and must not spend the
+    // account's budget — §5e's rule, and without it an empty form (a stray double-submit, or a forged
+    // cross-site post that happens to carry a token) would grief the real user's login.
+    if form.code.trim().is_empty() && recovery::normalize(&form.recovery_code).is_empty() {
+        let (token, jar) = csrf_token(&inner, &headers, jar);
+        return (
+            StatusCode::UNAUTHORIZED,
+            jar,
+            Html((inner.login_shell)(&totp_login_html(
+                Some("Enter the code from your authenticator app, or a recovery code."),
+                &token,
+            ))),
+        )
+            .into_response();
+    }
     // Two conditions, one answer: the code must be valid *and* must not have been spent already. A
     // replayed code is a failed check as far as the caller (and the lockout) is concerned — saying
     // "that code was already used" would tell an attacker holding a captured code that it was the right
     // one, which is precisely what they don't know yet.
     let step = user.totp_key().and_then(|s| totp::verify_step(s, &form.code));
-    let ok = step.is_some_and(|step| user.totp_step_ok(step));
+    let mut ok = step.is_some_and(|step| user.totp_step_ok(step));
+    // Failing that, a **recovery code** (§5i) — the way in when the authenticator is gone. Tried second
+    // so a normal login never touches the set, and spent on success so each code works exactly once.
+    let mut used_recovery = false;
+    if !ok && !recovery::normalize(&form.recovery_code).is_empty() {
+        ok = recovery::consume(&inner.db, user.id, &form.recovery_code).await;
+        used_recovery = ok;
+    }
     if !ok {
         inner.record_failure(&user.username, &headers, peer).await;
         let (token, jar) = csrf_token(&inner, &headers, jar);
@@ -1479,6 +1516,11 @@ async fn login_totp_submit(
     inner.usernames.clear(&user.username).await;
     let (_, csrf_cookie) = inner.csrf().issue();
     let jar = jar.add(session_cookie(&inner, token)).add(csrf_cookie);
+    if used_recovery {
+        // Land on the profile rather than `/`: they got in without their authenticator, so the next
+        // thing they need is either a re-enrolment or a fresh set of codes, and both live there.
+        return (jar, Redirect::to(&inner.profile_path)).into_response();
+    }
     (jar, Redirect::to("/")).into_response()
 }
 
@@ -1565,10 +1607,9 @@ async fn profile_form(
     };
     let (token, jar) = csrf_token(&inner, &headers, jar);
     let frag = match user.sso_key() {
-        Some(provider) => sso_profile_html(&who, provider),
-        None => change_form_html(&who, user.has_totp(), None, None, &token),
+        Some(provider) => inner.with_profile_extra(sso_profile_html(&who, provider), &who).await,
+        None => profile_fragment(&inner, &who, &user, None, None, &token).await,
     };
-    let frag = inner.with_profile_extra(frag, &who).await;
     (jar, Html((inner.profile_shell)(&frag, &who))).into_response()
 }
 
@@ -1597,8 +1638,6 @@ async fn profile_submit(
     if user.is_sso() {
         return Redirect::to(&inner.profile_path).into_response(); // SSO: password managed by the IdP
     }
-    let totp_on = user.has_totp();
-
     // Not lockout-limited: the caller is *authenticated*, so this isn't brute force from outside —
     // it's someone with a live session, which is a session-theft problem (short TTLs, re-auth before
     // sensitive changes — TODO.md), not a guessing one. Counting it here would also let a stolen
@@ -1615,14 +1654,14 @@ async fn profile_submit(
             .map(|e| format!("Your new password {e}."))
     };
     if let Some(msg) = error {
-        let frag = change_form_html(&who, totp_on, Some(&msg), None, &csrf);
-        let frag = inner.with_profile_extra(frag, &who).await;
+        let frag = profile_fragment(&inner, &who, &user, Some(&msg), None, &csrf).await;
         return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
     }
 
     if set_password(&inner.db, &who.username, &form.new_password).await.is_err() {
-        let frag = change_form_html(&who, totp_on, Some("Could not change the password."), None, &csrf);
-        let frag = inner.with_profile_extra(frag, &who).await;
+        let frag =
+            profile_fragment(&inner, &who, &user, Some("Could not change the password."), None, &csrf)
+                .await;
         return (StatusCode::INTERNAL_SERVER_ERROR, Html((inner.profile_shell)(&frag, &who)))
             .into_response();
     }
@@ -1651,8 +1690,7 @@ async fn profile_submit(
             peer,
         )
         .await;
-    let frag = change_form_html(&who, totp_on, None, Some(msg), &csrf);
-    let frag = inner.with_profile_extra(frag, &who).await;
+    let frag = profile_fragment(&inner, &who, &user, None, Some(msg), &csrf).await;
     (jar, Html((inner.profile_shell)(&frag, &who))).into_response()
 }
 
@@ -1893,9 +1931,92 @@ async fn totp_setup_submit(
     if am.update(&inner.db).await.is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not enable 2FA").into_response();
     }
-    let frag =
-        change_form_html(&who, true, None, Some("Two-factor authentication is now enabled."), &csrf);
-    Html((inner.profile_shell)(&frag, &who)).into_response()
+    // Issue recovery codes **with** the enrolment and show them once (§5i). Issuing them here rather
+    // than leaving it to the user is the difference between a lost phone being an inconvenience and
+    // being an account only an administrator can reopen.
+    let user_id = who.id.parse::<i32>().unwrap_or_default();
+    match recovery::issue(&inner.db, user_id).await {
+        Ok(codes) => {
+            let frag = recovery_codes_html(
+                &codes,
+                "Two-factor authentication is now enabled. Save these recovery codes.",
+            );
+            Html((inner.profile_shell)(&frag, &who)).into_response()
+        }
+        // 2FA *is* on, so don't imply otherwise; they can generate codes from the profile page.
+        Err(_) => {
+            let frag = change_form_html(
+                &who,
+                true,
+                Some(0),
+                Some("Two-factor authentication is on, but recovery codes could not be created — generate them below."),
+                None,
+                &csrf,
+            );
+            Html((inner.profile_shell)(&frag, &who)).into_response()
+        }
+    }
+}
+
+/// `POST /profile/totp/recovery` — replace the caller's recovery codes and show the new set once.
+/// **Re-authenticated** (§5h): a fresh set is a fresh way into the account, so an intruder holding a
+/// session must not be able to mint one, and the codes it invalidates are the real user's.
+async fn recovery_regenerate(
+    State(inner): State<Arc<Inner>>,
+    headers: HeaderMap,
+    MaybePeer(peer): MaybePeer,
+    Form(form): Form<ReauthForm>,
+) -> Response {
+    if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
+        return csrf_rejected(&inner);
+    }
+    let csrf = inner.csrf().token(&headers).unwrap_or_default();
+    let Some(who) = identity_of(&inner, &headers).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let Some(user) = current_user(&inner, &who).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    if !user.has_totp() {
+        // Codes exist to recover a second factor; without one there is nothing to recover.
+        return Redirect::to(&inner.profile_path).into_response();
+    }
+    if let Err(msg) = inner.reauth(&user, &form.current_password, &form.totp_code).await {
+        let frag = profile_fragment(&inner, &who, &user, Some(&msg), None, &csrf).await;
+        return (StatusCode::FORBIDDEN, Html((inner.profile_shell)(&frag, &who))).into_response();
+    }
+    match recovery::issue(&inner.db, user.id).await {
+        Ok(codes) => {
+            inner
+                .notify(
+                    "auth-profile",
+                    "auth_user",
+                    Some(who.id.clone()),
+                    serde_json::json!({ "recovery_codes_reissued": codes.len() }),
+                    &headers,
+                    peer,
+                )
+                .await;
+            let frag = recovery_codes_html(
+                &codes,
+                "Here is your new set. The previous codes no longer work.",
+            );
+            Html((inner.profile_shell)(&frag, &who)).into_response()
+        }
+        Err(_) => {
+            let frag = profile_fragment(
+                &inner,
+                &who,
+                &user,
+                Some("Could not generate new recovery codes."),
+                None,
+                &csrf,
+            )
+            .await;
+            (StatusCode::INTERNAL_SERVER_ERROR, Html((inner.profile_shell)(&frag, &who)))
+                .into_response()
+        }
+    }
 }
 
 /// `POST /profile/sessions/revoke` — the caller signs out every session **except this one**.
@@ -1937,8 +2058,7 @@ async fn sessions_revoke(
         1 => "1 other session signed out.".to_string(),
         n => format!("{n} other sessions signed out."),
     };
-    let frag = change_form_html(&who, user.has_totp(), None, Some(&msg), &csrf);
-    let frag = inner.with_profile_extra(frag, &who).await;
+    let frag = profile_fragment(&inner, &who, &user, None, Some(&msg), &csrf).await;
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
@@ -1960,13 +2080,12 @@ async fn totp_self_disable(
         return Redirect::to(&inner.login_path).into_response();
     };
     if let Err(msg) = inner.reauth(&user, &form.current_password, &form.totp_code).await {
-        let frag = change_form_html(&who, user.has_totp(), Some(&msg), None, &csrf);
-        let frag = inner.with_profile_extra(frag, &who).await;
+        let frag = profile_fragment(&inner, &who, &user, Some(&msg), None, &csrf).await;
         return (StatusCode::FORBIDDEN, Html((inner.profile_shell)(&frag, &who))).into_response();
     }
     clear_totp(&inner, user).await;
     let frag =
-        change_form_html(&who, false, None, Some("Two-factor authentication disabled."), &csrf);
+        change_form_html(&who, false, None, None, Some("Two-factor authentication disabled."), &csrf);
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
@@ -2020,21 +2139,45 @@ async fn totp_manage_disable(
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
+/// The whole self-service profile fragment for `user`: the password form, the 2FA section, the recovery
+/// codes section (only when 2FA is on — it needs a count from the DB, which is why this is async), the
+/// sessions section, and the app's `profile_extra` appended.
+async fn profile_fragment(
+    inner: &Inner,
+    who: &Identity,
+    user: &user::Model,
+    error: Option<&str>,
+    success: Option<&str>,
+    csrf: &str,
+) -> String {
+    let totp_on = user.has_totp();
+    let left = match totp_on {
+        true => Some(recovery::remaining(&inner.db, user.id).await),
+        false => None,
+    };
+    let frag = change_form_html(who, totp_on, left, error, success, csrf);
+    inner.with_profile_extra(frag, who).await
+}
+
 /// The caller's own user row.
 async fn current_user(inner: &Inner, who: &Identity) -> Option<user::Model> {
     let id = who.id.parse::<i32>().ok()?;
     user_by_id(&inner.db, id).await
 }
 
-/// Clear both the active and pending TOTP secrets on a user, and the replay guard with them
+/// Clear both the active and pending TOTP secrets on a user, the replay guard, and any recovery codes
 /// (best-effort). The step **must** go in the same write: leaving a stale ceiling behind would silently
-/// reject the first codes of a later re-enrolment, for as long as it took the clock to catch up.
+/// reject the first codes of a later re-enrolment, for as long as it took the clock to catch up. The
+/// recovery codes go too — they are a way past a second factor that no longer exists, and a later
+/// re-enrolment must not inherit a set the user threw away with their old phone.
 async fn clear_totp(inner: &Inner, user: user::Model) {
+    let user_id = user.id;
     let mut am: user::ActiveModel = user.into();
     am.totp_secret = Set(None);
     am.totp_pending = Set(None);
     am.totp_last_step = Set(None);
     let _ = am.update(&inner.db).await;
+    let _ = recovery::clear(&inner.db, user_id).await;
 }
 
 /// Render the 2FA enrolment page (QR + otpauth URL + verify form) for a pending secret.
@@ -2202,12 +2345,17 @@ fn alert_html(error: Option<&str>, success: Option<&str>) -> String {
 fn change_form_html(
     who: &Identity,
     totp_on: bool,
+    recovery_left: Option<u64>,
     error: Option<&str>,
     success: Option<&str>,
     csrf: &str,
 ) -> String {
     let alert = alert_html(error, success);
     let twofa = twofa_self_section(totp_on, csrf);
+    let recovery = match recovery_left {
+        Some(left) => format!("<hr class=\"my-4\">\n{}", recovery_self_section(left, csrf)),
+        None => String::new(),
+    };
     let sessions = sessions_self_section(csrf);
     let csrf_input = crate::csrf::Csrf::hidden_input(csrf);
     format!(
@@ -2232,9 +2380,63 @@ fn change_form_html(
 </form>
 <hr class="my-4">
 {twofa}
+{recovery}
 <hr class="my-4">
 {sessions}"#,
         user = esc(&who.username),
+    )
+}
+
+/// The recovery-codes section of the profile page: how many are left, and a re-authenticated button to
+/// replace the set. Only rendered when 2FA is on — codes recover a second factor, so without one there
+/// is nothing for them to do.
+fn recovery_self_section(left: u64, csrf: &str) -> String {
+    let state = match left {
+        0 => "<strong>None left.</strong> If you lose your authenticator now, only an administrator \
+              can get you back in — generate a new set."
+            .to_string(),
+        1 => "<strong>1 code left.</strong> Generate a new set soon.".to_string(),
+        n if n <= 3 => format!("<strong>{n} codes left.</strong> Generate a new set soon."),
+        n => format!("{n} unused codes."),
+    };
+    format!(
+        r#"<h2 class="h6">Recovery codes</h2>
+<p class="text-muted small mb-2">Single-use codes that log you in when your authenticator isn't
+available. {state}</p>
+<form method="post" action="/profile/totp/recovery">
+  {csrf_input}
+{reauth}
+  <button class="btn btn-outline-secondary btn-sm" type="submit">Generate new codes</button>
+</form>
+<p class="text-muted small mt-2 mb-0">Generating a set invalidates the previous one.</p>"#,
+        csrf_input = crate::csrf::Csrf::hidden_input(csrf),
+        reauth = reauth_inputs(
+            "rl-rec",
+            true,
+            "Confirm it's you — a new set is a new way into this account.",
+        ),
+    )
+}
+
+/// The one-time display of a freshly issued set. There is no way back to this page: the codes are
+/// hashed on the way in, so if the user doesn't keep them now they are gone.
+fn recovery_codes_html(codes: &[String], headline: &str) -> String {
+    let items = codes
+        .iter()
+        .map(|c| format!("<li><code>{}</code></li>", esc(&recovery::display(c))))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"<h1 class="h5 mb-3">Recovery codes</h1>
+<div class="alert alert-success">{headline}</div>
+<p class="text-muted small">Each code works <strong>once</strong>. Keep them somewhere you can reach
+without this account — a password manager, or printed. <strong>They are not shown again:</strong> only
+hashes are stored, so this page cannot be reproduced.</p>
+<ul class="list-unstyled bg-body-secondary p-3 rounded" style="columns:2;font-size:1.05rem;letter-spacing:.05em">
+{items}
+</ul>
+<a class="btn btn-primary btn-sm" href="/profile">I've saved them</a>"#,
+        headline = esc(headline),
     )
 }
 
@@ -2428,6 +2630,16 @@ fn totp_login_html(error: Option<&str>, csrf: &str) -> String {
     <label class="form-label" for="rl-totp">Authentication code</label>
     <input class="form-control" id="rl-totp" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus>
   </div>
+  <details class="mb-3">
+    <summary class="small text-muted">Lost your authenticator?</summary>
+    <div class="mt-2">
+      <label class="form-label small" for="rl-recovery">Recovery code</label>
+      <input class="form-control" id="rl-recovery" name="recovery_code" autocomplete="off"
+             placeholder="abcde-fghij" spellcheck="false">
+      <p class="form-text">Each recovery code works once. You'll land on your profile so you can
+      re-enrol or generate a new set.</p>
+    </div>
+  </details>
   <button class="btn btn-primary" type="submit">Verify</button>
 </form>"#
     )
@@ -2546,7 +2758,11 @@ mod tests {
         // The bootstrap `migrate` builds these with IF NOT EXISTS, so re-running on an existing DB
         // won't error ("table already exists"). Verified at the SQL level (no DB needed).
         let stmts = table_create_statements(DbBackend::Sqlite);
-        assert_eq!(stmts.len(), 6, "user, group, user_group, session + the two lockout tables");
+        assert_eq!(
+            stmts.len(),
+            7,
+            "user, group, user_group, session, the two lockout tables + totp recovery"
+        );
         for mut stmt in stmts {
             stmt.if_not_exists();
             let sql = DbBackend::Sqlite.build(&stmt).sql.to_uppercase();

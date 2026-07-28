@@ -243,6 +243,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // but nothing an operator should see or edit — the library maintains it, and hand-editing it either
     // lets a code be replayed or locks the user out of their own authenticator for a while.
     auth_user_mm.field("totp_last_step").hidden = true;
+    // Note what is *not* registered: `auth::recovery::entity` (the TOTP recovery codes). Every row is a
+    // hash of a credential, and there is nothing an operator can usefully do to one — a user who needs a
+    // fresh set generates it from /profile, and a user who has lost their authenticator is helped by the
+    // "Disable 2FA" button on their manage page, which clears the codes with it. Contrast the two lockout
+    // tables below, which *are* registered, because deleting one of those rows is the whole unlock.
     // New accounts are active by default (so a freshly created user with a password can log in).
     auth_user_mm.field("is_active").default = Some(serde_json::json!(true));
     // Lifecycle timestamps are maintained by the library (hooks / login flow) — show, don't edit.

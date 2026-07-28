@@ -141,6 +141,7 @@ SeaORM models (the app runs the migration / `create_table_from_entity`):
   `user_mm.field("username").validate_str(relativelylight::auth::valid_username)`. Group names get
   `auth::valid_group_name` (via `ensure_group`).
 - **`group`** + **`user_group`** (N:M) — group membership drives authz.
+- **`totp_recovery`** — the single-use recovery codes for an enrolled user, hashed (§5i).
 - **`session`** — `id` (opaque token), `user_id`, `expires_at` (the **absolute** deadline),
   `last_seen_at` (the **idle** clock; §5f), and `awaiting_totp` (a
   half-authenticated session — password ok, second factor pending; §5a).
@@ -150,7 +151,7 @@ These are ordinary `crud`-registerable entities (so the admin can manage users/g
 
 ### Database schema & migrations
 
-`auth::migrate(&db)` creates the six tables **if they don't already exist** — a bootstrap for a fresh
+`auth::migrate(&db)` creates the seven tables **if they don't already exist** — a bootstrap for a fresh
 DB or the examples, safe to call on every start. It is **not** a migration engine: it only *creates*
 missing tables, so it won't add columns when you upgrade the library (e.g. the TOTP / SSO columns on
 `auth_user`) or otherwise evolve the schema.
@@ -160,6 +161,8 @@ missing tables, so it won't add columns when you upgrade the library (e.g. the T
 > ALTER TABLE auth_session ADD COLUMN last_seen_at BIGINT NOT NULL DEFAULT 0;  -- idle clock (§5f)
 > ALTER TABLE auth_user    ADD COLUMN totp_last_step BIGINT NULL;              -- replay guard (§5a)
 > ```
+> …and one new table, `auth_totp_recovery` (§5i) — take it from `table_create_statements`, which now
+> returns it, rather than writing the DDL by hand.
 > The `DEFAULT 0` on `last_seen_at` makes every pre-existing session read as idle-expired, so everyone
 > signs in again once — the safe direction. Backfill it to `strftime('%s','now')` (or your dialect's
 > equivalent) instead if you'd rather not log your users out on deploy.
@@ -188,6 +191,7 @@ impl MigrationTrait for InitAuth {
     }
     async fn down(&self, m: &SchemaManager) -> Result<(), DbErr> {
         for t in [
+            "auth_totp_recovery",
             "auth_ip_lockout",
             "auth_username_lockout",
             "auth_session",
@@ -310,6 +314,9 @@ re-shows the same QR. `Auth::totp_issuer(name)` sets the issuer label authentica
 / `has_totp`), and a blank `totp_pending` as *no* enrolment in progress. Treating `Some("")` as "2FA on"
 would demand a login code no authenticator can produce — an account locked out of its own login — and
 an empty text input in an admin form is exactly how that value appears.
+
+**Recovery codes.** A lost authenticator is handled by single-use recovery codes, issued with the
+enrolment — see §5i.
 
 **Disable.** `POST /profile/totp/disable` turns off the caller's own 2FA. A **manager** (a
 profile-manager group, §5) can disable *another* user's 2FA via `POST /profile/{id}/totp/disable`
@@ -765,6 +772,53 @@ the refusal before anything is written.
 another `auth_session` column and a window during which a stolen session is dangerous again. These are
 rare actions; typing a password twice to reset two users is a fair price for having no open window.
 
+## 5i. TOTP recovery codes — implemented
+
+The answer to "my phone is gone". Without them, an enrolled user who loses their authenticator can only
+be let back in by a manager disabling their 2FA (§5a) — workable for staff with an IT department, useless
+for everyone else, and an availability problem the moment §5h means a live session can no longer simply
+switch 2FA off.
+
+**Ten single-use codes**, issued automatically **with** the enrolment and shown once. `auth::recovery`
+owns them: `issue`, `consume`, `remaining`, `clear`, plus the `entity` (table `auth_totp_recovery`).
+
+- **Use:** at `POST /login/totp`, in the `recovery_code` field instead of the 6-digit `code` — no separate
+  route. A recovery login lands on **`/profile`** rather than `/`, because the next thing that user needs
+  is to re-enrol or generate a fresh set. The session id rotates exactly as it does for a code (§5f).
+- **Spent on use**, so each code works once; the row is *marked* rather than deleted, which keeps "a
+  recovery code was used" visible afterwards.
+- **Regenerate** from the profile page (`POST /profile/totp/recovery`), which is **re-authenticated**
+  (§5h) — a new set is a new way into the account, so an intruder holding a session must not be able to
+  mint one. Issuing a set invalidates the previous one, which is what makes regeneration the right
+  response to "I think my codes leaked".
+- **Destroyed when 2FA is turned off**, self-service or by a manager: they are a way past a second factor,
+  so without one they would just be a weaker second password — and a later re-enrolment must not inherit
+  a set the user threw away with their old phone.
+- The profile page shows how many are unused, and says so more loudly at ≤ 3 and at 0.
+- 2FA stays **on** after a recovery login. The code got them in; it didn't decide their factor policy.
+
+**Hashed with SHA-256, not argon2 — deliberately.** Codes are machine-generated with ~49 bits of entropy
+(10 characters from a 30-symbol Crockford-style alphabet, so nothing reads as `0`/`1`), which is exactly
+the case argon2 is *not* for: no attacker enumerates a 49-bit space however cheap the hash. What a slow
+hash would cost is real and paid by the defender — a submitted code must be matched against the user's
+whole set, so up to ten argon2 verifications (≈190 MiB transient, most of a second) on the
+**unauthenticated** login path, per attempt. A single SHA-256 makes it one indexed equality lookup: O(1),
+no comparison loop, and nothing whose duration depends on how far into the set the match was. The hash is
+domain-separated by user id, so a row lifted from one account cannot be replayed against another.
+
+**A recovery code does not satisfy re-authentication** (§5h). It gets you *in*; it does not authorise
+entrenching. Otherwise one leaked code would be both a login *and* a licence to remove the second factor
+it just bypassed — and for re-auth the password already covers the lost-authenticator case.
+
+**Guessing is braked** by the same per-account counter as a wrong TOTP code (§5e). An **empty**
+submission — no code and no recovery code — is refused *without* counting, since presenting nothing is
+not a failed check, and counting it would let a stray double-submit or a forged post grief the real user's
+login.
+
+**Schema.** `auth_totp_recovery` is in `table_create_statements`, so an app with its own migrations needs
+a step for it. Don't register the entity in an admin panel: every row is a hash of a credential, and there
+is nothing an operator can usefully do to one that the "generate new codes" button doesn't do properly.
+
 ## 6. authz — the gate
 
 The gate trait lives in **`relativelylight::authz`** — always compiled, independent of the `auth`
@@ -1097,6 +1151,17 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
     however it arrives (plain v4, real v6, mapped, and a mapped *rule* against a plain client) while an
     address outside the list still locks, one client is **one row** whether it arrives mapped or plain,
     and `prune` drops expired rows while leaving live ones.
+  - **recovery codes** (§5i): a full set is issued by enrolment, **shown once** and never again (the
+    profile page reports a count and provably contains no code), and stored as hashes with no plaintext in
+    any row. A code completes a login — rotating the session and landing on `/profile` — and is then
+    refused on reuse, with 2FA still on and no second code spent. Another account's code is refused and
+    *not* consumed, which is the domain-separated hash under test. Regeneration is refused without
+    re-authentication (the old set surviving the refusal), and on success replaces the set: the superseded
+    code is dead and a new one works. Turning 2FA off deletes the rows outright, by the self-service and
+    the manager path. Wrong codes are counted against the account's lockout — three guesses at a limit of
+    three locks it, and a *valid* code is then refused too without being spent — while an **empty**
+    submission is refused without being counted at all. And a recovery code is shown *not* to satisfy
+    re-authentication, in any of the three fields, consuming nothing.
   - **re-authentication** (§5h): each of the four sensitive routes is driven with nothing, an empty
     factor, a wrong password and a wrong code — all `403`, with the account provably unchanged (2FA still
     on, the victim's old password still working, a pending enrolment still pending so the user can finish
@@ -1171,8 +1236,8 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
 Each group carries a positive control (a correct login, a correct TOTP code, an allowing gate) so a
 mistake that breaks *everything* can't make the negatives pass vacuously.
 
-**Not covered by tests** (and open in [TODO.md](../TODO.md)): TOTP recovery codes, which don't exist yet,
-and re-authentication *through an identity provider* for SSO accounts (§5h's documented limit). What the
+**Not covered by tests** (and open in [TODO.md](../TODO.md)): re-authentication *through an identity
+provider* for SSO accounts (§5h's documented limit), and breached-password screening (§5g). What the
 SSO suite deliberately doesn't reach: the *provider's* own behaviour (consent screens, refresh tokens,
 userinfo),
 and the browser-side redirect to the authorization endpoint, which is a `Location` header we assert but
@@ -1214,9 +1279,10 @@ don't follow.
   must stay fieldless, and the list-filter half reaches into `ListQuery`/`Accessor` too. Deferred until a
   requirement arrives that an app can't meet in its own handler.
 - PassKeys/WebAuthn, app-issued API tokens (extra principal source) — §8.
-- Security hardening — **TOTP recovery codes** is the one that remains (see `TODO.md`); lockout (§5e),
-  CSRF (§7), session lifetime/revocation (§5f), the password policy (§5g) and re-authentication before
-  sensitive changes (§5h) have all landed, as has SSO discovery caching. Still open there: re-auth through
-  the IdP for SSO accounts, and breached-password screening.
+- Security hardening — the backlog's security section is now down to follow-ups: lockout (§5e), CSRF (§7),
+  session lifetime/revocation (§5f), the password policy (§5g), re-authentication (§5h) and recovery codes
+  (§5i) have all landed, as has SSO discovery caching. Still open: re-auth through the IdP for SSO
+  accounts, breached-password screening, a `Csrf` layer + rejection hook, and the `ClientIp`/logging/CORS
+  layers.
 - Session store scaling: sessions are already shared across replicas (they're rows), so this is a
   performance question — the per-request read, and the lazy idle-refresh write — not a correctness one.

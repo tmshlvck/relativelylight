@@ -46,6 +46,10 @@ already using `auth`.
   break-glass recovery. (`a4f14a7`)
 - **An empty string submitted for a nullable column is stored as `NULL`**, not `""` (text / uuid / date
   / datetime; `NOT NULL` columns keep `""`). Opt out per field with `blank_is_null = false`. (`8419948`)
+- **A new table, `auth_totp_recovery`** (§5i), in `table_create_statements` — an app with its own
+  migrations needs a step for it. Don't register the entity in an admin panel: every row is a hash of a
+  credential. Note the upgrade gap: an account that enrolled in 2FA under an earlier version has **no**
+  recovery codes until it generates a set from `/profile` (filed in TODO).
 - **Two new columns on existing auth tables.** `auth_session.last_seen_at` (the idle clock) and
   `auth_user.totp_last_step` (the TOTP replay guard). `auth::migrate` only ever *creates* missing tables,
   so an existing database needs the `ALTER TABLE`s itself:
@@ -117,6 +121,18 @@ already using `auth`.
   rows, scheduled by the app (both examples run it hourly). The free `auth::prune(&db, lockout)` still
   works but sees only the absolute session deadline, since it has no `Auth` to read `session_idle_secs`
   from; prefer the method.
+- **`auth::recovery` — TOTP recovery codes.** Ten single-use codes, issued **with** the 2FA enrolment and
+  shown once, submitted in a `recovery_code` field at `POST /login/totp` when the authenticator isn't
+  available (no new login route; a recovery login lands on `/profile`, since re-enrolling is what that user
+  needs next). Regenerate at `POST /profile/totp/recovery`, which is re-authenticated and invalidates the
+  previous set; the profile page reports how many are unused and says so loudly at ≤ 3. Turning 2FA off
+  deletes them. `recovery::{issue, consume, remaining, clear}` if your own code needs them.
+  Hashed with **SHA-256 rather than argon2**, deliberately: the codes are machine-generated with ~49 bits
+  of entropy, so a slow hash buys nothing against enumeration while costing the defender up to ten argon2
+  verifications (~190 MiB, most of a second) per attempt on the *unauthenticated* login path — a single
+  hash makes it one indexed lookup instead. The hash is domain-separated by user id. A recovery code
+  deliberately does **not** satisfy re-authentication (§5h): it gets you in, it doesn't license removing the
+  factor it bypassed.
 - **`Auth::reauthenticate(&who, password, totp_code)` / `Auth::can_reauthenticate(&who)`** — the
   confirm-it's-you check the module applies to its own sensitive routes, exposed so an app can gate **its**
   destructive actions the same way (delete an account, rotate a token, export a dataset). Returns a message
@@ -199,6 +215,9 @@ already using `auth`.
   authenticator can produce, and burned the attempt-limit budget trying. (`c9d8957`)
 - **A manager password reset silently re-enabled a disabled account** (`set_password` set
   `is_active = true`). (`a4f14a7`)
+- **An empty second-factor submission spent an attempt.** `POST /login/totp` with no code and no recovery
+  code presents no credential, so it is not a failed check — counting it let a stray double-submit, or a
+  forged post that happened to carry a token, burn the real user's lockout budget.
 - **SSO ignored `is_active`.** A **disabled** account could complete an OIDC login: it never authenticated
   (`identify` re-checks the flag) but the callback still reconciled the account's groups, stamped
   `last_login_at`, and minted a session row — so "disable this account" meant one thing on the password

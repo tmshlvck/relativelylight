@@ -79,7 +79,7 @@ Identity is resolved **on demand** (no middleware, nothing injected into the req
 a per-model `Authz` gate with presets (`Open` / `UserReadWrite` / `UserReadGroupWrite` /
 `PublicReadGroupWrite` / `GroupReadWrite`) wired into `crud` (→ 401/403); self-service profile with
 password change; **TOTP 2FA**
-(enrol/verify/login/disable, single-use codes); **OIDC SSO** (feature `sso`: Google / Okta / corporate,
+(enrol/verify/login/disable, single-use codes, plus **recovery codes** for a lost authenticator); **OIDC SSO** (feature `sso`: Google / Okta / corporate,
 claim→group
 mapping, optional auto-registration, cached provider discovery, and a callback whose rejection paths are
 tested against a fake IdP); **double-submit CSRF protection** (feature `csrf`: always on for
@@ -97,7 +97,7 @@ paths (bad credentials, unusable sessions, wrong TOTP codes, replayed codes, idl
 non-manager profile writes, each gate preset) are covered by an automated negative-path suite —
 [AUTH.md §10a](AUTH.md).
 
-**Roadmap / deferred (see [../TODO.md](../TODO.md) for the ordered backlog):** TOTP recovery codes,
+**Roadmap / deferred (see [../TODO.md](../TODO.md) for the ordered backlog):**
 re-auth through the IdP for SSO accounts, breached-password screening, a CSRF layer + rejection hook, a `ClientIp`
 extractor / request-logging / CORS layers, and app-issued API tokens. **PassKeys/WebAuthn** is parked at
 **milestone 0.3+** (nothing needs it yet; it stays the only answer to real-time phishing), and

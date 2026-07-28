@@ -954,6 +954,256 @@ async fn password_change_rejects_an_empty_or_mismatched_new_password() {
     assert!(!fx.password_works("alice", PW).await, "the old password must stop working");
 }
 
+/// Enrol `username` in 2FA through the real pages and return `(active secret, recovery codes)` — the
+/// only way to obtain the codes, since they're shown once and hashed on the way in.
+async fn enrol_with_codes(fx: &Fx, username: &str, cookie: &str) -> (String, Vec<String>) {
+    assert_eq!(fx.get("/profile/totp", Some(cookie)).await.status, StatusCode::OK);
+    let pending = fx.row(username).await.totp_pending.expect("pending secret");
+    let res = fx
+        .post("/profile/totp", &reauth_form(&[("code", &totp::current_code(&pending))]), Some(cookie))
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "enrolment: {}", res.body);
+    // Scrape the displayed codes out of the one page that ever shows them.
+    let codes: Vec<String> = res
+        .body
+        .split("<code>")
+        .skip(1)
+        .filter_map(|s| s.split("</code>").next())
+        .map(recovery::normalize)
+        .filter(|c| c.len() == 10)
+        .collect();
+    assert_eq!(codes.len(), recovery::SET_SIZE, "a full set is shown once: {}", res.body);
+    (pending, codes)
+}
+
+#[tokio::test]
+async fn enrolment_issues_recovery_codes_shown_once_and_stored_hashed() {
+    let fx = Fx::new().await;
+    let id = fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    let (_secret, codes) = enrol_with_codes(&fx, "alice", &cookie).await;
+
+    assert_eq!(recovery::remaining(&fx.db, id).await, recovery::SET_SIZE as u64);
+    // Stored hashed: no row contains a code, so a database read is not a way in.
+    let rows = recovery::entity::Entity::find().all(&fx.db).await.expect("query");
+    assert_eq!(rows.len(), recovery::SET_SIZE);
+    for row in &rows {
+        assert_eq!(row.code_hash.len(), 64, "sha-256 hex");
+        assert!(row.used_at.is_none(), "a fresh set is unused");
+        assert!(!codes.iter().any(|c| row.code_hash.contains(c)), "no plaintext in the row");
+    }
+    // Revisiting the profile shows the count, never the codes again.
+    let page = fx.get("/profile", Some(&cookie)).await;
+    assert!(page.body.contains("Recovery codes"), "the section is there");
+    assert!(page.body.contains("10 unused codes"), "with a count: {}", page.body);
+    for c in &codes {
+        assert!(!page.body.contains(c), "a code must never be shown twice");
+    }
+}
+
+#[tokio::test]
+async fn a_recovery_code_completes_a_login_once() {
+    // The whole point: the authenticator is gone, and this is the way back in.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    let (_secret, codes) = enrol_with_codes(&fx, "alice", &cookie).await;
+
+    // Password gets you to the second-factor step, as usual.
+    let res = fx.post("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
+    res.assert_redirect("/login/totp");
+    let pending = res.session_token(fx.auth.session_cookie_name()).unwrap();
+
+    // A recovery code completes it — landing on the profile, since re-enrolling is the next thing they
+    // need — and the session id rotates just as it does for a code.
+    let res = fx
+        .post(
+            "/login/totp",
+            &form(&[("recovery_code", &recovery::display(&codes[0]))]),
+            Some(&fx.cookie(&pending)),
+        )
+        .await;
+    res.assert_redirect("/profile");
+    let token = res.session_token(fx.auth.session_cookie_name()).expect("a session cookie");
+    assert_ne!(token, pending, "the session id must still rotate");
+    assert_eq!(fx.identify_token(&token).await.map(|w| w.username), Some("alice".into()));
+    assert_eq!(recovery::remaining(&fx.db, fx.row("alice").await.id).await, 9, "one spent");
+
+    // The same code a second time is refused, and 2FA stays on.
+    let res = fx.post("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
+    let pending = res.session_token(fx.auth.session_cookie_name()).unwrap();
+    let res = fx
+        .post("/login/totp", &form(&[("recovery_code", &codes[0])]), Some(&fx.cookie(&pending)))
+        .await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED, "a spent code must not work twice");
+    assert!(fx.identify_token(&pending).await.is_none(), "and grants nothing");
+    assert!(fx.row("alice").await.has_totp(), "using a code does not turn 2FA off");
+    assert_eq!(recovery::remaining(&fx.db, fx.row("alice").await.id).await, 9, "no further spend");
+}
+
+#[tokio::test]
+async fn a_wrong_recovery_code_is_refused_and_costs_an_attempt() {
+    // A recovery code is a credential, so guessing at one has to be braked like guessing a password.
+    let fx = Fx::with_lockout(Lockout { username_after: 3, ..Lockout::default() }).await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    let (_secret, codes) = enrol_with_codes(&fx, "alice", &cookie).await;
+
+    let res = fx.post("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
+    let pending = res.session_token(fx.auth.session_cookie_name()).unwrap();
+
+    // An **empty** submission presents no credential, so it is refused *without* costing an attempt —
+    // otherwise a stray double-submit, or a forged post carrying a token, would grief the real user.
+    for empty in ["", "----", "  "] {
+        let res = fx
+            .post("/login/totp", &form(&[("recovery_code", empty)]), Some(&fx.cookie(&pending)))
+            .await;
+        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "{empty:?} is refused");
+        assert!(fx.lockout_row("alice").await.is_none(), "{empty:?} must not be counted");
+    }
+
+    // Three *actual* wrong guesses, which is the configured limit.
+    for bad in ["not-a-code", "abcde-fghij", "zzzzz-zzzzz"] {
+        let res = fx
+            .post("/login/totp", &form(&[("recovery_code", bad)]), Some(&fx.cookie(&pending)))
+            .await;
+        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "{bad:?} must be refused");
+        assert!(fx.identify_token(&pending).await.is_none());
+    }
+    // Those attempts were counted, so the account is now locked — even against a *valid* code.
+    let res = fx
+        .post("/login/totp", &form(&[("recovery_code", &codes[0])]), Some(&fx.cookie(&pending)))
+        .await;
+    assert_eq!(res.status, StatusCode::TOO_MANY_REQUESTS, "guessing must be braked: {}", res.body);
+    assert_eq!(
+        recovery::remaining(&fx.db, fx.row("alice").await.id).await,
+        recovery::SET_SIZE as u64,
+        "and a locked-out attempt must not spend a code"
+    );
+}
+
+#[tokio::test]
+async fn recovery_codes_are_bound_to_one_account() {
+    // The stored hash is domain-separated by user id, so a code (or a lifted row) can't be replayed
+    // against a different account.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    fx.user("bob").await;
+    let alice_cookie = fx.cookie(&fx.session_for("alice").await);
+    let bob_cookie = fx.cookie(&fx.session_for("bob").await);
+    let (_, alice_codes) = enrol_with_codes(&fx, "alice", &alice_cookie).await;
+    let (_, bob_codes) = enrol_with_codes(&fx, "bob", &bob_cookie).await;
+    assert!(alice_codes.iter().all(|c| !bob_codes.contains(c)), "different sets");
+
+    // Bob's second-factor step, with one of Alice's codes.
+    let res = fx.post("/login", &form(&[("username", "bob"), ("password", PW)]), None).await;
+    let pending = res.session_token(fx.auth.session_cookie_name()).unwrap();
+    let res = fx
+        .post("/login/totp", &form(&[("recovery_code", &alice_codes[0])]), Some(&fx.cookie(&pending)))
+        .await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED, "another account's code must not work");
+    let alice_id = fx.row("alice").await.id;
+    assert_eq!(recovery::remaining(&fx.db, alice_id).await, 10, "and must not be spent");
+}
+
+#[tokio::test]
+async fn regenerating_replaces_the_set_and_needs_re_authentication() {
+    let fx = Fx::new().await;
+    let id = fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    let (_secret, old) = enrol_with_codes(&fx, "alice", &cookie).await;
+
+    // A new set is a new way in, so an intruder holding the session must not be able to mint one.
+    for (body, what) in [(form(&[]), "no confirmation"), (form(&[("current_password", "nope")]), "a wrong one")] {
+        let res = fx.post("/profile/totp/recovery", &body, Some(&cookie)).await;
+        assert_eq!(res.status, StatusCode::FORBIDDEN, "regenerating with {what} must be refused");
+    }
+    // The old set is untouched by those refusals.
+    assert_eq!(recovery::remaining(&fx.db, id).await, 10);
+
+    let res = fx.post("/profile/totp/recovery", &reauth_form(&[]), Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    let new: Vec<String> = res
+        .body
+        .split("<code>")
+        .skip(1)
+        .filter_map(|s| s.split("</code>").next())
+        .map(recovery::normalize)
+        .filter(|c| c.len() == 10)
+        .collect();
+    assert_eq!(new.len(), recovery::SET_SIZE, "a full new set");
+    assert!(new.iter().all(|c| !old.contains(c)), "a different set");
+    assert_eq!(recovery::remaining(&fx.db, id).await, 10, "exactly one set exists");
+
+    // An old code is dead — which is the point of regenerating when you think they leaked.
+    let res = fx.post("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
+    let pending = res.session_token(fx.auth.session_cookie_name()).unwrap();
+    let res = fx
+        .post("/login/totp", &form(&[("recovery_code", &old[0])]), Some(&fx.cookie(&pending)))
+        .await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED, "a superseded code must not work");
+    // …and a new one is alive.
+    let res = fx
+        .post("/login/totp", &form(&[("recovery_code", &new[0])]), Some(&fx.cookie(&pending)))
+        .await;
+    res.assert_redirect("/profile");
+}
+
+#[tokio::test]
+async fn turning_2fa_off_destroys_the_recovery_codes() {
+    // They are a way past a second factor; with no second factor they are just a second password, and a
+    // later re-enrolment must not inherit a set the user threw away with their old phone.
+    let fx = Fx::new().await;
+    let id = fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    let (_secret, codes) = enrol_with_codes(&fx, "alice", &cookie).await;
+
+    let res = fx.post("/profile/totp/disable", &reauth_form(&[]), Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(recovery::remaining(&fx.db, id).await, 0, "the set is gone");
+    assert!(
+        recovery::entity::Entity::find().all(&fx.db).await.unwrap().is_empty(),
+        "rows deleted, not merely marked"
+    );
+    // A manager's disable clears them too.
+    let fx2 = Fx::with(|a| a.admin_group("admin")).await;
+    fx2.user_in("boss", "admin").await;
+    let victim = fx2.user("victim").await;
+    let vcookie = fx2.cookie(&fx2.session_for("victim").await);
+    enrol_with_codes(&fx2, "victim", &vcookie).await;
+    let bcookie = fx2.cookie(&fx2.session_for("boss").await);
+    let res = fx2
+        .post(&format!("/profile/{victim}/totp/disable"), &reauth_form(&[]), Some(&bcookie))
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(recovery::remaining(&fx2.db, victim).await, 0, "cleared by the manager path too");
+    let _ = codes;
+}
+
+#[tokio::test]
+async fn a_recovery_code_does_not_satisfy_re_authentication() {
+    // Deliberate (§5i): a recovery code gets you *in*, it doesn't authorise entrenching. Otherwise one
+    // leaked code would be both a login and a licence to remove the second factor it bypassed — and the
+    // password already covers the lost-authenticator case for re-auth.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    let (_secret, codes) = enrol_with_codes(&fx, "alice", &cookie).await;
+
+    for field in ["totp_code", "recovery_code", "current_password"] {
+        let res = fx
+            .post("/profile/totp/disable", &form(&[(field, &codes[0])]), Some(&cookie))
+            .await;
+        assert_eq!(res.status, StatusCode::FORBIDDEN, "a recovery code in {field} must not confirm");
+        assert!(fx.row("alice").await.has_totp(), "2FA still on");
+    }
+    assert_eq!(
+        recovery::remaining(&fx.db, fx.row("alice").await.id).await,
+        recovery::SET_SIZE as u64,
+        "and no code was consumed by the attempt"
+    );
+}
+
 #[tokio::test]
 async fn disabling_your_own_2fa_needs_re_authentication() {
     // The first thing an intruder holding a stolen session does is remove the second factor. A live

@@ -19,10 +19,13 @@ Highest priority first.
   (A time-boxed "you confirmed recently" window was also considered and rejected: it needs an
   `auth_session` column *and* reopens a period in which a stolen session is dangerous again. These
   actions are rare enough to confirm every time.)
-- [ ] **TOTP recovery / backup codes.** One-time recovery codes issued at enrolment, so a user who
-  loses their authenticator isn't locked out (today only a manager can disable their 2FA). Costs a new
-  table (so a migration step for apps) and a new route — check it against the app's own routes, since
-  axum panics on an overlap at merge time. Decide what happens for users already enrolled with no codes.
+- [ ] **Recovery codes for users enrolled *before* they existed.** The feature ships (AUTH.md §5i: ten
+  single-use codes issued with the enrolment, spent at `/login/totp`, regenerable under re-auth, destroyed
+  with the 2FA they recover). What it doesn't do is backfill: an account that enrolled under an earlier
+  version has **no** set until it visits `/profile` and generates one, and nothing prompts it to. Options,
+  none obviously right: issue lazily on the next successful 2FA login (a surprise page mid-login), nag on
+  the profile page when `remaining == 0` (only helps people who visit it), or leave it to the app via
+  `recovery::issue`. Worth deciding before 0.2.0 is tagged, since it only matters for the upgrade window.
 - [ ] **Lockout follow-ups.** The two DB-backed counters ship (AUTH.md §5e), durable, shared by every
   replica and by the app's own credential checks, with the unlock being a row delete in the admin panel.
   Address **whitelists** ship too (`Lockout::ip_whitelist`, CIDRs across both families and the mapped

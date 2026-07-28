@@ -125,6 +125,12 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
   single-use (`auth_user.totp_last_step` records the step it spent — RFC 6238 §5.2; hide the column in an
   admin panel). Expose a
   password column as a hashed, write-only field with `MetaField::password()`.
+- **Recovery codes** (`auth::recovery`, `docs/AUTH.md` §5i): ten single-use codes issued **with** the 2FA
+  enrolment and shown once; spent in the `recovery_code` field at `/login/totp` (which then lands on
+  `/profile`); regenerable there under re-auth; destroyed when 2FA is turned off. Hashed with **SHA-256,
+  not argon2** — they're machine-generated high-entropy secrets, so a slow hash buys nothing and would put
+  ten verifications on the unauthenticated login path. Table `auth_totp_recovery`; **don't** register it in
+  an admin panel (every row is a credential hash).
 - **Lockout** (`auth::lockout`): the **unauthenticated** credential checks (`POST /login`, `POST
   /login/totp`) are braked by two DB-backed counters — by account name and by source address —
   configured *mandatorily* on `Auth::new(db, Lockout { .. })`. Authenticated checks (`/profile`
