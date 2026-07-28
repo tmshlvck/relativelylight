@@ -8,12 +8,17 @@ tick/remove items as they ship, and add new ones with a one-line rationale.
 
 Highest priority first.
 
-- [ ] **Re-authenticate before sensitive changes.** Require the current password (or a fresh TOTP
-  code) before disabling 2FA, changing the password, or (later) removing a PassKey. Now the **top**
-  security item: with sessions bounded (§5f) the remaining hole is a *live* stolen session turning 2FA
-  off. Note the shape of the break — `POST /profile/totp/disable` and friends gain a required field, so
-  it's a wire break for anything scripting those forms, and a "fresh auth" window would want another
-  `auth_session` column (worth batching with any other schema change).
+- [ ] **Re-authenticate an SSO account through its identity provider.** Re-auth ships for local accounts
+  (AUTH.md §5h: password or a fresh TOTP code, on the four sensitive routes, plus
+  `Auth::reauthenticate` for app-owned ones). An account with **no local factor** — every SSO login —
+  passes unchallenged, because there is nothing to ask it for and refusing would lock SSO administrators
+  out of the manager pages for good. The real answer is an OIDC round-trip with `prompt=login` (or
+  `max_age=0`) that returns to the pending action, which needs somewhere to park that action across the
+  redirect — the first piece of server-side state this module would keep for a half-finished request, so
+  it wants designing rather than bolting on. Until then §5h states the limit plainly.
+  (A time-boxed "you confirmed recently" window was also considered and rejected: it needs an
+  `auth_session` column *and* reopens a period in which a stolen session is dangerous again. These
+  actions are rare enough to confirm every time.)
 - [ ] **TOTP recovery / backup codes.** One-time recovery codes issued at enrolment, so a user who
   loses their authenticator isn't locked out (today only a manager can disable their 2FA). Costs a new
   table (so a migration step for apps) and a new route — check it against the app's own routes, since

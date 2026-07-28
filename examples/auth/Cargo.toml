@@ -13,3 +13,4 @@ axum = "0.8"
 axum-extra = { version = "0.10", features = ["cookie"] }
 tokio = { workspace = true, features = ["net"] }
 base64 = "0.22"   # decode the HTTP Basic header on the app's own /api/whoami endpoint
+serde = { version = "1", features = ["derive"] } # the app's own form body (POST /api-token/rotate)

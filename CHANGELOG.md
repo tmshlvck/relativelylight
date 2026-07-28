@@ -72,6 +72,17 @@ already using `auth`.
   about 90 seconds, however many times they were presented. A replayed code is now refused exactly like a
   wrong one — and, deliberately, is *reported* like one, so a captured code isn't confirmed as genuine.
   Test suites that reuse one code for two logins in the same 30-second step will need a fresh code.
+- **Four routes now require re-authentication** — a `current_password` **or** a `totp_code` in the same
+  request: `POST /profile/totp/disable`, `POST /profile/totp` (enrolment), and the manager's
+  `POST /profile/{id}` and `POST /profile/{id}/totp/disable` (which take the **manager's own** factor, not
+  the target's). Without one they answer `403` and change nothing. The rendered forms carry the inputs, so
+  a browser is unaffected; **a script posting to any of those must add the field**. `POST /profile` already
+  required the current password. `POST /profile/sessions/revoke` deliberately does not — it only removes
+  access, and someone evicting an intruder shouldn't be slowed down. An account with **no local factor**
+  (any SSO login) passes unchallenged, since there is nothing to ask it for and refusing would lock SSO
+  administrators out of the manager pages permanently — see AUTH.md §5h for that limit and why re-auth via
+  the IdP is the real fix. A TOTP code used to re-authenticate is **spent**, so it can't then be used to
+  log in.
 - **`POST /profile` and `POST /profile/{id}` now enforce a password policy**, at
   `PasswordPolicy::recommended()`: at least 12 characters, not a common value, no six-character run, and
   not containing the account's own username. A password your users could set before may be refused now.
@@ -106,6 +117,13 @@ already using `auth`.
   rows, scheduled by the app (both examples run it hourly). The free `auth::prune(&db, lockout)` still
   works but sees only the absolute session deadline, since it has no `Auth` to read `session_idle_secs`
   from; prefer the method.
+- **`Auth::reauthenticate(&who, password, totp_code)` / `Auth::can_reauthenticate(&who)`** — the
+  confirm-it's-you check the module applies to its own sensitive routes, exposed so an app can gate **its**
+  destructive actions the same way (delete an account, rotate a token, export a dataset). Returns a message
+  fit to render; a fresh code is preferred over a password (it proves presence, where a password may have
+  been autofilled) and is spent when accepted. `can_reauthenticate` is `false` for an account with no local
+  factor, for a UI hint. `examples/auth` gates `POST /api-token/rotate` on it — the pattern to copy,
+  including returning the refusal before anything is written. AUTH.md §5h.
 - **`validate::PasswordPolicy` + `validate::password(policy)`** — password strength as a reusable
   predicate: **length-first with composition rules off**, per NIST SP 800-63B (requiring
   `upper + digit + special` gets you `Password1!`, so it costs usability and buys nothing a cracking

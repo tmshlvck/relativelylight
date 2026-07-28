@@ -87,7 +87,9 @@ the login/profile forms, `Crud::csrf` for the API); **attempt limiting** on the 
 credential checks (DB-backed lockout → 429, by account name and by source address, both mandatory, the
 unlock being a row delete in the admin panel); **session lifetime + revocation** (absolute *and* idle
 clocks, id rotation when the second factor completes, a password change or manager reset signing the
-user's other sessions out, "sign out other sessions" on `/profile`); a **password-strength policy**
+user's other sessions out, "sign out other sessions" on `/profile`); **re-authentication before sensitive
+changes** (a password or a fresh TOTP code before disabling/enrolling 2FA or a manager's reset, plus
+`Auth::reauthenticate` for app-owned actions); a **password-strength policy**
 (`validate::PasswordPolicy` — length-first, no composition rules per NIST SP 800-63B; on by default on the
 profile pages, opt-out two ways, wired separately into the admin form); UTC lifecycle timestamps
 on the auth entities. The rejection
@@ -95,8 +97,8 @@ paths (bad credentials, unusable sessions, wrong TOTP codes, replayed codes, idl
 non-manager profile writes, each gate preset) are covered by an automated negative-path suite —
 [AUTH.md §10a](AUTH.md).
 
-**Roadmap / deferred (see [../TODO.md](../TODO.md) for the ordered backlog):** re-auth before sensitive
-changes, TOTP recovery codes, breached-password screening, a CSRF layer + rejection hook, a `ClientIp`
+**Roadmap / deferred (see [../TODO.md](../TODO.md) for the ordered backlog):** TOTP recovery codes,
+re-auth through the IdP for SSO accounts, breached-password screening, a CSRF layer + rejection hook, a `ClientIp`
 extractor / request-logging / CORS layers, and app-issued API tokens. **PassKeys/WebAuthn** is parked at
 **milestone 0.3+** (nothing needs it yet; it stays the only answer to real-time phishing), and
 **row-level authorization** is filed as *transformative* — it reshapes the `Authz` trait rather than

@@ -774,7 +774,7 @@ async fn disabling_2fa_clears_the_replay_guard() {
     .await;
     assert!(fx.row("alice").await.totp_last_step.is_some(), "guard set by the login");
 
-    let res = fx.post("/profile/totp/disable", &form(&[]), Some(&cookie)).await;
+    let res = fx.post("/profile/totp/disable", &reauth_form(&[]), Some(&cookie)).await;
     assert_eq!(res.status, StatusCode::OK);
     let row = fx.row("alice").await;
     assert!(row.totp_secret.is_none(), "2FA off");
@@ -794,14 +794,14 @@ async fn totp_enrolment_only_activates_on_a_matching_code() {
     assert!(fx.row("alice").await.totp_secret.is_none(), "enrolment must not activate on its own");
 
     // A wrong code re-shows the form and leaves 2FA off.
-    let res = fx.post("/profile/totp", &form(&[("code", "000000")]), Some(&cookie)).await;
+    let res = fx.post("/profile/totp", &reauth_form(&[("code", "000000")]), Some(&cookie)).await;
     assert!(res.body.contains("didn't match"), "expected the retry form: {}", res.body);
     let row = fx.row("alice").await;
     assert!(row.totp_secret.is_none(), "a wrong code must not enable 2FA");
     assert_eq!(row.totp_pending.as_deref(), Some(pending.as_str()), "same pending secret is kept");
 
     // Control: the matching code promotes it.
-    let res = fx.post("/profile/totp", &form(&[("code", &totp::current_code(&pending))]), Some(&cookie)).await;
+    let res = fx.post("/profile/totp", &reauth_form(&[("code", &totp::current_code(&pending))]), Some(&cookie)).await;
     assert_eq!(res.status, StatusCode::OK);
     let row = fx.row("alice").await;
     assert_eq!(row.totp_secret.as_deref(), Some(pending.as_str()));
@@ -814,7 +814,7 @@ async fn totp_enrolment_post_without_a_pending_secret_does_nothing() {
     fx.user("alice").await;
     let cookie = fx.cookie(&fx.session_for("alice").await);
 
-    let res = fx.post("/profile/totp", &form(&[("code", "000000")]), Some(&cookie)).await;
+    let res = fx.post("/profile/totp", &reauth_form(&[("code", "000000")]), Some(&cookie)).await;
     res.assert_redirect("/profile");
     let row = fx.row("alice").await;
     assert!(row.totp_secret.is_none() && row.totp_pending.is_none());
@@ -955,6 +955,212 @@ async fn password_change_rejects_an_empty_or_mismatched_new_password() {
 }
 
 #[tokio::test]
+async fn disabling_your_own_2fa_needs_re_authentication() {
+    // The first thing an intruder holding a stolen session does is remove the second factor. A live
+    // session is not evidence that its owner is at the keyboard, so this asks again.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    fx.enable_totp("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+
+    for (body, what) in [
+        (form(&[]), "nothing offered"),
+        (form(&[("current_password", "")]), "an empty password"),
+        (form(&[("current_password", OTHER_PW)]), "the wrong password"),
+        (form(&[("totp_code", "000000")]), "a wrong code"),
+        (form(&[("totp_code", "")]), "an empty code"),
+    ] {
+        let res = fx.post("/profile/totp/disable", &body, Some(&cookie)).await;
+        assert_eq!(res.status, StatusCode::FORBIDDEN, "{what} must not disable 2FA");
+        assert!(fx.row("alice").await.has_totp(), "{what}: 2FA must still be on");
+    }
+    // Control: the right password does it.
+    let res = fx.post("/profile/totp/disable", &reauth_form(&[]), Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert!(!fx.row("alice").await.has_totp(), "2FA is off");
+}
+
+#[tokio::test]
+async fn a_fresh_totp_code_re_authenticates_and_is_spent_doing_so() {
+    // A code is *better* evidence than a password — a browser may have filled the password in for
+    // whoever is sitting there. It must be single-use here too, or one captured code would wave through
+    // both a sensitive action and a login.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let secret = fx.enable_totp("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    let code = totp::current_code(&secret);
+
+    // Enrol over the top of the existing 2FA, confirming with a code from the *outgoing* authenticator.
+    let setup = fx.get("/profile/totp", Some(&cookie)).await;
+    assert_eq!(setup.status, StatusCode::OK);
+    let pending = fx.row("alice").await.totp_pending.expect("pending secret");
+    let res = fx
+        .post(
+            "/profile/totp",
+            &form(&[("code", &totp::current_code(&pending)), ("totp_code", &code)]),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "a code re-authenticates: {}", res.body);
+    assert_eq!(fx.row("alice").await.totp_key(), Some(pending.as_str()), "the new secret is active");
+
+    // That code is now spent: it can't re-authenticate a second action…
+    let res = fx.post("/profile/totp/disable", &form(&[("totp_code", &code)]), Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "a spent code must not confirm again");
+    assert!(fx.row("alice").await.has_totp(), "2FA still on");
+    // …and the guard has moved past it, which is what makes that true.
+    assert!(fx.row("alice").await.totp_last_step.is_some(), "the step was recorded");
+}
+
+#[tokio::test]
+async fn enrolling_2fa_needs_re_authentication() {
+    // Otherwise an intruder enrols *their own* authenticator, which doesn't merely persist their access
+    // — it locks the real user out, because login then demands a code only the intruder can produce.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    assert_eq!(fx.get("/profile/totp", Some(&cookie)).await.status, StatusCode::OK);
+    let pending = fx.row("alice").await.totp_pending.expect("pending secret");
+
+    // A correct code for the pending secret proves possession of a device — not that the account is
+    // theirs. Without the password it isn't enough.
+    let res = fx
+        .post("/profile/totp", &form(&[("code", &totp::current_code(&pending))]), Some(&cookie))
+        .await;
+    assert!(res.body.contains("Confirm"), "expected the confirm prompt: {}", res.body);
+    assert!(fx.row("alice").await.totp_secret.is_none(), "2FA must not be enabled");
+    assert_eq!(
+        fx.row("alice").await.totp_pending.as_deref(),
+        Some(pending.as_str()),
+        "the same enrolment is still pending, so the user can finish it"
+    );
+
+    // Control: same code, with the password.
+    let res = fx
+        .post(
+            "/profile/totp",
+            &reauth_form(&[("code", &totp::current_code(&pending))]),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert!(fx.row("alice").await.has_totp(), "2FA is on");
+}
+
+#[tokio::test]
+async fn manager_actions_need_the_managers_own_re_authentication() {
+    // These two are what a stolen *manager* session is worth: reset any password (and then log in as
+    // that user), or strip anyone's second factor. Both now ask the manager to prove they're present.
+    let fx = Fx::with(|a| a.admin_group("admin")).await;
+    fx.user_in("boss", "admin").await;
+    let victim = fx.user("victim").await;
+    fx.enable_totp("victim").await;
+    let cookie = fx.cookie(&fx.session_for("boss").await);
+
+    for (body, what) in [
+        (form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]), "no confirmation"),
+        (
+            form(&[
+                ("new_password", OTHER_PW),
+                ("confirm_password", OTHER_PW),
+                ("current_password", "wrong-one"),
+            ]),
+            "a wrong confirmation",
+        ),
+    ] {
+        let res = fx.post(&format!("/profile/{victim}"), &body, Some(&cookie)).await;
+        assert_eq!(res.status, StatusCode::FORBIDDEN, "reset with {what} must be refused");
+        assert!(fx.password_works("victim", PW).await, "{what}: the old password still works");
+        assert!(!fx.password_works("victim", OTHER_PW).await, "{what}: the new one wasn't set");
+    }
+    for (body, what) in [(form(&[]), "no confirmation"), (form(&[("current_password", "x")]), "a wrong one")] {
+        let res = fx.post(&format!("/profile/{victim}/totp/disable"), &body, Some(&cookie)).await;
+        assert_eq!(res.status, StatusCode::FORBIDDEN, "2FA disable with {what} must be refused");
+        assert!(fx.row("victim").await.has_totp(), "{what}: the victim keeps their second factor");
+    }
+    // Controls: with the manager's own password, both go through.
+    let res = fx
+        .post(
+            &format!("/profile/{victim}/totp/disable"),
+            &reauth_form(&[]),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert!(!fx.row("victim").await.has_totp());
+    let res = fx
+        .post(
+            &format!("/profile/{victim}"),
+            &reauth_form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert!(fx.password_works("victim", OTHER_PW).await);
+}
+
+#[tokio::test]
+async fn an_account_with_no_local_factor_is_not_challenged() {
+    // An SSO account has neither password nor local 2FA, so there is nothing to ask it for. Refusing
+    // instead would lock every SSO administrator out of the manager pages permanently — a documented
+    // limit (§5h), not an oversight: re-auth through the identity provider is the real answer.
+    let fx = Fx::with(|a| a.admin_group("admin")).await;
+    fx.user_in("boss", "admin").await;
+    fx.make_sso("boss", "okta").await;
+    // An SSO account's password hash is what `create_user` left; blank it, as a real SSO account has.
+    fx.update_user("boss", |am| am.password_hash = Set(String::new())).await;
+    let victim = fx.user("victim").await;
+    let cookie = fx.cookie(&fx.session_for("boss").await);
+
+    let res = fx
+        .post(
+            &format!("/profile/{victim}"),
+            &form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "an SSO manager can still work: {}", res.body);
+    assert!(fx.password_works("victim", OTHER_PW).await);
+
+    // And the public API says so, which is what an app should key its own UI hint off.
+    let who = fx.identify_token(&fx.session_for("boss").await).await.expect("identity");
+    assert!(!fx.auth.can_reauthenticate(&who).await, "nothing to challenge with");
+    assert!(fx.auth.reauthenticate(&who, "", "").await.is_ok(), "so re-auth passes");
+}
+
+#[tokio::test]
+async fn the_reauthenticate_api_accepts_a_password_or_a_code_and_nothing_else() {
+    // The surface an app gates its *own* sensitive routes with (`examples/auth` uses it for one).
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let who = fx.identify_token(&fx.session_for("alice").await).await.expect("identity");
+
+    assert!(fx.auth.can_reauthenticate(&who).await, "a local account can be challenged");
+    assert!(fx.auth.reauthenticate(&who, PW, "").await.is_ok(), "the current password");
+    for (pw, code, what) in [
+        ("", "", "nothing"),
+        (OTHER_PW, "", "the wrong password"),
+        (&PW.to_uppercase(), "", "the right password in the wrong case"),
+        ("", "000000", "a code when the account has no 2FA"),
+    ] {
+        assert!(
+            fx.auth.reauthenticate(&who, pw, code).await.is_err(),
+            "{what} must not re-authenticate"
+        );
+    }
+
+    // With 2FA on, a current code works and a stale one doesn't.
+    let secret = fx.enable_totp("alice").await;
+    assert!(fx.auth.reauthenticate(&who, "", &totp::current_code(&secret)).await.is_ok());
+    assert!(
+        fx.auth.reauthenticate(&who, "", &totp::current_code(&secret)).await.is_err(),
+        "the same code twice is a replay, even here"
+    );
+    assert!(fx.auth.reauthenticate(&who, PW, "").await.is_ok(), "the password still works");
+}
+
+#[tokio::test]
 async fn the_password_policy_applies_to_the_self_service_page() {
     // On by default: a weak password is refused, and refused *without writing* — the old one still works.
     let fx = Fx::new().await;
@@ -1012,7 +1218,7 @@ async fn the_password_policy_applies_to_a_managers_reset_too() {
         let res = fx
             .post(
                 &format!("/profile/{victim}"),
-                &form(&[("new_password", weak), ("confirm_password", weak)]),
+                &reauth_form(&[("new_password", weak), ("confirm_password", weak)]),
                 Some(&cookie),
             )
             .await;
@@ -1023,7 +1229,7 @@ async fn the_password_policy_applies_to_a_managers_reset_too() {
     let res = fx
         .post(
             &format!("/profile/{victim}"),
-            &form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
+            &reauth_form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
             Some(&cookie),
         )
         .await;
@@ -1192,7 +1398,7 @@ async fn a_manager_reset_signs_the_target_out_everywhere() {
     let res = fx
         .post(
             &format!("/profile/{victim}"),
-            &form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
+            &reauth_form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
             Some(&fx.cookie(&bosses)),
         )
         .await;
@@ -1321,7 +1527,7 @@ async fn the_manager_route_is_not_a_way_around_your_own_current_password() {
     let res = fx
         .post(
             &format!("/profile/{admin}"),
-            &form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
+            &reauth_form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
             Some(&cookie),
         )
         .await;
@@ -1343,7 +1549,7 @@ async fn a_password_reset_does_not_re_enable_a_disabled_account() {
     let res = fx
         .post(
             &format!("/profile/{disabled}"),
-            &form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
+            &reauth_form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
             Some(&cookie),
         )
         .await;
@@ -1498,7 +1704,7 @@ async fn a_manager_reset_cannot_turn_an_sso_account_into_a_password_login() {
     let res = fx
         .post(
             &format!("/profile/{sso}"),
-            &form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
+            &reauth_form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
             Some(&cookie),
         )
         .await;
@@ -1520,7 +1726,7 @@ async fn a_manager_reset_cannot_turn_an_sso_account_into_a_password_login() {
     let res = fx
         .post(
             &format!("/profile/{local}"),
-            &form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
+            &reauth_form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
             Some(&cookie),
         )
         .await;
@@ -1812,12 +2018,12 @@ async fn enrolment_codes_are_not_limited_either() {
     let pending = fx.row("alice").await.totp_pending.expect("pending secret");
 
     for _ in 0..10 {
-        let res = fx.post("/profile/totp", &form(&[("code", "000000")]), Some(&cookie)).await;
+        let res = fx.post("/profile/totp", &reauth_form(&[("code", "000000")]), Some(&cookie)).await;
         assert_eq!(res.status, StatusCode::OK, "a wrong code just re-shows the form");
     }
     assert!(fx.lockout_row("alice").await.is_none());
     // The right code still enrols; nothing was locked on the way.
-    fx.post("/profile/totp", &form(&[("code", &totp::current_code(&pending))]), Some(&cookie)).await;
+    fx.post("/profile/totp", &reauth_form(&[("code", &totp::current_code(&pending))]), Some(&cookie)).await;
     assert!(fx.row("alice").await.has_totp(), "2FA enabled");
 }
 
@@ -2376,6 +2582,15 @@ fn form(pairs: &[(&str, &str)]) -> String {
         .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
         .collect::<Vec<_>>()
         .join("&")
+}
+
+/// A form for one of the **re-authenticated** routes (§5h), confirming with the caller's password
+/// [`PW`]. Spelled out as its own helper so a test that *means* to omit the confirmation (there are
+/// several) is visibly using plain [`form`] instead.
+fn reauth_form(pairs: &[(&str, &str)]) -> String {
+    let mut all: Vec<(&str, &str)> = vec![("current_password", PW)];
+    all.extend_from_slice(pairs);
+    form(&all)
 }
 
 fn urlencode(s: &str) -> String {

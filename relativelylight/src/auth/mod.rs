@@ -648,6 +648,44 @@ impl Inner {
         self.password_check.as_ref().and_then(|c| c(password, username).err())
     }
 
+    /// Re-authenticate the holder of `user`: their current password, or a fresh TOTP code when 2FA is
+    /// on. `Ok(())` on success **or** when the account has no local factor to ask for. See
+    /// [`Auth::reauthenticate`] for what this is protecting against and why the no-factor case passes.
+    ///
+    /// A code accepted here is **spent** (the §5a replay guard), so it can't then be used to log in or
+    /// to confirm a second sensitive action inside its window.
+    async fn reauth(&self, user: &user::Model, password: &str, code: &str) -> Result<(), String> {
+        let has_password = !user.password_hash.is_empty();
+        if !has_password && !user.has_totp() {
+            return Ok(()); // nothing to prove with — see the doc comment on `Auth::reauthenticate`
+        }
+        // The code path first: a fresh code is better evidence of presence than a password, which a
+        // browser may have filled in for whoever is sitting there.
+        if !code.trim().is_empty() {
+            if let Some(secret) = user.totp_key() {
+                return match totp::verify_step(secret, code) {
+                    Some(step) if user.totp_step_ok(step) => {
+                        stamp_login(&self.db, user.id, Some(step)).await; // spend it
+                        Ok(())
+                    }
+                    _ => Err("That code is not valid. Try the current one from your app.".into()),
+                };
+            }
+            return Err("This account has no authenticator app — enter your password instead.".into());
+        }
+        if !password.is_empty() {
+            return if has_password && verify_password(&user.password_hash, password) {
+                Ok(())
+            } else {
+                Err("That password is incorrect.".into())
+            };
+        }
+        Err(match user.has_totp() {
+            true => "Confirm with your password or a code from your authenticator app.".into(),
+            false => "Confirm with your current password.".into(),
+        })
+    }
+
     /// Whether this session is still alive on **both** clocks: inside its absolute deadline, and used
     /// within the idle window (when one is configured). Says nothing about `awaiting_totp` — the callers
     /// differ on whether a half-authenticated session is what they want.
@@ -1058,6 +1096,63 @@ impl Auth {
         self.inner.can_manage_others(who)
     }
 
+    /// **Re-authenticate** the caller before something sensitive: pass whatever the form submitted as
+    /// `password` and `totp_code` (empty strings for "not supplied"). `Ok(())` if either proves the
+    /// account holder is present; `Err(message)` is fit to render back into your form.
+    ///
+    /// A live session is not evidence that its owner is at the keyboard — a stolen cookie *is* a live
+    /// session, and the idle window (§5f) bounds how long it lasts but not what it can do inside that
+    /// time. So the actions that would let an intruder entrench (turning off 2FA, enrolling their own
+    /// authenticator, resetting someone else's password) ask for a factor again. This module already
+    /// applies it to its own such routes; use this for yours — deleting an account, rotating an API
+    /// token, exporting a dataset:
+    ///
+    /// ```ignore
+    /// let Some(who) = auth.identify(&headers).await else { return redirect_to_login() };
+    /// if let Err(msg) = auth.reauthenticate(&who, &form.current_password, &form.totp_code).await {
+    ///     return render_form_with_error(&msg);   // 403, and nothing has happened yet
+    /// }
+    /// delete_everything(&who).await;
+    /// ```
+    ///
+    /// A **fresh TOTP code is preferred** to a password when the account has 2FA: it proves presence,
+    /// where a password may have been filled in by the browser for whoever is sitting there. A code
+    /// accepted here is **spent** (§5a), so it can't be reused to log in or to wave through a second
+    /// action.
+    ///
+    /// **An account with no local factor passes.** An SSO account has neither password nor local 2FA, so
+    /// there is nothing to ask it for; refusing instead would lock every SSO administrator out of the
+    /// manager pages permanently. Their assurance is whatever the identity provider gave them — re-auth
+    /// through the IdP (an OIDC `prompt=login` round-trip) is the real answer and isn't built yet, so
+    /// this is a documented limit, not an oversight. The same applies to a local account whose password
+    /// is blank (login already disabled).
+    ///
+    /// Not lockout-limited, deliberately, for the reason §5e gives: the caller is already authenticated,
+    /// so counting failures here would let a stolen session lock the real user out of logging in. Nor is
+    /// it needed — guessing a password is no easier here than at `/login`, and a 6-digit code would need
+    /// ~10⁶ requests inside its 90-second window.
+    pub async fn reauthenticate(
+        &self,
+        who: &Identity,
+        password: &str,
+        totp_code: &str,
+    ) -> Result<(), String> {
+        let Some(user) = current_user(&self.inner, who).await else {
+            return Err("Your session is no longer valid — sign in again.".into());
+        };
+        self.inner.reauth(&user, password, totp_code).await
+    }
+
+    /// Whether [`reauthenticate`](Auth::reauthenticate) can actually challenge this account — i.e. it has
+    /// a local password or 2FA. `false` for an SSO account (nothing to ask for, so re-auth passes), which
+    /// is what to key a "you'll be asked to confirm" hint off in your own UI.
+    pub async fn can_reauthenticate(&self, who: &Identity) -> bool {
+        match current_user(&self.inner, who).await {
+            Some(u) => !u.password_hash.is_empty() || u.has_totp(),
+            None => false,
+        }
+    }
+
     /// Sign a user out **everywhere**: delete every session row they hold. Returns how many were
     /// deleted. The next request on any of those cookies is anonymous — there is no revocation list to
     /// consult and nothing to expire, which is the advantage of server-side sessions over a JWT.
@@ -1311,12 +1406,22 @@ async fn login_totp_form(
 
 #[derive(serde::Deserialize)]
 struct TotpForm {
+    /// At `/login/totp`, the code for the account's active secret. At `/profile/totp`, the code for the
+    /// **pending** secret being enrolled — which is why re-authentication there needs its own fields.
     code: String,
+    /// Re-authentication for `/profile/totp` (§5h); unused at `/login/totp`, where the password was just
+    /// checked a moment ago.
+    #[serde(default)]
+    current_password: String,
+    /// A code from the account's *currently active* secret — only meaningful when re-enrolling over an
+    /// existing 2FA setup. A first enrolment has no active secret, so the password is the factor.
+    #[serde(default)]
+    totp_code: String,
     #[serde(default, rename = "_csrf")]
     csrf: Option<String>,
 }
 
-/// The body of a post that carries nothing but the CSRF token (the "disable 2FA" buttons).
+/// The body of a post that carries nothing but the CSRF token (`/profile/sessions/revoke`).
 #[derive(serde::Deserialize)]
 struct CsrfOnlyForm {
     #[serde(default, rename = "_csrf")]
@@ -1414,6 +1519,22 @@ struct ChangeForm {
 struct ResetForm {
     new_password: String,
     confirm_password: String,
+    /// The **manager's own** re-authentication (§5h) — not the target's, which they don't know.
+    #[serde(default)]
+    current_password: String,
+    #[serde(default)]
+    totp_code: String,
+    #[serde(default, rename = "_csrf")]
+    csrf: Option<String>,
+}
+
+/// A post whose only payload is the caller's re-authentication (§5h): the "disable 2FA" buttons.
+#[derive(serde::Deserialize)]
+struct ReauthForm {
+    #[serde(default)]
+    current_password: String,
+    #[serde(default)]
+    totp_code: String,
     #[serde(default, rename = "_csrf")]
     csrf: Option<String>,
 }
@@ -1556,11 +1677,22 @@ async fn manage_form(
         return (StatusCode::NOT_FOUND, "No such user").into_response();
     };
     let (token, jar) = csrf_token(&inner, &headers, jar);
+    // The manager's own 2FA state decides whether the confirm-it's-you block offers a code field.
+    let manager_totp_on =
+        current_user(&inner, &who).await.map(|m| m.has_totp()).unwrap_or(false);
     // Don't offer a reset form for an account whose password lives at the identity provider — the POST
     // refuses it, so a form here would only ever produce an error.
     let frag = match target.sso_key() {
         Some(provider) => sso_managed_html(&target.username, provider),
-        None => reset_form_html(&id, &target.username, target.has_totp(), None, None, &token),
+        None => reset_form_html(
+            &id,
+            &target.username,
+            target.has_totp(),
+            manager_totp_on,
+            None,
+            None,
+            &token,
+        ),
     };
     (jar, Html((inner.profile_shell)(&frag, &who))).into_response()
 }
@@ -1591,6 +1723,19 @@ async fn manage_submit(
     };
     let totp_on = target.has_totp();
 
+    // Re-authenticate the **manager** (§5h) with their own factor. This route sets a password without
+    // knowing the old one — which is the point of it, and also what makes it the most valuable thing a
+    // stolen manager session can reach: every account it can reset is an account it can then log in as.
+    let Some(manager) = current_user(&inner, &who).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let manager_totp_on = manager.has_totp(); // whether to offer *them* the code field
+    if let Err(msg) = inner.reauth(&manager, &form.current_password, &form.totp_code).await {
+        let frag =
+            reset_form_html(&id, &target.username, totp_on, manager_totp_on, Some(&msg), None, &csrf);
+        return (StatusCode::FORBIDDEN, Html((inner.profile_shell)(&frag, &who))).into_response();
+    }
+
     // An SSO account has no local password to set, so refuse rather than store a hash that can never
     // authenticate — the same rule the self-service page applies to itself. Writing one was never a
     // bypass (`verify_credentials` refuses any `sso_provider` account), but it left a dead credential in
@@ -1600,7 +1745,8 @@ async fn manage_submit(
             "{} signs in through {provider} (single sign-on) — its password is managed there, not here.",
             target.username
         );
-        let frag = reset_form_html(&id, &target.username, totp_on, Some(&msg), None, &csrf);
+        let frag =
+            reset_form_html(&id, &target.username, totp_on, manager_totp_on, Some(&msg), None, &csrf);
         return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
     }
 
@@ -1614,7 +1760,8 @@ async fn manage_submit(
                 .map(|e| format!("The new password {e}."))
         });
     if let Some(msg) = error {
-        let frag = reset_form_html(&id, &target.username, totp_on, Some(&msg), None, &csrf);
+        let frag =
+            reset_form_html(&id, &target.username, totp_on, manager_totp_on, Some(&msg), None, &csrf);
         return (StatusCode::BAD_REQUEST, Html((inner.profile_shell)(&frag, &who))).into_response();
     }
     if set_password(&inner.db, &target.username, &form.new_password).await.is_err() {
@@ -1622,6 +1769,7 @@ async fn manage_submit(
             &id,
             &target.username,
             totp_on,
+            manager_totp_on,
             Some("Could not set the password."),
             None,
             &csrf,
@@ -1653,7 +1801,8 @@ async fn manage_submit(
         1 => format!("Password reset for {} and 1 session signed out.", target.username),
         n => format!("Password reset for {} and {n} sessions signed out.", target.username),
     };
-    let frag = reset_form_html(&id, &target.username, totp_on, None, Some(&msg), &csrf);
+    let frag =
+        reset_form_html(&id, &target.username, totp_on, manager_totp_on, None, Some(&msg), &csrf);
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
@@ -1676,13 +1825,16 @@ async fn totp_setup_form(
         return Redirect::to(&inner.profile_path).into_response(); // SSO: 2FA managed by the IdP
     }
     let secret = totp::generate_secret();
+    // Whether they *already* have 2FA decides which factors the confirm block can offer: a re-enrolment
+    // can be confirmed with a code from the outgoing authenticator, a first enrolment can't.
+    let totp_on = user.has_totp();
     let mut am: user::ActiveModel = user.into();
     am.totp_pending = Set(Some(secret.clone()));
     if am.update(&inner.db).await.is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not start 2FA setup").into_response();
     }
     let (token, jar) = csrf_token(&inner, &headers, jar);
-    (jar, render_totp_setup(&inner, &who, &secret, None, &token)).into_response()
+    (jar, render_totp_setup(&inner, &who, &secret, totp_on, None, &token)).into_response()
 }
 
 /// `POST /profile/totp` — confirm enrolment: verify the code against the pending secret, then promote
@@ -1708,6 +1860,18 @@ async fn totp_setup_submit(
     let Some(pending) = user.pending_totp_key().map(str::to_string) else {
         return Redirect::to(&inner.profile_path).into_response(); // nothing in progress
     };
+    // Re-authenticated (§5h): the pending code proves possession of *a* device, but not that the device
+    // belongs to the account holder. Without this, an intruder with a stolen session could enrol their
+    // own authenticator — which doesn't just persist their access, it locks the real user out, since
+    // login would then demand a code only the intruder can produce.
+    //
+    // The password is the factor here: the account's *active* secret is what a code would be checked
+    // against, and for a first enrolment there isn't one. An already-enrolled user re-enrolling can use
+    // either.
+    let totp_on = user.has_totp();
+    if let Err(msg) = inner.reauth(&user, &form.current_password, &form.totp_code).await {
+        return render_totp_setup(&inner, &who, &pending, totp_on, Some(&msg), &csrf);
+    }
     // Not lockout-limited: enrolling is authenticated, and the code being guessed is the caller's own
     // pending secret — there is nobody else's account to reach by guessing it.
     let Some(step) = totp::verify_step(&pending, &form.code) else {
@@ -1715,6 +1879,7 @@ async fn totp_setup_submit(
             &inner,
             &who,
             &pending,
+            totp_on,
             Some("That code didn't match. Try again."),
             &csrf,
         );
@@ -1777,11 +1942,12 @@ async fn sessions_revoke(
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
-/// `POST /profile/totp/disable` — the caller turns off their own 2FA.
+/// `POST /profile/totp/disable` — the caller turns off their own 2FA. **Re-authenticated** (§5h):
+/// removing the second factor is the first thing an intruder with a stolen session would do.
 async fn totp_self_disable(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
-    Form(form): Form<CsrfOnlyForm>,
+    Form(form): Form<ReauthForm>,
 ) -> Response {
     if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
         return csrf_rejected(&inner);
@@ -1793,6 +1959,11 @@ async fn totp_self_disable(
     let Some(user) = current_user(&inner, &who).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
+    if let Err(msg) = inner.reauth(&user, &form.current_password, &form.totp_code).await {
+        let frag = change_form_html(&who, user.has_totp(), Some(&msg), None, &csrf);
+        let frag = inner.with_profile_extra(frag, &who).await;
+        return (StatusCode::FORBIDDEN, Html((inner.profile_shell)(&frag, &who))).into_response();
+    }
     clear_totp(&inner, user).await;
     let frag =
         change_form_html(&who, false, None, Some("Two-factor authentication disabled."), &csrf);
@@ -1805,7 +1976,7 @@ async fn totp_manage_disable(
     State(inner): State<Arc<Inner>>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Form(form): Form<CsrfOnlyForm>,
+    Form(form): Form<ReauthForm>,
 ) -> Response {
     if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
         return csrf_rejected(&inner);
@@ -1823,10 +1994,29 @@ async fn totp_manage_disable(
     let Some(target) = target_user(&inner, &id).await else {
         return (StatusCode::NOT_FOUND, "No such user").into_response();
     };
+    // Re-authenticate the **manager**, with their own factor — stripping a victim's second factor is
+    // most of what a stolen manager session is worth.
+    let Some(manager) = current_user(&inner, &who).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let manager_totp_on = manager.has_totp();
+    if let Err(msg) = inner.reauth(&manager, &form.current_password, &form.totp_code).await {
+        let frag = reset_form_html(
+            &id,
+            &target.username,
+            target.has_totp(),
+            manager_totp_on,
+            Some(&msg),
+            None,
+            &csrf,
+        );
+        return (StatusCode::FORBIDDEN, Html((inner.profile_shell)(&frag, &who))).into_response();
+    }
     let username = target.username.clone();
     clear_totp(&inner, target).await;
     let msg = format!("Two-factor authentication disabled for {username}.");
-    let frag = reset_form_html(&id, &username, false, None, Some(&msg), &csrf);
+    let frag =
+        reset_form_html(&id, &username, false, manager_totp_on, None, Some(&msg), &csrf);
     Html((inner.profile_shell)(&frag, &who)).into_response()
 }
 
@@ -1852,13 +2042,14 @@ fn render_totp_setup(
     inner: &Inner,
     who: &Identity,
     secret: &str,
+    totp_on: bool,
     error: Option<&str>,
     csrf: &str,
 ) -> Response {
     let Some(prov) = totp::provisioning(&inner.totp_issuer, &who.username, secret) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not build QR code").into_response();
     };
-    let frag = totp_setup_html(&prov, error, csrf);
+    let frag = totp_setup_html(&prov, totp_on, error, csrf);
     Html((inner.profile_shell)(&frag, who)).into_response()
 }
 
@@ -2063,6 +2254,33 @@ out everywhere except here.</p>
     )
 }
 
+/// The confirm-it's-you inputs for a sensitive action (§5h): the account's password, or a fresh code
+/// when it has 2FA. `id_prefix` keeps the input ids unique when two of these render on one page.
+fn reauth_inputs(id_prefix: &str, totp_on: bool, hint: &str) -> String {
+    let code = if totp_on {
+        format!(
+            r#"  <div class="mb-2">
+    <label class="form-label small" for="{id_prefix}-code">…or a code from your authenticator app</label>
+    <input class="form-control form-control-sm" id="{id_prefix}-code" name="totp_code"
+           inputmode="numeric" autocomplete="one-time-code" placeholder="123456">
+  </div>
+"#
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"  <p class="text-muted small mb-2">{hint}</p>
+  <div class="mb-2">
+    <label class="form-label small" for="{id_prefix}-reauth">Your current password</label>
+    <input class="form-control form-control-sm" id="{id_prefix}-reauth" name="current_password"
+           type="password" autocomplete="current-password">
+  </div>
+{code}"#,
+        hint = esc(hint),
+    )
+}
+
 /// The self two-factor section: current state + a link to set up, or a button to disable.
 fn twofa_self_section(on: bool, csrf: &str) -> String {
     if on {
@@ -2071,9 +2289,16 @@ fn twofa_self_section(on: bool, csrf: &str) -> String {
 <p class="text-muted small mb-2">Enabled — a code from your authenticator app is required at login.</p>
 <form method="post" action="/profile/totp/disable">
   {csrf_input}
+{reauth}
   <button class="btn btn-outline-danger btn-sm" type="submit">Disable 2FA</button>
 </form>"#,
             csrf_input = crate::csrf::Csrf::hidden_input(csrf),
+            reauth = reauth_inputs(
+                "rl-2fa-off",
+                true,
+                "Turning off your second factor needs confirming — this is what stops someone \
+                 who has taken over your session from removing it.",
+            ),
         )
     } else {
         r#"<h2 class="h6">Two-factor authentication</h2>
@@ -2116,16 +2341,18 @@ fn reset_form_html(
     id: &str,
     username: &str,
     totp_on: bool,
+    manager_totp_on: bool,
     error: Option<&str>,
     success: Option<&str>,
     csrf: &str,
 ) -> String {
     let alert = alert_html(error, success);
-    let twofa = twofa_manage_section(id, username, totp_on, csrf);
+    let twofa = twofa_manage_section(id, username, totp_on, manager_totp_on, csrf);
     let csrf_input = crate::csrf::Csrf::hidden_input(csrf);
     format!(
         r#"<h1 class="h5 mb-3">Reset password</h1>
-<p class="text-muted">Set a new password for <strong>{user}</strong> (no current password required).</p>
+<p class="text-muted">Set a new password for <strong>{user}</strong> — you don't need their current one,
+which is why you have to confirm your own identity below.</p>
 <form method="post" action="/profile/{id}">
   {csrf_input}
   {alert}
@@ -2137,28 +2364,48 @@ fn reset_form_html(
     <label class="form-label" for="rl-confirm">Confirm new password</label>
     <input class="form-control" id="rl-confirm" name="confirm_password" type="password" autocomplete="new-password">
   </div>
+  <hr class="my-3">
+{reauth}
   <button class="btn btn-primary" type="submit">Reset password</button>
 </form>
 <hr class="my-4">
 {twofa}"#,
         user = esc(username),
         id = esc(id),
+        reauth = reauth_inputs(
+            "rl-mgr-pw",
+            manager_totp_on,
+            "Confirm it's you — this sets a password without knowing the old one, so it's the most \
+             valuable thing a stolen session of yours could reach.",
+        ),
     )
 }
 
 /// The manager two-factor section: disable the target's 2FA (managers can't set it up for others).
-fn twofa_manage_section(id: &str, username: &str, on: bool, csrf: &str) -> String {
+fn twofa_manage_section(
+    id: &str,
+    username: &str,
+    on: bool,
+    manager_totp_on: bool,
+    csrf: &str,
+) -> String {
     if on {
         format!(
             r#"<h2 class="h6">Two-factor authentication</h2>
 <p class="text-muted small mb-2">This user has 2FA enabled. Disabling it lets them log in with just a password until they set it up again.</p>
 <form method="post" action="/profile/{id}/totp/disable">
   {csrf_input}
+{reauth}
   <button class="btn btn-outline-danger btn-sm" type="submit">Disable 2FA for {user}</button>
 </form>"#,
             id = esc(id),
             user = esc(username),
             csrf_input = crate::csrf::Csrf::hidden_input(csrf),
+            reauth = reauth_inputs(
+                "rl-mgr-2fa",
+                manager_totp_on,
+                "Confirm it's you before removing someone else's second factor.",
+            ),
         )
     } else {
         r#"<h2 class="h6">Two-factor authentication</h2>
@@ -2188,9 +2435,19 @@ fn totp_login_html(error: Option<&str>, csrf: &str) -> String {
 
 /// The 2FA enrolment `<form>` fragment: the QR image, the `otpauth://` URL as copyable text, and a
 /// code field to confirm before activation.
-fn totp_setup_html(prov: &totp::Provisioning, error: Option<&str>, csrf: &str) -> String {
+fn totp_setup_html(
+    prov: &totp::Provisioning,
+    totp_on: bool,
+    error: Option<&str>,
+    csrf: &str,
+) -> String {
     let alert = alert_html(error, None);
     let csrf_input = crate::csrf::Csrf::hidden_input(csrf);
+    let reauth = reauth_inputs(
+        "rl-2fa-on",
+        totp_on,
+        "Confirm it's you: the code above proves you hold that device, not that the account is yours.",
+    );
     format!(
         r#"<h1 class="h5 mb-3">Set up two-factor authentication</h1>
 <p class="text-muted small">Scan this QR code with an authenticator app (or add the setup URL by hand), then enter the 6-digit code it shows to confirm.</p>
@@ -2206,6 +2463,8 @@ fn totp_setup_html(prov: &totp::Provisioning, error: Option<&str>, csrf: &str) -
     <label class="form-label" for="rl-totp">Authentication code</label>
     <input class="form-control" id="rl-totp" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus>
   </div>
+  <hr class="my-3">
+{reauth}
   <button class="btn btn-primary" type="submit">Verify &amp; enable</button>
   <a class="btn btn-link" href="/profile">Cancel</a>
 </form>"#,

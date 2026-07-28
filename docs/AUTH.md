@@ -712,6 +712,59 @@ pipeline is **coerce → validate → transform**, so the validator sees the pla
 `MetaField::password()`'s argon2 hook hashes it — no engine change needed. `examples/adminpanel` wires
 both halves from one `PASSWORD_LEVEL` env value, `0` switching them off together.
 
+## 5h. Re-authentication before sensitive changes — implemented
+
+A live session proves that **someone** logged in once. It does not prove that the account's owner is the
+one asking now — a stolen cookie *is* a live session. The idle clock (§5f) bounds how long such a cookie
+lasts; this bounds what it can **do** while it lasts. So the actions that would let an intruder entrench
+ask for a factor again, per request:
+
+| route | whose factor | why this one |
+|---|---|---|
+| `POST /profile/totp/disable` | the caller's | removing the second factor is step one for an intruder |
+| `POST /profile/totp` (enrol) | the caller's | otherwise they enrol *their own* authenticator — which doesn't just persist access, it **locks the real user out**, since login then wants a code only they can produce |
+| `POST /profile/{id}` (reset) | the **manager's** | sets a password without knowing the old one; every account it reaches is one the session can then log in as |
+| `POST /profile/{id}/totp/disable` | the **manager's** | strips a victim's second factor |
+
+`POST /profile` (your own password change) already required the current password, so it was
+re-authenticated before this existed. `POST /profile/sessions/revoke` deliberately is **not**: it only
+ever *removes* access, and a user racing to evict an intruder shouldn't be slowed down.
+
+**Either factor.** A `current_password` or a `totp_code` satisfies it. A **fresh code is preferred** when
+the account has 2FA — it proves presence, where a password may have been filled in by the browser for
+whoever is sitting there — and a code accepted here is **spent** (§5a), so one captured code can't wave
+through both a sensitive action and a login. Enrolment is the one asymmetric case: a *first* enrolment has
+no active secret to check a code against, so the password is the factor; a re-enrolment can use either.
+
+**An account with no local factor passes.** An SSO account has neither password nor local 2FA, so there is
+nothing to ask it for, and refusing would lock every SSO administrator out of the manager pages
+permanently. Their assurance is whatever the IdP gave them. Re-auth *through* the provider (an OIDC
+`prompt=login` round-trip returning to the pending action) is the real answer and isn't built — a
+documented limit, not an oversight. The same holds for a local account whose password is blank, which
+already can't log in.
+
+**Not lockout-limited**, for §5e's reason: the caller is authenticated, so counting failures here would let
+a stolen session lock the real user out of logging in. Nor is it needed — guessing a password is no easier
+here than at `/login`, and a 6-digit code would take ~10⁶ requests inside its 90-second window.
+
+**For your own routes**, which is where most sensitive actions live:
+
+```rust
+let Some(who) = auth.identify(&headers).await else { return redirect_to_login() };
+if let Err(msg) = auth.reauthenticate(&who, &form.current_password, &form.totp_code).await {
+    return (StatusCode::FORBIDDEN, render_form_with_error(&msg));  // nothing has happened yet
+}
+delete_the_thing(&who).await;
+```
+
+`Auth::can_reauthenticate(&who)` says whether the account *can* be challenged (false for SSO), for a UI
+hint. `examples/auth` gates a `POST /api-token/rotate` on it — the pattern to copy, including returning
+the refusal before anything is written.
+
+**Deliberately per-request, not a window.** A "you confirmed five minutes ago" grace period would need
+another `auth_session` column and a window during which a stolen session is dangerous again. These are
+rare actions; typing a password twice to reset two users is a fair price for having no open window.
+
 ## 6. authz — the gate
 
 The gate trait lives in **`relativelylight::authz`** — always compiled, independent of the `auth`
@@ -934,7 +987,10 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   page, a session cookie, and a `/secret` page gated by an on-demand `auth.identify(&headers)` check
   (redirect to `login_path` when anonymous). The `/secret` page shows the signed-in user and links to
   the self-service **`/profile`** page — password change **and TOTP 2FA** enrolment/disable — wrapped
-  in the app's chrome via `profile_shell`, plus the `--set-admin-pw` break-glass startup path
+  in the app's chrome via `profile_shell`. It also carries the worked example of **re-authentication for an
+  app's own sensitive action** (§5h): `POST /api-token/rotate`, reached from a form on `/secret`, resolves
+  the caller, calls `Auth::reauthenticate` with whatever the form submitted, and returns the refusal
+  *before* anything is written — the order that makes a rejection a no-op. Plus the `--set-admin-pw` break-glass startup path
   (`reset_admin_access`; the demo admin is seeded with `make_admin`). **Attempt limiting** is tuned down
   to 5 failures / 5 minutes per account with a 15-per-IP cap (§5e) and verified end-to-end: the 5th bad
   password locks the account (`429` + `Retry-After: ~298`, the correct password refused with it), and
@@ -1041,6 +1097,15 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
     however it arrives (plain v4, real v6, mapped, and a mapped *rule* against a plain client) while an
     address outside the list still locks, one client is **one row** whether it arrives mapped or plain,
     and `prune` drops expired rows while leaving live ones.
+  - **re-authentication** (§5h): each of the four sensitive routes is driven with nothing, an empty
+    factor, a wrong password and a wrong code — all `403`, with the account provably unchanged (2FA still
+    on, the victim's old password still working, a pending enrolment still pending so the user can finish
+    it) — and then with the right factor as the control. A **fresh TOTP code** is shown to re-authenticate
+    in place of a password *and to be spent doing so*: the same code is then refused for a second action.
+    An account with **no local factor** (an SSO manager) is shown to pass unchallenged, since refusing
+    would lock SSO administrators out of the manager pages. `Auth::reauthenticate` /
+    `can_reauthenticate` are tested directly too: right password, wrong password, right password in the
+    wrong case, a code on an account with no 2FA, and the same code twice.
   - **password strength** (§5g): the default policy refuses a short password, a common value (including
     one doubled, or with a digit/symbol tail), a value containing a six-character run, and one containing
     the account's **own username** — on the self-service page *and* on a manager's reset, since the reset
@@ -1106,9 +1171,10 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
 Each group carries a positive control (a correct login, a correct TOTP code, an allowing gate) so a
 mistake that breaks *everything* can't make the negatives pass vacuously.
 
-**Not covered by tests** (and open in [TODO.md](../TODO.md)): re-authentication before disabling 2FA /
-changing a password, and TOTP recovery codes — neither of which exists yet. What the SSO suite
-deliberately doesn't reach: the *provider's* own behaviour (consent screens, refresh tokens, userinfo),
+**Not covered by tests** (and open in [TODO.md](../TODO.md)): TOTP recovery codes, which don't exist yet,
+and re-authentication *through an identity provider* for SSO accounts (§5h's documented limit). What the
+SSO suite deliberately doesn't reach: the *provider's* own behaviour (consent screens, refresh tokens,
+userinfo),
 and the browser-side redirect to the authorization endpoint, which is a `Location` header we assert but
 don't follow.
 
@@ -1148,8 +1214,9 @@ don't follow.
   must stay fieldless, and the list-filter half reaches into `ListQuery`/`Accessor` too. Deferred until a
   requirement arrives that an app can't meet in its own handler.
 - PassKeys/WebAuthn, app-issued API tokens (extra principal source) — §8.
-- Security hardening — **TOTP recovery codes** and **re-auth before sensitive changes** are the two that
-  remain (see `TODO.md`); lockout (§5e), CSRF (§7) and session lifetime/revocation (§5f) have landed.
-  SSO: cache provider discovery instead of per-request.
+- Security hardening — **TOTP recovery codes** is the one that remains (see `TODO.md`); lockout (§5e),
+  CSRF (§7), session lifetime/revocation (§5f), the password policy (§5g) and re-authentication before
+  sensitive changes (§5h) have all landed, as has SSO discovery caching. Still open there: re-auth through
+  the IdP for SSO accounts, and breached-password screening.
 - Session store scaling: sessions are already shared across replicas (they're rows), so this is a
   performance question — the per-request read, and the lazy idle-refresh write — not a correctness one.

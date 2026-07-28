@@ -143,6 +143,12 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
   expired rows — and dead sessions — is `auth.prune()`, which **the app schedules**;
   the crate spawns no tasks. Worked examples: `examples/auth`'s `GET /api/whoami` + prune loop,
   `examples/adminpanel`'s lockout panels.
+- **Re-auth before sensitive changes** (`docs/AUTH.md` §5h): disabling 2FA, enrolling 2FA, a manager's
+  password reset and a manager's 2FA disable all require a **password or a fresh TOTP code** in the same
+  request (a code is spent when used). A live session isn't evidence its owner is present. Gate your own
+  sensitive routes the same way with `auth.reauthenticate(&who, pw, code)` — `examples/auth`'s
+  `POST /api-token/rotate` is the worked pattern. Accounts with no local factor (SSO) pass unchallenged;
+  `Auth::can_reauthenticate` reports that.
 - **Sessions** (`docs/AUTH.md` §5f): two clocks — `session_ttl_secs` (absolute, 7 days) and
   `session_idle_secs` (idle, 8 hours; `0` disables), both enforced by `identify`, the idle stamp
   refreshed lazily so a read stays a read. The session id **rotates** when the second factor completes
@@ -180,7 +186,7 @@ Full design + wiring: **[docs/AUTH.md](docs/AUTH.md)**.
 ```bash
 cargo run -p crud-example         # :3000  per-entity pages, CSV, Swagger — open, no auth
 cargo run -p adminpanel-example   # :3000  crud::ui::Admin, login-gated, inline accounts + 2FA (admin/password, editor/password)
-cargo run -p auth-example         # :3000  auth alone (no crud): login, /secret, /profile + 2FA (admin/password)
+cargo run -p auth-example         # :3000  auth alone (no crud): login, /secret, /profile + 2FA, re-auth demo (admin/password)
 cargo run -p time-example         # :3001  timezone picker + server/user-TZ backend hooks (see docs/TIME.md)
 ```
 

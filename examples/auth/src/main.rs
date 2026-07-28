@@ -18,8 +18,8 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::get;
-use axum::Router;
+use axum::routing::{get, post};
+use axum::{Form, Router};
 use axum_extra::extract::CookieJar;
 use relativelylight::auth::lockout::{IpLockout, Lockout, UsernameLockout};
 use relativelylight::net::client_ip;
@@ -111,6 +111,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/", get(public))
         .route("/secret", get(secret)) // gated on demand (see `secret`)
         .route("/api/whoami", get(whoami)) // the app's own credential check (see `whoami`)
+        // An app-owned **sensitive** action, gated by `Auth::reauthenticate` (see `rotate_api_token`).
+        .route("/api-token/rotate", post(rotate_api_token))
         .with_state(state)
         .merge(auth.routes()); // /login, /logout, /profile (password + 2FA), /login/totp
     if let Some(sso) = &sso {
@@ -226,10 +228,89 @@ async fn secret(State(app): State<AppState>, headers: HeaderMap, jar: CookieJar)
 <p class="small text-muted mb-1">session cookie</p>
 <pre class="bg-body-secondary p-2 rounded"><code>{name}={}</code></pre>
 <a class="btn btn-primary btn-sm" href="/profile">Change password</a>
-<a class="btn btn-outline-secondary btn-sm" href="/logout">Log out</a>"#,
+<a class="btn btn-outline-secondary btn-sm" href="/logout">Log out</a>
+<hr class="my-4">
+<h2 class="h6">An app-owned sensitive action</h2>
+<p class="small text-muted">Rotating this account's API token is the kind of thing a live session alone
+shouldn't be enough for — a stolen cookie <em>is</em> a live session. So the app asks the caller to prove
+they are present, with <code>Auth::reauthenticate</code>: the same factors the library's own sensitive
+pages take (your password, or a fresh 2FA code), and the same single-use rule for codes.</p>
+<form method="post" action="/api-token/rotate">
+  <div class="mb-2" style="max-width:22rem">
+    <label class="form-label small" for="rot-pw">Your current password</label>
+    <input class="form-control form-control-sm" id="rot-pw" name="current_password" type="password"
+           autocomplete="current-password">
+  </div>
+  <div class="mb-2" style="max-width:22rem">
+    <label class="form-label small" for="rot-code">…or a code from your authenticator app</label>
+    <input class="form-control form-control-sm" id="rot-code" name="totp_code" inputmode="numeric"
+           autocomplete="one-time-code" placeholder="123456">
+  </div>
+  <button class="btn btn-outline-danger btn-sm" type="submit">Rotate API token</button>
+</form>"#,
             who.username,
             who.groups.join(", "),
             cookie,
+        ),
+    ))
+    .into_response()
+}
+
+/// What an app's own sensitive route submits: the caller's re-authentication. (A real one would carry a
+/// CSRF token too — `auth.csrf()` — which the library's own forms demonstrate.)
+#[derive(serde::Deserialize)]
+struct RotateForm {
+    #[serde(default)]
+    current_password: String,
+    #[serde(default)]
+    totp_code: String,
+}
+
+/// `POST /api-token/rotate` — **the showcase for re-authentication before a sensitive change.**
+///
+/// The pattern to copy, in order:
+/// 1. resolve the caller (`identify`); anonymous goes to the login page;
+/// 2. **`reauthenticate`**, and return its error *before anything happens*, so a refusal is a no-op;
+/// 3. only then do the destructive thing.
+///
+/// Why bother when the caller already has a session? Because a session proves someone logged in once,
+/// not that the account's owner is the one asking now. The idle timeout bounds how long a stolen cookie
+/// lives; this bounds what it can *do* while it lives. An account with no local factor (an SSO login)
+/// passes step 2 — there is nothing to ask it for — which `Auth::can_reauthenticate` reports if you want
+/// to say so in your own UI.
+async fn rotate_api_token(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<RotateForm>,
+) -> Response {
+    let auth = &app.auth;
+    let Some(who) = auth.identify(&headers).await else {
+        return Redirect::to(auth.login_path()).into_response();
+    };
+    if let Err(msg) = auth.reauthenticate(&who, &form.current_password, &form.totp_code).await {
+        // 403, and nothing has changed — the old token is still the token.
+        return (
+            StatusCode::FORBIDDEN,
+            Html(page(
+                "Confirm it's you",
+                &format!(
+                    r#"<div class="alert alert-danger">{msg}</div>
+<p class="small text-muted">Nothing was changed.</p>
+<a class="btn btn-outline-secondary btn-sm" href="/secret">Back</a>"#
+                ),
+            )),
+        )
+            .into_response();
+    }
+    // Re-authenticated. A real app would mint and store a token here; this one only says it would, since
+    // the point of the example is the check above.
+    Html(page(
+        "API token rotated",
+        &format!(
+            r#"<div class="alert alert-success">Confirmed — a new API token would now be issued for
+<b>{}</b>, and the old one revoked.</div>
+<a class="btn btn-outline-secondary btn-sm" href="/secret">Back</a>"#,
+            who.username
         ),
     ))
     .into_response()
