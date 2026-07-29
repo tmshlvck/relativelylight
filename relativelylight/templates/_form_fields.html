@@ -1,0 +1,125 @@
+{#- The form's field widgets: one block per writable column, driven entirely by the published `_meta`
+    columns. Included by both hosts — `table.html`'s create/edit modal and `form.html`'s standalone
+    card — so a widget added here appears in both. Context-free: every value comes from the Alpine
+    component (`_form_core.html`), nothing from the template struct, which is why the same file works
+    for two different structs.
+-#}
+          <template x-for="c in formCols()" :key="c.name">
+            <div class="mb-3">
+              <label class="form-label">
+                <span x-text="c.label || c.name"></span>
+                <!-- NOT NULL with no default: the row can't be written without a value. -->
+                <span x-show="mustFill(c)" class="text-danger" title="Required">*</span>
+              </label>
+
+              <template x-if="c.kind === 'field' && c.type === 'Bool'">
+                <div class="form-check form-switch">
+                  <input type="checkbox" role="switch" class="form-check-input" x-model="form[c.name]">
+                  <span class="form-check-label small text-muted" x-text="form[c.name] ? 'Yes' : 'No'"></span>
+                </div>
+              </template>
+              <!-- Datetime: an int-seconds column flagged display=datetime → picker edited in UTC. -->
+              <template x-if="c.kind === 'field' && c.display === 'datetime'">
+                <div>
+                  <input type="datetime-local" step="1" class="form-control"
+                         :class="{'is-invalid': fieldErrors[c.name]}" x-model="form[c.name]">
+                  <div class="form-text">Times are
+                    <span x-text="(window.RLTime && $store.tz) ? $store.tz.effective() : 'UTC'"></span>.</div>
+                </div>
+              </template>
+              <template x-if="c.kind === 'field' && !hasOptions(c) && (c.type === 'Int' || c.type === 'Float') && c.display !== 'datetime'">
+                <input type="number" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
+                       :step="c.type === 'Float' ? 'any' : '1'" x-model.number="form[c.name]">
+              </template>
+              <!-- A closed set of values (an enum column, or any column given `options`) → a dropdown, so
+                   the allowed values are discoverable and a typo is impossible. The blank choice appears
+                   only where the column accepts one: nullable, or not required. -->
+              <template x-if="c.kind === 'field' && hasOptions(c)">
+                <select class="form-select" :class="{'is-invalid': fieldErrors[c.name]}"
+                        x-model="form[c.name]">
+                  <template x-if="c.nullable || !c.required">
+                    <option value="">—</option>
+                  </template>
+                  <template x-for="o in c.options" :key="o">
+                    <option :value="o" x-text="o"></option>
+                  </template>
+                </select>
+              </template>
+
+              <!-- Write-only string fields are secrets (e.g. a password) → masked input; on edit
+                   the value isn't loaded (write-only), so blank means "keep current". -->
+              <template x-if="c.kind === 'field' && !hasOptions(c) && !['Bool','Int','Float'].includes(c.type)">
+                <input :type="c.write_only ? 'password' : 'text'" class="form-control"
+                       :class="{'is-invalid': fieldErrors[c.name]}"
+                       :autocomplete="c.write_only ? 'new-password' : 'off'"
+                       :placeholder="c.write_only && mode === 'edit' ? 'Leave blank to keep current' : ''"
+                       x-model="form[c.name]">
+              </template>
+
+              <!-- Small target: plain dropdown. Options are fetched whole. -->
+              <template x-if="c.kind === 'relation' && c.cardinality === 'ToOne' && !isBig(c)">
+                <select class="form-select" x-model="form[c.name]">
+                  <option value="">—</option>
+                  <template x-for="o in (options[c.name] || [])" :key="o.id">
+                    <option :value="o.id" x-text="o.label"></option>
+                  </template>
+                </select>
+              </template>
+              <template x-if="c.kind === 'relation' && c.cardinality === 'ToMany' && !isBig(c)">
+                <select class="form-select" multiple size="4" x-model="form[c.name]">
+                  <template x-for="o in (options[c.name] || [])" :key="o.id">
+                    <option :value="o.id" x-text="o.label"></option>
+                  </template>
+                </select>
+              </template>
+
+              <!-- Large target: search→select combobox (queries the target's list with ?q=…). -->
+              <template x-if="c.kind === 'relation' && c.cardinality === 'ToOne' && isBig(c)">
+                <div class="position-relative" @click.away="pOpen[c.name] = false">
+                  <div class="input-group">
+                    <input type="text" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
+                           :placeholder="form[c.name] ? selLabel(c) : searchHint(c)"
+                           x-model="pQuery[c.name]" @focus="pSearch(c)" @input.debounce.250ms="pSearch(c)"
+                           @keydown.enter.prevent="pSearch(c)">
+                    <button class="btn btn-outline-secondary" type="button"
+                            x-show="form[c.name]" @click="pClear(c)" title="Clear">&times;</button>
+                  </div>
+                  <div class="form-text" x-show="form[c.name]">Selected: <span x-text="selLabel(c)"></span></div>
+                  <ul class="list-group position-absolute w-100 shadow" style="z-index:1060; max-height:220px; overflow:auto"
+                      x-show="pOpen[c.name] && (pResults[c.name] || []).length">
+                    <template x-for="o in (pResults[c.name] || [])" :key="o.id">
+                      <li class="list-group-item list-group-item-action" style="cursor:pointer"
+                          @click="pPickOne(c, o)" x-text="o.label"></li>
+                    </template>
+                  </ul>
+                </div>
+              </template>
+              <template x-if="c.kind === 'relation' && c.cardinality === 'ToMany' && isBig(c)">
+                <div class="position-relative" @click.away="pOpen[c.name] = false">
+                  <div class="d-flex flex-wrap gap-1 mb-1" x-show="(form[c.name] || []).length">
+                    <template x-for="id in form[c.name]" :key="id">
+                      <span class="badge text-bg-secondary d-inline-flex align-items-center">
+                        <span x-text="labelFor(c, id)"></span>
+                        <a href="#" class="text-white ms-1 text-decoration-none"
+                           @click.prevent="pRemove(c, id)">&times;</a>
+                      </span>
+                    </template>
+                  </div>
+                  <input type="text" class="form-control" :placeholder="searchHint(c)"
+                         x-model="pQuery[c.name]" @focus="pSearch(c)" @input.debounce.250ms="pSearch(c)"
+                         @keydown.enter.prevent="pSearch(c)">
+                  <ul class="list-group position-absolute w-100 shadow" style="z-index:1060; max-height:220px; overflow:auto"
+                      x-show="pOpen[c.name] && (pResults[c.name] || []).length">
+                    <template x-for="o in (pResults[c.name] || [])" :key="o.id">
+                      <li class="list-group-item list-group-item-action" style="cursor:pointer"
+                          :class="{'active': (form[c.name] || []).includes(String(o.id))}"
+                          @click="pAddMany(c, o)" x-text="o.label"></li>
+                    </template>
+                  </ul>
+                </div>
+              </template>
+
+              <div class="invalid-feedback d-block" x-show="fieldErrors[c.name]" x-text="fieldErrors[c.name]"></div>
+              <div class="form-text" x-show="c.description" x-text="c.description"></div>
+            </div>
+          </template>

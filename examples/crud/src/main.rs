@@ -1,17 +1,19 @@
 //! crud example — registers the model, serves the JSON API under /api/v1 (CRUD + metadata +
-//! CSV import/export), a relativelylight UI (one page per entity, linked MPA-style from the navbar), and
-//! Swagger UI at /docs over the generated OpenAPI.
+//! CSV import/export), a relativelylight UI (one page per entity, linked MPA-style from the navbar), a
+//! **standalone `Form`** on its own pages (/post/new, /post/{id}/edit), and Swagger UI at /docs over the
+//! generated OpenAPI.
 //!
-//! Try:  open http://127.0.0.1:3000/   ·   Swagger at /docs   ·   spec at /openapi.json
+//! Try:  open http://127.0.0.1:3000/   ·   /post/new   ·   Swagger at /docs   ·   spec at /openapi.json
 
 use askama::Template;
 use relativelylight::authz::Open;
-use relativelylight::crud::ui::Table;
+use relativelylight::crud::engine::Engine;
+use relativelylight::crud::ui::{Form, Table};
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::validate;
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
-use axum::response::{Html, IntoResponse};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use model::{author, post, profile, tag, user};
@@ -26,13 +28,20 @@ struct Shell {
     title: String,
     entities: Vec<String>,
     current: String,
-    table: String,
+    body: String,
+    /// Wrap the body in a card. The table pages want it; a `Form` renders its own card, and two nested
+    /// ones look like a mistake.
+    boxed: bool,
 }
 
 struct App {
     pages: HashMap<String, String>, // slug -> full shell page
     first: String,
     openapi: String,
+    /// Shared with the API router: the form pages are rendered **per request** (the row id is in the
+    /// URL), so unlike the table pages they can't be pre-rendered at startup.
+    engine: Arc<Engine>,
+    entities: Vec<String>,
 }
 
 #[tokio::main]
@@ -62,6 +71,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     post_mm.field("status").description = Some("Editorial state — a closed set.".into());
     post_mm.field("published").label = Some("Published".into());
     post_mm.field("published").default = Some(serde_json::json!(true));
+    // An int column holding **Unix seconds** → a datetime picker in the form and a readable cell in the
+    // table, storage and wire staying integer UTC. This shell doesn't load `time::JS`, so both fall back
+    // to plain UTC rather than a selected zone (see docs/TIME.md; the `time` example wires the picker up).
+    post_mm.field("published_at").datetime();
+    post_mm.field("published_at").label = Some("Published at".into());
+    post_mm.field("published_at").description = Some("When it went live (UTC).".into());
     post_mm.relation("author").label = Some("Author".into());
     post_mm.relation("tag").label = Some("Tags".into());
 
@@ -102,8 +117,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.register(profile_mm, Open);
     crud.register(tag_mm, Open);
 
-    // Pre-render one shell page per entity (shape read in-process; data is fetched client-side).
-    let engine = crud.engine();
+    // One shared engine: the router serves the API from it, the table pages are pre-rendered from it
+    // below, and the /post/new + /post/{id}/edit handlers render a `Form` from it per request.
+    let engine = Arc::new(crud.into_engine());
     let entities = engine.tables();
     // The app owns the OpenAPI document root (its own info/servers/version); the crud entity
     // endpoints + schemas are merged in. A real app would also add its own your own paths here.
@@ -116,23 +132,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .build(),
         )
         .build();
-    let openapi = relativelylight::crud::openapi::merge_into(app_doc, engine)
+    let openapi = relativelylight::crud::openapi::merge_into(app_doc, &engine)
         .to_pretty_json()
         .unwrap_or_default();
     let mut pages = HashMap::new();
     for slug in &entities {
         // `user` is a read-only table (display only); the rest are read-write with a form.
-        let mut table = Table::new(engine, slug)
+        let mut table = Table::new(&engine, slug)
             .title(capitalize(slug))
             .read_only(slug == "user")
             .per_page(5); // small so the example exercises the pager (post → 9 pages)
         // Default picker_threshold (20) demos both widgets on the post form: author (6 rows) stays a
         // plain dropdown, while tags (40 rows) crosses over to the search→select combobox.
         if slug == "post" {
-            // Custom cell renderer: link the title to the row's JSON record (demo of Table::format).
+            // Custom cell renderer (demo of Table::format): link each title to the **standalone**
+            // edit form, so the same row is editable both ways — the table's modal and its own page.
             table = table.format(
                 "title",
-                r#"(v, row) => `<a href="/api/v1/post/${row.id}" target="_blank">${v}</a>`"#,
+                r#"(v, row) => `<a href="/post/${row.id}/edit">${v}</a>`"#,
             );
         }
         let table = table.render()?;
@@ -140,7 +157,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             title: "relativelylight".into(),
             entities: entities.clone(),
             current: slug.clone(),
-            table,
+            body: table,
+            boxed: true,
         }
         .render()?;
         pages.insert(slug.clone(), page);
@@ -149,17 +167,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         first: entities.first().cloned().unwrap_or_default(),
         pages,
         openapi,
+        engine: engine.clone(),
+        entities: entities.clone(),
     });
 
     let ui = Router::new()
         .route("/", get(home))
         .route("/ui/{slug}", get(ui_page))
+        .route("/post/new", get(post_new))
+        .route("/post/{id}/edit", get(post_edit))
         .route("/openapi.json", get(openapi_json))
         .route("/docs", get(docs))
         .with_state(app);
 
     let app_router =
-        ui.merge(crud.into_router()).layer(axum::middleware::from_fn(relativelylight::middleware::access_log))
+        ui.merge(engine.router()).layer(axum::middleware::from_fn(relativelylight::middleware::access_log))
         // One resolution of the caller's address for the whole app (see relativelylight::middleware).
         .layer(axum::middleware::from_fn_with_state(
             relativelylight::middleware::TrustProxy(false),
@@ -168,6 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     println!("relativelylight on   http://127.0.0.1:3000/");
+    println!("Standalone form  http://127.0.0.1:3000/post/new");
     println!("Swagger UI on   http://127.0.0.1:3000/docs");
     println!("JSON API under  http://127.0.0.1:3000/api/v1");
     axum::serve(listener, app_router.into_make_service_with_connect_info::<SocketAddr>()).await?;
@@ -185,6 +208,66 @@ async fn ui_page(State(app): State<Arc<App>>, Path(slug): Path<String>) -> impl 
     match app.pages.get(&slug) {
         Some(html) => Html(html.clone()).into_response(),
         None => (StatusCode::NOT_FOUND, "unknown entity").into_response(),
+    }
+}
+
+// ---- the standalone form on the app's own pages (crud::ui::Form) ----
+//
+// This is the building block the admin panel is assembled from, used directly. Note what *isn't* here:
+// no field list in HTML, no input types, no validation wiring, no relation lookups. The form is built
+// from the model's published metadata, so `status` is a dropdown of its four values, `published_at` gets
+// a datetime picker, `author` a plain <select> and `tags` a search→select combobox (40 rows crosses the
+// picker threshold) — and a 422 from the API lands on the field that caused it.
+
+/// Create a post on its own page, then go to its edit page.
+async fn post_new(State(app): State<Arc<App>>) -> Response {
+    // A user-facing form shows a chosen subset, in a chosen order — not every writable column, which is
+    // the admin's job. `views` has to be among them even though it has a default of 0: the default
+    // pre-fills the *input*, so the field must be rendered for the value to be sent. Drop it and
+    // rendering fails here, naming the column, instead of the save 422-ing in the browser.
+    let form = Form::new(&app.engine, "post")
+        .title("New post")
+        .description("The same form the admin table opens in a modal — on a page of your own.")
+        .fields(["title", "body", "status", "views", "published", "published_at", "author", "tag"])
+        .submit_label("Create post")
+        .cancel("/ui/post")
+        .redirect("/post/{id}/edit")
+        .render();
+    render_form(&app, "post", form)
+}
+
+/// Edit an existing post on its own page.
+async fn post_edit(State(app): State<Arc<App>>, Path(id): Path<String>) -> Response {
+    let form = Form::new(&app.engine, "post")
+        .edit(&id)
+        .title(format!("Edit post #{id}"))
+        .cancel("/ui/post")
+        .saved_message("Saved. The table will show the change on its next load.")
+        .render();
+    render_form(&app, "post", form)
+}
+
+/// Wrap a rendered form in the app's shell — or report why it couldn't render. In a gated app
+/// `render_for` would be used instead, and `Unauthorized` would redirect to the login page.
+fn render_form(app: &App, current: &str, form: relativelylight::crud::Result<String>) -> Response {
+    match form {
+        Ok(html) => {
+            let page = Shell {
+                title: "relativelylight".into(),
+                entities: app.entities.clone(),
+                current: current.into(),
+                body: html,
+                boxed: false,
+            }
+            .render();
+            match page {
+                Ok(p) => Html(p).into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            }
+        }
+        // A misconfigured form (unknown column, or a create missing a required one) is a programming
+        // error, and says which column — see crud::ui::Form.
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 

@@ -22,7 +22,7 @@ sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 |---|---|---|
 | `crud` | ✅ | the CRUD engine + SeaORM backend (the `crud` module) |
 | `axum` | ✅ | the HTTP router (`Crud::into_router`, `Engine::router`) + the `middleware` module (`resolve_real_ip`, **required**; `access_log`) |
-| `ui` | | the web admin components (`crud::ui::Table`, `crud::ui::Admin`) |
+| `ui` | | the web UI components (`crud::ui::Form`, `Table`, `Admin`) |
 | `openapi` | | runtime OpenAPI 3.1 (`crud::openapi`) |
 | `csv` | | CSV import/export endpoints |
 | `auth` | | sessions, login, **TOTP 2FA**, profile/password pages, and the identity-resolving gate presets |
@@ -78,8 +78,23 @@ let html = relativelylight::crud::ui::Admin::new(crud.engine())
 ```
 
 `Table` renders one entity (search, pager, create/edit modal, relation pickers, bulk delete, CSV,
-custom cell renderers); `Admin` composes many `Table`s behind a side-panel. Full reference:
-[docs/CRUD.md → Web admin](docs/CRUD.md#web-admin-ui).
+custom cell renderers); `Admin` composes many `Table`s behind a side-panel.
+
+**`Form` is the same form standalone**, for your app's *own* pages rather than the admin — the building
+block `Table` and `Admin` are assembled from (they share the widget + behaviour partials, so a fix lands
+in all three):
+
+```rust
+let html = relativelylight::crud::ui::Form::new(engine, "ticket")
+    .title("New ticket")
+    .fields(["subject", "body", "priority"])   // subset *and* order; default is every writable column
+    .redirect("/tickets/{id}")                 // or .on_saved(js), else a success message
+    .render_for(&headers).await?;               // 401/403 instead of a form that can't submit
+```
+
+It refuses to render a form that couldn't work (unknown / read-only / required-but-unrendered column),
+naming it — note a column `default` pre-fills the *input*, so a required field still has to be rendered
+for its value to be sent. Full reference: [docs/CRUD.md → Web UI](docs/CRUD.md#web-ui-ui).
 
 ## Auth (feature `auth`)
 
@@ -206,7 +221,7 @@ Behind a CDN, write your own middleware inserting a `RealIp` instead; there is n
 
 - **Router** — merge `Crud::into_router()` / `Engine::router()` / `Auth::routes()` into your own
   `Router`. Keep crud under a prefix (`/api/v1`) so its `/{entity}` routes can't shadow yours.
-- **Page shell** — `ui::Table`/`Admin` and the auth login/profile pages return **HTML fragments**,
+- **Page shell** — `ui::Form`/`Table`/`Admin` and the auth login/profile pages return **HTML fragments**,
   never full pages. Your app owns the `<html>`, Bootstrap/Alpine `<script>`/`<link>` tags, and layout.
 - **OpenAPI** — build your own `OpenApi` (your `info`/`servers`) and fold crud's paths + schemas in
   with `crud::openapi::merge_into(doc, &engine)`.
@@ -214,7 +229,7 @@ Behind a CDN, write your own middleware inserting a `RealIp` instead; there is n
 ## Run the examples
 
 ```bash
-cargo run -p crud-example         # :3000  per-entity pages, CSV, Swagger — open, no auth
+cargo run -p crud-example         # :3000  per-entity pages, standalone Form (/post/new), CSV, Swagger — no auth
 cargo run -p adminpanel-example   # :3000  crud::ui::Admin, login-gated, inline accounts + 2FA (admin/password, editor/password)
 cargo run -p auth-example         # :3000  auth alone (no crud): login, /secret, /profile + 2FA, re-auth demo (admin/password)
 cargo run -p time-example         # :3001  timezone picker + server/user-TZ backend hooks (see docs/TIME.md)
@@ -227,8 +242,9 @@ under `/api/v1` with Swagger at `/docs`.
 ## Documentation
 
 - **[docs/CRUD.md](docs/CRUD.md)** — the full `crud` guide: `MetaModel`/`MetaField`/`MetaRelation`,
-  the HTTP API and wire formats, query params, the validation pipeline, metadata, CSV, the web admin,
-  OpenAPI, the write-observer audit hook, and composing with your app. (Examples: `crud`, `adminpanel`.)
+  the HTTP API and wire formats, query params, the validation pipeline, metadata, CSV, the web UI
+  (`Form`/`Table`/`Admin`), OpenAPI, the write-observer audit hook, and composing with your app.
+  (Examples: `crud`, `adminpanel`.)
 - **[docs/AUTH.md](docs/AUTH.md)** — the `auth` guide: sessions, login, TOTP 2FA, OIDC SSO, the gate
   presets, profile/password pages, and app-side wiring. (Examples: `auth`, `adminpanel`.)
 - **[docs/TIME.md](docs/TIME.md)** — time & timezones: UTC storage/API, the `RLTime` helpers, the

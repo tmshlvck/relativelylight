@@ -195,6 +195,30 @@ already using `auth`.
 
 ### Added
 
+- **`crud::ui::Form`** (feature `ui`) — a **standalone create/edit form** for one entity, for the app's
+  own pages rather than the admin panel: a signup form, a "new ticket" screen, a settings page. It reads
+  the same published metadata as the admin, so the widgets, required markers, enum dropdowns, relation
+  pickers, datetime handling and inline `422` errors come with it. Builders: `edit(id)` (edit instead of
+  create), `fields([…])` / `omit([…])` (subset **and order** — a user-facing form is not an admin form),
+  `title` / `description` / `heading`, `submit_label` / `saved_message` / `cancel(href)`,
+  `redirect(url)` (with `{id}` substituted from the saved row), `on_saved(js)`, `picker_threshold`,
+  `dom_id`. `render_for(&headers)` is gate-aware — `Err(Unauthorized)` → `401`, `Err(Forbidden)` → `403`
+  — so a caller who couldn't submit isn't shown a form. See
+  [CRUD.md → `Form`](docs/CRUD.md#form--a-standalone-createedit-form); worked example in `examples/crud`
+  at `/post/new` and `/post/{id}/edit`.
+
+  `Form` **refuses to render a form that couldn't work**, naming the column: an unknown field name, a
+  `read_only` one, or a *create* that omits a column the engine requires. Note a column `default` does
+  **not** excuse a required field from being rendered — `MetaField::default` is a *create-form* default,
+  so it pre-fills the input (and drops the `*`) but is never applied server-side, meaning an unrendered
+  field simply isn't sent.
+
+  `Form` and `Table`'s modal are now **one implementation** behind two shared templates (widgets in
+  `_form_fields.html`, behaviour in `_form_core.html`), so a fix or a new widget lands in both. No change
+  to `Table`'s or `Admin`'s API or output.
+- **`Engine::decide(slug, op, &headers) -> authz::Decision`** — the gate's actual decision, where
+  `Engine::permits` collapses it to a bool. For code that needs to tell "log in" from "not for you";
+  `permits` is now a thin wrapper over it and behaves identically.
 - **`csrf` module** (feature `csrf`, implied by `auth`) — the double-submit token from AUTH.md §7:
   `Csrf::{issue, ensure, token, verify, clear_cookie, hidden_input}`, `Auth::csrf()`,
   `Auth::csrf_cookie_name()`, and `Crud::csrf(..)` / `Engine::set_csrf(..)` to require
@@ -316,6 +340,10 @@ already using `auth`.
 
 ### Fixed
 
+- **A `422` naming a column the form doesn't render was silently swallowed** — the save failed with
+  nothing on screen, because a field error can only be shown next to a field. Those are now promoted to
+  the form's error banner as `column: message`. Affects `crud::ui::Form` and `Table`'s modal (shared
+  code), and shows up whenever a validator rejects something the form doesn't display.
 - **An account created in the admin panel could never log in.** A blank `sso_provider` (what an empty
   text input writes) counted as an SSO account, so password login was refused and the profile page
   offered nothing to change. (`98f4964`)

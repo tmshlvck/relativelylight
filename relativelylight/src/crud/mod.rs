@@ -16,6 +16,10 @@ mod gate_tests;
 #[cfg(feature = "ui")]
 pub mod ui;
 
+/// Tests for the standalone `ui::Form` (its render-time checks, field selection, and gating).
+#[cfg(all(test, feature = "ui"))]
+mod ui_tests;
+
 #[cfg(feature = "openapi")]
 pub mod openapi;
 

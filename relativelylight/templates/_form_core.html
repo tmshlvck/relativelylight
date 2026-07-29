@@ -1,0 +1,234 @@
+{#- The form's behaviour, as Alpine component members spliced into a host component's object literal.
+    Included by `table.html` (the create/edit modal) and `form.html` (the standalone card), so both
+    speak to the JSON API identically: same payload shaping, same 422 mapping, same CSRF header, same
+    relation pickers, same datetime handling.
+
+    Requires from the host's template struct: `data_url`, `columns_json`, `picker_threshold`,
+    `csrf_cookie`. Requires from the host's component: `mode` ("create" | "edit"), `editId`, and an
+    `afterSave(row)` — the one thing the two hosts genuinely disagree about (close-and-reload vs
+    redirect-or-reset). Optional on the host: `only` / `omit` arrays narrowing the rendered columns.
+-#}
+        // ---- shared form core (crud::ui::Table's modal + crud::ui::Form) ----
+        dataUrl: "{{ data_url }}",
+        columns: {{ columns_json|safe }},
+        pickerThreshold: {{ picker_threshold }},
+        form: {}, options: {}, fieldErrors: {}, rowErrors: [], saving: false,
+        // search→select picker state, keyed by column name:
+        pBig: {}, pTotal: {}, pLabels: {}, pQuery: {}, pResults: {}, pOpen: {},
+
+        // CSRF: echo the double-submit cookie in the X-CSRF-Token header on every write. The cookie is
+        // readable on purpose (it is not a credential); a cross-site attacker can neither read nor set
+        // it. Empty name = this engine doesn't enforce CSRF, so no header is sent.
+        csrfHeaders() {
+          const name = "{{ csrf_cookie }}";
+          if (!name) return {};
+          const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
+          return m ? { "x-csrf-token": decodeURIComponent(m[1]) } : {};
+        },
+
+        // --- datetime helpers: a `display: "datetime"` field is an int (Unix seconds, UTC). When
+        // rl-time.js (window.RLTime) is loaded these delegate to it, so cells + the form picker
+        // follow the $store.tz selection (reading it here keeps the cell reactive to zone changes);
+        // otherwise they fall back to plain UTC. Storage/API stay integer UTC either way. ---
+        isDateTime(c) { return c.display === "datetime"; },
+        _pad(n) { return String(n).padStart(2, "0"); },
+        _tzSel() { return (this.$store && this.$store.tz) ? this.$store.tz.sel() : { mode: "utc", zone: "UTC" }; },
+        fmtDateTime(sec) {                 // Unix seconds → readable string (selected zone, or UTC)
+          if (window.RLTime) {
+            const withUtc = this.$store && this.$store.tz && this.$store.tz.withUtc;
+            return withUtc ? window.RLTime.fmtWithUtc(sec, this._tzSel()) : window.RLTime.fmt(sec, this._tzSel());
+          }
+          if (sec === null || sec === undefined || sec === "" || Number(sec) === 0) return "";
+          const d = new Date(Number(sec) * 1000);
+          if (isNaN(d.getTime())) return String(sec);
+          return d.getUTCFullYear() + "-" + this._pad(d.getUTCMonth() + 1) + "-" + this._pad(d.getUTCDate())
+            + " " + this._pad(d.getUTCHours()) + ":" + this._pad(d.getUTCMinutes()) + ":" + this._pad(d.getUTCSeconds()) + " UTC";
+        },
+        dtToInput(sec) {                   // Unix seconds → datetime-local value (selected zone, or UTC)
+          if (window.RLTime) return window.RLTime.toInput(sec, this._tzSel());
+          if (sec === null || sec === undefined || sec === "" || Number(sec) === 0) return "";
+          const d = new Date(Number(sec) * 1000);
+          if (isNaN(d.getTime())) return "";
+          return d.getUTCFullYear() + "-" + this._pad(d.getUTCMonth() + 1) + "-" + this._pad(d.getUTCDate())
+            + "T" + this._pad(d.getUTCHours()) + ":" + this._pad(d.getUTCMinutes()) + ":" + this._pad(d.getUTCSeconds());
+        },
+        dtFromInput(str) {                 // datetime-local value → Unix seconds (selected zone, or UTC)
+          if (window.RLTime) return window.RLTime.fromInput(str, this._tzSel());
+          if (!str) return null;
+          const ms = Date.parse(str + "Z");
+          return Number.isNaN(ms) ? null : Math.floor(ms / 1000);
+        },
+
+        // The columns the form renders: writable, then narrowed by the host's `only` (which also sets the
+        // order) and `omit`. Table's modal sets neither and gets every writable column; a standalone Form
+        // usually shows a subset, because a user-facing form is not an admin form.
+        formCols() {
+          let cols = this.columns.filter(c => !c.read_only);
+          const only = this.only || [], omit = this.omit || [];
+          if (only.length) cols = only.map(n => cols.find(c => c.name === n)).filter(Boolean);
+          if (omit.length) cols = cols.filter(c => !omit.includes(c.name));
+          return cols;
+        },
+        toNum(v) { const n = Number(v); return (v === "" || Number.isNaN(n)) ? v : n; },
+
+        async fetchOptions() {
+          for (const c of this.formCols()) {
+            if (c.kind === "relation" && c.list_url) {
+              // Fetch one threshold-sized page; `total` decides plain <select> vs search picker.
+              const res = await fetch(c.list_url + "?view=terse&per_page=" + this.pickerThreshold);
+              const d = await res.json();
+              this.pTotal[c.name] = d.total || 0;
+              if (this.pTotal[c.name] > this.pickerThreshold) {
+                this.pBig[c.name] = true;                        // large → search→select
+              } else {
+                this.pBig[c.name] = false;                       // small → plain dropdown
+                this.options[c.name] = (d.data || []).map(x => ({ id: x.id, label: x.label }));
+              }
+            }
+          }
+        },
+        isBig(c) { return !!this.pBig[c.name]; },
+        // Placeholder for a big-target search box: "Search 12,345 items…".
+        searchHint(c) { return "Search " + (this.pTotal[c.name] || 0).toLocaleString() + " items…"; },
+        // Labels shown by the picker: current selection (seeded from the row on edit) + search hits.
+        labelFor(c, id) { return (this.pLabels[c.name] || {})[String(id)] || ("#" + id); },
+        selLabel(c) { return this.form[c.name] ? this.labelFor(c, this.form[c.name]) : ""; },
+        async pSearch(c) {
+          if (!this.pLabels[c.name]) this.pLabels[c.name] = {};
+          const term = this.pQuery[c.name] ? "&q=" + encodeURIComponent(this.pQuery[c.name]) : "";
+          const res = await fetch(c.list_url + "?view=terse&per_page=20" + term);
+          const d = await res.json();
+          const rows = (d.data || []).map(x => ({ id: String(x.id), label: x.label }));
+          rows.forEach(o => (this.pLabels[c.name][o.id] = o.label));
+          this.pResults[c.name] = rows;
+          this.pOpen[c.name] = true;
+        },
+        pPickOne(c, o) {
+          this.form[c.name] = String(o.id);
+          this.pLabels[c.name][String(o.id)] = o.label;
+          this.pQuery[c.name] = ""; this.pOpen[c.name] = false;
+        },
+        pClear(c) { this.form[c.name] = ""; },
+        pAddMany(c, o) {
+          const id = String(o.id);
+          if (!this.form[c.name].includes(id)) this.form[c.name].push(id);
+          this.pLabels[c.name][id] = o.label;
+          this.pQuery[c.name] = ""; this.pResults[c.name] = []; this.pOpen[c.name] = false;
+        },
+        pRemove(c, id) {
+          this.form[c.name] = (this.form[c.name] || []).filter(x => x !== String(id));
+        },
+        blankForm() {
+          const f = {};
+          for (const c of this.formCols()) {
+            if (c.kind === "relation") f[c.name] = c.cardinality === "ToMany" ? [] : "";
+            else if (c.type === "Bool") f[c.name] = c.default ?? false;
+            else f[c.name] = c.default ?? "";
+          }
+          return f;
+        },
+        fromRow(row) {
+          const f = {};
+          for (const c of this.formCols()) {
+            const v = row ? row[c.name] : undefined;
+            if (c.kind === "relation") {
+              // Seed the picker's label map from the row so the current selection stays visible
+              // even when it isn't in the first search page (large targets).
+              if (!this.pLabels[c.name]) this.pLabels[c.name] = {};
+              if (c.cardinality === "ToMany") {
+                const arr = v || [];
+                f[c.name] = arr.map(l => String(l.id));
+                arr.forEach(l => (this.pLabels[c.name][String(l.id)] = l.label));
+              } else {
+                f[c.name] = v ? String(v.id) : "";
+                if (v) this.pLabels[c.name][String(v.id)] = v.label;
+              }
+            } else if (this.isDateTime(c)) {
+              f[c.name] = this.dtToInput(v);
+            } else {
+              f[c.name] = (v === null || v === undefined) ? "" : v;
+            }
+          }
+          return f;
+        },
+        // Whether to mark a field with the red `*`. `required` now comes from the engine, which also
+        // enforces it, so the form no longer re-derives it from nullable/default and hopes the two agree.
+        // The one thing left to the form: a field it **pre-fills from `default`** needs no marker, because
+        // the user can't accidentally leave it out — that is how `MetaField::password()`, whose blank means
+        // "no password", avoids a `*` beside help text that says "optional".
+        // Whether this column publishes a closed set of values (`_meta` omits `options` when empty).
+        hasOptions(c) {
+          return Array.isArray(c.options) && c.options.length > 0;
+        },
+        mustFill(c) {
+          if (c.kind !== "field" || c.required !== true) return false;
+          return c.default === undefined || c.default === null;
+        },
+        resetPicker() { this.pQuery = {}; this.pResults = {}; this.pOpen = {}; this.pLabels = {}; },
+        // Blank every write-only field (a password): a form that stays in the DOM (a hidden modal, or a
+        // standalone form after a save) would otherwise keep a typed secret in a live input until the next
+        // open — a footgun, and what makes Chrome re-offer the *last* row's password on the next save.
+        clearSecrets() {
+          for (const c of this.formCols()) if (c.write_only) this.form[c.name] = "";
+        },
+        payload() {
+          const p = {};
+          for (const c of this.formCols()) {
+            let v = this.form[c.name];
+            if (c.kind === "relation") {
+              if (c.cardinality === "ToMany") p[c.name] = (v || []).map(x => this.toNum(x));
+              else p[c.name] = (v === "" || v == null) ? null : this.toNum(v);
+            } else if (this.isDateTime(c)) {
+              // Datetime picker → Unix seconds; empty means "clear" (null) for nullable columns.
+              p[c.name] = this.dtFromInput(v);
+            } else {
+              // Empty numbers are omitted (server default / unchanged); text is sent as-is
+              // (including "") so field validators can run.
+              const empty = v === "" || v === null || v === undefined;
+              if ((c.type === "Int" || c.type === "Float") && empty) continue;
+              // A blank write-only secret on edit means "keep current" — omit it so it isn't cleared.
+              // (On create it's sent through, so an empty password is allowed and stored as such.)
+              if (c.write_only && empty && this.mode === "edit") continue;
+              // On a nullable column an empty input means "nothing here" → send null, so the row gets
+              // SQL NULL instead of "" (the server canonicalizes this too; sending it honestly keeps
+              // the wire format truthful). A NOT NULL column has no such option: "" is its "empty".
+              if (empty && c.nullable && !c.write_only) { p[c.name] = null; continue; }
+              p[c.name] = v === undefined ? "" : v;
+            }
+          }
+          return p;
+        },
+        async save() {
+          this.saving = true;
+          this.fieldErrors = {}; this.rowErrors = [];
+          const url = this.mode === "create" ? this.dataUrl : this.dataUrl + "/" + this.editId;
+          const method = this.mode === "create" ? "POST" : "PATCH";
+          const res = await fetch(url, {
+            method, headers: { "content-type": "application/json", ...this.csrfHeaders() },
+            body: JSON.stringify(this.payload()),
+          });
+          this.saving = false;
+          if (res.status === 422) {
+            const b = await res.json();
+            this.fieldErrors = b.fields || {};
+            this.rowErrors = b.errors || [];
+            // An error keyed on a column this form doesn't render has nowhere to appear, and silently
+            // swallowing it leaves a save that fails for no visible reason. Promote those to the banner.
+            const shown = this.formCols().map(c => c.name);
+            for (const name of Object.keys(this.fieldErrors)) {
+              if (!shown.includes(name)) this.rowErrors.push(name + ": " + this.fieldErrors[name]);
+            }
+            return; // stay open, errors shown inline
+          }
+          if (!res.ok) {
+            let msg = "request failed";
+            try { msg = (await res.json()).error || msg; } catch (e) {}
+            this.rowErrors = [msg];
+            return;
+          }
+          // Saved. The submit already gave the browser its one chance to offer to remember a credential;
+          // the host decides what happens next and is responsible for wiping the secret (clearSecrets).
+          let row = null;
+          try { row = await res.json(); } catch (e) { /* no body — the host can cope */ }
+          await this.afterSave(row);
+        },

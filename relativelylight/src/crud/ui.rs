@@ -1,13 +1,25 @@
-//! `relativelylight::crud::ui` — server-rendered admin components (Bootstrap 5 + Alpine.js fragments).
+//! `relativelylight::crud::ui` — server-rendered UI components (Bootstrap 5 + Alpine.js fragments).
 //!
-//! `Table` renders a table for one entity: read-only, or read-write with a Create button, per-row
-//! Edit/Delete, and a modal create/update form (validation errors shown inline). `Admin` composes
-//! many `Table`s plus a side-panel into one page: pick a model to view/edit, with configurable
-//! ordering, group headings, separators, and custom links. Both are **fragments** — the app owns
-//! the shell (chrome + Bootstrap/Alpine tags); data + writes go through the JSON API.
+//! Two building blocks and one composition of them:
+//!
+//! - [`Form`] — a create/edit form for one entity, standalone. For an app's own pages (a signup form,
+//!   a "new ticket" screen) where the admin's shape is wrong.
+//! - [`Table`] — a table for one entity: read-only, or read-write with a Create button, per-row
+//!   Edit/Delete, and the same form in a modal (validation errors inline).
+//! - [`Admin`] — many `Table`s plus a side-panel: pick a model to view/edit, with configurable
+//!   ordering, group headings, separators, and custom links.
+//!
+//! `Form` and `Table`'s modal are **one implementation**: the field widgets live in the
+//! `_form_fields.html` partial and the behaviour (payload shaping, `422` mapping, CSRF header,
+//! relation pickers, datetime conversion) in `_form_core.html`, which both hosts include. The hosts
+//! differ only in chrome and in what happens after a save. So a widget or a fix lands in both, and
+//! `Admin` remains what it was meant to be — a free composition of the parts, not a separate thing.
+//!
+//! All three are **fragments**: the app owns the shell (chrome + Bootstrap/Alpine tags); data and
+//! writes go through the JSON API.
 
-use crate::authz::Operation;
-use crate::crud::engine::{Engine, Error, Result};
+use crate::authz::{Decision, Operation};
+use crate::crud::engine::{Column, Engine, Error, Result};
 use askama::Template;
 use http::HeaderMap;
 use serde_json::Value;
@@ -156,6 +168,323 @@ impl<'a> Table<'a> {
             picker_threshold: self.picker_threshold,
             formatters,
             csrf_cookie: self.engine.csrf_cookie_name().unwrap_or_default().to_string(),
+        };
+        tmpl.render().map_err(|e| Error::Backend(e.to_string()))
+    }
+}
+
+// ===================== Form =====================
+
+#[derive(Template)]
+#[template(path = "form.html")]
+struct FormTemplate {
+    id: String, // unique per instance — namespaces the Alpine component on shared pages
+    title: String,
+    description: String,
+    has_heading: bool,
+    has_description: bool,
+    data_url: String,
+    columns_json: String,
+    picker_threshold: u64,
+    /// CSRF cookie name to echo in write requests, or empty when the engine doesn't enforce CSRF.
+    csrf_cookie: String,
+    mode: &'static str, // "create" | "edit"
+    edit_id_js: String, // JS literal: a quoted id, or `null` on create
+    only_json: String,
+    omit_json: String,
+    on_saved_js: String, // JS literal: an arrow function, or `null`
+    redirect_js: String, // JS literal: a quoted URL, or `null`
+    submit_label: String,
+    saved_message_js: String, // JS literal: a quoted message
+    has_cancel: bool,
+    cancel_href: String,
+}
+
+/// A standalone create/edit form for one registered entity, rendered as an HTML fragment — the same
+/// form [`Table`] shows in its modal, without the table.
+///
+/// This is the building block for an app's **own** pages, where [`Admin`] is the wrong shape: a
+/// signup form, a "new ticket" page, a settings screen. It reads the entity's published metadata, so
+/// the widgets, the required markers, the enum dropdowns, the relation pickers, the datetime handling
+/// and the `422` field-error mapping all come for free and stay in step with the model.
+///
+/// ```ignore
+/// // Create: only these fields, in this order, then go to the new row's page.
+/// let html = Form::new(&engine, "ticket")
+///     .title("New ticket")
+///     .fields(["subject", "body", "priority", "assignee"])
+///     .submit_label("Open ticket")
+///     .redirect("/tickets/{id}")
+///     .render_for(&headers).await?;      // 401/403 if the gate says no
+///
+/// // Edit an existing row:
+/// let html = Form::new(&engine, "ticket").edit(id).omit(["assignee"]).render()?;
+/// ```
+///
+/// **It talks to the JSON API**, like `Table`: the entity's routes must be mounted, and the page must
+/// load Bootstrap 5 + Alpine (plus [`time::JS`](crate::time::JS) if any column is a datetime). When
+/// the engine enforces CSRF the form echoes the cookie automatically — but the cookie has to exist, so
+/// issue it when rendering the page (`Csrf::ensure`, as `auth`'s own pages do).
+pub struct Form<'a> {
+    engine: &'a Engine,
+    slug: String,
+    dom_id: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+    heading: Option<bool>,
+    edit_id: Option<String>,
+    only: Vec<String>,
+    omit: Vec<String>,
+    submit_label: Option<String>,
+    saved_message: Option<String>,
+    cancel_href: Option<String>,
+    on_saved: Option<String>,
+    redirect: Option<String>,
+    picker_threshold: u64,
+}
+
+impl<'a> Form<'a> {
+    /// A form that **creates** a row of `slug`. Add [`edit`](Form::edit) to load and update one.
+    pub fn new(engine: &'a Engine, slug: impl Into<String>) -> Self {
+        Self {
+            engine,
+            slug: slug.into(),
+            dom_id: None,
+            title: None,
+            description: None,
+            heading: None,
+            edit_id: None,
+            only: Vec::new(),
+            omit: Vec::new(),
+            submit_label: None,
+            saved_message: None,
+            cancel_href: None,
+            on_saved: None,
+            redirect: None,
+            picker_threshold: 20,
+        }
+    }
+
+    /// Edit this existing row: the form fetches it on load and saves with `PATCH`. Without this the
+    /// form creates (`POST`).
+    pub fn edit(mut self, id: impl Into<String>) -> Self {
+        self.edit_id = Some(id.into());
+        self
+    }
+
+    /// Heading shown in the card header. Setting a title (or a description) shows the header; without
+    /// either there is none, since an app page usually has its own heading already.
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+    /// A muted line under the title — what this form is for.
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+    /// Force the card header on or off, overriding the "on if titled" default.
+    pub fn heading(mut self, on: bool) -> Self {
+        self.heading = Some(on);
+        self
+    }
+
+    /// Render **only** these columns, in this order. Without it the form shows every writable column,
+    /// which is the admin's default and rarely what a user-facing form wants. Rendering errors on an
+    /// unknown or read-only name, and (when creating) on omitting a column the engine requires.
+    pub fn fields<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.only = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Drop these columns from the form, keeping the rest (the complement of
+    /// [`fields`](Form::fields); applied after it if both are given).
+    pub fn omit<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.omit = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Text on the submit button. Default: `Save`.
+    pub fn submit_label(mut self, label: impl Into<String>) -> Self {
+        self.submit_label = Some(label.into());
+        self
+    }
+
+    /// The confirmation shown after a successful save when there's no [`redirect`](Form::redirect) or
+    /// [`on_saved`](Form::on_saved). Default: `Saved.`
+    pub fn saved_message(mut self, msg: impl Into<String>) -> Self {
+        self.saved_message = Some(msg.into());
+        self
+    }
+
+    /// Show a Cancel link to this URL. Without it there's no Cancel button (a page usually has its
+    /// own way back).
+    pub fn cancel(mut self, href: impl Into<String>) -> Self {
+        self.cancel_href = Some(href.into());
+        self
+    }
+
+    /// Go here after a successful save. `{id}` is replaced with the saved row's id (URL-encoded), so
+    /// `"/tickets/{id}"` lands on the new row. Takes precedence over [`on_saved`](Form::on_saved).
+    pub fn redirect(mut self, url: impl Into<String>) -> Self {
+        self.redirect = Some(url.into());
+        self
+    }
+
+    /// Run this JS after a successful save instead of showing the message — an arrow function
+    /// `(row) => { … }` receiving the saved row (`null` if the API returned no body). Inserted into a
+    /// `<script>` verbatim, so it's your code, not user input.
+    pub fn on_saved(mut self, js: impl Into<String>) -> Self {
+        self.on_saved = Some(js.into());
+        self
+    }
+
+    /// Relation widget cutover: targets with more rows than this use a live search→select combobox
+    /// instead of a plain `<select>`. Default: 20.
+    pub fn picker_threshold(mut self, n: u64) -> Self {
+        self.picker_threshold = n;
+        self
+    }
+
+    /// Namespaces the form's Alpine component, so two forms for the *same* entity can share a page.
+    /// Default: the slug. Must be a valid JS identifier fragment.
+    pub fn dom_id(mut self, id: impl Into<String>) -> Self {
+        self.dom_id = Some(id.into());
+        self
+    }
+
+    /// Render the form fragment. Errors if the entity isn't registered, if a named column doesn't
+    /// exist or is read-only, or if creating without a column the engine requires.
+    pub fn render(&self) -> Result<String> {
+        self.render_inner()
+    }
+
+    /// Render the form for a specific request, refusing rather than rendering a form the caller could
+    /// never submit: `Err(Error::Unauthorized)` (→ `401`) when the gate wants a login, and
+    /// `Err(Error::Forbidden)` (→ `403`) when it's simply not permitted. A page handler can turn the
+    /// first into a redirect to the login page.
+    pub async fn render_for(&self, headers: &HeaderMap) -> Result<String> {
+        let op = if self.edit_id.is_some() { Operation::Update } else { Operation::Create };
+        match self.engine.decide(&self.slug, op, headers).await {
+            Decision::Allow => self.render_inner(),
+            Decision::NeedsLogin => Err(Error::Unauthorized),
+            Decision::Denied => Err(Error::Forbidden),
+        }
+    }
+
+    /// Check the configured field list against the model *before* rendering, so a typo or an
+    /// unsatisfiable create fails here — with a message naming the column — instead of rendering a
+    /// form whose save can only ever `422`.
+    fn check_fields(&self) -> Result<()> {
+        let cols = self.engine.columns(&self.slug)?;
+        let mut known: Vec<&str> = Vec::new();
+        let mut read_only: Vec<&str> = Vec::new();
+        // Writable columns, with whether a create *must* render one. Note a `default` does **not** excuse
+        // it: `MetaField::default` is a *create-form* default — the form pre-fills the input with it (and
+        // drops the `*` marker), but the engine never applies it server-side, so a required column that
+        // isn't rendered simply isn't sent and the create fails with `field: required`.
+        let mut writable: Vec<(&str, bool)> = Vec::new();
+        for c in &cols {
+            match c {
+                Column::Field { name, read_only: ro, required, .. } => {
+                    known.push(name);
+                    if *ro {
+                        read_only.push(name);
+                    } else {
+                        writable.push((name, *required));
+                    }
+                }
+                Column::Relation { name, read_only: ro, .. } => {
+                    known.push(name);
+                    if *ro {
+                        read_only.push(name);
+                    } else {
+                        writable.push((name, false));
+                    }
+                }
+            }
+        }
+
+        for name in self.only.iter().chain(self.omit.iter()) {
+            if read_only.contains(&name.as_str()) {
+                return Err(Error::BadRequest(format!(
+                    "crud::ui::Form({}): column '{name}' is read-only, so a form can't write it",
+                    self.slug
+                )));
+            }
+            if !known.contains(&name.as_str()) {
+                return Err(Error::BadRequest(format!(
+                    "crud::ui::Form({}): no column '{name}' — known columns: {}",
+                    self.slug,
+                    known.join(", ")
+                )));
+            }
+        }
+
+        // A create must be able to satisfy every required column; an edit needn't, since the row
+        // already has values for the fields this form doesn't show.
+        if self.edit_id.is_none() {
+            let missing: Vec<&str> = writable
+                .iter()
+                .filter(|(name, must)| *must && !self.renders(name))
+                .map(|(name, _)| *name)
+                .collect();
+            if !missing.is_empty() {
+                return Err(Error::BadRequest(format!(
+                    "crud::ui::Form({}): creating needs {}, which this form doesn't show — add {} to \
+                     .fields(), or use .edit(id). A column `default` doesn't help: it pre-fills the \
+                     input, so the field still has to be rendered for the value to be sent",
+                    self.slug,
+                    missing.join(", "),
+                    if missing.len() == 1 { "it" } else { "them" }
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the rendered form includes this column — mirroring `formCols()` in `_form_core.html`.
+    fn renders(&self, name: &str) -> bool {
+        let included = self.only.is_empty() || self.only.iter().any(|n| n == name);
+        included && !self.omit.iter().any(|n| n == name)
+    }
+
+    fn render_inner(&self) -> Result<String> {
+        let desc = self.engine.meta_one(&self.slug)?;
+        self.check_fields()?;
+        let columns_json =
+            desc.get("columns").cloned().unwrap_or(Value::Array(vec![])).to_string();
+        let js_str = |s: &str| Value::String(s.to_string()).to_string();
+        let tmpl = FormTemplate {
+            id: self.dom_id.clone().unwrap_or_else(|| self.slug.clone()),
+            title: self.title.clone().unwrap_or_else(|| self.slug.clone()),
+            description: self.description.clone().unwrap_or_default(),
+            has_heading: self
+                .heading
+                .unwrap_or(self.title.is_some() || self.description.is_some()),
+            has_description: self.description.is_some(),
+            data_url: self.engine.entity_url(&self.slug),
+            columns_json,
+            picker_threshold: self.picker_threshold,
+            csrf_cookie: self.engine.csrf_cookie_name().unwrap_or_default().to_string(),
+            mode: if self.edit_id.is_some() { "edit" } else { "create" },
+            edit_id_js: self.edit_id.as_deref().map_or("null".to_string(), &js_str),
+            only_json: Value::from(self.only.clone()).to_string(),
+            omit_json: Value::from(self.omit.clone()).to_string(),
+            on_saved_js: self.on_saved.clone().unwrap_or_else(|| "null".to_string()),
+            redirect_js: self.redirect.as_deref().map_or("null".to_string(), &js_str),
+            submit_label: self.submit_label.clone().unwrap_or_else(|| "Save".to_string()),
+            saved_message_js: js_str(self.saved_message.as_deref().unwrap_or("Saved.")),
+            has_cancel: self.cancel_href.is_some(),
+            cancel_href: self.cancel_href.clone().unwrap_or_default(),
         };
         tmpl.render().map_err(|e| Error::Backend(e.to_string()))
     }

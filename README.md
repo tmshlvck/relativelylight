@@ -60,8 +60,12 @@ crud.register(author, Open);                // pass an auth gate to restrict —
 crud.register(post, Open);
 crud.register(tag, Open);
 
-// Optional admin UI fragment (needs the `ui` feature). Build it before into_router().
+// Optional UI fragments (needs the `ui` feature). Build them before into_router().
 let admin_html = relativelylight::crud::ui::Admin::new(crud.engine()).entities().render()?;
+// …or drop a single create/edit form onto a page of your own — the block the admin is built from:
+let form_html = relativelylight::crud::ui::Form::new(crud.engine(), "post")
+    .fields(["title", "body"])
+    .render()?;
 
 // The CRUD routes as an axum Router — merge into your own app.
 let app = axum::Router::new()
@@ -98,7 +102,7 @@ post.field("title").validate = Some(Box::new(|v| {
 |---|---|---|
 | `crud` | ✅ | the CRUD engine + SeaORM backend (the `crud` module) |
 | `axum` | ✅ | the HTTP router (`Crud::into_router`) |
-| `ui` | | the web admin components (`crud::ui::Table`, `crud::ui::Admin`) |
+| `ui` | | the web UI components (`crud::ui::Form`, `Table`, `Admin`) |
 | `openapi` | | runtime OpenAPI 3.1 generation |
 | `csv` | | CSV import/export endpoints |
 | `auth` | | sessions, on-demand login resolution, TOTP 2FA, DB-backed login lockout, a per-model authorization gate |
@@ -112,7 +116,7 @@ Enable only what you use — an unused feature pulls no dependencies.
 Four runnable examples share one seeded in-memory SQLite model (`examples/model`):
 
 ```bash
-cargo run -p crud-example          # :3000  per-entity pages (MPA), CSV, Swagger UI — open (no auth)
+cargo run -p crud-example          # :3000  per-entity pages (MPA), a standalone Form at /post/new, CSV, Swagger UI — open (no auth)
 cargo run -p adminpanel-example    # :3000  the crud::ui::Admin side-panel — login-gated (admin / password)
 cargo run -p auth-example          # :3000  auth alone: argon2 login/session gating a page (admin / password)
 cargo run -p time-example          # :3001  timezone picker + server/user-TZ backend hooks (docs/TIME.md)

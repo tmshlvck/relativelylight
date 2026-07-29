@@ -12,7 +12,7 @@ For the concrete backlog see **[../TODO.md](../TODO.md)**.
 | Module | What it's for | Status | Guide |
 |---|---|---|---|
 | **`crud`** (§1) | SeaORM entities → JSON CRUD + machine-readable metadata API | ✅ implemented | [CRUD.md](CRUD.md) |
-| **`crud::ui`** (§2) | auto-generated web admin: table, create/edit form, side-panel, bulk + CSV | ✅ implemented | [CRUD.md → Web admin](CRUD.md#web-admin-ui) |
+| **`crud::ui`** (§2) | auto-generated web UI: standalone form, table, side-panel, bulk + CSV | ✅ implemented | [CRUD.md → Web UI](CRUD.md#web-ui-ui) |
 | **`auth`** (§3) | user/group model, sessions, login, TOTP 2FA, OIDC SSO, per-model `Authz` gate | 🟡 major slice done | [AUTH.md](AUTH.md) |
 | **`middleware`** | `resolve_real_ip` (required — the caller's address, resolved once into a `RealIp` extension) + `access_log` | ✅ | [AUTH.md §4](AUTH.md) |
 | **`observe`** (§4) | write-observer hook for audit logging (change + request context) | ✅ implemented | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
@@ -62,14 +62,22 @@ Rendering is hybrid: the column **shape** is read from the engine in-process and
 server-rendered HTML **fragment**; **data** is fetched client-side from the JSON API. The app supplies
 the shell (Bootstrap 5 + Alpine.js) and drops the fragment in.
 
-- **`Table`** — one entity: search, windowed pager, a create/edit modal form (typed inputs, boolean
-  switch, relation dropdown or search→select picker, timezone-aware datetime picker, inline
-  validation), per-row + bulk delete, CSV import/export, boolean/relation badges, custom cell
+- **`Form`** — one entity's create/edit form, standalone, for the **app's own** pages: field subset +
+  order, gate-aware rendering (`401`/`403` rather than a form that can't submit), redirect-or-callback
+  after save, and render-time refusal of a form that could never work (unknown / read-only / required-but
+  -unrendered column).
+- **`Table`** — one entity: search, windowed pager, that same form in a modal (typed inputs, boolean
+  switch, enum dropdown, relation dropdown or search→select picker, timezone-aware datetime picker,
+  inline validation), per-row + bulk delete, CSV import/export, boolean/relation badges, custom cell
   renderers.
 - **`Admin`** — a model side-panel over many `Table`s (configurable order, group headings,
   separators, custom links) with client-side model switching.
 
-**Roadmap / deferred:** a standalone `Form` component, per-field widget overrides, transactional CSV
+`Form` and `Table`'s modal are **one implementation** behind shared partials (widgets in one, behaviour
+in the other), so the requirement above — *no hand-written forms* — is met once and `Admin` stays a
+composition of the parts rather than a fourth thing to maintain.
+
+**Roadmap / deferred:** per-field widget overrides, transactional CSV
 import, and (further out) a server-rendered `htmx` frontend on the same seam.
 
 ## 3. `auth` — authentication & authorization 🟡

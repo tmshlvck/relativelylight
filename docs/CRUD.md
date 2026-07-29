@@ -12,7 +12,7 @@ The only thing you declare by hand is many-to-many (SeaORM can't enumerate it).
 - [Validation & transforms](#validation--transforms)
 - [Metadata](#metadata) — for building UIs
 - [CSV import/export](#csv-importexport)
-- [Web admin](#web-admin-ui) — `ui::Table` and `ui::Admin`
+- [Web UI](#web-ui-ui) — `ui::Form`, `ui::Table` and `ui::Admin`
 - [OpenAPI](#openapi)
 - [Composing with your app](#composing-with-your-app) — you own the roots
 - [Architecture & extending](#architecture--extending)
@@ -31,7 +31,7 @@ sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 |---|---|---|---|
 | `crud` | ✅ | `sea-orm` | the CRUD engine + SeaORM backend (this module) |
 | `axum` | ✅ | `axum` | the HTTP router (`Crud::into_router`, `Engine::router`) |
-| `ui` | | `askama` | the server-rendered admin components (`crud::ui::Table`, `::Admin`) |
+| `ui` | | `askama` | the server-rendered UI components (`crud::ui::Form`, `::Table`, `::Admin`) |
 | `openapi` | | `utoipa` | runtime OpenAPI 3.1 generation (`crud::openapi::json`) |
 | `csv` | | `csv` | CSV import/export routes + `crud::csv_io` |
 | `csrf` | | `rand_core` | `Crud::csrf` — require a CSRF token on writes (implied by `auth`) |
@@ -207,7 +207,7 @@ Mounted under `base_path`.
 A row is a **flat object keyed by column name**. Hidden fields, write-only fields, and raw FK
 columns are omitted. Relations embed `{id, label}` — just the identity and a display label, **no
 URLs**. (The admin UI shows relations as text/badges, not links; if you want a row to link
-somewhere, use a [custom formatter](#web-admin-ui).)
+somewhere, use a [custom formatter](#web-ui-ui).)
 
 ```jsonc
 GET /api/v1/post/1
@@ -477,13 +477,26 @@ and stops at the first failure — not atomic, and documented as such; the SeaOR
 
 [`Accessor::write_batch`]: https://docs.rs/relativelylight/latest/relativelylight/crud/trait.Accessor.html#method.write_batch
 
-## Web admin (`ui`)
+## Web UI (`ui`)
 
-Feature `ui`. Two components — `Table` (one entity) and `Admin` (a side-panel over many). Both
-render Bootstrap-5 + Alpine.js **HTML fragments**; you own the shell. `ui::Table` renders one
-entity. The *shape* (columns) is read from the `Engine` in-process and embedded; *data* is fetched
-client-side from the JSON API. You provide a shell page that loads Bootstrap 5.3 CSS/JS and Alpine 3
-(both via CDN) and drops the fragment into a `<div>`.
+Feature `ui`. **Two building blocks and one composition of them:**
+
+| Component | Renders | For |
+|---|---|---|
+| [`Form`](#form--a-standalone-createedit-form) | one create/edit form | **your own pages** — a signup form, a "new ticket" screen |
+| `Table` | one entity: list + search + pager, with that same form in a modal | an entity's admin view |
+| `Admin` | many `Table`s behind a side-panel | a whole back-office |
+
+All three render Bootstrap-5 + Alpine.js **HTML fragments**; you own the shell. The *shape* (columns)
+is read from the `Engine` in-process and embedded; *data* is fetched client-side from the JSON API. You
+provide a shell page that loads Bootstrap 5.3 CSS/JS and Alpine 3 (both via CDN) and drops the fragment
+into a `<div>`.
+
+`Form` and `Table`'s modal are **one implementation** — the field widgets and the behaviour (payload
+shaping, `422` mapping, CSRF header, relation pickers, datetime conversion) live in shared partials both
+include, differing only in chrome and in what follows a save. So everything the next section says about
+the form applies to both, and `Admin` is what it was always meant to be: a free composition of the
+parts rather than a thing of its own.
 
 ```rust
 let html: String = relativelylight::crud::ui::Table::new(&engine, "post")
@@ -535,6 +548,64 @@ page of results.
   `(value, row) => htmlString`, inserted as HTML. `value` is the raw cell value and `row` is the full
   record, so you can build links or badges from any field (e.g. `row.id`). The returned string is
   inserted verbatim — **escape untrusted content yourself**.
+
+### `Form` — a standalone create/edit form
+
+`ui::Form` is the form above without the table, for pages the admin's shape doesn't fit. It reads the
+same published metadata, so the widgets, required markers, enum dropdowns, relation pickers, datetime
+handling and inline `422` errors all come along, and stay in step with the model.
+
+```rust
+use relativelylight::crud::ui::Form;
+
+// Create, showing a chosen subset in a chosen order, then land on the new row's page:
+let html = Form::new(&engine, "ticket")
+    .title("New ticket")                  // card header; omit it and there's no header at all
+    .description("We usually reply within a day.")
+    .fields(["subject", "body", "priority", "assignee"])  // only these, in this order
+    .submit_label("Open ticket")
+    .cancel("/tickets")                   // Cancel link; omit for no Cancel button
+    .redirect("/tickets/{id}")            // `{id}` ← the saved row's id
+    .render_for(&headers).await?;          // gate-aware: Err(Unauthorized) / Err(Forbidden)
+
+// Edit an existing row — fetched on load, saved with PATCH:
+let html = Form::new(&engine, "ticket").edit(&id).omit(["assignee"]).render()?;
+```
+
+| Builder | Effect |
+|---|---|
+| `edit(id)` | edit that row (`PATCH`) instead of creating (`POST`) |
+| `fields([…])` | render **only** these, in this order (default: every writable column) |
+| `omit([…])` | drop these, keep the rest |
+| `title` / `description` / `heading(bool)` | card header; shown only if titled, or forced either way |
+| `submit_label` / `saved_message` / `cancel(href)` | button text, success text, Cancel link |
+| `redirect(url)` | go here after saving; `{id}` is substituted (URL-encoded) |
+| `on_saved(js)` | run `(row) => {…}` instead of showing the message |
+| `picker_threshold(n)` | relation widget cutover (default 20) |
+| `dom_id(id)` | namespace the component so two forms for one entity can share a page |
+
+**After a save**, in order: `redirect` wins, then `on_saved`, else a success message — and a *create*
+blanks itself so the next record can be entered, while an *edit* keeps what was saved. `write_only`
+fields are wiped either way, which matters more here than in the modal: a standalone form stays on
+screen.
+
+**It refuses to render a form that couldn't work.** Rendering errors — naming the column — if a field
+name is misspelled, if it's `read_only`, or if a *create* omits a column the engine requires. That last
+one has a wrinkle worth knowing: a column `default` **doesn't** excuse a required field from being
+rendered, because `MetaField::default` is a *create-form* default — it pre-fills the input (and drops
+the `*` marker), but the engine never applies it server-side, so an unrendered field simply isn't sent.
+An *edit* may omit anything: `PATCH` is partial and the stored row already has values.
+
+**Gating.** `render_for(&headers)` asks the model's gate about `Create`/`Update` as appropriate and
+returns `Err(Error::Unauthorized)` → `401` or `Err(Error::Forbidden)` → `403` rather than rendering a
+form the caller could never submit; a page handler can turn the first into a login redirect. (`render()`
+skips the check, for open or pre-rendered pages.) The underlying
+`Engine::decide(slug, op, &headers) -> Decision` is public if you want the same answer for your own
+page logic.
+
+**It talks to the JSON API**, so the entity's routes must be mounted, and — when the engine enforces
+CSRF — the page must have issued the token cookie (`Csrf::ensure`, as `auth`'s own pages do); the form
+echoes it automatically. Worked example: `examples/crud`'s `/post/new` and `/post/{id}/edit`.
 
 ### `Admin` — a whole admin in one component
 

@@ -1,0 +1,97 @@
+<div x-data="rlForm_{{ id }}()" x-init="init()" x-cloak>
+  <div class="card">
+    {% if has_heading %}
+    <div class="card-header">
+      <h5 class="mb-0">{{ title }}</h5>
+      {% if has_description %}<div class="small text-muted">{{ description }}</div>{% endif %}
+    </div>
+    {% endif %}
+    <!-- A real <form>: submitting it (the button, or Enter in a field) is the signal a browser's password
+         manager needs to offer to save a credential *once*, at the right moment. We post it ourselves with
+         fetch (@submit.prevent) and blank the secret fields right after, so a typed password doesn't linger
+         in a live input. -->
+    <form x-ref="editForm" @submit.prevent="save()" autocomplete="off" novalidate>
+      <div class="card-body">
+        <div class="alert alert-success" x-show="savedMsg" x-transition>
+          <span x-text="savedMsg"></span>
+        </div>
+        <div class="alert alert-danger" x-show="rowErrors.length">
+          <template x-for="e in rowErrors" :key="e"><div x-text="e"></div></template>
+        </div>
+        <!-- On edit the row is fetched on init, so the fields would otherwise flash empty first. -->
+        <div x-show="loading" class="text-center text-muted py-3">
+          <span class="spinner-border spinner-border-sm"></span> Loading…
+        </div>
+        <div x-show="!loading">
+          {% include "_form_fields.html" %}
+        </div>
+      </div>
+      <div class="card-footer text-end">
+        {% if has_cancel %}<a class="btn btn-secondary" href="{{ cancel_href }}">Cancel</a>{% endif %}
+        <button type="submit" class="btn btn-primary" :disabled="saving || loading">{{ submit_label }}</button>
+      </div>
+    </form>
+  </div>
+
+  <script>
+    function rlForm_{{ id }}() {
+      return {
+        {% include "_form_core.html" %}
+        // This host's half of the core's contract: which row (if any) is being edited, plus afterSave.
+        mode: "{{ mode }}",
+        editId: {{ edit_id_js|safe }},
+        only: {{ only_json|safe }},
+        omit: {{ omit_json|safe }},
+        loading: true,
+        savedMsg: "",
+        onSaved: {{ on_saved_js|safe }},
+        redirectTo: {{ redirect_js|safe }},
+
+        async init() {
+          this.resetPicker();
+          await this.fetchOptions();
+          await this.$nextTick();            // relation <option>s exist before x-model assigns to them
+          if (this.mode === "edit") {
+            try {
+              const res = await fetch(this.dataUrl + "/" + this.editId);
+              if (res.ok) {
+                this.form = this.fromRow(await res.json());
+              } else {
+                // Blank the form rather than leaving it undefined: the message says what happened, and a
+                // half-initialised form that silently PATCHes a row it never loaded would be worse.
+                this.rowErrors = [res.status === 404 ? "This record no longer exists." : "Could not load this record."];
+                this.form = this.blankForm();
+              }
+            } catch (e) {
+              this.rowErrors = ["Could not load this record."];
+              this.form = this.blankForm();
+            }
+          } else {
+            this.form = this.blankForm();
+          }
+          this.loading = false;
+        },
+
+        // Saved. A redirect wins (the usual page-flow case), then an app callback, then the built-in
+        // message. Secrets are wiped first: unlike the modal, a standalone form stays on screen.
+        async afterSave(row) {
+          this.clearSecrets();
+          if (this.redirectTo) {
+            const id = (row && row.id != null) ? encodeURIComponent(row.id) : "";
+            window.location.assign(this.redirectTo.replace("{id}", id));
+            return;
+          }
+          if (this.onSaved) { this.onSaved(row); return; }
+          this.savedMsg = {{ saved_message_js|safe }};
+          // A create blanks itself so the next record can be entered; an edit keeps what was just saved.
+          if (this.mode === "create") {
+            this.resetPicker();
+            this.form = this.blankForm();
+            await this.$nextTick();
+            if (this.$refs.editForm) this.$refs.editForm.reset();
+          }
+        },
+      };
+    }
+  </script>
+</div>

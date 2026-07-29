@@ -171,125 +171,7 @@
           <div class="alert alert-danger" x-show="rowErrors.length">
             <template x-for="e in rowErrors" :key="e"><div x-text="e"></div></template>
           </div>
-          <template x-for="c in formCols()" :key="c.name">
-            <div class="mb-3">
-              <label class="form-label">
-                <span x-text="c.label || c.name"></span>
-                <!-- NOT NULL with no default: the row can't be written without a value. -->
-                <span x-show="mustFill(c)" class="text-danger" title="Required">*</span>
-              </label>
-
-              <template x-if="c.kind === 'field' && c.type === 'Bool'">
-                <div class="form-check form-switch">
-                  <input type="checkbox" role="switch" class="form-check-input" x-model="form[c.name]">
-                  <span class="form-check-label small text-muted" x-text="form[c.name] ? 'Yes' : 'No'"></span>
-                </div>
-              </template>
-              <!-- Datetime: an int-seconds column flagged display=datetime → picker edited in UTC. -->
-              <template x-if="c.kind === 'field' && c.display === 'datetime'">
-                <div>
-                  <input type="datetime-local" step="1" class="form-control"
-                         :class="{'is-invalid': fieldErrors[c.name]}" x-model="form[c.name]">
-                  <div class="form-text">Times are
-                    <span x-text="(window.RLTime && $store.tz) ? $store.tz.effective() : 'UTC'"></span>.</div>
-                </div>
-              </template>
-              <template x-if="c.kind === 'field' && !hasOptions(c) && (c.type === 'Int' || c.type === 'Float') && c.display !== 'datetime'">
-                <input type="number" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
-                       :step="c.type === 'Float' ? 'any' : '1'" x-model.number="form[c.name]">
-              </template>
-              <!-- A closed set of values (an enum column, or any column given `options`) → a dropdown, so
-                   the allowed values are discoverable and a typo is impossible. The blank choice appears
-                   only where the column accepts one: nullable, or not required. -->
-              <template x-if="c.kind === 'field' && hasOptions(c)">
-                <select class="form-select" :class="{'is-invalid': fieldErrors[c.name]}"
-                        x-model="form[c.name]">
-                  <template x-if="c.nullable || !c.required">
-                    <option value="">—</option>
-                  </template>
-                  <template x-for="o in c.options" :key="o">
-                    <option :value="o" x-text="o"></option>
-                  </template>
-                </select>
-              </template>
-
-              <!-- Write-only string fields are secrets (e.g. a password) → masked input; on edit
-                   the value isn't loaded (write-only), so blank means "keep current". -->
-              <template x-if="c.kind === 'field' && !hasOptions(c) && !['Bool','Int','Float'].includes(c.type)">
-                <input :type="c.write_only ? 'password' : 'text'" class="form-control"
-                       :class="{'is-invalid': fieldErrors[c.name]}"
-                       :autocomplete="c.write_only ? 'new-password' : 'off'"
-                       :placeholder="c.write_only && mode === 'edit' ? 'Leave blank to keep current' : ''"
-                       x-model="form[c.name]">
-              </template>
-
-              <!-- Small target: plain dropdown. Options are fetched whole. -->
-              <template x-if="c.kind === 'relation' && c.cardinality === 'ToOne' && !isBig(c)">
-                <select class="form-select" x-model="form[c.name]">
-                  <option value="">—</option>
-                  <template x-for="o in (options[c.name] || [])" :key="o.id">
-                    <option :value="o.id" x-text="o.label"></option>
-                  </template>
-                </select>
-              </template>
-              <template x-if="c.kind === 'relation' && c.cardinality === 'ToMany' && !isBig(c)">
-                <select class="form-select" multiple size="4" x-model="form[c.name]">
-                  <template x-for="o in (options[c.name] || [])" :key="o.id">
-                    <option :value="o.id" x-text="o.label"></option>
-                  </template>
-                </select>
-              </template>
-
-              <!-- Large target: search→select combobox (queries the target's list with ?q=…). -->
-              <template x-if="c.kind === 'relation' && c.cardinality === 'ToOne' && isBig(c)">
-                <div class="position-relative" @click.away="pOpen[c.name] = false">
-                  <div class="input-group">
-                    <input type="text" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
-                           :placeholder="form[c.name] ? selLabel(c) : searchHint(c)"
-                           x-model="pQuery[c.name]" @focus="pSearch(c)" @input.debounce.250ms="pSearch(c)"
-                           @keydown.enter.prevent="pSearch(c)">
-                    <button class="btn btn-outline-secondary" type="button"
-                            x-show="form[c.name]" @click="pClear(c)" title="Clear">&times;</button>
-                  </div>
-                  <div class="form-text" x-show="form[c.name]">Selected: <span x-text="selLabel(c)"></span></div>
-                  <ul class="list-group position-absolute w-100 shadow" style="z-index:1060; max-height:220px; overflow:auto"
-                      x-show="pOpen[c.name] && (pResults[c.name] || []).length">
-                    <template x-for="o in (pResults[c.name] || [])" :key="o.id">
-                      <li class="list-group-item list-group-item-action" style="cursor:pointer"
-                          @click="pPickOne(c, o)" x-text="o.label"></li>
-                    </template>
-                  </ul>
-                </div>
-              </template>
-              <template x-if="c.kind === 'relation' && c.cardinality === 'ToMany' && isBig(c)">
-                <div class="position-relative" @click.away="pOpen[c.name] = false">
-                  <div class="d-flex flex-wrap gap-1 mb-1" x-show="(form[c.name] || []).length">
-                    <template x-for="id in form[c.name]" :key="id">
-                      <span class="badge text-bg-secondary d-inline-flex align-items-center">
-                        <span x-text="labelFor(c, id)"></span>
-                        <a href="#" class="text-white ms-1 text-decoration-none"
-                           @click.prevent="pRemove(c, id)">&times;</a>
-                      </span>
-                    </template>
-                  </div>
-                  <input type="text" class="form-control" :placeholder="searchHint(c)"
-                         x-model="pQuery[c.name]" @focus="pSearch(c)" @input.debounce.250ms="pSearch(c)"
-                         @keydown.enter.prevent="pSearch(c)">
-                  <ul class="list-group position-absolute w-100 shadow" style="z-index:1060; max-height:220px; overflow:auto"
-                      x-show="pOpen[c.name] && (pResults[c.name] || []).length">
-                    <template x-for="o in (pResults[c.name] || [])" :key="o.id">
-                      <li class="list-group-item list-group-item-action" style="cursor:pointer"
-                          :class="{'active': (form[c.name] || []).includes(String(o.id))}"
-                          @click="pAddMany(c, o)" x-text="o.label"></li>
-                    </template>
-                  </ul>
-                </div>
-              </template>
-
-              <div class="invalid-feedback d-block" x-show="fieldErrors[c.name]" x-text="fieldErrors[c.name]"></div>
-              <div class="form-text" x-show="c.description" x-text="c.description"></div>
-            </div>
-          </template>
+          {% include "_form_fields.html" %}
         </div>
         <div class="card-footer text-end">
           <button type="button" class="btn btn-secondary" @click="closeModal()">Cancel</button>
@@ -304,29 +186,16 @@
   <script>
     function ruTable_{{ id }}() {
       return {
-        dataUrl: "{{ data_url }}",
-        columns: {{ columns_json|safe }},
+        {% include "_form_core.html" %}
         formatters: {{ formatters|safe }},
         perPage: {{ per_page }},
         confirmDelete: {{ confirm }},
-        pickerThreshold: {{ picker_threshold }},
         // `loading` starts true: `x-init` always calls load() immediately, so the table shows the
         // spinner from first paint rather than a momentary empty "No rows".
         q: "", page: 1, total: 0, rows: [], loading: true, selected: [],
+        // The modal is this host's contribution to the shared form core: `mode`/`editId` are what the
+        // core switches POST-vs-PATCH on, and `afterSave` below is the one behaviour the two hosts differ on.
         modalOpen: false, mode: "create", editId: null,
-        form: {}, options: {}, fieldErrors: {}, rowErrors: [], saving: false,
-        // search→select picker state, keyed by column name:
-        pBig: {}, pTotal: {}, pLabels: {}, pQuery: {}, pResults: {}, pOpen: {},
-
-        // CSRF: echo the double-submit cookie in the X-CSRF-Token header on every write. The cookie is
-        // readable on purpose (it is not a credential); a cross-site attacker can neither read nor set
-        // it. Empty name = this engine doesn't enforce CSRF, so no header is sent.
-        csrfHeaders() {
-          const name = "{{ csrf_cookie }}";
-          if (!name) return {};
-          const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
-          return m ? { "x-csrf-token": decodeURIComponent(m[1]) } : {};
-        },
 
         async load() {
           this.loading = true;
@@ -404,38 +273,6 @@
           if (this.isDateTime(c)) return this.fmtDateTime(v);
           return (v === null || v === undefined) ? "" : v;
         },
-        // --- datetime helpers: a `display: "datetime"` field is an int (Unix seconds, UTC). When
-        // rl-time.js (window.RLTime) is loaded these delegate to it, so cells + the form picker
-        // follow the $store.tz selection (reading it here keeps the cell reactive to zone changes);
-        // otherwise they fall back to plain UTC. Storage/API stay integer UTC either way. ---
-        isDateTime(c) { return c.display === "datetime"; },
-        _pad(n) { return String(n).padStart(2, "0"); },
-        _tzSel() { return (this.$store && this.$store.tz) ? this.$store.tz.sel() : { mode: "utc", zone: "UTC" }; },
-        fmtDateTime(sec) {                 // Unix seconds → readable string (selected zone, or UTC)
-          if (window.RLTime) {
-            const withUtc = this.$store && this.$store.tz && this.$store.tz.withUtc;
-            return withUtc ? window.RLTime.fmtWithUtc(sec, this._tzSel()) : window.RLTime.fmt(sec, this._tzSel());
-          }
-          if (sec === null || sec === undefined || sec === "" || Number(sec) === 0) return "";
-          const d = new Date(Number(sec) * 1000);
-          if (isNaN(d.getTime())) return String(sec);
-          return d.getUTCFullYear() + "-" + this._pad(d.getUTCMonth() + 1) + "-" + this._pad(d.getUTCDate())
-            + " " + this._pad(d.getUTCHours()) + ":" + this._pad(d.getUTCMinutes()) + ":" + this._pad(d.getUTCSeconds()) + " UTC";
-        },
-        dtToInput(sec) {                   // Unix seconds → datetime-local value (selected zone, or UTC)
-          if (window.RLTime) return window.RLTime.toInput(sec, this._tzSel());
-          if (sec === null || sec === undefined || sec === "" || Number(sec) === 0) return "";
-          const d = new Date(Number(sec) * 1000);
-          if (isNaN(d.getTime())) return "";
-          return d.getUTCFullYear() + "-" + this._pad(d.getUTCMonth() + 1) + "-" + this._pad(d.getUTCDate())
-            + "T" + this._pad(d.getUTCHours()) + ":" + this._pad(d.getUTCMinutes()) + ":" + this._pad(d.getUTCSeconds());
-        },
-        dtFromInput(str) {                 // datetime-local value → Unix seconds (selected zone, or UTC)
-          if (window.RLTime) return window.RLTime.fromInput(str, this._tzSel());
-          if (!str) return null;
-          const ms = Date.parse(str + "Z");
-          return Number.isNaN(ms) ? null : Math.floor(ms / 1000);
-        },
         links(item, c) {
           const v = this.cellRaw(item, c);
           if (Array.isArray(v)) return v;
@@ -448,109 +285,6 @@
           catch (e) { return ""; }
         },
 
-        formCols() { return this.columns.filter(c => !c.read_only); },
-        toNum(v) { const n = Number(v); return (v === "" || Number.isNaN(n)) ? v : n; },
-
-        async fetchOptions() {
-          for (const c of this.formCols()) {
-            if (c.kind === "relation" && c.list_url) {
-              // Fetch one threshold-sized page; `total` decides plain <select> vs search picker.
-              const res = await fetch(c.list_url + "?view=terse&per_page=" + this.pickerThreshold);
-              const d = await res.json();
-              this.pTotal[c.name] = d.total || 0;
-              if (this.pTotal[c.name] > this.pickerThreshold) {
-                this.pBig[c.name] = true;                        // large → search→select
-              } else {
-                this.pBig[c.name] = false;                       // small → plain dropdown
-                this.options[c.name] = (d.data || []).map(x => ({ id: x.id, label: x.label }));
-              }
-            }
-          }
-        },
-        isBig(c) { return !!this.pBig[c.name]; },
-        // Placeholder for a big-target search box: "Search 12,345 items…".
-        searchHint(c) { return "Search " + (this.pTotal[c.name] || 0).toLocaleString() + " items…"; },
-        // Labels shown by the picker: current selection (seeded from the row on edit) + search hits.
-        labelFor(c, id) { return (this.pLabels[c.name] || {})[String(id)] || ("#" + id); },
-        selLabel(c) { return this.form[c.name] ? this.labelFor(c, this.form[c.name]) : ""; },
-        async pSearch(c) {
-          if (!this.pLabels[c.name]) this.pLabels[c.name] = {};
-          const term = this.pQuery[c.name] ? "&q=" + encodeURIComponent(this.pQuery[c.name]) : "";
-          const res = await fetch(c.list_url + "?view=terse&per_page=20" + term);
-          const d = await res.json();
-          const rows = (d.data || []).map(x => ({ id: String(x.id), label: x.label }));
-          rows.forEach(o => (this.pLabels[c.name][o.id] = o.label));
-          this.pResults[c.name] = rows;
-          this.pOpen[c.name] = true;
-        },
-        pPickOne(c, o) {
-          this.form[c.name] = String(o.id);
-          this.pLabels[c.name][String(o.id)] = o.label;
-          this.pQuery[c.name] = ""; this.pOpen[c.name] = false;
-        },
-        pClear(c) { this.form[c.name] = ""; },
-        pAddMany(c, o) {
-          const id = String(o.id);
-          if (!this.form[c.name].includes(id)) this.form[c.name].push(id);
-          this.pLabels[c.name][id] = o.label;
-          this.pQuery[c.name] = ""; this.pResults[c.name] = []; this.pOpen[c.name] = false;
-        },
-        pRemove(c, id) {
-          this.form[c.name] = (this.form[c.name] || []).filter(x => x !== String(id));
-        },
-        blankForm() {
-          const f = {};
-          for (const c of this.formCols()) {
-            if (c.kind === "relation") f[c.name] = c.cardinality === "ToMany" ? [] : "";
-            else if (c.type === "Bool") f[c.name] = c.default ?? false;
-            else f[c.name] = c.default ?? "";
-          }
-          return f;
-        },
-        fromRow(row) {
-          const f = {};
-          for (const c of this.formCols()) {
-            const v = row ? row[c.name] : undefined;
-            if (c.kind === "relation") {
-              // Seed the picker's label map from the row so the current selection stays visible
-              // even when it isn't in the first search page (large targets).
-              if (!this.pLabels[c.name]) this.pLabels[c.name] = {};
-              if (c.cardinality === "ToMany") {
-                const arr = v || [];
-                f[c.name] = arr.map(l => String(l.id));
-                arr.forEach(l => (this.pLabels[c.name][String(l.id)] = l.label));
-              } else {
-                f[c.name] = v ? String(v.id) : "";
-                if (v) this.pLabels[c.name][String(v.id)] = v.label;
-              }
-            } else if (this.isDateTime(c)) {
-              f[c.name] = this.dtToInput(v);
-            } else {
-              f[c.name] = (v === null || v === undefined) ? "" : v;
-            }
-          }
-          return f;
-        },
-        // Whether to mark a field with the red `*`. `required` now comes from the engine, which also
-        // enforces it, so the form no longer re-derives it from nullable/default and hopes the two agree.
-        // The one thing left to the form: a field it **pre-fills from `default`** needs no marker, because
-        // the user can't accidentally leave it out — that is how `MetaField::password()`, whose blank means
-        // "no password", avoids a `*` beside help text that says "optional".
-        // Whether this column publishes a closed set of values (`_meta` omits `options` when empty).
-        hasOptions(c) {
-          return Array.isArray(c.options) && c.options.length > 0;
-        },
-        mustFill(c) {
-          if (c.kind !== "field" || c.required !== true) return false;
-          return c.default === undefined || c.default === null;
-        },
-        resetPicker() { this.pQuery = {}; this.pResults = {}; this.pOpen = {}; this.pLabels = {}; },
-        // Blank every write-only field (a password): the modal only hides, so a typed secret would
-        // otherwise sit in a live input until the next open — a footgun, and what makes Chrome re-offer
-        // the *last* account's password every time another row is saved.
-        clearSecrets() {
-          for (const c of this.formCols()) if (c.write_only) this.form[c.name] = "";
-        },
         // Close the modal, leaving no secret behind (also resets the DOM form, so a browser autofill
         // that never touched our model is cleared too).
         async closeModal() {
@@ -584,57 +318,9 @@
           this.form = this.fromRow(row); // select options that now exist in the DOM.
           this.modalOpen = true;
         },
-        payload() {
-          const p = {};
-          for (const c of this.formCols()) {
-            let v = this.form[c.name];
-            if (c.kind === "relation") {
-              if (c.cardinality === "ToMany") p[c.name] = (v || []).map(x => this.toNum(x));
-              else p[c.name] = (v === "" || v == null) ? null : this.toNum(v);
-            } else if (this.isDateTime(c)) {
-              // Datetime picker → Unix seconds; empty means "clear" (null) for nullable columns.
-              p[c.name] = this.dtFromInput(v);
-            } else {
-              // Empty numbers are omitted (server default / unchanged); text is sent as-is
-              // (including "") so field validators can run.
-              const empty = v === "" || v === null || v === undefined;
-              if ((c.type === "Int" || c.type === "Float") && empty) continue;
-              // A blank write-only secret on edit means "keep current" — omit it so it isn't cleared.
-              // (On create it's sent through, so an empty password is allowed and stored as such.)
-              if (c.write_only && empty && this.mode === "edit") continue;
-              // On a nullable column an empty input means "nothing here" → send null, so the row gets
-              // SQL NULL instead of "" (the server canonicalizes this too; sending it honestly keeps
-              // the wire format truthful). A NOT NULL column has no such option: "" is its "empty".
-              if (empty && c.nullable && !c.write_only) { p[c.name] = null; continue; }
-              p[c.name] = v === undefined ? "" : v;
-            }
-          }
-          return p;
-        },
-        async save() {
-          this.saving = true;
-          this.fieldErrors = {}; this.rowErrors = [];
-          const url = this.mode === "create" ? this.dataUrl : this.dataUrl + "/" + this.editId;
-          const method = this.mode === "create" ? "POST" : "PATCH";
-          const res = await fetch(url, {
-            method, headers: { "content-type": "application/json", ...this.csrfHeaders() },
-            body: JSON.stringify(this.payload()),
-          });
-          this.saving = false;
-          if (res.status === 422) {
-            const b = await res.json();
-            this.fieldErrors = b.fields || {};
-            this.rowErrors = b.errors || [];
-            return; // stay open
-          }
-          if (!res.ok) {
-            let msg = "request failed";
-            try { msg = (await res.json()).error || msg; } catch (e) {}
-            this.rowErrors = [msg];
-            return;
-          }
-          // Saved. The submit already gave the browser its one chance to offer to remember the
-          // credential; wipe it now so the next save doesn't re-present the same one.
+        // The shared core saved a row; this host closes the modal (which wipes the secret — the submit
+        // already gave the password manager its one chance) and reloads the current page of rows.
+        async afterSave(row) {
           await this.closeModal();
           await this.load();
         },

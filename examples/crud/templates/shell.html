@@ -20,16 +20,21 @@
         </li>
         {% endfor %}
       </ul>
+      <a class="btn btn-outline-light btn-sm me-2" href="/post/new">New post (standalone form)</a>
       <a class="btn btn-outline-light btn-sm" href="/docs" target="_blank">API docs</a>
     </div>
   </nav>
 
   <main class="container my-4">
+    {% if boxed %}
     <div class="card shadow-sm">
       <div class="card-body">
-        {{ table|safe }}
+        {{ body|safe }}
       </div>
     </div>
+    {% else %}
+    {{ body|safe }}
+    {% endif %}
   </main>
 
   <footer class="text-center text-muted small py-3">

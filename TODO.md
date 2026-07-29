@@ -128,8 +128,11 @@ Highest priority first.
 
 ## crud::ui / time
 
-- [ ] Standalone `Form` component + per-field widget overrides. The widget override means another public
-  `MetaField` field — batch it with the metadata additions above rather than breaking twice.
+- [ ] **Per-field widget overrides** (the half of the old "standalone `Form`" item that's left — the
+  component itself shipped: CRUD.md § `Form`). Choosing a widget per field — a textarea for a long text
+  column, a radio group instead of a `<select>`, a slider for an int — means another public `MetaField`
+  field, so batch it with any other metadata addition rather than breaking twice. The widgets themselves
+  live in one partial (`_form_fields.html`) now, so the render side is a branch in one place, not two.
 - **Timezone abbreviations — `GMT+1`/`GMT+2` is the wanted output.** Not a defect to fix: the offset is
   unambiguous and locale-independent, where an abbreviation asks the reader to know which one means +2, and
   the alternatives are worse (`timeZoneName: 'long'` varies by locale and can give "Central European

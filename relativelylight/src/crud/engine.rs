@@ -483,6 +483,22 @@ impl Engine {
         self.authz.get(slug)
     }
 
+    /// The model's gate [`Decision`](crate::authz::Decision) for `op` on this request — an unregistered
+    /// slug is `Denied`. Use this over [`permits`](Engine::permits) when the difference between
+    /// "log in" and "not for you" matters: `crud::ui::Form` maps it to `401` vs `403` rather than
+    /// rendering a form the caller could never submit.
+    pub async fn decide(
+        &self,
+        slug: &str,
+        op: crate::authz::Operation,
+        headers: &::http::HeaderMap,
+    ) -> crate::authz::Decision {
+        match self.authz_for(slug) {
+            Some(gate) => gate.authorize(op, headers).await,
+            None => crate::authz::Decision::Denied,
+        }
+    }
+
     /// Whether the model's gate would allow `op` for this request. Used by the UI to hide write
     /// controls the caller isn't permitted; the API is the actual enforcement point.
     pub async fn permits(
@@ -491,10 +507,7 @@ impl Engine {
         op: crate::authz::Operation,
         headers: &::http::HeaderMap,
     ) -> bool {
-        match self.authz_for(slug) {
-            Some(gate) => matches!(gate.authorize(op, headers).await, crate::authz::Decision::Allow),
-            None => false,
-        }
+        matches!(self.decide(slug, op, headers).await, crate::authz::Decision::Allow)
     }
 
     /// Register an accessor and its authorization gate. Panics on a duplicate slug.
