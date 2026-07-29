@@ -129,6 +129,29 @@ All optional, all applied by the app; defaults chosen for "safe but works out of
   *every* request, a large bill for a log field, and the write side is already better served by the audit
   hook (§5d). Put it inside `resolve_real_ip`; without an address it logs `-` and warns once rather than
   failing the request, because an app shouldn't fall over when a log field is unavailable.
+
+  **To log who called, log it from your handler**, in a second line — that is the intended pattern, not a
+  workaround. It also beats a principal in this line for anything token-authenticated: a bearer token is
+  verified *inside* your handler while `access_log` wraps it, so a request that fails authentication —
+  the one most worth naming — could never have contributed a name on the way out. Extract
+  [`RealIp`](../relativelylight/src/middleware.rs) in the handler and the two lines carry the *same*
+  canonical address, so they need no correlation id:
+
+  ```rust
+  use relativelylight::middleware::RealIp;
+
+  async fn api_write(RealIp(ip): RealIp, headers: HeaderMap) -> Response {
+      let Some(principal) = verify_api_token(&headers).await else {
+          eprintln!("{ip} api-token rejected");     // access_log prints the 401 too; this says why
+          return StatusCode::UNAUTHORIZED.into_response();
+      };
+      eprintln!("{ip} {principal} api-write ok");
+      // …
+  }
+  ```
+
+  An app that insists on a *single* line writes its own `access_log`: it takes no state, reads the same
+  `RealIp` extension, and is a dozen lines — replacing it costs nothing and forks nothing.
 - **CORS** — **use `tower_http::cors::CorsLayer` directly; this crate ships no wrapper**, deliberately.
   `CorsLayer` is a self-contained middleware that answers preflight `OPTIONS` and sets the
   `Access-Control-*` response headers; there is no library state it needs and nothing we could add but

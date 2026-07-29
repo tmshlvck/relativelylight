@@ -70,11 +70,18 @@ Highest priority first.
   `None; Secure`, and would then lean entirely on the CSRF token). `Lax` is a small, safe addition; `None`
   should stay unsupported until app-issued tokens land, since it trades away the defence AUTH.md §7 calls
   defence-in-depth.
-- [ ] **A principal in the access log.** `middleware::access_log` logs no username, because naming one
-  means an `Auth::identify` — session + user + groups — on *every* request, including those that never
-  needed an identity. The fix isn't more work in the log line; it's a way for a handler that already
-  resolved the caller to hand that back (a response extension, say), so the log uses it when it's there
-  and skips it when it isn't.
+- **A principal in the access log — decided: the app logs its own line, we don't plumb identity.**
+  `access_log` stays address/method/path/status/latency. Naming a user would cost an `Auth::identify`
+  (session + user + groups) on *every* request, including the ones that never needed an identity — but the
+  reason not to build it is the shape, not the bill. The mechanism would be a response extension a handler
+  writes the caller back into, and that is wrong for the case that wanted it: an **API token** is verified
+  *inside* the handler, while `access_log` wraps it, so a request that **fails** auth — the one most worth
+  naming — never gets far enough to write anything and logs `-` regardless. The two-line pattern is both
+  simpler and strictly more informative: this crate's line says a request arrived, then the app's own line,
+  after it has verified the token, says who it was and whether it succeeded. Those lines need no
+  correlation id because the handler can extract [`RealIp`] and print the *same canonical address* the
+  access log did. An app that genuinely wants one line writes its own `access_log` — it takes no state and
+  is a dozen lines.
 - **CORS — no wrapper; document it instead.** `tower_http::cors::CorsLayer` is self-contained (it answers
   preflight `OPTIONS` and sets the `Access-Control-*` headers); wrapping it would add a dependency and a
   layer of our opinions over zero logic. AUTH.md §4 carries the guidance, including the two things only
