@@ -102,8 +102,11 @@ non-manager profile writes, each gate preset) are covered by an automated negati
 [AUTH.md §10a](AUTH.md).
 
 **Roadmap / deferred (see [../TODO.md](../TODO.md) for the ordered backlog):**
-re-auth through the IdP for SSO accounts, breached-password screening, a CORS layer, and app-issued API
-tokens. (Client-IP resolution and the access log shipped as `middleware`.) **PassKeys/WebAuthn** is parked at
+re-auth through the IdP for SSO accounts, breached-password screening, and CSRF on multipart bodies.
+(Client-IP resolution and the access log shipped as `middleware`; CORS is documented rather than wrapped,
+and **app-issued API tokens are deliberately the app's** — the gate is handed the request headers, so an
+API-first service verifies its own tokens and gates the generated CRUD routes with them, while this crate
+owns the web door.) **PassKeys/WebAuthn** is parked at
 **milestone 0.3+** (nothing needs it yet; it stays the only answer to real-time phishing), and
 **row-level authorization** is filed as *transformative* — it reshapes the `Authz` trait rather than
 extending it, so it waits for a requirement an app can't meet in its own handler.

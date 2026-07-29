@@ -67,9 +67,10 @@ Highest priority first.
 - [ ] **Configurable cookie `SameSite`** — the real feature behind the CORS question. Session and CSRF
   cookies are hardcoded `Strict`, which is the right default and blocks two legitimate cases: a top-level
   cross-site GET landing on a logged-in page (wants `Lax`), and a cross-origin SPA using cookies (wants
-  `None; Secure`, and would then lean entirely on the CSRF token). `Lax` is a small, safe addition; `None`
-  should stay unsupported until app-issued tokens land, since it trades away the defence AUTH.md §7 calls
-  defence-in-depth.
+  `None; Secure`, and would then lean entirely on the CSRF token). `Lax` is a small, safe addition and the
+  whole of what's wanted here. `None` should stay **unsupported**: it trades away the defence AUTH.md §7
+  calls defence-in-depth, and the case for it — a cross-origin client — is better served by that client
+  sending an app-issued token, which needs no cookie at all.
 - **A principal in the access log — decided: the app logs its own line, we don't plumb identity.**
   `access_log` stays address/method/path/status/latency. Naming a user would cost an `Auth::identify`
   (session + user + groups) on *every* request, including the ones that never needed an identity — but the
@@ -91,7 +92,16 @@ Highest priority first.
 
 ## Auth features
 
-- [ ] **App-issued API tokens** — a Bearer identity source resolving the same `Identity`.
+- **App-issued API tokens — decided: the app's, not ours.** Dropped rather than deferred. An API-first
+  service (`teleddns-server`: the API is the product, the admin panel a convenience this crate throws in)
+  needs tokens shaped its own way — per-machine or per-person, scoped or not, its own table or not, its own
+  rotation. A built-in would have to choose, and every app that chose differently would then carry two
+  systems. Nothing blocks them: `Authz::authorize` gets the **raw headers**, so an app-written gate reads
+  `Authorization`, verifies however it likes, and returns the same `Allow`/`NeedsLogin`/`Denied` the cookie
+  presets do — gating the same generated CRUD routes — and `Authorization`-bearing requests are already
+  CSRF-exempt (AUTH.md §7). This crate owns the **web** door: `auth_user`/`auth_group`, sessions, 2FA, SSO.
+  A web-only app never issues a token; an API-first app issues its own and still gets the admin panel.
+  (This also closes the `SameSite=None` question below and the access-log principal above.)
 - [ ] **SSO / OIDC leftovers** (none urgent). Base OIDC ships with cached discovery and fake-IdP coverage
   of the rejection paths (AUTH.md §5b, §10a). Left: refresh-token handling and `userinfo` (we read claims
   from the ID token only, which covers username + groups), RP-initiated logout at the provider

@@ -57,9 +57,10 @@ Sibling docs: [docs/CRUD.md](CRUD.md) (the API/UI), [PRD.md](PRD.md) (roadmap).
   gate builders, and SeaORM models — the app wires them where it wants, so it can leave `/metrics`
   public, IP-gate an internal API, or bearer-auth its own namespace.
 - **Secure by default.** HttpOnly cookies, argon2id hashing, SameSite, sane CORS.
-- **Don't shut doors.** The identity is resolved from *pluggable* credential sources; the session
-  cookie is the built-in, and Bearer/API-token / OIDC sources slot in later behind the same
-  `identify`-style lookup without changing the gate or the app's call sites.
+- **Don't shut doors.** The gate is handed the **raw request headers** (`Authz::authorize(op, &HeaderMap)`),
+  not a resolved identity, so a credential source this crate knows nothing about still works: the session
+  cookie is the built-in, OIDC slots in behind the same `identify` lookup, and an app's **own API tokens**
+  are read straight from the header by a gate the app writes — no library change, no call-site change.
 
 ## 2. Layering
 
@@ -101,8 +102,9 @@ Comparison for *our* model (a server-rendered admin + same-origin JSON API insid
 
 JWT's wins (stateless, cross-service) don't apply to a single monolith, and its revocation story is
 poor — bad for an admin that must be able to disable a user *now*. So the built-in is the cookie
-session. **Bearer tokens are still first-class for the app's own API**, and a future API-token source
-can resolve the *same* `Identity` — but that's app-issued, not the admin's login session.
+session. **Bearer tokens remain first-class for the app's own API — and stay the app's** (§8): the gate
+receives the headers, so an app verifies its own token and answers `Decision` from it, without this crate
+having an opinion on how tokens are shaped, scoped or stored.
 
 Cookie attributes: `HttpOnly`, `Secure` (configurable off for local http), `SameSite=Strict` (or
 `Lax` if the app needs top-level cross-site GETs), `Path=/`, a rolling idle timeout + absolute
@@ -161,7 +163,7 @@ All optional, all applied by the app; defaults chosen for "safe but works out of
   - **A cross-origin browser client cannot use the session cookie.** It is `SameSite=Strict` (so is the CSRF
     cookie), which means the browser won't send it on a cross-site request however permissive your CORS
     config is. `allow_credentials(true)` therefore buys nothing here — a cross-origin SPA needs a token in
-    an `Authorization` header, which is the roadmap item in §8 and is CSRF-exempt anyway (§7).
+    an `Authorization` header — which the app issues (§8) and which is CSRF-exempt anyway (§7).
   - **If you do allow a cross-origin caller**, allow the headers this crate's clients send: `content-type`,
     and **`x-csrf-token`** for any write the admin UI makes (its `fetch` calls include it, so a preflight
     that doesn't permit it fails every write). Add `text/csv` handling if you expose CSV import.
@@ -1022,8 +1024,8 @@ precedes the gate, so a forged write never reaches a session lookup, let alone t
 (`Csrf::ensure`), and login / 2FA-completion **rotate** it along with the session; logout clears it.
 
 **`Authorization`-bearing requests are exempt** — an API credential isn't ambient, so a cross-site
-request can't borrow it and there's nothing to protect. This keeps a token-based API unburdened (and
-holds the door open for the app-issued API tokens of §8).
+request can't borrow it and there's nothing to protect. This is what keeps an API-first app's own
+token-authenticated routes unburdened (§8): they need no token dance, ours or theirs.
 
 **A layer for your own routes.** Rather than calling `Csrf::verify` in every handler, put
 `csrf::enforce` in front of the ones that need it:
@@ -1097,9 +1099,17 @@ if !auth.csrf().verify(&headers, form.csrf.as_deref()) { return StatusCode::FORB
   replay guard do not address.
 - **OIDC SSO — done (§5b, feature `sso`).** The callback creates a `session` for the mapped user —
   the same session model. Group memberships come from the username/claim mapping tables.
-- **App API tokens:** the app issues tokens and adds an **identity source** that maps a Bearer token →
-  `Identity` (a gate that checks the header instead of the cookie); the gate contract and all call
-  sites are unchanged. The built-in session source ships; token sources are app- or future-provided.
+- **App API tokens — deliberately the app's, and not on this roadmap.** An API-first service (its admin
+  panel a convenience this crate provides, its API the actual product) needs tokens shaped its own way:
+  per-machine or per-person, scoped or not, in their own table or alongside something else, rotated on
+  their own schedule. A built-in would have to pick, and every app that picked differently would carry
+  both. Nothing is missing for them to do it: **`Authz::authorize` is handed the headers**, so a gate the
+  app writes reads `Authorization`, verifies the token however it likes, and returns
+  `Allow`/`NeedsLogin`/`Denied` — the same three answers the cookie presets give, gating the same
+  generated CRUD routes. `Authorization`-bearing requests are CSRF-exempt (§7), so such a route needs no
+  token dance either. What this crate keeps is the **web** door: `auth_user`/`auth_group`, the login
+  session, 2FA, SSO. A web-only app uses that and never issues a token; an API-first app issues its own
+  and still gets the admin panel. Neither pays for the other.
 
 ## 9. Module / feature layout
 
@@ -1187,7 +1197,8 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
   - a cookie is worth nothing unless its row is **live, unexpired, past the second factor, and its
     user active** — expired, `awaiting_totp`, deactivated-user, deleted-user, forged, empty,
     truncated, and wrong-cookie-name tokens all resolve to anonymous, as does a token offered as
-    `Authorization: Bearer …` (there is no header identity source yet);
+    `Authorization: Bearer …` (this crate resolves identity from the cookie only — a bearer credential is
+    the app's own affair, §8, so a session token pasted into that header is simply not a credential here);
   - `POST /login` returns **401 with no session cookie and no session row** for a wrong/empty/prefix
     password, an unknown user, an **inactive** account, and an **SSO** account (correct password
     included); the error text stays generic. Session tokens are 256 random bits and never repeat, and
@@ -1370,11 +1381,12 @@ don't follow.
   **additional** `Authz` methods with defaults rather than a changed `authorize` signature, `Decision`
   must stay fieldless, and the list-filter half reaches into `ListQuery`/`Accessor` too. Deferred until a
   requirement arrives that an app can't meet in its own handler.
-- PassKeys/WebAuthn, app-issued API tokens (extra principal source) — §8.
-- Security hardening — the backlog's security section is now down to follow-ups: lockout (§5e), CSRF (§7),
-  session lifetime/revocation (§5f), the password policy (§5g), re-authentication (§5h) and recovery codes
-  (§5i) have all landed, as has SSO discovery caching. Still open: re-auth through the IdP for SSO
-  accounts, breached-password screening, a `Csrf` layer + rejection hook, and the `ClientIp`/logging/CORS
-  layers.
+- PassKeys/WebAuthn — §8, milestone 0.3+. (**App-issued API tokens are *not* open**: they're the app's by
+  design, and the header-carrying gate is all that's needed — §8.)
+- Security hardening — lockout (§5e), CSRF including the `csrf::enforce` layer and the rejection hook (§7),
+  session lifetime/revocation (§5f), the password policy (§5g), re-authentication (§5h), recovery codes
+  (§5i), SSO discovery caching, and the `RealIp`/access-log middleware (§4) have all landed. Still open:
+  re-auth through the IdP for SSO accounts (§5h states the limit), breached-password screening (§5g), and
+  CSRF on a multipart body (§7). CORS is answered by documenting `tower_http` rather than wrapping it (§4).
 - Session store scaling: sessions are already shared across replicas (they're rows), so this is a
   performance question — the per-request read, and the lazy idle-refresh write — not a correctness one.
