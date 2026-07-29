@@ -146,6 +146,17 @@ already using `auth`.
   a caller then can't supply it. **That last one is the upgrade risk**: an entity whose `NOT NULL`
   `created_at` is filled by an `ActiveModelBehavior::before_save` hook must be marked `read_only`, or
   creates through the API/admin form will start failing. Both examples already do.
+- **CSV import is all-or-nothing.** Previously best-effort: a file that failed on line 40 left the first 39
+  rows applied, and you had to work out which. Now one backend transaction covers the file, validation runs
+  across every row *before* it opens (so four bad cells come back as four errors in one pass, each naming its
+  line and column), and a database-level failure mid-apply rolls back everything before it. The
+  `ImportReport` shape is unchanged; what changed is that `created`/`updated` are `0` whenever `failed > 0`.
+- **`Accessor` gained `write_batch`**, with a default implementation, so this is additive for anyone
+  implementing the seam — but the default is **not atomic** (it applies rows one at a time and stops at the
+  first failure), because a transaction lives below the seam and only a backend can open one. Override it if
+  yours can; the SeaORM backend does. `Error` gained `BatchRejected(Vec<(usize, Error)>)` — free, now that
+  `Error` is `#[non_exhaustive]` — and `Error::one_line()` flattens a validation failure into
+  `field: message; field: message` for per-row reports, replacing a private helper in the CSV module.
 - **`Column::Field` gained `options`, and enum columns are now a closed set.** Introspected from
   `ColumnType::Enum`, so a Postgres/MySQL enum needs no per-model code: the variants become a `<select>` in
   the admin form, an `enum` in the OpenAPI schema, and a membership check on write

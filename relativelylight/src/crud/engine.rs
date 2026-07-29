@@ -60,6 +60,10 @@ pub enum Error {
     Forbidden,
     /// A cookie-authenticated write without a valid CSRF token → 403 (see [`crate::csrf`]).
     Csrf,
+    /// A batch write ([`Accessor::write_batch`]) was rejected and **nothing was applied** — the offending
+    /// rows by index, so a CSV import can point at lines. Carries the errors themselves rather than
+    /// rendered strings, so the caller chooses how to show them ([`Error::one_line`]). → 422.
+    BatchRejected(Vec<(usize, Error)>),
 }
 
 impl std::fmt::Display for Error {
@@ -74,6 +78,28 @@ impl std::fmt::Display for Error {
             Error::Unauthorized => write!(f, "unauthorized"),
             Error::Forbidden => write!(f, "forbidden"),
             Error::Csrf => write!(f, "csrf token missing or invalid"),
+            Error::BatchRejected(rows) => write!(f, "{} row(s) rejected; nothing applied", rows.len()),
+        }
+    }
+}
+
+impl Error {
+    /// This error as **one line**, flattening a [`Validation`](Error::Validation)'s field messages into
+    /// `field: message; field: message`. `Display` says only "validation failed", which is useless in a
+    /// per-row report where the whole point is which cell is wrong.
+    pub fn one_line(&self) -> String {
+        match self {
+            Error::Validation(v) => {
+                let mut parts: Vec<String> =
+                    v.fields.iter().map(|(k, m)| format!("{k}: {m}")).collect();
+                parts.extend(v.errors.iter().cloned());
+                if parts.is_empty() {
+                    "validation failed".into()
+                } else {
+                    parts.join("; ")
+                }
+            }
+            other => other.to_string(),
         }
     }
 }
@@ -337,6 +363,45 @@ pub trait Accessor: Send + Sync {
     async fn delete(&self, pk: &str) -> Result<Option<Value>>;
     /// Delete every row matching the query in one set-based operation; returns the count.
     async fn delete_many(&self, q: &ListQuery) -> Result<u64>;
+
+    /// Apply many writes as **one unit**: `Some(pk)` updates that row, `None` creates. Returns what was
+    /// applied, or [`Error::BatchRejected`] naming every row that stopped it — in which case **nothing**
+    /// was applied.
+    ///
+    /// This is what makes a CSV import all-or-nothing (`csv_io::import`), and it exists as its own method
+    /// because a transaction lives *below* this seam: the engine can't open one, and calling `create` in a
+    /// loop can't be atomic however carefully it's done. The finished row is deliberately **not** returned
+    /// for each write — resolving relations reads through the connection pool, which would need a second
+    /// connection while the batch's transaction holds the first, deadlocking a single-connection pool (an
+    /// in-memory SQLite, say). Nothing that imports needs those values anyway.
+    ///
+    /// **The default implementation is not atomic** — it applies rows one at a time via
+    /// [`create`](Accessor::create) / [`update`](Accessor::update) and stops at the first failure, so
+    /// earlier rows stay applied. A backend with transactions should override it; the SeaORM one does.
+    async fn write_batch(&self, rows: Vec<(Option<String>, Value)>) -> Result<BatchApplied> {
+        let mut applied = BatchApplied::default();
+        for (i, (pk, body)) in rows.iter().enumerate() {
+            let outcome = match pk {
+                Some(pk) => self.update(pk, body).await.map(|_| false),
+                None => self.create(body).await.map(|_| true),
+            };
+            match outcome {
+                Ok(true) => applied.created += 1,
+                Ok(false) => applied.updated += 1,
+                Err(e) => return Err(Error::BatchRejected(vec![(i, e)])),
+            }
+        }
+        Ok(applied)
+    }
+}
+
+/// What a [`write_batch`](Accessor::write_batch) applied. **`#[non_exhaustive]`** — use
+/// [`BatchApplied::default`] and add to the counts, as the default `write_batch` does.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BatchApplied {
+    pub created: u64,
+    pub updated: u64,
 }
 
 // ===================== The Engine =====================
@@ -592,6 +657,16 @@ impl Engine {
     }
 
     /// Bulk delete matching rows. Refuses to wipe the whole (unfiltered) table unless `q.all`.
+    /// Apply many writes to one entity as a single unit — see [`Accessor::write_batch`]. Used by CSV
+    /// import to make a file all-or-nothing.
+    pub async fn write_batch(
+        &self,
+        slug: &str,
+        rows: Vec<(Option<String>, Value)>,
+    ) -> Result<BatchApplied> {
+        self.accessor(slug)?.write_batch(rows).await
+    }
+
     pub async fn delete_where(&self, slug: &str, q: &ListQuery) -> Result<Value> {
         let has_filter = !q.search.is_empty() || !q.eq.is_empty() || !q.pk_in.is_empty();
         if !has_filter && !q.all {
@@ -652,6 +727,16 @@ mod http {
                     body["error"] = json!("validation failed");
                     (StatusCode::UNPROCESSABLE_ENTITY, Json(body))
                 }
+                Error::BatchRejected(rows) => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({
+                        "error": "nothing was applied",
+                        "rows": rows
+                            .iter()
+                            .map(|(row, e)| json!({ "row": row, "message": e.one_line() }))
+                            .collect::<Vec<_>>(),
+                    })),
+                ),
                 Error::Unauthorized => {
                     (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" })))
                 }

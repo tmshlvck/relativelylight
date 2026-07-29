@@ -65,10 +65,18 @@ Highest priority first.
 
 Client-IP resolution (`resolve_real_ip`, mandatory) and `access_log` shipped; see AUTH.md §4.
 
-- [ ] **A CORS layer.** The last of the cross-cutting middleware AUTH.md §4 promised: a thin
-  `tower_http::cors` wrapper with defaults that suit a **cookie-auth** app — which means *not* `Any` with
-  credentials on, a combination the spec forbids and browsers reject. Needs none of the address machinery
-  (CORS is about `Origin`), so it is independent of everything else here.
+- **CORS — decided: no wrapper, document it instead.** `tower_http::cors::CorsLayer` is a self-contained
+  middleware (it answers preflight `OPTIONS` and sets the `Access-Control-*` headers); wrapping it would add
+  a dependency and a layer of our opinions over zero logic. AUTH.md §4 now carries the guidance, including
+  the two things only this crate can tell you: allow **`x-csrf-token`** or every admin-UI write fails its
+  preflight, and a cross-origin *browser* client can't use the session cookie at all, because it is
+  `SameSite=Strict` — so `allow_credentials` is beside the point and such a client wants a token instead.
+- [ ] **Configurable cookie `SameSite`** — the real feature hiding behind the CORS question. Session and
+  CSRF cookies are hardcoded `Strict`, which is the right default and blocks two legitimate cases: a
+  top-level cross-site GET landing on a logged-in page (wants `Lax`), and a cross-origin SPA using cookies
+  (wants `None; Secure`, and would then be leaning entirely on the CSRF token). `Lax` is a small, safe
+  addition; `None` should probably stay unsupported until app-issued tokens land, since it trades away the
+  defence §7 calls defence-in-depth.
 - [ ] **A principal in the access log.** `middleware::access_log` deliberately logs no username, because
   naming one means an `Auth::identify` — session + user + groups — on *every* request, including the ones
   that never needed an identity. The fix isn't more work in the log line; it's a way for a handler that
@@ -114,7 +122,6 @@ adding to it.)
 
 - [ ] Standalone `Form` component + per-field widget overrides. The widget override means another public
   `MetaField` field — batch it with the metadata additions above rather than breaking twice.
-- [ ] Transactional CSV import.
 - [ ] Nicer timezone abbreviations in `time` (Intl `short` yields `GMT+2`, not `CEST`).
 
 ## Transformative — deferred until there is real demand

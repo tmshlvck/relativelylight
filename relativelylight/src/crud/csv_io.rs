@@ -122,31 +122,42 @@ pub async fn import(engine: &Engine, slug: &str, text: &str) -> Result<ImportRep
     let headers = rdr.headers().map_err(be)?.clone();
     let mut report = ImportReport::default();
 
+    // Parse every record first. A malformed line is reported without attempting any write — the import is
+    // all-or-nothing (see below), so there is nothing to half-apply while collecting these.
+    let mut rows: Vec<(Option<String>, Value)> = Vec::new();
     for (i, result) in rdr.records().enumerate() {
         let row_no = i + 2; // header is line 1; first data record is line 2
-        let rec = match result {
-            Ok(r) => r,
+        match result {
+            Ok(rec) => {
+                let (body, pk_val) = build_body(&headers, &rec, &by_name, &pk);
+                rows.push((pk_val, Value::Object(body)));
+            }
             Err(e) => {
                 report.failed += 1;
                 report.errors.push(ImportError { row: row_no, message: e.to_string() });
-                continue;
-            }
-        };
-        let (body, pk_val) = build_body(&headers, &rec, &by_name, &pk);
-        let body = Value::Object(body);
-        // A PK value routes to update; its absence routes to create.
-        let outcome = match &pk_val {
-            Some(id) => engine.update(slug, id, &body).await.map(|_| false),
-            None => engine.create(slug, &body).await.map(|_| true),
-        };
-        match outcome {
-            Ok(true) => report.created += 1,
-            Ok(false) => report.updated += 1,
-            Err(e) => {
-                report.failed += 1;
-                report.errors.push(ImportError { row: row_no, message: err_msg(e) });
             }
         }
+    }
+    if report.failed > 0 {
+        return Ok(report); // unparseable CSV: say so, write nothing
+    }
+
+    // **All or nothing.** One backend transaction for the whole file (`Accessor::write_batch`), so a file
+    // that fails on line 40 leaves the first 39 rows unapplied rather than half-importing a spreadsheet.
+    // Validation runs across every row before the transaction opens, so a file with four bad cells reports
+    // all four in one pass instead of one per re-upload.
+    match engine.write_batch(slug, rows).await {
+        Ok(applied) => {
+            report.created = applied.created as usize;
+            report.updated = applied.updated as usize;
+        }
+        Err(Error::BatchRejected(bad)) => {
+            report.failed = bad.len();
+            report.errors.extend(
+                bad.into_iter().map(|(i, e)| ImportError { row: i + 2, message: e.one_line() }),
+            );
+        }
+        Err(e) => return Err(e),
     }
     Ok(report)
 }
@@ -217,18 +228,3 @@ fn csv_to_json(ty: &str, cell: &str) -> Option<Value> {
     }
 }
 
-/// Flatten an engine error into a one-line message for the row report.
-fn err_msg(e: Error) -> String {
-    match e {
-        Error::Validation(v) => {
-            let mut parts: Vec<String> = v.fields.iter().map(|(k, m)| format!("{k}: {m}")).collect();
-            parts.extend(v.errors);
-            if parts.is_empty() {
-                "validation failed".into()
-            } else {
-                parts.join("; ")
-            }
-        }
-        other => other.to_string(),
-    }
-}

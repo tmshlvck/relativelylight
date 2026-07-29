@@ -129,9 +129,32 @@ All optional, all applied by the app; defaults chosen for "safe but works out of
   *every* request, a large bill for a log field, and the write side is already better served by the audit
   hook (§5d). Put it inside `resolve_real_ip`; without an address it logs `-` and warns once rather than
   failing the request, because an app shouldn't fall over when a log field is unavailable.
-- **CORS** — `tower_http::cors::CorsLayer`. **Open by default** (any origin, credentials off); the
-  app narrows to an allow-list of origins (turning credentials on when it does, required for
-  cookie-auth cross-origin).
+- **CORS** — **use `tower_http::cors::CorsLayer` directly; this crate ships no wrapper**, deliberately.
+  `CorsLayer` is a self-contained middleware that answers preflight `OPTIONS` and sets the
+  `Access-Control-*` response headers; there is no library state it needs and nothing we could add but
+  opinions. What *is* worth knowing is crate-specific, and no wrapper would say it better:
+  - **Most deployments need no CORS at all.** The app serves the admin UI and the JSON API from one origin,
+    so nothing is cross-origin.
+  - **A cross-origin browser client cannot use the session cookie.** It is `SameSite=Strict` (so is the CSRF
+    cookie), which means the browser won't send it on a cross-site request however permissive your CORS
+    config is. `allow_credentials(true)` therefore buys nothing here — a cross-origin SPA needs a token in
+    an `Authorization` header, which is the roadmap item in §8 and is CSRF-exempt anyway (§7).
+  - **If you do allow a cross-origin caller**, allow the headers this crate's clients send: `content-type`,
+    and **`x-csrf-token`** for any write the admin UI makes (its `fetch` calls include it, so a preflight
+    that doesn't permit it fails every write). Add `text/csv` handling if you expose CSV import.
+  - Never pair `allow_credentials(true)` with `Any` origins: the spec forbids the combination and browsers
+    reject the response.
+
+  ```rust
+  use tower_http::cors::CorsLayer;
+  use http::{header, Method};
+
+  let cors = CorsLayer::new()
+      .allow_origin(["https://console.example.com".parse().unwrap()])
+      .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+      .allow_headers([header::CONTENT_TYPE, header::HeaderName::from_static("x-csrf-token")]);
+  let app = app.layer(cors);
+  ```
 - **CSRF** — see §7.
 - **Lockout** — not a layer: the unauthenticated login handlers brake themselves, see §5e.
 

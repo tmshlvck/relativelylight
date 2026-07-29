@@ -2,6 +2,7 @@
 //! This is the only module that depends on SeaORM.
 
 use crate::crud::engine::{
+    BatchApplied,
     coerce, default_label, slugify, value_key, Accessor, Cardinality, Column, Engine, Error,
     FieldDisplay, ListQuery, LogicalType, Page, Result, RowItem, ValidationErrors,
 };
@@ -865,6 +866,13 @@ where
     }
 
     /// The finished, ready-to-send row: visible scalars (`on_read` applied) + resolved relations.
+    /// Coerce + validate one write body into the pieces a row insert/update needs. Pure: no database, so
+    /// a batch can run this for every row before opening a transaction.
+    fn prepare(&self, body: &Value, is_create: bool) -> Result<Prepared> {
+        let obj = body.as_object().ok_or_else(|| Error::BadRequest("expected a JSON object".into()))?;
+        self.model.prepare_write(obj, is_create)
+    }
+
     async fn finish(&self, raw: &Value) -> Result<Value> {
         let mut out = self.model.read_scalars(raw);
         for r in &self.model.relations {
@@ -974,6 +982,66 @@ where
     }
 }
 
+/// One write body, coerced and validated into the pieces a row insert/update needs: scalar columns,
+/// to-one foreign keys, and N:M link sets.
+type Prepared = (Vec<(String, Value)>, Vec<(String, Value)>, Vec<(String, Vec<Value>)>);
+
+/// The write helpers, which need the same bounds as the `Accessor` impl (a default `ActiveModel` to insert
+/// into, and a `Model` that can become one to update).
+impl<E> SeaAccessor<E>
+where
+    E: EntityTrait + Send + Sync,
+    E::Model: Serialize + Sync + IntoActiveModel<E::ActiveModel>,
+    E::ActiveModel: ActiveModelTrait<Entity = E> + Default + Send + Sync,
+{
+    /// Insert a prepared row (and its N:M links) on `txn`, returning the **raw** stored row. Relations are
+    /// not resolved here: that reads through the pool, which would need a second connection while `txn`
+    /// holds the first — a deadlock on a single-connection pool. Callers that want the finished view call
+    /// [`finish`](Self::finish) after committing.
+    async fn insert_prepared(
+        &self,
+        txn: &sea_orm::DatabaseTransaction,
+        prepared: Prepared,
+    ) -> Result<Value> {
+        let (scalars, to_one, nm_ops) = prepared;
+        let mut am = <E::ActiveModel as Default>::default();
+        set_columns::<E>(&mut am, &scalars);
+        set_columns::<E>(&mut am, &to_one);
+        let model: E::Model = am.insert(txn).await?;
+        let full = serde_json::to_value(&model).unwrap();
+        let pk = pk_string(&self.model.pk, &full);
+        for (rel, ids) in &nm_ops {
+            self.write_nm(txn, rel, &pk, ids).await?;
+        }
+        Ok(full)
+    }
+
+    /// Update a prepared row on `txn`; `None` when there is no such row. Raw, as
+    /// [`insert_prepared`](Self::insert_prepared).
+    async fn update_prepared(
+        &self,
+        txn: &sea_orm::DatabaseTransaction,
+        pk: &str,
+        prepared: Prepared,
+    ) -> Result<Option<Value>> {
+        let (scalars, to_one, nm_ops) = prepared;
+        let Some(model) = E::find().filter(pk_condition::<E>(pk)?).one(txn).await? else {
+            return Ok(None);
+        };
+        let mut am = model.into_active_model();
+        set_columns::<E>(&mut am, &scalars);
+        set_columns::<E>(&mut am, &to_one);
+        let model: E::Model = am.update(txn).await?;
+        let full = serde_json::to_value(&model).unwrap();
+        let pks = pk_string(&self.model.pk, &full);
+        for (rel, ids) in &nm_ops {
+            self.write_nm(txn, rel, &pks, ids).await?;
+        }
+        Ok(Some(full))
+    }
+
+}
+
 #[async_trait]
 impl<E> Accessor for SeaAccessor<E>
 where
@@ -1045,40 +1113,62 @@ where
     }
 
     async fn create(&self, body: &Value) -> Result<Value> {
-        let obj = body.as_object().ok_or_else(|| Error::BadRequest("expected a JSON object".into()))?;
-        let (scalars, to_one, nm_ops) = self.model.prepare_write(obj, true)?;
+        let prepared = self.prepare(body, true)?;
         let txn = self.db.begin().await?;
-        let mut am = <E::ActiveModel as Default>::default();
-        set_columns::<E>(&mut am, &scalars);
-        set_columns::<E>(&mut am, &to_one);
-        let model: E::Model = am.insert(&txn).await?;
-        let full = serde_json::to_value(&model).unwrap();
-        let pk = pk_string(&self.model.pk, &full);
-        for (rel, ids) in &nm_ops {
-            self.write_nm(&txn, rel, &pk, ids).await?;
-        }
+        let full = self.insert_prepared(&txn, prepared).await?;
         txn.commit().await?;
         self.finish(&full).await
     }
 
     async fn update(&self, pk: &str, body: &Value) -> Result<Option<Value>> {
-        let obj = body.as_object().ok_or_else(|| Error::BadRequest("expected a JSON object".into()))?;
-        let (scalars, to_one, nm_ops) = self.model.prepare_write(obj, false)?;
+        let prepared = self.prepare(body, false)?;
         let txn = self.db.begin().await?;
-        let Some(model) = E::find().filter(pk_condition::<E>(pk)?).one(&txn).await? else {
+        let Some(full) = self.update_prepared(&txn, pk, prepared).await? else {
             return Ok(None);
         };
-        let mut am = model.into_active_model();
-        set_columns::<E>(&mut am, &scalars);
-        set_columns::<E>(&mut am, &to_one);
-        let model: E::Model = am.update(&txn).await?;
-        let full = serde_json::to_value(&model).unwrap();
-        let pks = pk_string(&self.model.pk, &full);
-        for (rel, ids) in &nm_ops {
-            self.write_nm(&txn, rel, &pks, ids).await?;
-        }
         txn.commit().await?;
         Ok(Some(self.finish(&full).await?))
+    }
+
+    /// One transaction for the whole batch — see [`Accessor::write_batch`] for why this can't be a loop
+    /// over `create`.
+    async fn write_batch(&self, rows: Vec<(Option<String>, Value)>) -> Result<BatchApplied> {
+        // Phase 1, **before** anything is written: validate every row and collect *all* the complaints.
+        // A spreadsheet with four bad cells should be reported in one pass, not one error per re-upload —
+        // and this is also what keeps the transaction below short.
+        let mut prepared = Vec::with_capacity(rows.len());
+        let mut rejected = Vec::new();
+        for (i, (pk, body)) in rows.iter().enumerate() {
+            match self.prepare(body, pk.is_none()) {
+                Ok(p) => prepared.push((pk.clone(), p)),
+                Err(e) => rejected.push((i, e)),
+            }
+        }
+        if !rejected.is_empty() {
+            return Err(Error::BatchRejected(rejected));
+        }
+
+        // Phase 2: apply them all, or none. A database-level failure (a unique violation, a foreign key)
+        // can only be found by trying, so this aborts at the first one — dropping the transaction without
+        // committing rolls back everything before it.
+        let txn = self.db.begin().await?;
+        let mut applied = BatchApplied::default();
+        for (i, (pk, p)) in prepared.into_iter().enumerate() {
+            let outcome = match &pk {
+                Some(pk) => self.update_prepared(&txn, pk, p).await.map(|o| o.map(|_| false)),
+                None => self.insert_prepared(&txn, p).await.map(|_| Some(true)),
+            };
+            match outcome {
+                Ok(Some(true)) => applied.created += 1,
+                Ok(Some(false)) => applied.updated += 1,
+                Ok(None) => {
+                    return Err(Error::BatchRejected(vec![(i, Error::NotFound)]))
+                }
+                Err(e) => return Err(Error::BatchRejected(vec![(i, e)])),
+            }
+        }
+        txn.commit().await?;
+        Ok(applied)
     }
 
     async fn delete(&self, pk: &str) -> Result<Option<Value>> {
@@ -1506,6 +1596,92 @@ mod nullable_tests {
             ),
             other => panic!("expected a required error, got {:?}", other.map(|_| "ok")),
         }
+    }
+
+    /// Build a live engine over an in-memory SQLite holding the `stamped` table.
+    async fn stamped_engine() -> (sea_orm::DatabaseConnection, Engine) {
+        use crate::authz::Open;
+        use sea_orm::{ConnectionTrait, Database, Schema};
+        let db = Database::connect("sqlite::memory:").await.expect("sqlite");
+        let schema = Schema::new(db.get_database_backend());
+        let stmt = schema.create_table_from_entity(stamped::Entity);
+        db.execute(db.get_database_backend().build(&stmt)).await.expect("create table");
+        let mut mm = MetaModel::new(stamped::Entity);
+        mm.field("created_at").read_only = true;
+        let mut crud = Crud::new(db.clone(), "");
+        crud.register(mm, Open);
+        (db, crud.into_engine())
+    }
+
+    async fn stamped_count(db: &sea_orm::DatabaseConnection) -> usize {
+        stamped::Entity::find().all(db).await.expect("query").len()
+    }
+
+    #[tokio::test]
+    async fn a_batch_write_applies_every_row_or_none_of_them() {
+        let (db, engine) = stamped_engine().await;
+        let row = |t: &str| (None, serde_json::json!({ "title": t }));
+
+        // All good → all applied.
+        let applied = engine
+            .write_batch("stamped", vec![row("a"), row("b"), row("c")])
+            .await
+            .expect("all valid");
+        assert_eq!((applied.created, applied.updated), (3, 0));
+        assert_eq!(stamped_count(&db).await, 3);
+
+        // One bad row anywhere in the file → **nothing** applied, not even the rows before it. This is the
+        // whole point: a file that fails on line 40 must not half-import a spreadsheet.
+        let bad = vec![row("d"), (None, serde_json::json!({})), row("e")];
+        match engine.write_batch("stamped", bad).await {
+            Err(Error::BatchRejected(rows)) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].0, 1, "the offending row is named by index");
+                assert_eq!(rows[0].1.one_line(), "title: required");
+            }
+            other => panic!("expected a rejection, got {:?}", other.map(|_| "ok")),
+        }
+        assert_eq!(stamped_count(&db).await, 3, "the good rows around it were rolled back");
+
+        // Every invalid row is reported in one pass, so a spreadsheet is fixed once rather than per upload.
+        let many_bad =
+            vec![(None, serde_json::json!({})), row("f"), (None, serde_json::json!({ "title": null }))];
+        match engine.write_batch("stamped", many_bad).await {
+            Err(Error::BatchRejected(rows)) => {
+                assert_eq!(rows.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 2]);
+            }
+            other => panic!("expected two rejections, got {:?}", other.map(|_| "ok")),
+        }
+        assert_eq!(stamped_count(&db).await, 3);
+    }
+
+    #[tokio::test]
+    async fn a_csv_import_is_all_or_nothing() {
+        // The same guarantee through the CSV surface, which is where it matters to a user.
+        let (db, engine) = stamped_engine().await;
+
+        let good = "title\nalpha\nbeta\n";
+        let report = crate::crud::csv_io::import(&engine, "stamped", good).await.expect("import");
+        assert_eq!((report.created, report.updated, report.failed), (2, 0, 0));
+        assert_eq!(stamped_count(&db).await, 2);
+
+        // Now a file whose *second* data line updates a row that doesn't exist. The first line is a
+        // perfectly good update — and it must be rolled back, which is the guarantee that matters and the
+        // one a per-row loop cannot give.
+        let before = stamped::Entity::find().one(&db).await.unwrap().unwrap();
+        assert_eq!(before.title, "alpha");
+        let bad = "id,title\n1,ALPHA\n999,ghost\n";
+        let report = crate::crud::csv_io::import(&engine, "stamped", bad).await.expect("import ran");
+        assert_eq!((report.created, report.updated), (0, 0), "nothing applied");
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.errors[0].row, 3, "1-based line, header counted");
+        assert_eq!(report.errors[0].message, "not found");
+        assert_eq!(stamped_count(&db).await, 2, "no rows added");
+        assert_eq!(
+            stamped::Entity::find().one(&db).await.unwrap().unwrap().title,
+            "alpha",
+            "the valid update on the line before was rolled back"
+        );
     }
 
     #[test]

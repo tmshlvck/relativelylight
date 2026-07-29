@@ -458,8 +458,24 @@ coerce/validate pipeline as HTTP.
 
 Format (round-trippable): header = column names (write-only omitted); field → scalar; to-one → the
 target id (blank if none); N:M → ids joined with `|` (e.g. `1|3`). On import a row **with** a PK value
-updates that row, **without** creates one; read-only columns are ignored. Import is best-effort — a
-failed row is reported with its line number and the rest continue.
+updates that row, **without** creates one; read-only columns are ignored.
+
+**Import is all-or-nothing.** One backend transaction covers the whole file, so a file that fails on line
+40 leaves the first 39 rows unapplied — you fix the spreadsheet and re-upload it, rather than hunting for
+which half landed. Two details follow from that:
+
+- **Every invalid row is reported in one pass.** Validation runs across the whole file *before* the
+  transaction opens, so four bad cells come back as four errors, not one per re-upload. Each carries its
+  1-based CSV line and the offending column (`"title: required"`, not "invalid row").
+- **A database-level failure can only be found by trying**, so a unique-constraint violation or a missing
+  update target aborts at that row and rolls the rest back. The report then names that one row.
+
+Under the hood this is [`Accessor::write_batch`], added because a transaction lives *below* the backend
+seam: the engine cannot open one, so looping over `create` could never be atomic however carefully it was
+written. A backend without transactions inherits a default implementation that applies rows one at a time
+and stops at the first failure — not atomic, and documented as such; the SeaORM backend overrides it.
+
+[`Accessor::write_batch`]: https://docs.rs/relativelylight/latest/relativelylight/crud/trait.Accessor.html#method.write_batch
 
 ## Web admin (`ui`)
 
