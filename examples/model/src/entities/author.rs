@@ -7,6 +7,9 @@ pub struct Model {
     pub id: i32,
     pub name: String,
     pub country: String,
+    /// Nullable, so the `email` / `url` form widgets have something optional to demonstrate.
+    pub email: Option<String>,
+    pub homepage: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

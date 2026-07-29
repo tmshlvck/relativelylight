@@ -59,6 +59,35 @@
           return Number.isNaN(ms) ? null : Math.floor(ms / 1000);
         },
 
+        // **One** widget per column, resolved once here rather than as a chain of mutually-exclusive
+        // conditions in the markup — which is what kept going wrong as widgets were added (two branches
+        // matching, or none). An explicit `display` override wins; otherwise it's derived from the type.
+        // The Rust side has already refused to render a widget that can't fit its column
+        // (`FieldDisplay::fits`), so there's no fallback to guess at here.
+        widgetOf(c) {
+          if (c.kind === "relation") {
+            const many = c.cardinality === "ToMany";
+            if (this.isBig(c)) return many ? "pick-many" : "pick-one";
+            return many ? "select-many" : "select-one";
+          }
+          if (c.display) return c.display;              // datetime | textarea | radio | range | email | url
+          if (c.type === "Bool") return "switch";
+          if (this.hasOptions(c)) return "select";
+          if (c.type === "Int" || c.type === "Float") return "number";
+          return "text";
+        },
+        // A widget's parameters (`_meta`'s sibling `widget` object), with a fallback so a hand-rolled
+        // metadata source that omits them still renders something sane.
+        wopt(c, key, fallback) {
+          const w = c.widget || {};
+          return w[key] === undefined ? fallback : w[key];
+        },
+        // A radio group's shared `name`: per column so the buttons are mutually exclusive, and per
+        // component so two forms for the same entity on one page don't fight over one group.
+        radioName(c) {
+          return "rl_{{ id }}_" + c.name.replace(/[^A-Za-z0-9_]/g, "_");
+        },
+
         // The columns the form renders: writable, then narrowed by the host's `only` (which also sets the
         // order) and `omit`. Table's modal sets neither and gets every writable column; a standalone Form
         // usually shows a subset, because a user-facing form is not an admin form.

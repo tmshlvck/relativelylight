@@ -3,6 +3,10 @@
     card — so a widget added here appears in both. Context-free: every value comes from the Alpine
     component (`_form_core.html`), nothing from the template struct, which is why the same file works
     for two different structs.
+
+    Exactly one branch matches per column: `widgetOf(c)` resolves a single widget name (an explicit
+    `display` override, else derived from the type), so adding a widget means adding one branch here
+    and one case there — not editing a chain of conditions that must stay mutually exclusive.
 -#}
           <template x-for="c in formCols()" :key="c.name">
             <div class="mb-3">
@@ -12,14 +16,15 @@
                 <span x-show="mustFill(c)" class="text-danger" title="Required">*</span>
               </label>
 
-              <template x-if="c.kind === 'field' && c.type === 'Bool'">
+              <template x-if="widgetOf(c) === 'switch'">
                 <div class="form-check form-switch">
                   <input type="checkbox" role="switch" class="form-check-input" x-model="form[c.name]">
                   <span class="form-check-label small text-muted" x-text="form[c.name] ? 'Yes' : 'No'"></span>
                 </div>
               </template>
+
               <!-- Datetime: an int-seconds column flagged display=datetime → picker edited in UTC. -->
-              <template x-if="c.kind === 'field' && c.display === 'datetime'">
+              <template x-if="widgetOf(c) === 'datetime'">
                 <div>
                   <input type="datetime-local" step="1" class="form-control"
                          :class="{'is-invalid': fieldErrors[c.name]}" x-model="form[c.name]">
@@ -27,14 +32,26 @@
                     <span x-text="(window.RLTime && $store.tz) ? $store.tz.effective() : 'UTC'"></span>.</div>
                 </div>
               </template>
-              <template x-if="c.kind === 'field' && !hasOptions(c) && (c.type === 'Int' || c.type === 'Float') && c.display !== 'datetime'">
+
+              <template x-if="widgetOf(c) === 'number'">
                 <input type="number" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
                        :step="c.type === 'Float' ? 'any' : '1'" x-model.number="form[c.name]">
               </template>
+
+              <!-- A slider needs its value shown: the handle position alone isn't a number. -->
+              <template x-if="widgetOf(c) === 'range'">
+                <div class="d-flex align-items-center gap-2">
+                  <input type="range" class="form-range" :class="{'is-invalid': fieldErrors[c.name]}"
+                         :min="wopt(c, 'min', 0)" :max="wopt(c, 'max', 100)" :step="wopt(c, 'step', 1)"
+                         x-model.number="form[c.name]">
+                  <output class="badge text-bg-secondary" style="min-width:3.5rem" x-text="form[c.name]"></output>
+                </div>
+              </template>
+
               <!-- A closed set of values (an enum column, or any column given `options`) → a dropdown, so
                    the allowed values are discoverable and a typo is impossible. The blank choice appears
                    only where the column accepts one: nullable, or not required. -->
-              <template x-if="c.kind === 'field' && hasOptions(c)">
+              <template x-if="widgetOf(c) === 'select'">
                 <select class="form-select" :class="{'is-invalid': fieldErrors[c.name]}"
                         x-model="form[c.name]">
                   <template x-if="c.nullable || !c.required">
@@ -46,18 +63,47 @@
                 </select>
               </template>
 
+              <!-- The same closed set, shown all at once. `name` is per column so the group is exclusive,
+                   and per component id so two forms on one page don't share a group. -->
+              <template x-if="widgetOf(c) === 'radio'">
+                <div>
+                  <template x-for="o in c.options" :key="o">
+                    <div class="form-check">
+                      <input type="radio" class="form-check-input" :class="{'is-invalid': fieldErrors[c.name]}"
+                             :name="radioName(c)" :id="radioName(c) + '_' + o" :value="o"
+                             x-model="form[c.name]">
+                      <label class="form-check-label" :for="radioName(c) + '_' + o" x-text="o"></label>
+                    </div>
+                  </template>
+                  <!-- Only where the column accepts "nothing here", matching the <select> above. -->
+                  <template x-if="c.nullable || !c.required">
+                    <div class="form-check">
+                      <input type="radio" class="form-check-input" :name="radioName(c)"
+                             :id="radioName(c) + '_none'" value="" x-model="form[c.name]">
+                      <label class="form-check-label text-muted" :for="radioName(c) + '_none'">—</label>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
               <!-- Write-only string fields are secrets (e.g. a password) → masked input; on edit
                    the value isn't loaded (write-only), so blank means "keep current". -->
-              <template x-if="c.kind === 'field' && !hasOptions(c) && !['Bool','Int','Float'].includes(c.type)">
-                <input :type="c.write_only ? 'password' : 'text'" class="form-control"
+              <template x-if="widgetOf(c) === 'text' || widgetOf(c) === 'email' || widgetOf(c) === 'url'">
+                <input :type="c.write_only ? 'password' : widgetOf(c) === 'text' ? 'text' : widgetOf(c)"
+                       class="form-control"
                        :class="{'is-invalid': fieldErrors[c.name]}"
                        :autocomplete="c.write_only ? 'new-password' : 'off'"
                        :placeholder="c.write_only && mode === 'edit' ? 'Leave blank to keep current' : ''"
                        x-model="form[c.name]">
               </template>
 
+              <template x-if="widgetOf(c) === 'textarea'">
+                <textarea class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
+                          :rows="wopt(c, 'rows', 4)" x-model="form[c.name]"></textarea>
+              </template>
+
               <!-- Small target: plain dropdown. Options are fetched whole. -->
-              <template x-if="c.kind === 'relation' && c.cardinality === 'ToOne' && !isBig(c)">
+              <template x-if="widgetOf(c) === 'select-one'">
                 <select class="form-select" x-model="form[c.name]">
                   <option value="">—</option>
                   <template x-for="o in (options[c.name] || [])" :key="o.id">
@@ -65,7 +111,7 @@
                   </template>
                 </select>
               </template>
-              <template x-if="c.kind === 'relation' && c.cardinality === 'ToMany' && !isBig(c)">
+              <template x-if="widgetOf(c) === 'select-many'">
                 <select class="form-select" multiple size="4" x-model="form[c.name]">
                   <template x-for="o in (options[c.name] || [])" :key="o.id">
                     <option :value="o.id" x-text="o.label"></option>
@@ -74,7 +120,7 @@
               </template>
 
               <!-- Large target: search→select combobox (queries the target's list with ?q=…). -->
-              <template x-if="c.kind === 'relation' && c.cardinality === 'ToOne' && isBig(c)">
+              <template x-if="widgetOf(c) === 'pick-one'">
                 <div class="position-relative" @click.away="pOpen[c.name] = false">
                   <div class="input-group">
                     <input type="text" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
@@ -94,7 +140,7 @@
                   </ul>
                 </div>
               </template>
-              <template x-if="c.kind === 'relation' && c.cardinality === 'ToMany' && isBig(c)">
+              <template x-if="widgetOf(c) === 'pick-many'">
                 <div class="position-relative" @click.away="pOpen[c.name] = false">
                   <div class="d-flex flex-wrap gap-1 mb-1" x-show="(form[c.name] || []).length">
                     <template x-for="id in form[c.name]" :key="id">

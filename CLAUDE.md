@@ -94,7 +94,13 @@ let html = relativelylight::crud::ui::Form::new(engine, "ticket")
 
 It refuses to render a form that couldn't work (unknown / read-only / required-but-unrendered column),
 naming it — note a column `default` pre-fills the *input*, so a required field still has to be rendered
-for its value to be sent. Full reference: [docs/CRUD.md → Web UI](docs/CRUD.md#web-ui-ui).
+for its value to be sent.
+
+**Per-field widget overrides** pick the input where the column type can't: `field("body").textarea(8)`,
+`.radio()` (over `options`), `.range(min, max, step)`, `.email()`, `.url()`, `.datetime()`. Only the form
+input changes, not the cell; a widget that can't fit its column is a render-time error naming the field.
+Full reference: [docs/CRUD.md → Web UI](docs/CRUD.md#web-ui-ui) and
+[§ Widget overrides](docs/CRUD.md#widget-overrides--picking-the-form-input-per-field).
 
 ## Auth (feature `auth`)
 

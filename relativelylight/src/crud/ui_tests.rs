@@ -15,7 +15,7 @@
 use super::ui::Form;
 use crate::authz::{Authz, Decision, Open, Operation};
 use crate::crud::engine::{
-    Accessor, Cardinality, Column, Engine, Error, ListQuery, LogicalType, Page, Result,
+    Accessor, Cardinality, Column, Engine, Error, FieldDisplay, ListQuery, LogicalType, Page, Result,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -273,6 +273,154 @@ fn two_forms_for_one_entity_can_share_a_page() {
     let b = Form::new(&e, "post").dom_id("post_quick").render().unwrap();
     assert!(a.contains("function rlForm_post()"));
     assert!(b.contains("function rlForm_post_quick()"));
+}
+
+// ---------- per-field widget overrides ----------
+
+/// An entity whose columns carry widget overrides, plus a `bad` one the test points a wrong widget at.
+struct MockWidgets(Option<FieldDisplay>);
+
+#[async_trait]
+impl Accessor for MockWidgets {
+    fn slug(&self) -> &str {
+        "thing"
+    }
+    fn pk(&self) -> String {
+        "id".into()
+    }
+    fn columns(&self) -> Vec<Column> {
+        let with = |name: &str, lt: LogicalType, opts: Vec<String>, d: Option<FieldDisplay>| {
+            Column::Field {
+                name: name.into(),
+                logical_type: lt,
+                read_only: false,
+                write_only: false,
+                nullable: true,
+                required: false,
+                options: opts,
+                label: None,
+                description: None,
+                default: None,
+                display: d,
+            }
+        };
+        vec![
+            field("id", false, true, None),
+            with("body", LogicalType::Text, vec![], Some(FieldDisplay::Textarea { rows: 8 })),
+            with(
+                "mood",
+                LogicalType::Text,
+                vec!["good".into(), "bad".into()],
+                Some(FieldDisplay::Radio),
+            ),
+            with(
+                "weight",
+                LogicalType::Float,
+                vec![],
+                Some(FieldDisplay::Range { min: 0.0, max: 10.0, step: 0.5 }),
+            ),
+            with("contact", LogicalType::Text, vec![], Some(FieldDisplay::Email)),
+            with("link", LogicalType::Text, vec![], Some(FieldDisplay::Url)),
+            with("bad", LogicalType::Int, vec![], self.0),
+        ]
+    }
+    async fn list(&self, _q: &ListQuery, _t: bool) -> Result<Page> {
+        Ok(Page::new(0, 1, 30, vec![]))
+    }
+    async fn get(&self, _pk: &str) -> Result<Option<Value>> {
+        Ok(None)
+    }
+    async fn create(&self, _b: &Value) -> Result<Value> {
+        Err(Error::ReadOnly)
+    }
+    async fn update(&self, _pk: &str, _b: &Value) -> Result<Option<Value>> {
+        Err(Error::ReadOnly)
+    }
+    async fn delete(&self, _pk: &str) -> Result<Option<Value>> {
+        Err(Error::ReadOnly)
+    }
+    async fn delete_many(&self, _q: &ListQuery) -> Result<u64> {
+        Err(Error::ReadOnly)
+    }
+}
+
+fn widget_engine(bad: Option<FieldDisplay>) -> Engine {
+    let mut e = Engine::new("/api/v1");
+    e.add(Arc::new(MockWidgets(bad)), Arc::new(Open));
+    e
+}
+
+#[test]
+fn a_widget_publishes_its_tag_and_its_parameters() {
+    let e = widget_engine(None);
+    let html = Form::new(&e, "thing").render().unwrap();
+    // `display` is a plain lowercase string and the parameters ride in a sibling `widget` object, so a
+    // client switches on a string instead of unpacking a tagged shape.
+    assert!(html.contains(r#""display":"textarea""#), "{html}");
+    assert!(html.contains(r#""widget":{"rows":8}"#), "textarea rows must be published");
+    assert!(html.contains(r#""display":"radio""#));
+    assert!(html.contains(r#""display":"range""#));
+    // (serde_json sorts object keys, so assert on the members rather than an order.)
+    assert!(html.contains(r#""max":10.0"#), "range max must be published: {html}");
+    assert!(html.contains(r#""min":0.0"#), "range min must be published");
+    assert!(html.contains(r#""step":0.5"#), "a float column's fractional step must survive");
+    assert!(html.contains(r#""display":"email""#));
+    assert!(html.contains(r#""display":"url""#));
+    // A widget with no parameters publishes no `widget` key rather than an empty object.
+    assert!(!html.contains(r#""display":"radio","widget""#));
+}
+
+#[test]
+fn every_widget_has_exactly_one_branch_in_the_markup() {
+    // `widgetOf()` returns one name per column and each name has one `x-if` — the property that stops
+    // two inputs rendering for one field, or none at all.
+    let fields = include_str!("../../templates/_form_fields.html");
+    let core = include_str!("../../templates/_form_core.html");
+    for w in [
+        "switch", "datetime", "number", "range", "select", "radio", "textarea", "select-one",
+        "select-many", "pick-one", "pick-many",
+    ] {
+        let branches = fields.matches(&format!("'{w}'")).count();
+        assert!(branches >= 1, "widget `{w}` has no branch in _form_fields.html");
+    }
+    // `text`, `email` and `url` deliberately share one <input>, differing only in its `type`.
+    assert!(fields.contains("widgetOf(c) === 'text' || widgetOf(c) === 'email' || widgetOf(c) === 'url'"));
+    assert!(core.contains("widgetOf(c)"), "the resolver must live in the shared core");
+}
+
+#[test]
+fn a_widget_that_cannot_render_its_column_is_refused_by_name() {
+    // Each of these is a configuration that would otherwise render a *different* input than the model
+    // asked for — noticed in production, not in review.
+    let cases = [
+        (FieldDisplay::Radio, "options"),                                  // no options to list
+        (FieldDisplay::Textarea { rows: 3 }, "text column"),               // on an Int
+        (FieldDisplay::Email, "text column"),
+        (FieldDisplay::Range { min: 5.0, max: 5.0, step: 1.0 }, "min < max"), // empty range
+    ];
+    for (bad, expect) in cases {
+        let e = widget_engine(Some(bad));
+        let err = Form::new(&e, "thing").render().unwrap_err().to_string();
+        assert!(err.contains("'bad'"), "must name the offending field: {err}");
+        assert!(err.contains(expect), "expected {expect:?} in: {err}");
+    }
+
+    // `datetime` needs integer seconds — a string column would reach the picker as NaN.
+    let mut e = Engine::new("/api/v1");
+    e.add(Arc::new(MockPost), Arc::new(Open)); // MockPost's columns are Text
+    let dt = FieldDisplay::DateTime;
+    assert!(dt.fits(LogicalType::Text, false).is_err());
+    assert!(dt.fits(LogicalType::Int, false).is_ok());
+
+    // Positive control: the whole valid set renders, so the negatives can't pass vacuously.
+    Form::new(&widget_engine(None), "thing").render().expect("valid widgets must render");
+}
+
+#[test]
+fn the_table_checks_widgets_too_since_it_renders_the_same_form() {
+    let e = widget_engine(Some(FieldDisplay::Radio));
+    let err = super::ui::Table::new(&e, "thing").render().unwrap_err().to_string();
+    assert!(err.contains("'bad'"), "Table must refuse it as well: {err}");
 }
 
 // ---------- gating ----------

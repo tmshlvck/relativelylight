@@ -63,7 +63,7 @@ server-rendered HTML **fragment**; **data** is fetched client-side from the JSON
 the shell (Bootstrap 5 + Alpine.js) and drops the fragment in.
 
 - **`Form`** — one entity's create/edit form, standalone, for the **app's own** pages: field subset +
-  order, gate-aware rendering (`401`/`403` rather than a form that can't submit), redirect-or-callback
+  order, per-field widget overrides (textarea / radio / slider / email / url / datetime), gate-aware rendering (`401`/`403` rather than a form that can't submit), redirect-or-callback
   after save, and render-time refusal of a form that could never work (unknown / read-only / required-but
   -unrendered column).
 - **`Table`** — one entity: search, windowed pager, that same form in a modal (typed inputs, boolean
@@ -77,7 +77,7 @@ the shell (Bootstrap 5 + Alpine.js) and drops the fragment in.
 in the other), so the requirement above — *no hand-written forms* — is met once and `Admin` stays a
 composition of the parts rather than a fourth thing to maintain.
 
-**Roadmap / deferred:** per-field widget overrides, transactional CSV
+**Roadmap / deferred:** transactional CSV
 import, and (further out) a server-rendered `htmx` frontend on the same seam.
 
 ## 3. `auth` — authentication & authorization 🟡

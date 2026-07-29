@@ -141,6 +141,7 @@ impl<'a> Table<'a> {
     }
 
     fn render_inner(&self, editable: bool) -> Result<String> {
+        check_widgets(&self.slug, &self.engine.columns(&self.slug)?)?;
         let desc = self.engine.meta_one(&self.slug)?;
         let columns_json = desc
             .get("columns")
@@ -171,6 +172,21 @@ impl<'a> Table<'a> {
         };
         tmpl.render().map_err(|e| Error::Backend(e.to_string()))
     }
+}
+
+/// Refuse a widget that can't render its column, naming the field — a `Radio` with no `options`, a
+/// `Range` on text, a `Textarea` on a number. Checked by **both** hosts at render time, because the
+/// alternative is a form quietly showing a different input than the model asked for, which is the sort of
+/// thing that's noticed in production and not in review. See [`FieldDisplay::fits`].
+fn check_widgets(slug: &str, cols: &[Column]) -> Result<()> {
+    for c in cols {
+        if let Column::Field { name, logical_type, options, display: Some(d), .. } = c {
+            if let Err(why) = d.fits(*logical_type, !options.is_empty()) {
+                return Err(Error::BadRequest(format!("crud::ui({slug}): field '{name}': {why}")));
+            }
+        }
+    }
+    Ok(())
 }
 
 // ===================== Form =====================
@@ -385,6 +401,7 @@ impl<'a> Form<'a> {
     /// form whose save can only ever `422`.
     fn check_fields(&self) -> Result<()> {
         let cols = self.engine.columns(&self.slug)?;
+        check_widgets(&self.slug, &cols)?;
         let mut known: Vec<&str> = Vec::new();
         let mut read_only: Vec<&str> = Vec::new();
         // Writable columns, with whether a create *must* render one. Note a `default` does **not** excuse

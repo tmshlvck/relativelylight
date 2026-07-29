@@ -16,6 +16,16 @@ already using `auth`.
 
 ### Breaking
 
+- **`FieldDisplay` gained variants and lost `Eq`.** It's the home of the new
+  [widget overrides](docs/CRUD.md#widget-overrides--picking-the-form-input-per-field), so it now carries
+  parameters (`Textarea { rows }`, `Range { min, max, step }`) — and `Range`'s `f64`s mean `Eq` can no
+  longer be derived (`PartialEq` remains). It was already `#[non_exhaustive]`, so a `match` on it already
+  needed a `_` arm. The **wire format is unchanged** for existing users: `display` is still the plain
+  lowercase tag (`"datetime"`), with parameters in a new sibling `widget` object.
+- **`.datetime()` on a non-integer column is now refused at render time** rather than producing a picker
+  that reads the value as `NaN`. It has always required an `Int` of Unix seconds (that's what the picker
+  writes back); this only says so out loud, naming the field. If a model has it on a text/`DateTime`
+  column, that form was already broken.
 - **`auth`'s own forms now require a CSRF token.** `POST /login`, `/login/totp`, and every `/profile*`
   write verify a double-submit token before anything else and answer `403` without it. The rendered
   fragments carry it, so a browser is unaffected — a **script that posts to `/login`** must now read the
@@ -195,6 +205,23 @@ already using `auth`.
 
 ### Added
 
+- **Per-field widget overrides** — pick the form input where the column type alone can't know better:
+  `MetaField::textarea(rows)`, `.radio()`, `.range(min, max, step)`, `.email()`, `.url()`, joining the
+  existing `.datetime()`. **Only the form input changes**; cells keep rendering the plain value (`datetime`
+  aside), because a table row is no place for a slider. See
+  [CRUD.md → Widget overrides](docs/CRUD.md#widget-overrides--picking-the-form-input-per-field);
+  demonstrated in `examples/crud` (post `body` → textarea, `views` → slider, `status` → radio group;
+  author `email`/`homepage` → email/url inputs).
+
+  These needed **no new field** on `MetaField` or `Column::Field`: `display: Option<FieldDisplay>` was
+  already the presentation override, so the widgets are variants of *that* — which is why the `Accessor`
+  seam is untouched (an enum variant is free where a struct field would have been a break).
+
+  **A widget that can't render its column is a render-time error naming the field** — a `.radio()` with no
+  `options`, a `.range()` on text, a `.textarea()` on a number, a `.datetime()` on a non-integer column —
+  rather than a form quietly showing a different input than the model asked for. Both `Form` and `Table`
+  check it. `email`/`url` are conveniences, not controls: pair them with `validate::email` / `validate::url`,
+  which is what runs for a caller hitting the JSON API directly.
 - **`crud::ui::Form`** (feature `ui`) — a **standalone create/edit form** for one entity, for the app's
   own pages rather than the admin panel: a signup form, a "new ticket" screen, a settings page. It reads
   the same published metadata as the admin, so the widgets, required markers, enum dropdowns, relation

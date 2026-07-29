@@ -124,7 +124,7 @@ pub struct MetaField {
     pub label: Option<String>,
     pub description: Option<String>,
     pub default: Option<Value>,        // create-form default (edit uses the row)
-    pub display: Option<FieldDisplay>, // presentation override, e.g. DateTime (see .datetime())
+    pub display: Option<FieldDisplay>, // form-input override (see widget overrides below)
     // hooks (optional; all None):
     pub validate:  Option<Box<dyn Fn(&Value) -> Result<(), String> + ...>>,
     pub nullable:  bool,        // from the entity: does the column accept NULL? (read-only info)
@@ -168,6 +168,46 @@ key.field("expires_at").datetime();    // editable timestamp → datetime picker
 For a read-only column this affects only the cell (read-only fields have no form input). Cells and
 the form picker render in UTC by default, or follow a timezone selection when you include the
 timezone JS/picker — see **[docs/TIME.md](TIME.md)**.
+
+### Widget overrides — picking the form input per field
+
+`display` is the general form of the datetime helper: the input a field gets is derived from its type,
+and these override that where the type alone can't know better. **Only the form input changes** —
+`datetime` aside, cells keep rendering the plain value, because a table row is no place for a slider.
+
+| Helper | Input | Needs |
+|---|---|---|
+| `.datetime()` | `datetime-local` picker (+ formatted cell) | an `Int` of Unix seconds |
+| `.textarea(rows)` | `<textarea>` of `rows` rows | a text column |
+| `.radio()` | radio group over `options` | a text column with non-empty `options` |
+| `.range(min, max, step)` | slider, with the value shown beside it | `Int` or `Float`, `min < max` |
+| `.email()` | `<input type="email">` | a text column |
+| `.url()` | `<input type="url">` | a text column |
+
+```rust
+post.field("body").textarea(8);                    // prose
+post.field("views").range(0.0, 500.0, 1.0);        // slider + readout
+post.field("status").options = vec!["draft".into(), "published".into()];
+post.field("status").radio();                      // …the options must exist first
+author.field("email").email();
+author.field("email").validate_str(validate::optional(Box::new(validate::email)));
+```
+
+**A widget that can't render its column is a render-time error naming the field** — a `.radio()` with no
+`options`, a `.range()` on text, a `.textarea()` on a number — rather than a form quietly showing a
+different input than the model asked for. Both `Form` and `Table` check it, so the failure arrives on the
+first render.
+
+**`email`/`url` are conveniences, not controls.** They give you the browser's own check and the right
+mobile keyboard; a caller hitting the JSON API directly meets none of it, so pair them with
+[`validate::email`](DATAINPUT.md) / `validate::url`, which is what actually runs. Likewise a `range`
+`step` that doesn't divide an existing value puts the handle at the nearest step while the readout keeps
+showing the exact stored number — the readout is the truthful one, since that's what a save would write.
+
+**On the wire** `display` is a plain lowercase string (`"textarea"`, `"radio"`, …) with any parameters in
+a sibling `widget` object (`{"rows": 8}`, `{"min":0.0,"max":500.0,"step":1.0}`), so a client switches on a
+string rather than unpacking a tagged shape. Adding a widget is one variant in `FieldDisplay`, one case in
+the resolver, one branch in the markup.
 
 ### `MetaRelation`
 
@@ -518,8 +558,11 @@ validation errors), per-row and bulk delete (delete-selected / delete-all-matchi
 import/export (tucked into a `⋮` overflow menu). Field labels/help/defaults and validators come from
 the `MetaModel` you registered.
 
-**Form inputs:** numbers/text as typed inputs, **booleans as a toggle switch**, and **`write_only`
-string fields as a masked password input** (secrets like a password: typed in, hashed by an `on_write`
+**Form inputs** are derived from the column type — numbers/text as typed inputs, **booleans as a toggle
+switch**, a closed `options` set as a dropdown — and can be overridden per field with
+[widget overrides](#widget-overrides--picking-the-form-input-per-field) (`textarea`, `radio`, `range`,
+`email`, `url`, `datetime`). **`write_only`
+string fields render as a masked password input** (secrets like a password: typed in, hashed by an `on_write`
 hook, never shown in reads). On **edit** a write-only field starts blank and is *omitted* from the
 save when left blank — "leave blank to keep current" — so a blank doesn't clobber the stored secret;
 on **create** it's sent as-is (an empty value is allowed, e.g. an account with no password).

@@ -126,16 +126,100 @@ pub enum LogicalType {
 
 /// Optional presentation hint overriding how the UI renders a field (the default is derived from the
 /// [`LogicalType`]). The stored value, validation, and OpenAPI schema are unaffected — only the admin
-/// table cell and form input change.
+/// table cell and the **form input** change.
+///
+/// Set it through the [`MetaField`](crate::crud::seaorm::MetaField) helpers rather than by hand:
+/// `.datetime()`, `.textarea(rows)`, `.radio()`, `.range(min, max, step)`, `.email()`, `.url()`.
+///
+/// Every variant but [`DateTime`](FieldDisplay::DateTime) affects **only the form input** — a cell keeps
+/// rendering the plain value, because a table row is not a place for a slider.
+///
+/// A widget that can't render its column is a **render-time error naming the field** (a `Radio` with no
+/// `options`, a `Range` on text, a `Textarea` on a number) rather than a silently different input — see
+/// [`fits`](FieldDisplay::fits).
+///
 /// **`#[non_exhaustive]`**, for the same reason as [`LogicalType`]: more of these are likely (currency,
-/// percentage, …), and an out-of-crate `match` shouldn't break when one arrives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+/// percentage, colour, …), and an out-of-crate `match` shouldn't break when one arrives.
+///
+/// **On the wire** it publishes as a plain lowercase string in `display` (`"datetime"`, `"textarea"`, …)
+/// with any parameters in a sibling `widget` object (`{"rows": 6}`), so a client switches on a string
+/// instead of unpacking a tagged shape. That's also why [`Serialize`] emits only the tag.
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum FieldDisplay {
     /// An integer column holding **Unix seconds (UTC)**: the cell shows a readable UTC datetime and
     /// the form offers a datetime picker (edited in UTC), storing back the integer seconds.
     DateTime,
+    /// A multi-line `<textarea>` of `rows` rows, for prose — the one override almost every app wants.
+    Textarea { rows: u16 },
+    /// A radio group over the column's `options`, instead of a `<select>`: better for a handful of
+    /// choices where seeing them all at once matters. Requires a non-empty `options`.
+    Radio,
+    /// A slider over a numeric column. `step` may be fractional for a `Float`.
+    Range { min: f64, max: f64, step: f64 },
+    /// `<input type="email">` — the browser's own validation and the right mobile keyboard. Pair it with
+    /// [`validate::email`](crate::validate::email), which is the check that actually runs server-side.
+    Email,
+    /// `<input type="url">`, as [`Email`](FieldDisplay::Email) but for links.
+    Url,
+}
+
+impl FieldDisplay {
+    /// The wire tag published in `display`.
+    pub fn tag(self) -> &'static str {
+        match self {
+            FieldDisplay::DateTime => "datetime",
+            FieldDisplay::Textarea { .. } => "textarea",
+            FieldDisplay::Radio => "radio",
+            FieldDisplay::Range { .. } => "range",
+            FieldDisplay::Email => "email",
+            FieldDisplay::Url => "url",
+        }
+    }
+
+    /// This widget's parameters, published beside the tag as `widget`; `None` when it has none.
+    pub fn params(self) -> Option<Value> {
+        match self {
+            FieldDisplay::Textarea { rows } => Some(json!({ "rows": rows })),
+            FieldDisplay::Range { min, max, step } => {
+                Some(json!({ "min": min, "max": max, "step": step }))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether this widget can render a column of `lt` (given whether it has a closed option set).
+    /// `Err` carries the reason, for a render-time error that names the field instead of quietly
+    /// falling back to a different input.
+    pub fn fits(self, lt: LogicalType, has_options: bool) -> std::result::Result<(), String> {
+        let textish = matches!(lt, LogicalType::Text | LogicalType::Json | LogicalType::Other);
+        match self {
+            // The picker reads the value as integer seconds, so a string column would arrive as NaN.
+            FieldDisplay::DateTime if !matches!(lt, LogicalType::Int) => {
+                Err("`datetime` needs an integer column holding Unix seconds".into())
+            }
+            FieldDisplay::Textarea { .. } | FieldDisplay::Email | FieldDisplay::Url if !textish => {
+                Err(format!("`{}` needs a text column, not {lt:?}", self.tag()))
+            }
+            FieldDisplay::Radio if !has_options => {
+                Err("`radio` needs `options` — there is nothing to list".into())
+            }
+            FieldDisplay::Range { .. } if !matches!(lt, LogicalType::Int | LogicalType::Float) => {
+                Err(format!("`range` needs a numeric column, not {lt:?}"))
+            }
+            FieldDisplay::Range { min, max, .. } if min >= max => {
+                Err(format!("`range` needs min < max (got {min} and {max})"))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Emits the tag alone — parameters travel in the sibling `widget` key (see the type's docs).
+impl Serialize for FieldDisplay {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(self.tag())
+    }
 }
 
 impl LogicalType {
@@ -597,7 +681,10 @@ impl Engine {
                     o["default"] = dv;
                 }
                 if let Some(disp) = display {
-                    o["display"] = json!(disp);
+                    o["display"] = json!(disp); // the lowercase tag
+                    if let Some(w) = disp.params() {
+                        o["widget"] = w; // e.g. {"rows": 6} / {"min":0,"max":100,"step":1}
+                    }
                 }
                 o
             }

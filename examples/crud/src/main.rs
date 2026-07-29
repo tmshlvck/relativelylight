@@ -60,7 +60,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     post_mm.field("title").label = Some("Title".into());
     post_mm.field("title").description = Some("The post headline (required).".into());
     post_mm.field("body").description = Some("Full text of the post.".into());
+    // **Per-field widget overrides.** The default input is derived from the column type; these pick a
+    // different one where the type alone can't know better. Cells are unaffected — a table row is no
+    // place for a slider.
+    post_mm.field("body").textarea(8); // prose wants more than a one-line input
     post_mm.field("views").default = Some(serde_json::json!(0));
+    // A slider, with the value shown beside it. `step` is 1 because these are whole view counts: a step
+    // that doesn't divide the stored value puts the handle at the nearest step while the readout keeps
+    // showing the exact number (which is what would be saved) — truthful, but confusing to look at.
+    post_mm.field("views").range(0.0, 500.0, 1.0);
     post_mm.field("views").description = Some("View counter — defaults to 0 on create.".into());
     // A **closed set of values**. `status` is a plain text column in SQLite, so the allowed values are
     // declared here — which turns the form input into a dropdown, publishes them as `enum` in the OpenAPI
@@ -69,6 +77,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     post_mm.field("status").options =
         vec!["draft".into(), "review".into(), "published".into(), "archived".into()];
     post_mm.field("status").description = Some("Editorial state — a closed set.".into());
+    // The same closed set as a **radio group** rather than a dropdown: four choices worth seeing at once.
+    // (`radio` needs `options`, so it's set above — reversing these two lines is a render-time error.)
+    post_mm.field("status").radio();
     post_mm.field("published").label = Some("Published".into());
     post_mm.field("published").default = Some(serde_json::json!(true));
     // An int column holding **Unix seconds** → a datetime picker in the form and a readable cell in the
@@ -94,6 +105,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     author_mm.field("name").validate_str(validate::non_empty);
     author_mm.field("country").description = Some("ISO 3166-1 alpha-2 country code, e.g. \"US\".".into());
     author_mm.field("country").validate_str(validate::length(2, 2));
+    // `email`/`url` widgets: the browser's own check plus the right mobile keyboard. That check is a
+    // convenience, not the control — the validator beside each one is what actually runs, and is what a
+    // caller hitting the JSON API directly meets.
+    author_mm.field("email").email();
+    author_mm.field("email").validate_str(validate::optional(Box::new(validate::email)));
+    author_mm.field("homepage").url();
+    author_mm.field("homepage").validate_str(validate::optional(Box::new(validate::url)));
 
     // A cross-field row validator (form banner) — unchanged, shows the non-`validate` hook.
     post_mm.validate_row = Some(Box::new(|fields| {

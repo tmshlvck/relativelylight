@@ -151,6 +151,61 @@ impl MetaField {
         self
     }
 
+    /// Edit this text column in a multi-line **`<textarea>`** of `rows` rows instead of a one-line
+    /// input — for prose (a body, a note, a description). Table cells are unaffected.
+    ///
+    /// ```ignore
+    /// post.field("body").textarea(8);
+    /// ```
+    pub fn textarea(&mut self, rows: u16) -> &mut Self {
+        self.display = Some(FieldDisplay::Textarea { rows });
+        self
+    }
+
+    /// Offer this column's [`options`](Self::options) as a **radio group** rather than a `<select>` —
+    /// better for a handful of choices where seeing them all at once is the point. Set `options` first
+    /// (or the render errors, since there'd be nothing to list).
+    ///
+    /// ```ignore
+    /// post.field("status").options = vec!["draft".into(), "published".into()];
+    /// post.field("status").radio();
+    /// ```
+    pub fn radio(&mut self) -> &mut Self {
+        self.display = Some(FieldDisplay::Radio);
+        self
+    }
+
+    /// Edit this numeric column with a **slider** over `min..=max`. `step` may be fractional for a
+    /// float column. Table cells still show the number.
+    ///
+    /// ```ignore
+    /// server.field("weight").range(0.0, 100.0, 1.0);
+    /// ```
+    pub fn range(&mut self, min: f64, max: f64, step: f64) -> &mut Self {
+        self.display = Some(FieldDisplay::Range { min, max, step });
+        self
+    }
+
+    /// Use `<input type="email">` for this text column: the browser's own check and the right mobile
+    /// keyboard. That check is a **convenience, not the control** — pair it with a server-side
+    /// validator, which is the thing that actually runs:
+    ///
+    /// ```ignore
+    /// user.field("email").email();
+    /// user.field("email").validate_str(relativelylight::validate::email);
+    /// ```
+    pub fn email(&mut self) -> &mut Self {
+        self.display = Some(FieldDisplay::Email);
+        self
+    }
+
+    /// Use `<input type="url">` for this text column, as [`email`](Self::email) but for links (pair it
+    /// with [`validate::url`](crate::validate::url)).
+    pub fn url(&mut self) -> &mut Self {
+        self.display = Some(FieldDisplay::Url);
+        self
+    }
+
     /// Canonicalize an empty submitted string on a **nullable** text-ish column to `null` (see
     /// [`blank_is_null`](Self::blank_is_null)). Runs right after coercion, so validators and
     /// `on_write` hooks — and the row that lands in the database — all see one representation of

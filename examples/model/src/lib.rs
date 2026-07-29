@@ -38,19 +38,22 @@ async fn create_table<E: EntityTrait>(db: &DatabaseConnection, e: E) -> Result<(
 }
 
 async fn seed(db: &DatabaseConnection) -> Result<(), DbErr> {
+    // The last author is left without contact details, so the nullable columns show both states.
     let authors = [
-        ("Ada Lovelace", "UK"),
-        ("Bjarne Stroustrup", "DK"),
-        ("Grace Hopper", "US"),
-        ("Linus Torvalds", "FI"),
-        ("Barbara Liskov", "US"),
-        ("Alan Kay", "US"),
+        ("Ada Lovelace", "UK", Some("ada@example.com"), Some("https://example.com/ada")),
+        ("Bjarne Stroustrup", "DK", Some("bjarne@example.com"), None),
+        ("Grace Hopper", "US", Some("grace@example.com"), Some("https://example.com/grace")),
+        ("Linus Torvalds", "FI", Some("linus@example.com"), None),
+        ("Barbara Liskov", "US", Some("barbara@example.com"), Some("https://example.com/liskov")),
+        ("Alan Kay", "US", None, None),
     ];
-    for (i, (name, country)) in authors.iter().enumerate() {
+    for (i, (name, country, email, homepage)) in authors.iter().enumerate() {
         author::ActiveModel {
             id: Set(i as i32 + 1),
             name: Set((*name).into()),
             country: Set((*country).into()),
+            email: Set(email.map(Into::into)),
+            homepage: Set(homepage.map(Into::into)),
         }
         .insert(db)
         .await?;
