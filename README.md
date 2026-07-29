@@ -113,17 +113,18 @@ Enable only what you use — an unused feature pulls no dependencies.
 
 ## Examples
 
-Four runnable examples share one seeded in-memory SQLite model (`examples/model`):
+Four runnable examples; the first three share one seeded in-memory SQLite model (`examples/model`),
+while `time-example` carries its own single table:
 
 ```bash
 cargo run -p crud-example          # :3000  per-entity pages (MPA), a standalone Form at /post/new, CSV, Swagger UI — open (no auth)
 cargo run -p adminpanel-example    # :3000  the crud::ui::Admin side-panel — login-gated (admin / password)
 cargo run -p auth-example          # :3000  auth alone: argon2 login/session gating a page (admin / password)
-cargo run -p time-example          # :3001  timezone picker + server/user-TZ backend hooks (docs/TIME.md)
+cargo run -p time-example          # :3000  timezone picker + DST-straddling rows + server/user-TZ hooks (docs/TIME.md)
 ```
 
-Run one at a time (the first three share port 3000; `time-example` uses 3001). The first two put the
-JSON API under `/api/v1` with Swagger at `/docs`.
+**Run one at a time** — they all serve on port 3000. The first two put the JSON API under `/api/v1`
+with Swagger at `/docs`.
 
 ## Requirements
 

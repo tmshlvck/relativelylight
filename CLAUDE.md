@@ -238,12 +238,12 @@ Behind a CDN, write your own middleware inserting a `RealIp` instead; there is n
 cargo run -p crud-example         # :3000  per-entity pages, standalone Form (/post/new), CSV, Swagger — no auth
 cargo run -p adminpanel-example   # :3000  crud::ui::Admin, login-gated, inline accounts + 2FA (admin/password, editor/password)
 cargo run -p auth-example         # :3000  auth alone (no crud): login, /secret, /profile + 2FA, re-auth demo (admin/password)
-cargo run -p time-example         # :3001  timezone picker + server/user-TZ backend hooks (see docs/TIME.md)
+cargo run -p time-example         # :3000  timezone picker, DST-straddling rows, server/user-TZ hooks (see docs/TIME.md)
 ```
 
-Run one at a time (fresh seeded in-memory SQLite each start); they print an access-log line per
-request. The first three share port 3000, `time-example` uses 3001. The first two put the JSON API
-under `/api/v1` with Swagger at `/docs`.
+**Run one at a time — they all bind port 3000** (fresh seeded in-memory SQLite each start); they print
+an access-log line per request. The first two put the JSON API under `/api/v1` with Swagger at `/docs`.
+The first three share `examples/model`; `time-example` has its own one-column-that-matters table.
 
 ## Documentation
 
@@ -270,7 +270,18 @@ under `/api/v1` with Swagger at `/docs`.
 It's a Cargo workspace: the crate lives in `relativelylight/` (`crud/`, `auth/`, `authz.rs`,
 `observe.rs`, `time.rs`, front-end assets in `assets/`) with runnable examples in `examples/`. Build
 with `cargo build --all-features`, test `cargo test --all-features`, lint `cargo clippy
---all-features`. Deps: SeaORM 1.1, axum 0.8, askama 0.13, utoipa 5, totp-rs 5.7.
+--all-features`.
+
+**`--all-features` is not enough on its own** — it turns everything on, so it cannot catch a feature that
+forgets to enable what it uses (`auth` did exactly this with `axum`, and `examples/auth` stopped building
+without anyone noticing). Before a release, also build the combinations that real apps ask for:
+
+```bash
+for f in "" crud axum csrf auth auth,sso crud,ui,openapi,csv; do
+  cargo build -p relativelylight --no-default-features ${f:+--features $f} || break
+done
+cargo build --workspace      # and the examples, which pin their own narrow feature sets
+``` Deps: SeaORM 1.1, axum 0.8, askama 0.13, utoipa 5, totp-rs 5.7.
 
 **Security behavior is tested by rejection.** `auth/security_tests.rs` and `crud/gate_tests.rs` drive
 the real routers over in-memory SQLite and assert the *negative* cases — bad password, bogus/expired/

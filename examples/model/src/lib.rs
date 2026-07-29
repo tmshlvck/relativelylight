@@ -13,13 +13,32 @@ pub mod entities {
 pub use entities::{author, post, post_tag, profile, tag, user};
 
 use sea_orm::{
-    ActiveModelTrait, ConnectionTrait, Database, DatabaseConnection, DbErr, EntityTrait, Schema,
-    Set,
+    ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbErr,
+    EntityTrait, Schema, Set,
 };
+use std::time::Duration;
 
-/// Connect to a fresh in-memory SQLite DB, create the schema from the entities, and seed data.
+/// Connect to an in-memory SQLite DB, create the schema from the entities, and seed data.
+///
+/// **The pool is pinned to one permanent connection on purpose.** An in-memory SQLite database lives
+/// *inside* its connection, and a pool recycles connections — SeaORM defaults to a 30-minute
+/// `max_lifetime` and a 10-minute `idle_timeout`. When the pool closes the connection holding the
+/// database, the database goes with it, and the next query fails with `no such table: post`. So an
+/// example left open for half an hour would lose its data, which looked like a bug in the library and
+/// was a bug in this function.
+///
+/// A second connection would be just as bad: with plain `sqlite::memory:` each one gets its **own**
+/// empty database, so whichever request landed on it would see no tables. `max_connections(1)` avoids
+/// both, and the long lifetimes stop the one connection being retired underneath us. (A real app points
+/// at a file or a server and needs none of this.)
 pub async fn setup() -> Result<DatabaseConnection, DbErr> {
-    let db = Database::connect("sqlite::memory:").await?;
+    const FOREVER: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
+    let mut opt = ConnectOptions::new("sqlite::memory:".to_owned());
+    opt.max_connections(1)
+        .min_connections(1)
+        .idle_timeout(FOREVER)
+        .max_lifetime(FOREVER);
+    let db = Database::connect(opt).await?;
     create_table(&db, author::Entity).await?;
     create_table(&db, post::Entity).await?;
     create_table(&db, user::Entity).await?;

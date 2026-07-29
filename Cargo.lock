@@ -3259,8 +3259,9 @@ version = "0.0.0"
 dependencies = [
  "askama",
  "axum",
- "model",
  "relativelylight",
+ "sea-orm",
+ "serde",
  "serde_json",
  "tokio",
 ]

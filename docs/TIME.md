@@ -196,5 +196,9 @@ during load-time adoption so the app doesn't echo its own values back.
 Examples:
 - **`examples/adminpanel`** — the picker in the navbar over a full admin: `RL_TZ` + `time::JS`,
   read-only auth timestamps, and an editable `post.published_at`.
-- **`examples/time`** — the minimal single-table version plus the optional backend hooks (server-TZ
-  adoption + a fake per-user TZ endpoint, logging the round-trip to the console).
+- **`examples/time`** — the minimal version (its own `event` table: a name and one `happens_at`) plus the
+  optional backend hooks (server-TZ adoption + a fake per-user TZ endpoint, logging the round-trip to the
+  console), and the same datetime widget shown in both a `Table` modal and a standalone `Form`. Its rows
+  **straddle a DST transition on purpose**: in `Europe/Prague` the January rows read `GMT+1` and the June
+  ones `GMT+2` — verified end to end, including that the spring-forward skips 02:00 local and the
+  fall-back repeats it.

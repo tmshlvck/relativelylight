@@ -367,6 +367,26 @@ already using `auth`.
 
 ### Fixed
 
+- **The crate didn't compile with `auth` but without `axum`** — which is what `examples/auth` asks for
+  (`default-features = false, features = ["auth", "sso"]`), so that example had stopped building. `auth`
+  and `csrf` depended on `dep:axum` (the dependency) rather than `axum` (the crate feature), leaving
+  `middleware::RealIp` and parts of `csrf` compiled out from under code that uses them unconditionally.
+  Both features now enable `axum` properly. Note `cargo build --all-features` cannot catch this class of
+  break, since it turns every feature on; the combinations are now listed in `CLAUDE.md`.
+- **The examples lost their database after 30 minutes** — `no such table: post`, on reads as well as
+  writes. An in-memory SQLite database lives *inside* its connection, and a pool recycles connections
+  (SeaORM defaults to a 30-minute `max_lifetime` and a 10-minute `idle_timeout`), so the database went
+  with the connection that held it. Worse, a *second* pool connection would have opened its own empty
+  database, so whichever request landed on it saw no tables. The examples now pin the pool to one
+  permanent connection (`max_connections(1)`, `min_connections(1)`, effectively infinite lifetimes). Only
+  `examples/` was affected — the library never opens a connection of its own — but it's worth knowing if
+  you point an app at `sqlite::memory:`.
+- **`examples/time` could not create a record at all.** It reused the shared `post` table with `body` and
+  the `author` FK hidden, and a hidden column is never written — so every save hit `NOT NULL constraint
+  failed: post.body`. It now has its own three-column `event` table, seeded with instants **either side of
+  a DST transition** (so `Europe/Prague` shows `GMT+1` in January and `GMT+2` in June from the same
+  integers), and renders the datetime widget in both a `Table` modal and a standalone `Form`.
+- **All four examples now bind port 3000** (`time-example` used to use 3001); run one at a time.
 - **A `422` naming a column the form doesn't render was silently swallowed** — the save failed with
   nothing on screen, because a field error can only be shown next to a field. Those are now promoted to
   the form's error banner as `column: message`. Affects `crud::ui::Form` and `Table`'s modal (shared

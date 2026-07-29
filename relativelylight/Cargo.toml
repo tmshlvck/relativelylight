@@ -48,8 +48,12 @@ axum = ["dep:axum"]           # the HTTP router/handlers
 ui = ["dep:askama", "crud"]   # the Bootstrap/Alpine admin components (Table, Admin)
 openapi = ["dep:utoipa", "crud"]
 csv = ["dep:csv", "crud"]
-auth = ["csrf", "dep:sea-orm", "dep:axum", "dep:axum-extra", "dep:argon2", "dep:totp-rs", "dep:sha2"] # sessions/login + TOTP 2FA + Authz gate
-csrf = ["dep:rand_core", "dep:axum-extra", "dep:time"] # the double-submit CSRF token (the `csrf` module); implied by `auth`
+# `auth` needs the **`axum` feature**, not merely the axum dependency: it serves routes, and it reads the
+# caller's address from `middleware::RealIp`, which is `#[cfg(feature = "axum")]`. Depending on `dep:axum`
+# alone left `auth`-without-`axum` a combination that didn't compile (and `--all-features` can't catch that,
+# because it turns everything on).
+auth = ["csrf", "axum", "dep:sea-orm", "dep:axum-extra", "dep:argon2", "dep:totp-rs", "dep:sha2"] # sessions/login + TOTP 2FA + Authz gate
+csrf = ["axum", "dep:rand_core", "dep:axum-extra", "dep:time"] # the double-submit CSRF token (the `csrf` module); implied by `auth`
 sso = ["auth", "dep:openidconnect", "dep:regex", "dep:base64"] # OIDC single sign-on (Google / Okta / corporate) + group mapping
 validate-regex = ["dep:regex"]   # validate::regex_match (reuses the regex dep)
 validate-base64 = ["dep:base64"] # validate::base64 / base64_url (reuses the base64 dep)

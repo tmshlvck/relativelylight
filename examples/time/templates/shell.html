@@ -68,13 +68,19 @@
       <strong x-text="($store.tz && window.RLTime) ? $store.tz.effective() : 'UTC'"></strong> ·
       Server zone: <strong id="server-tz">{{ server_tz }}</strong>.
       Open the browser console and the server console to watch the round-trip as you edit
-      <code>Published at</code> or change the picker.
+      <code>Happens at</code> or change the picker.
+      <hr class="my-2">
+      The seeded rows <strong>straddle a DST transition</strong>: choose <em>Central Europe (Prague)</em>
+      and the January rows read <code>GMT+1</code> while the June ones read <code>GMT+2</code> — same
+      integers in the database, and the browser's own IANA rules doing the work.
     </div>
-    <div class="card shadow-sm">
+    <div class="card shadow-sm mb-4">
       <div class="card-body">
         {{ table|safe }}
       </div>
     </div>
+    <!-- The same datetime widget in a standalone form (crud::ui::Form) rather than the table's modal. -->
+    {{ form|safe }}
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>

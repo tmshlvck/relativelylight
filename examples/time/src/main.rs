@@ -1,8 +1,8 @@
 //! time example — the smallest possible demo of relativelylight's timezone handling.
 //!
-//! One table (`post`, which has a `published_at` timestamp) served with the CRUD API + UI, plus the
-//! `relativelylight::time` frontend (RLTime + the `$store.tz` picker). It also shows the two optional
-//! backend integrations from `docs/TIME.md`:
+//! One table of its own — an `event` with a name and one `happens_at` timestamp — served with the CRUD
+//! API + UI, plus the `relativelylight::time` frontend (RLTime + the `$store.tz` picker). It also shows
+//! the two optional backend integrations from `docs/TIME.md`:
 //!
 //!   GET  /api/settings/timezone   → the **server's** timezone (policy (e): adopt on load)
 //!   GET  /api/me/timezone         → a (randomly assigned) **stored user** preference (policy (d))
@@ -10,7 +10,13 @@
 //!
 //! The DB/API stay integer-UTC throughout — only display changes. Storage is a fresh in-memory DB.
 //!
-//! Try:  open http://127.0.0.1:3001/  (watch the server console as you change the picker)
+//! The seeded rows **straddle a DST transition on purpose**: pick `Europe/Prague` (or any zone that
+//! observes DST) and the January rows show `GMT+1` while the June ones show `GMT+2`, from the same
+//! integer column. That difference is the whole point of the module.
+//!
+//! Try:  open http://127.0.0.1:3000/  (watch the server console as you change the picker)
+
+mod event;
 
 use askama::Template;
 use axum::extract::State;
@@ -20,17 +26,23 @@ use axum::routing::get;
 use axum::{Json, Router};
 use relativelylight::authz::Open;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::Table;
+use relativelylight::crud::ui::{Form, Table};
 use relativelylight::time::{TzPicker, JS as TIME_JS};
+use sea_orm::{
+    ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbErr, Schema,
+    Set,
+};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Template)]
 #[template(path = "shell.html")]
 struct Shell {
     table: String,
+    form: String,
     server_tz: String,
     time_js: &'static str,
     tz_picker: String,
@@ -48,27 +60,33 @@ const USER_TZS: &[&str] =
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = model::setup().await?;
+    let db = setup().await?;
 
     // One editable datetime column (Unix seconds, UTC) → a timezone-aware picker in the form.
-    let mut post_mm = MetaModel::new(model::post::Entity);
-    post_mm.field("title").label = Some("Title".into());
-    post_mm.field("published_at").label = Some("Published at".into());
-    post_mm.field("published_at").description =
+    let mut event_mm = MetaModel::new(event::Entity);
+    event_mm.field("name").label = Some("Event".into());
+    event_mm.field("happens_at").label = Some("Happens at".into());
+    event_mm.field("happens_at").description =
         Some("Editable timestamp — shown and edited in the selected zone; stored as UTC.".into());
-    post_mm.field("published_at").datetime();
-    // Hide the noise so the table focuses on the timestamp.
-    post_mm.field("body").hidden = true;
-    post_mm.relation("author").hidden = true;
+    event_mm.field("happens_at").datetime();
 
     let mut crud = Crud::new(db, "/api/v1");
-    crud.register(post_mm, Open);
+    crud.register(event_mm, Open);
 
     let engine = crud.engine();
-    let table = Table::new(engine, "post").title("Posts").per_page(8).render()?;
+    let table = Table::new(engine, "event").title("Events").per_page(8).render()?;
+    // The same datetime widget in a standalone `Form` (crud::ui::Form) — one component, two hosts, and
+    // the picker follows the page's zone selection in both.
+    let form = Form::new(engine, "event")
+        .title("Add an event")
+        .description("Type a local time in the selected zone; it's stored as integer UTC seconds.")
+        .submit_label("Add")
+        .saved_message("Added. Refresh the table (↻) to see it.")
+        .render()?;
 
     let page = Shell {
         table,
+        form,
         server_tz: server_timezone(),
         time_js: TIME_JS,
         tz_picker: TzPicker::new().render(),
@@ -90,10 +108,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             relativelylight::middleware::resolve_real_ip,
         ));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3001").await?;
-    println!("time example on  http://127.0.0.1:3001/   (change the picker → watch this console)");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
+    println!("time example on  http://127.0.0.1:3000/   (change the picker → watch this console)");
     axum::serve(listener, app_router.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
+}
+
+/// An in-memory SQLite DB with the `event` table and a few rows **either side of a DST transition**, so
+/// the zone picker has something to show: in `Europe/Prague` the January rows read `GMT+1` and the June
+/// ones `GMT+2`, from the same stored integers.
+///
+/// The pool is pinned to one permanent connection deliberately: an in-memory database lives *inside* its
+/// connection, and a pool recycles connections (SeaORM defaults to a 30-minute `max_lifetime`), which
+/// would take the tables with it — an example that worked, then answered `no such table: event` half an
+/// hour later. A second connection would see its own empty database, so one it is. A real app pointing at
+/// a file or a server needs none of this.
+async fn setup() -> Result<DatabaseConnection, DbErr> {
+    const FOREVER: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
+    let mut opt = ConnectOptions::new("sqlite::memory:".to_owned());
+    opt.max_connections(1).min_connections(1).idle_timeout(FOREVER).max_lifetime(FOREVER);
+    let db = Database::connect(opt).await?;
+
+    let backend = db.get_database_backend();
+    let stmt = Schema::new(backend).create_table_from_entity(event::Entity);
+    db.execute(backend.build(&stmt)).await?;
+
+    // (name, Unix seconds UTC) → what a `Europe/Prague` viewer sees. The EU switches on the last Sunday
+    // of March and October at 01:00 UTC, which in 2026 is the 29th and the 25th.
+    let rows: &[(&str, Option<i64>)] = &[
+        ("New Year's fireworks", Some(1767268800)), // 2026-01-01 12:00 UTC → 13:00 GMT+1
+        ("Winter standup", Some(1768212000)),       // 2026-01-12 10:00 UTC → 11:00 GMT+1
+        ("Spring forward (01:00Z)", Some(1774746000)), // 2026-03-29 01:00 UTC → 03:00 GMT+2 (02:00 skipped)
+        ("Midsummer picnic", Some(1780315200)),     // 2026-06-01 12:00 UTC → 14:00 GMT+2
+        ("Summer release", Some(1783238400)),       // 2026-07-05 08:00 UTC → 10:00 GMT+2
+        ("Fall back (01:00Z)", Some(1792890000)),   // 2026-10-25 01:00 UTC → 02:00 GMT+1 (02:00 repeats)
+        ("Someday (no date yet)", None),            // a nullable timestamp, cleared
+    ];
+    for (i, (name, happens_at)) in rows.iter().enumerate() {
+        event::ActiveModel {
+            id: Set(i as i32 + 1),
+            name: Set((*name).into()),
+            happens_at: Set(*happens_at),
+        }
+        .insert(&db)
+        .await?;
+    }
+    Ok(db)
 }
 
 async fn home(State(app): State<Arc<App>>) -> impl IntoResponse {
