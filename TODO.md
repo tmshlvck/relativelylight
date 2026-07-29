@@ -4,6 +4,10 @@ Backlog for `relativelylight`, highest-impact first. See [docs/PRD.md](docs/PRD.
 roadmap and [docs/AUTH.md](docs/AUTH.md) for the auth design these expand on. Keep this list current:
 tick/remove items as they ship, and add new ones with a one-line rationale.
 
+> **Convention:** `- [ ]` is work still to do. A plain `-` bullet is a **recorded decision** — something
+> shipped, or considered and rejected — kept so the reasoning isn't re-derived. Most of what follows is the
+> second kind.
+
 ## Security hardening (auth)
 
 Highest priority first.
@@ -25,27 +29,20 @@ Highest priority first.
   surprises (a set appearing mid-login, or a nag that only reaches people who visit their profile). An app
   that ever does need one calls `recovery::issue` itself. The profile page already says "None left" loudly,
   which covers the case honestly.
-- [ ] **Lockout follow-ups.** The two DB-backed counters ship (AUTH.md §5e), durable, shared by every
+- **Lockout — nothing outstanding.** The two DB-backed counters ship (AUTH.md §5e), durable, shared by every
   replica and by the app's own credential checks, with the unlock being a row delete in the admin panel.
   Address **whitelists** ship too (`Lockout::ip_whitelist`, CIDRs across both families and the mapped
   form). A *username* whitelist was considered and rejected: an account that can never be locked out is
   an account whose password can be guessed at forever, so if one is ever wanted it needs a better story
   than "skip the counter" — a raised limit, perhaps.
-- [ ] **CSRF follow-ups — both listed items have shipped** (AUTH.md §7): `csrf::enforce` is the layer for
-  app-owned unsafe routes, and `Auth::csrf_rejection` / `Csrf::on_reject` is the rejection hook, shared by
-  the library's forms and the layer. What's left is a deliberate gap: the layer reads the `X-CSRF-Token`
-  header and, for URL-encoded bodies under 64 KiB, the `_csrf` field — a **multipart** body is not parsed,
-  because buffering an upload to find a token is worse than asking that surface to send the header. If a
-  real app hits it (a file upload from a JS-less form), the fix is a streaming pre-scan that stops at the
-  first non-field part: a chunk of work for a narrow case, so it waits for the case.
-- [ ] **A CORS layer (AUTH.md §4)** — the last of the cross-cutting middleware. Client-IP resolution and the
-  access log **shipped** as `middleware::resolve_real_ip` (mandatory, one `RealIp` extension read by every
-  consumer) and `middleware::access_log`; the `trust_proxy` boolean is final, and there is deliberately no
-  resolver hook — a stranger topology writes its own middleware inserting the same extension. What remains
-  is CORS, which needs none of that (it is about `Origin`): a thin `tower_http::cors` wrapper with defaults
-  that suit a cookie-auth app, i.e. *not* `Any` with credentials on, which the spec forbids and browsers
-  reject. Also still open: an access-log line that can name the principal without paying an `identify` per
-  request, which needs a way for a handler to hand back the identity it already resolved.
+- **CSRF — both follow-ups shipped** (AUTH.md §7): `csrf::enforce` is the layer for app-owned unsafe
+  routes, and `Auth::csrf_rejection` / `Csrf::on_reject` is the rejection hook, shared by the library's
+  forms and the layer.
+- [ ] **CSRF on a multipart body** — the one deliberate gap. `csrf::enforce` reads the `X-CSRF-Token`
+  header and, for URL-encoded bodies under 64 KiB, the `_csrf` field; a **multipart** body isn't parsed,
+  because buffering an upload to find a token is worse than asking that surface to send the header. The fix
+  is a streaming pre-scan that stops at the first non-field part — a chunk of work for a narrow case, so it
+  waits for a real one (a file upload from a JS-less form).
 - [ ] **Breached-password screening.** The policy ships (`validate::PasswordPolicy`, AUTH.md §5g:
   length-first, no composition rules, on by default on both surfaces, opt-out two ways). Its
   common-value list is deliberately a **floor** — a few dozen perennial values plus keyboard walks,
@@ -55,7 +52,7 @@ Highest priority first.
   not want). Both are app-level decisions, which is why `Auth::password_check(closure)` exists; the open
   question is whether a *helper* for the HIBP form is worth shipping behind a feature, given it needs an
   HTTP client and a caching story.
-- [ ] **Sign or otherwise bind the SSO transaction cookie — only if the assumption stops holding.**
+- **SSO transaction cookie — deferred with cause; revisit only if the assumption stops holding.**
   Analysed and **deferred with cause** (AUTH.md §5b): `state`/`nonce`/PKCE ride in an unsigned cookie, so
   anyone able to *write* a cookie for the host can plant a transaction and produce a login CSRF (the victim
   signed in as the attacker). Signing was considered and rejected — `/sso/{key}/login` hands a genuine
@@ -64,9 +61,23 @@ Highest priority first.
   assumption (a shared registrable domain, http), the fix isn't a signature — it's binding the transaction
   to something server-side, which means state the module currently doesn't keep.
 
+## middleware
+
+Client-IP resolution (`resolve_real_ip`, mandatory) and `access_log` shipped; see AUTH.md §4.
+
+- [ ] **A CORS layer.** The last of the cross-cutting middleware AUTH.md §4 promised: a thin
+  `tower_http::cors` wrapper with defaults that suit a **cookie-auth** app — which means *not* `Any` with
+  credentials on, a combination the spec forbids and browsers reject. Needs none of the address machinery
+  (CORS is about `Origin`), so it is independent of everything else here.
+- [ ] **A principal in the access log.** `middleware::access_log` deliberately logs no username, because
+  naming one means an `Auth::identify` — session + user + groups — on *every* request, including the ones
+  that never needed an identity. The fix isn't more work in the log line; it's a way for a handler that
+  already resolved the caller to hand that back (a response extension, say), so the log can use it when it
+  is there and skip it when it isn't.
+
 ## Auth features
 
-- [ ] **SSO / OIDC follow-ups.** Base OIDC ships (feature `sso`, AUTH.md §5b), and so now do the two
+- [ ] **SSO / OIDC leftovers** (none urgent). Base OIDC ships (feature `sso`, AUTH.md §5b), and so now do the two
   follow-ups that were listed here: provider discovery is **cached** (one hour, per provider, keys
   included), and the callback is **covered by tests** — against a fake IdP on a loopback port rather than a
   live one, which is what makes the rejection paths (wrong key, wrong audience, wrong issuer, expired,
