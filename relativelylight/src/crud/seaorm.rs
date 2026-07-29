@@ -1414,6 +1414,100 @@ mod nullable_tests {
         let _ = bad;
     }
 
+    /// An entity whose `NOT NULL` timestamp is filled by a **hook**, not by the database and not by the
+    /// caller — the `auth_user.created_at` shape, which is the configuration `required` interacts with
+    /// most awkwardly.
+    mod stamped {
+        use sea_orm::entity::prelude::*;
+
+        #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, serde::Serialize, serde::Deserialize)]
+        #[sea_orm(table_name = "stamped")]
+        pub struct Model {
+            #[sea_orm(primary_key)]
+            pub id: i32,
+            pub title: String,
+            /// NOT NULL, no database default, never sent by a client.
+            pub created_at: i64,
+        }
+
+        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+        pub enum Relation {}
+
+        #[async_trait::async_trait]
+        impl ActiveModelBehavior for ActiveModel {
+            async fn before_save<C: ConnectionTrait>(mut self, _db: &C, insert: bool) -> Result<Self, DbErr> {
+                if insert {
+                    self.created_at = sea_orm::ActiveValue::Set(1_700_000_000);
+                }
+                Ok(self)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hook_stamped_column_is_filled_even_though_the_caller_never_sends_it() {
+        use crate::authz::Open;
+        use sea_orm::{ConnectionTrait, Database, Schema};
+
+        // The schema says `created_at` is required — NOT NULL, no default, not the key. That is the fact
+        // introspection reads, and on its own it would make every create a 422.
+        let mut mm = MetaModel::new(stamped::Entity);
+        assert!(mm.field("created_at").required, "the raw schema fact");
+
+        // Marking it read-only is what an app must do for a hook-filled column (both examples do), and it
+        // is what exempts it: a caller has no way to supply it, so requiring it of them is nonsense.
+        mm.field("created_at").read_only = true;
+        let published: Vec<bool> = mm
+            .columns()
+            .iter()
+            .filter_map(|c| match c {
+                Column::Field { name, required, .. } if name == "created_at" => Some(*required),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(published, vec![false], "not required *of the caller*");
+
+        // Now prove the whole chain against a real database: the engine omits the column, the hook fills
+        // it during the insert, and the row comes back stamped.
+        let db = Database::connect("sqlite::memory:").await.expect("sqlite");
+        let schema = Schema::new(db.get_database_backend());
+        let stmt = schema.create_table_from_entity(stamped::Entity);
+        db.execute(db.get_database_backend().build(&stmt)).await.expect("create table");
+
+        let mut crud = Crud::new(db.clone(), "");
+        crud.register(mm, Open);
+        let engine = crud.into_engine();
+        // A create body with no `created_at` — which is how every real client writes.
+        let created = engine
+            .create("stamped", &serde_json::json!({ "title": "t" }))
+            .await
+            .expect("the create must succeed, not 422 and not 500");
+
+        assert_eq!(created.get("title").and_then(|v| v.as_str()), Some("t"));
+        assert_eq!(
+            created.get("created_at").and_then(|v| v.as_i64()),
+            Some(1_700_000_000),
+            "the before_save hook stamped it, and the read reflects it"
+        );
+        let row = stamped::Entity::find().one(&db).await.expect("query").expect("one row");
+        assert_eq!(row.created_at, 1_700_000_000, "…and it is what the database holds");
+
+        // The upgrade hazard, asserted: **forget** the `read_only` and the same create is refused, because
+        // from the engine's side a hook-filled column is indistinguishable from one nothing fills. This is
+        // the one item in the 0.2.0 notes that can bite an app silently, so it gets a test rather than only
+        // a paragraph.
+        let bare = MetaModel::new(stamped::Entity);
+        let obj = serde_json::json!({ "title": "t" }).as_object().unwrap().clone();
+        match bare.prepare_write(&obj, true) {
+            Err(Error::Validation(v)) => assert_eq!(
+                v.fields.get("created_at").map(String::as_str),
+                Some("required"),
+                "mark a hook-filled column read_only, or it is required of the caller"
+            ),
+            other => panic!("expected a required error, got {:?}", other.map(|_| "ok")),
+        }
+    }
+
     #[test]
     fn a_required_field_is_introspected_from_the_schema() {
         let mm = MetaModel::new(thing::Entity);

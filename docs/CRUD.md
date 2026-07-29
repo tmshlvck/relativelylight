@@ -375,8 +375,19 @@ Two ways out where introspection guesses wrong:
 
 `required` describes presence only. For "must not be blank", add `validate_str(validate::non_empty)`.
 
-One gap it deliberately doesn't cover: a `NOT NULL` column with no default that is **hidden or read-only**
-can't be created at all, and still fails at the database. `required` can't help, because a column filled by
+**Who fills a `created_at`, then?** Not the database and not the engine — a SeaORM
+`ActiveModelBehavior::before_save` hook, in Rust, during the insert (that is how `auth_user.created_at` /
+`updated_at` work). The chain for a column the client leaves out entirely: the field is `read_only`, so the
+engine skips it *and* exempts it from `required`; the backend builds the `ActiveModel` without it; the hook
+stamps it; the row comes back with the value. There's a test that runs exactly that against a real database,
+and a second half asserting the hazard — **forget the `read_only` and the create is refused**, because from
+the engine's side a hook-filled column is indistinguishable from one nothing fills. (`updated_at` is
+restamped on every save by the same hook, which is why `auth`'s login flow bumps `last_login_at` with a
+set-based `update_many` instead: that path doesn't run `ActiveModelBehavior`, so a login doesn't count as a
+content change.)
+
+One gap this deliberately doesn't cover: a `NOT NULL` column with no default that is **hidden or read-only**
+*and has no hook* can't be created at all, and still fails at the database. `required` can't help, because a column filled by
 an `ActiveModelBehavior::before_save` hook looks identical to one nothing fills — so refusing the write
 would break the hook case. If creates on a model fail with a database `NOT NULL` error, look for a hidden or
 read-only column with nothing filling it (`examples/time` hides `body`, which is why that demo is
