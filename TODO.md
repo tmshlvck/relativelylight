@@ -4,9 +4,18 @@ Backlog for `relativelylight`, highest-impact first. See [docs/PRD.md](docs/PRD.
 roadmap and [docs/AUTH.md](docs/AUTH.md) for the auth design these expand on. Keep this list current:
 tick/remove items as they ship, and add new ones with a one-line rationale.
 
-> **Convention:** `- [ ]` is work still to do. A plain `-` bullet is a **recorded decision** — something
-> shipped, or considered and rejected — kept so the reasoning isn't re-derived. Most of what follows is the
-> second kind.
+> **Convention:** `- [ ]` is work still to do. A plain `-` bullet is a **recorded decision** — considered
+> and rejected, or bounded on purpose — kept so the reasoning isn't re-derived when the idea resurfaces.
+> An item whose only content is "this shipped" belongs in [CHANGELOG.md](CHANGELOG.md), not here.
+
+## Next: cut 0.2.0
+
+Everything the 0.2.0 cycle set out to do has landed — the security defaults are on, the schema and API
+breaks are in, and `CHANGELOG.md`'s `## Unreleased` has the full upgrade path. Nothing below blocks the
+tag; all of it is post-0.2.0 work.
+
+- [ ] **Release 0.2.0**: rename `## Unreleased` to `## [0.2.0] — YYYY-MM-DD` + compare link, bump
+  `relativelylight/Cargo.toml`, commit `Release v0.2.0`, tag, push the tag.
 
 ## Security hardening (auth)
 
@@ -23,96 +32,78 @@ Highest priority first.
   (A time-boxed "you confirmed recently" window was also considered and rejected: it needs an
   `auth_session` column *and* reopens a period in which a stolen session is dangerous again. These
   actions are rare enough to confirm every time.)
-- **Recovery-code backfill — decided: not needed.** Recovery codes ship (AUTH.md §5i) and are issued with
-  the enrolment, so only accounts that enrolled in 2FA under an *earlier* version lack a set. No production
-  deployment has such an account, so there is nothing to migrate and no auto-issue path is worth its
-  surprises (a set appearing mid-login, or a nag that only reaches people who visit their profile). An app
-  that ever does need one calls `recovery::issue` itself. The profile page already says "None left" loudly,
-  which covers the case honestly.
-- **Lockout — nothing outstanding.** The two DB-backed counters ship (AUTH.md §5e), durable, shared by every
-  replica and by the app's own credential checks, with the unlock being a row delete in the admin panel.
-  Address **whitelists** ship too (`Lockout::ip_whitelist`, CIDRs across both families and the mapped
-  form). A *username* whitelist was considered and rejected: an account that can never be locked out is
-  an account whose password can be guessed at forever, so if one is ever wanted it needs a better story
-  than "skip the counter" — a raised limit, perhaps.
-- **CSRF — both follow-ups shipped** (AUTH.md §7): `csrf::enforce` is the layer for app-owned unsafe
-  routes, and `Auth::csrf_rejection` / `Csrf::on_reject` is the rejection hook, shared by the library's
-  forms and the layer.
+- [ ] **Breached-password screening.** The policy ships (`validate::PasswordPolicy`, AUTH.md §5g), but its
+  common-value list is deliberately a **floor** — a few dozen perennial values plus keyboard walks, matched
+  whole. The control NIST actually asks for is a check against **breach data**, which means either a local
+  corpus (tens of MB: a data file or a feature-gated download, not a `const`) or an online lookup (HIBP's
+  k-anonymity range API — a network call per password change, and a dependency an app may not want). Both
+  are app-level calls, which is why `Auth::password_check(closure)` exists; the open question is only
+  whether a *helper* for the HIBP form earns a feature flag, given it needs an HTTP client and a caching
+  story.
 - [ ] **CSRF on a multipart body** — the one deliberate gap. `csrf::enforce` reads the `X-CSRF-Token`
   header and, for URL-encoded bodies under 64 KiB, the `_csrf` field; a **multipart** body isn't parsed,
   because buffering an upload to find a token is worse than asking that surface to send the header. The fix
   is a streaming pre-scan that stops at the first non-field part — a chunk of work for a narrow case, so it
   waits for a real one (a file upload from a JS-less form).
-- [ ] **Breached-password screening.** The policy ships (`validate::PasswordPolicy`, AUTH.md §5g:
-  length-first, no composition rules, on by default on both surfaces, opt-out two ways). Its
-  common-value list is deliberately a **floor** — a few dozen perennial values plus keyboard walks,
-  matched whole. The real control NIST asks for is a check against **breach data**, which means either a
-  local corpus (tens of MB, so a data file or a feature-gated download, not a `const`) or an online
-  lookup (HIBP's k-anonymity range API — a network call per password change, and a dependency an app may
-  not want). Both are app-level decisions, which is why `Auth::password_check(closure)` exists; the open
-  question is whether a *helper* for the HIBP form is worth shipping behind a feature, given it needs an
-  HTTP client and a caching story.
+- **No *username* whitelist for lockout.** Addresses can be exempted (`Lockout::ip_whitelist`); accounts
+  can't, on purpose. An account that can never be locked out is an account whose password can be guessed
+  at forever. If one is ever wanted it needs a better story than "skip the counter" — a raised limit, say.
+- **Recovery-code backfill — not needed.** Codes are issued *with* the enrolment (AUTH.md §5i), so only an
+  account that enrolled under an earlier version lacks a set, and no deployment has one. An auto-issue path
+  would buy surprises (a set appearing mid-login, or a nag that only reaches people who visit their
+  profile); an app that ever needs one calls `recovery::issue` itself. The profile page already says
+  "None left" loudly.
 - **SSO transaction cookie — deferred with cause; revisit only if the assumption stops holding.**
-  Analysed and **deferred with cause** (AUTH.md §5b): `state`/`nonce`/PKCE ride in an unsigned cookie, so
-  anyone able to *write* a cookie for the host can plant a transaction and produce a login CSRF (the victim
-  signed in as the attacker). Signing was considered and rejected — `/sso/{key}/login` hands a genuine
-  transaction to anyone who asks, so an attacker plants a validly signed one instead and nothing changes.
-  It rests on the same assumption as the double-submit CSRF token. If a deployment ever *can't* hold that
-  assumption (a shared registrable domain, http), the fix isn't a signature — it's binding the transaction
-  to something server-side, which means state the module currently doesn't keep.
+  `state`/`nonce`/PKCE ride in an unsigned cookie (AUTH.md §5b), so anyone able to *write* a cookie for the
+  host can plant a transaction and produce a login CSRF (the victim signed in as the attacker). Signing was
+  considered and rejected: `/sso/{key}/login` hands a genuine transaction to anyone who asks, so an attacker
+  plants a validly signed one instead and nothing changes. It rests on the same assumption as the
+  double-submit CSRF token. If a deployment ever *can't* hold that assumption (a shared registrable domain,
+  http), the fix isn't a signature — it's binding the transaction to something server-side, which means
+  state this module doesn't currently keep.
 
-## middleware
+## middleware / cookies
 
-Client-IP resolution (`resolve_real_ip`, mandatory) and `access_log` shipped; see AUTH.md §4.
-
-- **CORS — decided: no wrapper, document it instead.** `tower_http::cors::CorsLayer` is a self-contained
-  middleware (it answers preflight `OPTIONS` and sets the `Access-Control-*` headers); wrapping it would add
-  a dependency and a layer of our opinions over zero logic. AUTH.md §4 now carries the guidance, including
-  the two things only this crate can tell you: allow **`x-csrf-token`** or every admin-UI write fails its
-  preflight, and a cross-origin *browser* client can't use the session cookie at all, because it is
-  `SameSite=Strict` — so `allow_credentials` is beside the point and such a client wants a token instead.
-- [ ] **Configurable cookie `SameSite`** — the real feature hiding behind the CORS question. Session and
-  CSRF cookies are hardcoded `Strict`, which is the right default and blocks two legitimate cases: a
-  top-level cross-site GET landing on a logged-in page (wants `Lax`), and a cross-origin SPA using cookies
-  (wants `None; Secure`, and would then be leaning entirely on the CSRF token). `Lax` is a small, safe
-  addition; `None` should probably stay unsupported until app-issued tokens land, since it trades away the
-  defence §7 calls defence-in-depth.
-- [ ] **A principal in the access log.** `middleware::access_log` deliberately logs no username, because
-  naming one means an `Auth::identify` — session + user + groups — on *every* request, including the ones
-  that never needed an identity. The fix isn't more work in the log line; it's a way for a handler that
-  already resolved the caller to hand that back (a response extension, say), so the log can use it when it
-  is there and skip it when it isn't.
+- [ ] **Configurable cookie `SameSite`** — the real feature behind the CORS question. Session and CSRF
+  cookies are hardcoded `Strict`, which is the right default and blocks two legitimate cases: a top-level
+  cross-site GET landing on a logged-in page (wants `Lax`), and a cross-origin SPA using cookies (wants
+  `None; Secure`, and would then lean entirely on the CSRF token). `Lax` is a small, safe addition; `None`
+  should stay unsupported until app-issued tokens land, since it trades away the defence AUTH.md §7 calls
+  defence-in-depth.
+- [ ] **A principal in the access log.** `middleware::access_log` logs no username, because naming one
+  means an `Auth::identify` — session + user + groups — on *every* request, including those that never
+  needed an identity. The fix isn't more work in the log line; it's a way for a handler that already
+  resolved the caller to hand that back (a response extension, say), so the log uses it when it's there
+  and skips it when it isn't.
+- **CORS — no wrapper; document it instead.** `tower_http::cors::CorsLayer` is self-contained (it answers
+  preflight `OPTIONS` and sets the `Access-Control-*` headers); wrapping it would add a dependency and a
+  layer of our opinions over zero logic. AUTH.md §4 carries the guidance, including the two things only
+  this crate can tell you: allow **`x-csrf-token`** or every admin-UI write fails its preflight, and a
+  cross-origin *browser* client can't use the session cookie at all (it's `SameSite=Strict`), so
+  `allow_credentials` is beside the point and such a client wants a token.
 
 ## Auth features
 
-- [ ] **SSO / OIDC leftovers** (none urgent). Base OIDC ships (feature `sso`, AUTH.md §5b), and so now do the two
-  follow-ups that were listed here: provider discovery is **cached** (one hour, per provider, keys
-  included), and the callback is **covered by tests** — against a fake IdP on a loopback port rather than a
-  live one, which is what makes the rejection paths (wrong key, wrong audience, wrong issuer, expired,
-  replayed nonce) testable at all (AUTH.md §10a). Remaining, none of it urgent: refresh-token handling and
-  `userinfo` (we read claims from the ID token only, which is enough for username + groups), RP-initiated
-  logout at the provider (`end_session_endpoint`), and a smoke test against a real IdP as a *release* step
-  rather than a CI one.
+- [ ] **App-issued API tokens** — a Bearer identity source resolving the same `Identity`.
+- [ ] **SSO / OIDC leftovers** (none urgent). Base OIDC ships with cached discovery and fake-IdP coverage
+  of the rejection paths (AUTH.md §5b, §10a). Left: refresh-token handling and `userinfo` (we read claims
+  from the ID token only, which covers username + groups), RP-initiated logout at the provider
+  (`end_session_endpoint`), and a smoke test against a real IdP as a *release* step rather than a CI one.
 - [ ] **PassKeys / WebAuthn** as an additional second factor / passwordless — **milestone 0.3+**, not
   before. Deliberately parked: the enterprise apps driving this crate authenticate against passwords +
   TOTP (or their IdP via `sso`), so nothing needs it today, and it's a large surface — a `webauthn-rs`
   dependency, a credentials table, registration/assertion ceremonies with browser JS, and an assurance
-  level on the session that a gate could require. That last part is why it wants a milestone of its own
-  rather than a spare afternoon: `Identity` would likely gain a field, which is a source break.
-  It stays the right answer to real-time phishing, which neither TOTP nor its replay guard addresses
-  (AUTH.md §5a) — revisit when an app actually faces that threat.
-- [ ] **App-issued API tokens** — a Bearer identity source resolving the same `Identity`.
-
-(Row-level authorization moved to *Transformative* below — it reshapes the `Authz` trait rather than
-adding to it.)
+  level on the session that a gate could require. That last part is why it wants its own milestone rather
+  than a spare afternoon: `Identity` would likely gain a field, which is a source break. It stays the
+  right answer to real-time phishing, which neither TOTP nor its replay guard addresses (AUTH.md §5a) —
+  revisit when an app actually faces that threat.
 
 ## crud / engine
 
 > **Adding to `MetaField` is free** (it's `#[non_exhaustive]`); publishing through `Column::Field` is not,
 > because that *variant* can't be non-exhaustive without making the `Accessor` seam unimplementable out of
-> crate — see the type's doc comment. `required` and enum `options`, the two additions this note was written
-> for, have both shipped (CRUD.md § Required columns, § Enumerations), so the batching advice now applies
-> only to whatever comes next.
+> crate — see the type's doc comment. So batch anything that needs publishing to the front end into one
+> release rather than breaking twice.
 
 - [ ] Batch relation reads (avoid N+1 on relation resolution). Keep it inside the SeaORM backend — the
   resolution already happens behind `Accessor::list`, so this can be **purely internal**; a new
@@ -122,16 +113,12 @@ adding to it.)
 
 - [ ] Standalone `Form` component + per-field widget overrides. The widget override means another public
   `MetaField` field — batch it with the metadata additions above rather than breaking twice.
-- **Timezone abbreviations — decided: `GMT+1`/`GMT+2` is the better output, nothing to do.** The item used
-  to read "Intl `short` yields `GMT+2`, not `CEST`" as if that were a defect. It isn't: the offset form is
-  unambiguous and locale-independent, where an abbreviation asks the reader to know that CEST means +2 —
-  and getting abbreviations would mean either `timeZoneName: 'long'`/`'shortGeneric'` (locale-dependent,
-  and sometimes *worse*: "Central European Standard Time") or maintaining our own table. Verified against
-  the shipped `rl-time.js`: `Europe/Prague` renders `2026-01-01T12:00Z` as `13:00 GMT+1` and
-  `2026-06-01T12:00Z` as `14:00 GMT+2`, the spring-forward correctly skips 02:00 local and the fall-back
-  correctly repeats it, and the picker round-trips a datetime either side of a transition. DST is the
-  browser's IANA database via `Intl`, so it also survives a government moving a transition date without a
-  release from us.
+- **Timezone abbreviations — `GMT+1`/`GMT+2` is the wanted output.** Not a defect to fix: the offset is
+  unambiguous and locale-independent, where an abbreviation asks the reader to know which one means +2, and
+  the alternatives are worse (`timeZoneName: 'long'` varies by locale and can give "Central European
+  Standard Time"; our own table would be ours to keep correct forever). DST itself is `Intl` + the
+  browser's IANA database, verified across both transition instants — see
+  [docs/TIME.md §2a](docs/TIME.md).
 
 ## Transformative — deferred until there is real demand
 
