@@ -124,10 +124,16 @@ pub enum Cardinality {
     ToMany,
 }
 
-/// One ordered column of an entity — a scalar field or a relation — as **backend-agnostic
-/// metadata**. The `Accessor` produces these; the `Engine` renders them into `_meta` JSON (adding
-/// URLs) and OpenAPI, and the UI uses them to build tables and forms. Relations carry no resolution
-/// mechanics anymore — the backend resolves them and embeds `{id, label}` into the row.
+/// One entry in an entity's published shape — a scalar field or a relation — **backend-agnostic**.
+/// The `Accessor` produces these, the `Engine` renders them into the `_meta` JSON (adding URLs) and into
+/// OpenAPI, and the UI builds tables and forms from that JSON.
+///
+/// The name matches the wire: `_meta` emits `"columns": [{ "kind": "field" | "relation", … }]`, so the
+/// Rust type and the payload a reader is cross-referencing use one word. (A to-many relation is not a
+/// database column, but it *is* one of these entries — the JSON made that choice first.) Note this is
+/// the description the engine **publishes**; the thing you *configure* is
+/// [`MetaField`](crate::crud::seaorm::MetaField), which is a different direction despite the family
+/// resemblance the old name `ColumnMeta` implied.
 ///
 /// **`#[non_exhaustive]` covers new *variants*, not new *fields* — and that limit is deliberate.** A
 /// `#[non_exhaustive]` enum *variant* cannot be constructed from another crate at all, which would make
@@ -137,7 +143,7 @@ pub enum Cardinality {
 /// *that* free would mean moving each variant's payload into its own non-exhaustive struct with a
 /// constructor, which is worth doing the day a second backend exists and not before.
 #[non_exhaustive]
-pub enum ColumnMeta {
+pub enum Column {
     Field {
         name: String,
         logical_type: LogicalType,
@@ -145,8 +151,13 @@ pub enum ColumnMeta {
         write_only: bool,
         /// Whether the column accepts SQL NULL. Drives the UI's "empty means nothing here" handling
         /// (an empty input on a nullable column is sent as `null`, not `""`) and the schema's type
-        /// union; its inverse tells a form which fields must carry a value.
+        /// union.
         nullable: bool,
+        /// Whether a create must carry this field — NOT NULL, no default, writable. The engine enforces
+        /// it (a `422` naming the field, rather than the database's `500`), the form marks it, and OpenAPI
+        /// lists it in the create schema's `required`. See
+        /// [`MetaField::required`](crate::crud::seaorm::MetaField::required).
+        required: bool,
         label: Option<String>,
         description: Option<String>,
         default: Option<Value>,
@@ -310,7 +321,7 @@ pub trait Accessor: Send + Sync {
     /// The (single) primary-key field name.
     fn pk(&self) -> String;
     /// Backend-agnostic column metadata (fields + relations).
-    fn columns(&self) -> Vec<ColumnMeta>;
+    fn columns(&self) -> Vec<Column>;
 
     /// A page of rows. `terse` returns only `{id, label}` per item (e.g. relation pickers);
     /// otherwise each item also carries the finished `row`. `ListQuery::all` returns every match.
@@ -465,18 +476,19 @@ impl Engine {
     }
 
     /// Typed column metadata for one entity (fields + relations) — for schema / OpenAPI generation.
-    pub fn columns(&self, slug: &str) -> Result<Vec<ColumnMeta>> {
+    pub fn columns(&self, slug: &str) -> Result<Vec<Column>> {
         Ok(self.accessor(slug)?.columns())
     }
 
-    fn column_json(&self, e: ColumnMeta) -> Value {
+    fn column_json(&self, e: Column) -> Value {
         match e {
-            ColumnMeta::Field {
+            Column::Field {
                 name,
                 logical_type,
                 read_only,
                 write_only,
                 nullable,
+                required,
                 label,
                 description,
                 default,
@@ -485,7 +497,7 @@ impl Engine {
                 let mut o = json!({
                     "kind": "field", "name": name, "type": logical_type,
                     "read_only": read_only, "write_only": write_only,
-                    "nullable": nullable,
+                    "nullable": nullable, "required": required,
                 });
                 if let Some(l) = label {
                     o["label"] = json!(l);
@@ -501,7 +513,7 @@ impl Engine {
                 }
                 o
             }
-            ColumnMeta::Relation {
+            Column::Relation {
                 name,
                 target,
                 cardinality,

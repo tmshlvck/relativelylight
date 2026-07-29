@@ -2,7 +2,7 @@
 //! This is the only module that depends on SeaORM.
 
 use crate::crud::engine::{
-    coerce, default_label, slugify, value_key, Accessor, Cardinality, ColumnMeta, Engine, Error,
+    coerce, default_label, slugify, value_key, Accessor, Cardinality, Column, Engine, Error,
     FieldDisplay, ListQuery, LogicalType, Page, Result, RowItem, ValidationErrors,
 };
 use async_trait::async_trait;
@@ -48,6 +48,21 @@ pub struct MetaField {
     pub logical_type: LogicalType,
     pub is_pk: bool,
     pub is_fk: bool,
+    /// Whether a write must carry a value for this column. Introspected as **NOT NULL, no default
+    /// declared on the entity, and not the primary key** — the three facts that make an omission a
+    /// database error rather than a legitimate blank.
+    ///
+    /// Enforced on **create** (a missing field → `422`, not the `500` the database would produce), and on
+    /// any write that sends an explicit `null`. It means **present**, not non-empty: `""` still satisfies
+    /// a NOT NULL text column, exactly as before — pair it with a `non_empty` validator if you want more.
+    ///
+    /// Set it to `false` to opt out. You need that when the *database* has a default the entity doesn't
+    /// declare (`DEFAULT now()` written in DDL rather than `#[sea_orm(default_value = ..)]`) — SeaORM
+    /// can't see it, so introspection assumes the column is required. Marking a field `read_only` or
+    /// `hidden` also exempts it automatically, without touching this, since a caller then has no way to
+    /// supply it — which is what spares a `created_at` filled by an `ActiveModelBehavior::before_save`
+    /// hook, provided you marked it read-only (both examples do).
+    pub required: bool,
     /// Whether the column accepts SQL NULL (read from the entity's `ColumnDef`). Reported in the
     /// metadata + OpenAPI schema, and it decides what an **empty** submitted string means — see
     /// [`blank_is_null`](Self::blank_is_null).
@@ -460,6 +475,8 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                 let def = c.def();
                 MetaField {
                     logical_type: logical_type(def.get_column_type()),
+                    // NOT NULL, nothing to fall back on, and not the key the database assigns.
+                    required: !def.is_null() && def.get_column_default().is_none() && !is_pk,
                     nullable: def.is_null(),
                     blank_is_null: true,
                     read_only: is_pk,
@@ -563,7 +580,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
         self
     }
 
-    fn columns(&self) -> Vec<ColumnMeta> {
+    fn columns(&self) -> Vec<Column> {
         let mut out = Vec::new();
         let mut emitted: Vec<String> = Vec::new();
         for f in &self.fields {
@@ -575,12 +592,16 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                 out.push(relation_column(r));
                 emitted.push(r.name.clone());
             } else if !f.hidden {
-                out.push(ColumnMeta::Field {
+                out.push(Column::Field {
                     name: f.name.clone(),
                     logical_type: f.logical_type,
                     read_only: f.read_only,
                     write_only: f.write_only,
                     nullable: f.nullable,
+                    // The schema facts, narrowed by the app's config: a field it has made unwritable
+                    // can't be required of a caller. Kept here rather than in `MetaField::required` so
+                    // flipping `read_only` after `MetaModel::new` does the right thing.
+                    required: f.required && !f.read_only && !f.hidden,
                     label: f.label.clone(),
                     description: f.description.clone(),
                     default: f.default.clone(),
@@ -626,10 +647,25 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
             if f.hidden || f.read_only || (is_create && f.is_pk) {
                 continue;
             }
-            let Some(raw) = obj.get(&f.name) else { continue };
+            // A field the caller *can* write and must: absent on create is a client error (422 with the
+            // field named), where letting it through produced a 500 carrying the database's own message.
+            // Skipped for update, where an absent field means "leave it alone" — requiring it there would
+            // make partial updates impossible.
+            let Some(raw) = obj.get(&f.name) else {
+                if is_create && f.required {
+                    errs.field(&f.name, "required");
+                }
+                continue;
+            };
             match coerce(f.logical_type, raw).map(|v| f.normalize_blank(v)) {
                 Err(e) => errs.field(&f.name, e),
                 Ok(norm) => {
+                    // An explicit `null` for a NOT NULL column is the same client error, and it is one on
+                    // *update* too — nulling such a column can never succeed.
+                    if f.required && norm.is_null() {
+                        errs.field(&f.name, "required");
+                        continue;
+                    }
                     if let Some(v) = &f.validate {
                         if let Err(e) = v(&norm) {
                             errs.field(&f.name, e);
@@ -677,8 +713,8 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
 
 /// A relation's backend-agnostic metadata. `target` is the raw table name here; `SeaAccessor::columns`
 /// maps it to the target's slug via the registry.
-fn relation_column(r: &MetaRelation) -> ColumnMeta {
-    ColumnMeta::Relation {
+fn relation_column(r: &MetaRelation) -> Column {
+    Column::Relation {
         name: r.name.clone(),
         target: r.target.clone(),
         cardinality: r.cardinality,
@@ -906,13 +942,13 @@ where
     fn pk(&self) -> String {
         self.model.pk.first().cloned().unwrap_or_else(|| "id".into())
     }
-    fn columns(&self) -> Vec<ColumnMeta> {
+    fn columns(&self) -> Vec<Column> {
         // Map each relation's target table → the target's slug (the engine wants slugs, not tables).
         self.model
             .columns()
             .into_iter()
             .map(|c| match c {
-                ColumnMeta::Relation {
+                Column::Relation {
                     name,
                     target,
                     cardinality,
@@ -920,7 +956,7 @@ where
                     read_only,
                     label,
                     description,
-                } => ColumnMeta::Relation {
+                } => Column::Relation {
                     target: self.registry.slug_for(&target).unwrap_or(target),
                     name,
                     cardinality,
@@ -1188,7 +1224,7 @@ mod nullable_tests {
         mm.columns()
             .into_iter()
             .filter_map(|c| match c {
-                ColumnMeta::Field { name, nullable, .. } => Some((name, nullable)),
+                Column::Field { name, nullable, .. } => Some((name, nullable)),
                 _ => None,
             })
             .collect()
@@ -1214,6 +1250,88 @@ mod nullable_tests {
         let obj = body.as_object().unwrap().clone();
         let (scalars, _, _) = mm.prepare_write(&obj, true).expect("no validation errors");
         scalars
+    }
+
+    /// The validation errors a write would produce, for the cases that must not reach the database.
+    fn write_errors(mm: &MetaModel<thing::Entity>, body: Value, is_create: bool) -> ValidationErrors {
+        let obj = body.as_object().unwrap().clone();
+        match mm.prepare_write(&obj, is_create) {
+            Err(Error::Validation(v)) => v,
+            other => panic!("expected validation errors, got {:?}", other.map(|_| "ok")),
+        }
+    }
+
+    #[test]
+    fn a_required_field_is_introspected_from_the_schema() {
+        let mm = MetaModel::new(thing::Entity);
+        // NOT NULL with no default → required. Nullable → not. The primary key → not: the database
+        // assigns it, and it is read-only anyway.
+        let flags: Vec<(String, bool)> =
+            mm.fields().map(|f| (f.name.clone(), f.required)).collect();
+        assert_eq!(
+            flags,
+            vec![
+                ("id".to_string(), false),
+                ("name".to_string(), true),
+                ("nickname".to_string(), false),
+                ("note".to_string(), false),
+                ("rank".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_missing_required_field_is_a_field_error_not_a_database_crash() {
+        // The point of the whole feature: omitting `name` used to reach the database, which rejected it,
+        // which surfaced as a 500 carrying the database's own message. Now it is a 422 naming the field —
+        // which the admin form renders inline, and which doesn't leak the schema.
+        let mm = MetaModel::new(thing::Entity);
+        let errs = write_errors(&mm, serde_json::json!({ "nickname": "n" }), true);
+        assert_eq!(errs.fields.get("name").map(String::as_str), Some("required"));
+
+        // An explicit `null` is the same client error — and it is one on **update** too, where nulling a
+        // NOT NULL column can never succeed.
+        for is_create in [true, false] {
+            let errs = write_errors(&mm, serde_json::json!({ "name": null }), is_create);
+            assert_eq!(errs.fields.get("name").map(String::as_str), Some("required"), "create={is_create}");
+        }
+
+        // Absent on **update** is fine: that means "leave it alone", and requiring it would make a
+        // partial update impossible.
+        let patch = serde_json::json!({ "nickname": "n" }).as_object().unwrap().clone();
+        assert!(mm.prepare_write(&patch, false).is_ok(), "a PATCH need not resend every column");
+
+        // `required` means *present*, not non-empty: "" still satisfies a NOT NULL text column, as it did
+        // before. A `non_empty` validator is how you ask for more.
+        let ok = serde_json::json!({ "name": "" }).as_object().unwrap().clone();
+        assert!(mm.prepare_write(&ok, true).is_ok(), "blank is a value; use a validator to refuse it");
+    }
+
+    #[test]
+    fn the_app_can_opt_out_of_requiring_a_field() {
+        // Needed when the *database* has a default the entity doesn't declare — SeaORM can't see it, so
+        // introspection assumes the column is required.
+        let mut mm = MetaModel::new(thing::Entity);
+        mm.field("name").required = false;
+        let obj = serde_json::json!({ "nickname": "n" }).as_object().unwrap().clone();
+        assert!(mm.prepare_write(&obj, true).is_ok(), "opted out");
+
+        // And making a field unwritable exempts it without touching `required` — which is what spares a
+        // `created_at` filled by a `before_save` hook.
+        let mut mm = MetaModel::new(thing::Entity);
+        mm.field("name").read_only = true;
+        let obj = serde_json::json!({}).as_object().unwrap().clone();
+        assert!(mm.prepare_write(&obj, true).is_ok(), "read-only can't be required of a caller");
+        // …and the published flag agrees, so the form doesn't mark a field it can't fill.
+        let published: Vec<bool> = mm
+            .columns()
+            .iter()
+            .filter_map(|c| match c {
+                Column::Field { name, required, .. } if name == "name" => Some(*required),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(published, vec![false]);
     }
 
     #[test]
@@ -1257,8 +1375,15 @@ mod nullable_tests {
         // For a column where "" and NULL are meaningfully different to the app.
         let mut mm = MetaModel::new(thing::Entity);
         mm.field("nickname").blank_is_null = false;
-        let out = scalars(&mm, serde_json::json!({ "nickname": "" }));
-        assert_eq!(out, vec![("nickname".to_string(), Value::String(String::new()))]);
+        // `name` is NOT NULL, so a create body carries it — this test is about `nickname`.
+        let out = scalars(&mm, serde_json::json!({ "name": "t", "nickname": "" }));
+        assert_eq!(
+            out,
+            vec![
+                ("name".to_string(), Value::String("t".into())),
+                ("nickname".to_string(), Value::String(String::new())),
+            ]
+        );
     }
 
     #[test]
@@ -1267,13 +1392,17 @@ mod nullable_tests {
         // `null` (which it passes — nullability is the column's concern) rather than "".
         let mut mm = MetaModel::new(thing::Entity);
         mm.field("nickname").validate_str(crate::validate::non_empty);
-        let out = scalars(&mm, serde_json::json!({ "nickname": "" }));
-        assert_eq!(out, vec![("nickname".to_string(), Value::Null)], "blank was not rejected as empty");
+        let out = scalars(&mm, serde_json::json!({ "name": "t", "nickname": "" }));
+        assert_eq!(
+            out,
+            vec![("name".to_string(), Value::String("t".into())), ("nickname".to_string(), Value::Null)],
+            "blank was not rejected as empty"
+        );
         // …and a real value still goes through the predicate, which still rejects what it should
         // (`non_empty` treats whitespace as empty).
-        let ok = serde_json::json!({ "nickname": "nick" }).as_object().unwrap().clone();
+        let ok = serde_json::json!({ "name": "t", "nickname": "nick" }).as_object().unwrap().clone();
         assert!(mm.prepare_write(&ok, true).is_ok());
-        let blank = serde_json::json!({ "nickname": "   " }).as_object().unwrap().clone();
+        let blank = serde_json::json!({ "name": "t", "nickname": "   " }).as_object().unwrap().clone();
         assert!(mm.prepare_write(&blank, true).is_err(), "whitespace-only is still rejected");
     }
 
@@ -1284,7 +1413,7 @@ mod nullable_tests {
         let engine_view: Vec<Value> = cols
             .into_iter()
             .filter_map(|c| match c {
-                ColumnMeta::Field { name, nullable, .. } => {
+                Column::Field { name, nullable, .. } => {
                     Some(serde_json::json!({ "name": name, "nullable": nullable }))
                 }
                 _ => None,
@@ -1306,6 +1435,7 @@ mod tests {
             logical_type: LogicalType::Text,
             is_pk: false,
             is_fk: false,
+            required: true,
             nullable: false,
             blank_is_null: true,
             read_only: false,

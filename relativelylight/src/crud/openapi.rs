@@ -5,7 +5,7 @@
 //! body** (`{slug}_write`) — derived from the column metadata (logical types + relations), and the
 //! operations reference them so the spec (and Swagger UI) describes the actual payloads.
 
-use crate::crud::engine::{Cardinality, ColumnMeta, Engine, LogicalType};
+use crate::crud::engine::{Cardinality, Column, Engine, LogicalType};
 use utoipa::openapi::content::{Content, ContentBuilder};
 use utoipa::openapi::path::{
     HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn, PathItem, PathsBuilder,
@@ -99,16 +99,16 @@ fn schema_ref(name: impl Into<String>) -> RefOr<Schema> {
 }
 
 /// The read record: every readable column (write-only fields omitted); relations as `{id,label}`.
-fn record_schema(cols: &[ColumnMeta]) -> RefOr<Schema> {
+fn record_schema(cols: &[Column]) -> RefOr<Schema> {
     let mut o = ObjectBuilder::new();
     for c in cols {
         match c {
-            ColumnMeta::Field { name, logical_type, write_only, nullable, .. } => {
+            Column::Field { name, logical_type, write_only, nullable, .. } => {
                 if !write_only {
                     o = o.property(name, scalar_nullable(*logical_type, *nullable));
                 }
             }
-            ColumnMeta::Relation { name, cardinality, .. } => {
+            Column::Relation { name, cardinality, .. } => {
                 o = o.property(
                     name,
                     match cardinality {
@@ -123,16 +123,21 @@ fn record_schema(cols: &[ColumnMeta]) -> RefOr<Schema> {
 }
 
 /// The write body: writable columns; relations by id (`id` / `[id, …]`).
-fn write_schema(cols: &[ColumnMeta]) -> RefOr<Schema> {
+fn write_schema(cols: &[Column]) -> RefOr<Schema> {
     let mut o = ObjectBuilder::new();
     for c in cols {
         match c {
-            ColumnMeta::Field { name, logical_type, read_only, nullable, .. } => {
+            Column::Field { name, logical_type, read_only, nullable, required, .. } => {
                 if !read_only {
                     o = o.property(name, scalar_nullable(*logical_type, *nullable));
+                    // A create must carry it, so say so in the schema — a generated client can then
+                    // refuse the request before it costs a round trip.
+                    if *required {
+                        o = o.required(name);
+                    }
                 }
             }
-            ColumnMeta::Relation { name, cardinality, read_only, .. } => {
+            Column::Relation { name, cardinality, read_only, .. } => {
                 if !read_only {
                     o = o.property(
                         name,
@@ -317,7 +322,8 @@ mod tests {
     /// JSON, which is what a client actually reads.
     #[test]
     fn nullable_columns_widen_the_schema_type() {
-        let field = |name: &str, nullable: bool| ColumnMeta::Field {
+        let field = |name: &str, nullable: bool| Column::Field {
+            required: !nullable,
             name: name.into(),
             logical_type: LogicalType::Text,
             read_only: false,

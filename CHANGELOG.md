@@ -128,6 +128,24 @@ already using `auth`.
   automatically** — that's a `crud` field validator you wire per model (AUTH.md §5g), and leaving it
   unwired leaves an operator-facing way around the rule. Tests and seeders that set short passwords
   through `create_user` / `set_password` are unaffected: the policy governs typed input, not code.
+- **`crud::ColumnMeta` is renamed `crud::Column`.** The type describes one entry in an entity's published
+  shape, and the wire has always called those `columns` (`_meta` emits
+  `"columns": [{ "kind": "field" | "relation", … }]`), so the Rust name now matches the payload a reader
+  cross-references. "Meta" was actively misleading: it suggested kinship with `MetaField`/`MetaModel`, which
+  are the config you *write*, where this is the description the engine *publishes*. Only an `Accessor`
+  implementation or a caller of `Engine::columns` touches it, and neither exists outside this crate today.
+- **`Column::Field` gained `required`, and the engine enforces it.** Introspected as NOT NULL + no default
+  declared on the entity + not the primary key. A **create** that omits such a field, and any write that
+  sends an explicit `null` for one, is now `422 {"fields":{"x":"required"}}`. Previously the write reached
+  the database, which rejected it, which surfaced as a **`500` carrying the database's own error text** —
+  wrong status, nothing for a form to highlight, and the schema leaked to the caller. Absent on **update**
+  is still fine (that means "leave it alone"), and `""` still satisfies a NOT NULL text column, since
+  `required` means *present*, not non-empty.
+  Two escapes where introspection can't know better: `field("x").required = false` for a database-side
+  default the entity doesn't declare, and `read_only`/`hidden`, which exempt a field automatically because
+  a caller then can't supply it. **That last one is the upgrade risk**: an entity whose `NOT NULL`
+  `created_at` is filled by an `ActiveModelBehavior::before_save` hook must be marked `read_only`, or
+  creates through the API/admin form will start failing. Both examples already do.
 - **The public data types are `#[non_exhaustive]`**, so that *this* is the last release in which adding a
   field or a variant to them is a breaking change. Affected: `Lockout`, `Identity`, `MetaField`,
   `MetaRelation`, `ListQuery`, `ValidationErrors`, `Page`, `RowItem`, `PasswordPolicy`, `WriteEvent`, and
@@ -150,7 +168,7 @@ already using `auth`.
   needs each variant's payload moved into its own non-exhaustive struct, which is worth doing the day a
   second backend exists.
 - **Source-level:** `MetaField` gained public fields (`nullable`, `blank_is_null`) and
-  `crud::ColumnMeta::Field` gained `nullable` — struct-literal construction and exhaustive matches need
+  `crud::Column::Field` (then `ColumnMeta`) gained `nullable` — struct-literal construction and exhaustive matches need
   updating, which matters if you implement the `Accessor` seam yourself. `crud::Error` gained a `Csrf`
   variant. `session::Model` and `user::Model` each gained a public field (above), so struct-literal
   construction of those needs updating too.

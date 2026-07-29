@@ -23,6 +23,6 @@ pub mod openapi;
 pub mod csv_io;
 
 pub use engine::{
-    coerce, default_label, slugify, Accessor, Cardinality, ColumnMeta, Engine, Error, ListQuery,
+    coerce, default_label, slugify, Accessor, Cardinality, Column, Engine, Error, ListQuery,
     LogicalType, Page, Result, RowItem, ValidationErrors,
 };

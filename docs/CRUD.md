@@ -128,6 +128,7 @@ pub struct MetaField {
     // hooks (optional; all None):
     pub validate:  Option<Box<dyn Fn(&Value) -> Result<(), String> + ...>>,
     pub nullable:  bool,        // from the entity: does the column accept NULL? (read-only info)
+    pub required:  bool,        // NOT NULL + no default + not the PK → a create must carry it
     pub blank_is_null: bool,    // nullable + empty string submitted → store NULL (default true)
     pub on_write:  Option<Box<dyn Fn(Value) -> Value + ...>>,   // inbound  (e.g. hash)
     pub on_read:   Option<Box<dyn Fn(&Value) -> Value + ...>>,  // outbound (e.g. redact)
@@ -341,8 +342,37 @@ an account created in the admin panel could end up with `sso_provider = ""` and 
   behaviour working.
 
 Set `field("x").blank_is_null = false` where an empty string is a value you mean to keep distinct from
-absent. In the admin form, a column that is `NOT NULL` **and** has no default is marked with a red `*`;
-that marker is advisory — the API and the database remain the enforcement points.
+absent.
+
+### Required columns
+
+`MetaField::required` is introspected as **NOT NULL, no default declared on the entity, and not the
+primary key** — the three facts that make an omission a database error rather than a legitimate blank. It
+is published as `"required": true` in the metadata, listed in the OpenAPI **create** schema's `required`,
+marked with a red `*` in the admin form (unless the field has a `default`, which the form pre-fills — so
+`MetaField::password()`, whose blank means "no password", gets no marker), and **enforced by the engine**:
+
+| Write | Field | Result |
+|---|---|---|
+| create | absent | `422 {"fields":{"title":"required"}}` |
+| create or update | explicit `null` | `422` — nulling a `NOT NULL` column can never succeed |
+| update | absent | fine: absent means "leave it alone", so partial updates still work |
+| either | `""` | fine — `required` means **present**, not non-empty |
+
+Before this, an omitted `NOT NULL` column reached the database, which rejected it, which surfaced as a
+**`500` carrying the database's own error text** — the wrong status, no field for the form to highlight,
+and the schema leaked to the caller.
+
+Two ways out where introspection guesses wrong:
+
+- `field("x").required = false` — needed when the **database** has a default the entity doesn't declare
+  (`DEFAULT now()` in DDL rather than `#[sea_orm(default_value = ..)]`); SeaORM can't see it.
+- `field("x").read_only = true` (or `hidden`) exempts it automatically, since a caller then has no way to
+  supply it. That is what spares a `created_at`/`updated_at` filled by an
+  `ActiveModelBehavior::before_save` hook — **provided you mark it read-only**, as both examples do. An
+  app that registers such an entity without doing so will start seeing `422`s on create.
+
+`required` describes presence only. For "must not be blank", add `validate_str(validate::non_empty)`.
 
 ## Metadata
 

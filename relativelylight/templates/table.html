@@ -516,10 +516,13 @@
           }
           return f;
         },
-        // Whether a form field has to carry a value: a NOT NULL column with no default that this form
-        // actually writes. Advisory (the API is the enforcement point) — it just marks the label.
+        // Whether to mark a field with the red `*`. `required` now comes from the engine, which also
+        // enforces it, so the form no longer re-derives it from nullable/default and hopes the two agree.
+        // The one thing left to the form: a field it **pre-fills from `default`** needs no marker, because
+        // the user can't accidentally leave it out — that is how `MetaField::password()`, whose blank means
+        // "no password", avoids a `*` beside help text that says "optional".
         mustFill(c) {
-          if (c.kind !== "field" || c.read_only || c.nullable) return false;
+          if (c.kind !== "field" || c.required !== true) return false;
           return c.default === undefined || c.default === null;
         },
         resetPicker() { this.pQuery = {}; this.pResults = {}; this.pOpen = {}; this.pLabels = {}; },

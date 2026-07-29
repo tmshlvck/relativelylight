@@ -89,35 +89,21 @@ adding to it.)
 
 ## crud / engine
 
-> **`MetaField` is now `#[non_exhaustive]`, so adding to *it* is free** — the batching that used to be
-> needed for these items applies only to `ColumnMeta::Field`, whose *variant* can't be non-exhaustive
-> without making the `Accessor` seam unimplementable out of crate (see its doc comment). So: adding a
-> `MetaField` knob is no longer a break; publishing it through `ColumnMeta` still is. Since there are no
-> out-of-crate `Accessor` implementations today, that break currently costs nobody — but it is the reason
-> to publish `required` and `options` in the same release *if* both are wanted, rather than a reason to
-> rush either.
+> **Adding to `MetaField` is free now** (it's `#[non_exhaustive]`); publishing through `Column::Field`
+> still isn't, because that *variant* can't be non-exhaustive without making the `Accessor` seam
+> unimplementable out of crate — see the type's doc comment. With no out-of-crate `Accessor` today that
+> break costs nobody, so it is a reason to batch metadata additions if several are wanted, not a reason to
+> rush any one of them.
 
-- [ ] **Enum `options`.** SeaORM reports `ColumnType::Enum { name, variants }`, so the variant list is
+- [ ] **Enum `options`** — the remaining half of the richer-metadata item; `required` shipped (CRUD.md
+  § Required columns: introspected, published, enforced on create and on an explicit null, with
+  `required = false` and `read_only` as the two escapes). SeaORM reports `ColumnType::Enum { name, variants }`, so the variant list is
   **introspectable** — auto-discovered, no per-model code, consistent with the rest of the crate. Today
   an enum column falls through to a free-text input in the admin form and any string is accepted on
-  write. Wanted: `MetaField::options: Vec<String>` (empty = not an enum), carried into `ColumnMeta`, the
+  write. Wanted: `MetaField::options: Vec<String>` (empty = not an enum), carried into `Column`, the
   `_meta` JSON and OpenAPI (`"enum": [..]`), a `<select>` in the form, and membership enforced on write.
   Must stay hand-settable — a `DeriveActiveEnum` column stored as text (the common SQLite shape) reports
   as `String`, so the app supplies the list: `field("status").options = vec![..]`.
-- [ ] **Engine-side `required` enforcement.** `nullable` ships (from `ColumnDef::is_null()`, in the
-  metadata + OpenAPI, driving the `""`→`NULL` canonicalization). The admin form *already* derives
-  "must fill" client-side (`mustFill` in `table.html`: not read-only, not nullable, no default) and marks
-  the label `*`, but the comment there is honest — it's advisory, and the server still lets a missing
-  `NOT NULL` column reach the database as a 500 instead of a 422 field error. Wanted: `MetaField::required`
-  (same derivation, app-overridable), published in `ColumnMeta` so the UI and OpenAPI stop re-deriving it
-  (OpenAPI could then emit a real `required: [..]` on the create schema), and checked in
-  `MetaModel::prepare_write`.
-  Two constraints that are easy to get wrong: enforce on **create only** — on PATCH an absent field means
-  "unchanged", so requiring it would make partial updates impossible — and keep the existing skip rules
-  (hidden / read-only / PK), which is what exempts a column filled by an
-  `ActiveModelBehavior::before_save` hook, *provided* the app marked it read-only. `auth_user`'s
-  `created_at` / `updated_at` are exactly that shape: both examples mark them read-only, an app that
-  didn't would start getting 422s. Hence the per-field opt-out, and a loud release note.
 - [ ] Batch relation reads (avoid N+1 on relation resolution). Keep it inside the SeaORM backend — the
   resolution already happens behind `Accessor::list`, so this can be **purely internal**; a new
   `Accessor` method would be a break for anyone implementing the seam.

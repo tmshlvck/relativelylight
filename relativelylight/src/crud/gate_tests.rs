@@ -8,7 +8,7 @@
 //!   that's checked *after* the write would fail the test rather than pass silently);
 //! - an unregistered model has no gate and is a plain `404` — not an open door.
 
-use super::engine::{Accessor, ColumnMeta, Engine, ListQuery, Page, Result};
+use super::engine::{Accessor, Column, Engine, ListQuery, Page, Result};
 use crate::auth::{migrate, Auth, UserReadGroupWrite};
 use crate::authz::{Authz, Decision, Operation};
 use axum::body::Body;
@@ -52,8 +52,9 @@ impl Accessor for Stub {
     fn pk(&self) -> String {
         "id".into()
     }
-    fn columns(&self) -> Vec<ColumnMeta> {
-        let field = |name: &str, nullable: bool| ColumnMeta::Field {
+    fn columns(&self) -> Vec<Column> {
+        let field = |name: &str, nullable: bool| Column::Field {
+            required: !nullable,
             name: name.into(),
             logical_type: crate::crud::LogicalType::Text,
             read_only: false,
