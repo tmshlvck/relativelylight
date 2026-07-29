@@ -53,6 +53,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     post_mm.field("body").description = Some("Full text of the post.".into());
     post_mm.field("views").default = Some(serde_json::json!(0));
     post_mm.field("views").description = Some("View counter — defaults to 0 on create.".into());
+    // A **closed set of values**. `status` is a plain text column in SQLite, so the allowed values are
+    // declared here — which turns the form input into a dropdown, publishes them as `enum` in the OpenAPI
+    // schema, and makes anything else a 422 instead of a stored typo. A Postgres/MySQL enum column needs
+    // none of this: the variants are introspected from `ColumnType::Enum`.
+    post_mm.field("status").options =
+        vec!["draft".into(), "review".into(), "published".into(), "archived".into()];
+    post_mm.field("status").description = Some("Editorial state — a closed set.".into());
     post_mm.field("published").label = Some("Published".into());
     post_mm.field("published").default = Some(serde_json::json!(true));
     post_mm.relation("author").label = Some("Author".into());

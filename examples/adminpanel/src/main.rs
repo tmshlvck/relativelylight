@@ -206,6 +206,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user_mm = MetaModel::new(user::Entity);
     let profile_mm = MetaModel::new(profile::Entity);
     let mut post_mm = MetaModel::new(post::Entity);
+    // A closed set of values on a text column → a dropdown in the form, `enum` in the schema, and a 422
+    // for anything else. (An enum column on Postgres/MySQL is introspected and needs no declaration.)
+    post_mm.field("status").options =
+        vec!["draft".into(), "review".into(), "published".into(), "archived".into()];
     let mut tag_mm = MetaModel::new(tag::Entity);
     post_mm.relate(&tag_mm);
     tag_mm.relate(&post_mm);

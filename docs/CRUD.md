@@ -129,6 +129,7 @@ pub struct MetaField {
     pub validate:  Option<Box<dyn Fn(&Value) -> Result<(), String> + ...>>,
     pub nullable:  bool,        // from the entity: does the column accept NULL? (read-only info)
     pub required:  bool,        // NOT NULL + no default + not the PK → a create must carry it
+    pub options: Vec<String>,   // allowed values; introspected from an enum column, or set by hand
     pub blank_is_null: bool,    // nullable + empty string submitted → store NULL (default true)
     pub on_write:  Option<Box<dyn Fn(Value) -> Value + ...>>,   // inbound  (e.g. hash)
     pub on_read:   Option<Box<dyn Fn(&Value) -> Value + ...>>,  // outbound (e.g. redact)
@@ -373,6 +374,41 @@ Two ways out where introspection guesses wrong:
   app that registers such an entity without doing so will start seeing `422`s on create.
 
 `required` describes presence only. For "must not be blank", add `validate_str(validate::non_empty)`.
+
+One gap it deliberately doesn't cover: a `NOT NULL` column with no default that is **hidden or read-only**
+can't be created at all, and still fails at the database. `required` can't help, because a column filled by
+an `ActiveModelBehavior::before_save` hook looks identical to one nothing fills — so refusing the write
+would break the hook case. If creates on a model fail with a database `NOT NULL` error, look for a hidden or
+read-only column with nothing filling it (`examples/time` hides `body`, which is why that demo is
+read-only in practice).
+
+### Enumerations: a closed set of values
+
+`MetaField::options` is the list of values a column accepts — empty for everything else. It is
+**introspected** from `ColumnType::Enum`, so a Postgres/MySQL enum needs no per-model code:
+
+| Where | Effect |
+|---|---|
+| admin form | a `<select>` instead of a free-text input (with a blank choice where the column is nullable or not required) |
+| metadata | `"options": ["draft","review",…]`, emitted only for columns that have a set |
+| OpenAPI | a string schema with `enum`, so a generated client can refuse a bad value without a round trip |
+| write path | membership checked before your own validator → `422 {"fields":{"status":"must be one of: …"}}` |
+
+Values match **exactly**; database enums are case-sensitive.
+
+**Declare it by hand for the common SQLite shape.** A `DeriveActiveEnum` with `db_type = "String"` is a text
+column as far as the schema is concerned, so there are no variants to find:
+
+```rust
+post.field("status").options = vec!["draft".into(), "review".into(), "published".into()];
+```
+
+That works on *any* column — the widget and the check key off the list, not the logical type — so it is also
+how you close a set that the database doesn't model as an enum at all. Both `examples/crud` and
+`examples/adminpanel` do exactly this for `post.status`.
+
+Before this, an enum column fell through to a free-text input and **any** string was accepted: on a real
+enum column the database rejected it (a `500`), and on a text-backed one the typo was simply stored.
 
 ## Metadata
 

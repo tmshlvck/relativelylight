@@ -56,6 +56,15 @@ fn or_null(schema: RefOr<Schema>) -> RefOr<Schema> {
 }
 
 /// JSON Schema for a scalar field, by logical type. `nullable` columns admit `null` as well.
+/// A column's schema: its closed set of values when it has one, else the plain scalar for its type.
+fn field_schema(ty: LogicalType, nullable: bool, options: &[String]) -> RefOr<Schema> {
+    if options.is_empty() {
+        scalar_nullable(ty, nullable)
+    } else {
+        enum_of(options, nullable)
+    }
+}
+
 fn scalar_nullable(ty: LogicalType, nullable: bool) -> RefOr<Schema> {
     let s = scalar(ty);
     if nullable {
@@ -78,6 +87,21 @@ fn scalar(ty: LogicalType) -> RefOr<Schema> {
         // Text / Enum / Other → plain string
         _ => String::schema(),
     }
+}
+
+/// A string schema restricted to a closed set — what an enum column publishes, so a generated client can
+/// reject a bad value without a round trip.
+fn enum_of(variants: &[String], nullable: bool) -> RefOr<Schema> {
+    let mut b = ObjectBuilder::new()
+        .schema_type(SchemaType::Type(Type::String))
+        .enum_values(Some(
+            variants.iter().map(|v| serde_json::Value::from(v.as_str())).collect::<Vec<_>>(),
+        ));
+    if nullable {
+        // A nullable enum accepts null as well as the variants, so widen the type union to match.
+        b = b.schema_type(SchemaType::from_iter([Type::String, Type::Null]));
+    }
+    RefOr::T(Schema::Object(b.build()))
 }
 
 /// A relation link object `{ id, label }`.
@@ -103,9 +127,9 @@ fn record_schema(cols: &[Column]) -> RefOr<Schema> {
     let mut o = ObjectBuilder::new();
     for c in cols {
         match c {
-            Column::Field { name, logical_type, write_only, nullable, .. } => {
+            Column::Field { name, logical_type, write_only, nullable, options, .. } => {
                 if !write_only {
-                    o = o.property(name, scalar_nullable(*logical_type, *nullable));
+                    o = o.property(name, field_schema(*logical_type, *nullable, options));
                 }
             }
             Column::Relation { name, cardinality, .. } => {
@@ -127,9 +151,9 @@ fn write_schema(cols: &[Column]) -> RefOr<Schema> {
     let mut o = ObjectBuilder::new();
     for c in cols {
         match c {
-            Column::Field { name, logical_type, read_only, nullable, required, .. } => {
+            Column::Field { name, logical_type, read_only, nullable, required, options, .. } => {
                 if !read_only {
-                    o = o.property(name, scalar_nullable(*logical_type, *nullable));
+                    o = o.property(name, field_schema(*logical_type, *nullable, options));
                     // A create must carry it, so say so in the schema — a generated client can then
                     // refuse the request before it costs a round trip.
                     if *required {
@@ -324,6 +348,7 @@ mod tests {
     fn nullable_columns_widen_the_schema_type() {
         let field = |name: &str, nullable: bool| Column::Field {
             required: !nullable,
+            options: Vec::new(),
             name: name.into(),
             logical_type: LogicalType::Text,
             read_only: false,

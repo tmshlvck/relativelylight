@@ -55,6 +55,7 @@ impl Accessor for Stub {
     fn columns(&self) -> Vec<Column> {
         let field = |name: &str, nullable: bool| Column::Field {
             required: !nullable,
+            options: Vec::new(),
             name: name.into(),
             logical_type: crate::crud::LogicalType::Text,
             read_only: false,
@@ -65,7 +66,11 @@ impl Accessor for Stub {
             default: None,
             display: None,
         };
-        vec![field("name", false), field("nickname", true)]
+        let mut status = field("status", true);
+        if let Column::Field { options, .. } = &mut status {
+            *options = vec!["draft".into(), "live".into()];
+        }
+        vec![field("name", false), field("nickname", true), status]
     }
     async fn list(&self, _q: &ListQuery, _terse: bool) -> Result<Page> {
         self.calls.read();
@@ -422,4 +427,21 @@ async fn the_table_ui_is_told_which_columns_are_nullable() {
     assert!(html.contains(r#""nullable":false"#));
     assert!(html.contains("c.nullable"), "…and the payload builder consults it");
     assert!(html.contains("mustFill(c)"), "…and the label marks what must be filled");
+
+    // `required` is published rather than re-derived by the form (it used to guess from nullable+default).
+    assert!(html.contains(r#""required":true"#), "the engine's own required flag is embedded");
+    assert!(html.contains(r#""required":false"#));
+    assert!(html.contains("c.required !== true"), "…and the marker reads it rather than guessing");
+
+    // A closed set of values reaches the form, which renders it as a dropdown.
+    assert!(html.contains(r#""options":["draft","live"]"#), "the allowed values are embedded: {html}");
+    assert!(html.contains("hasOptions(c)"), "…and the form switches widget on them");
+    assert!(html.contains("x-for=\"o in c.options\""), "…rendering one <option> each");
+    // Columns without a set carry no `options` key at all — the payload is read on every page load.
+    let per_column: Vec<&str> = html.split(r#""kind":"field""#).skip(1).collect();
+    assert_eq!(
+        per_column.iter().filter(|c| c.split(r#""kind""#).next().unwrap_or("").contains("options")).count(),
+        1,
+        "only the one column with a set mentions options"
+    );
 }

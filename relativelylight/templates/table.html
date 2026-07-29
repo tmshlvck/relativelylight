@@ -194,13 +194,28 @@
                     <span x-text="(window.RLTime && $store.tz) ? $store.tz.effective() : 'UTC'"></span>.</div>
                 </div>
               </template>
-              <template x-if="c.kind === 'field' && (c.type === 'Int' || c.type === 'Float') && c.display !== 'datetime'">
+              <template x-if="c.kind === 'field' && !hasOptions(c) && (c.type === 'Int' || c.type === 'Float') && c.display !== 'datetime'">
                 <input type="number" class="form-control" :class="{'is-invalid': fieldErrors[c.name]}"
                        :step="c.type === 'Float' ? 'any' : '1'" x-model.number="form[c.name]">
               </template>
+              <!-- A closed set of values (an enum column, or any column given `options`) → a dropdown, so
+                   the allowed values are discoverable and a typo is impossible. The blank choice appears
+                   only where the column accepts one: nullable, or not required. -->
+              <template x-if="c.kind === 'field' && hasOptions(c)">
+                <select class="form-select" :class="{'is-invalid': fieldErrors[c.name]}"
+                        x-model="form[c.name]">
+                  <template x-if="c.nullable || !c.required">
+                    <option value="">—</option>
+                  </template>
+                  <template x-for="o in c.options" :key="o">
+                    <option :value="o" x-text="o"></option>
+                  </template>
+                </select>
+              </template>
+
               <!-- Write-only string fields are secrets (e.g. a password) → masked input; on edit
                    the value isn't loaded (write-only), so blank means "keep current". -->
-              <template x-if="c.kind === 'field' && !['Bool','Int','Float'].includes(c.type)">
+              <template x-if="c.kind === 'field' && !hasOptions(c) && !['Bool','Int','Float'].includes(c.type)">
                 <input :type="c.write_only ? 'password' : 'text'" class="form-control"
                        :class="{'is-invalid': fieldErrors[c.name]}"
                        :autocomplete="c.write_only ? 'new-password' : 'off'"
@@ -521,6 +536,10 @@
         // The one thing left to the form: a field it **pre-fills from `default`** needs no marker, because
         // the user can't accidentally leave it out — that is how `MetaField::password()`, whose blank means
         // "no password", avoids a `*` beside help text that says "optional".
+        // Whether this column publishes a closed set of values (`_meta` omits `options` when empty).
+        hasOptions(c) {
+          return Array.isArray(c.options) && c.options.length > 0;
+        },
         mustFill(c) {
           if (c.kind !== "field" || c.required !== true) return false;
           return c.default === undefined || c.default === null;

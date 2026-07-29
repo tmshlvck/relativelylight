@@ -48,6 +48,20 @@ pub struct MetaField {
     pub logical_type: LogicalType,
     pub is_pk: bool,
     pub is_fk: bool,
+    /// The allowed values, when the column is an enumeration — empty for everything else.
+    ///
+    /// **Introspected** from `ColumnType::Enum`, so a Postgres/MySQL enum needs no per-model code: the
+    /// variants become a `<select>` in the admin form, an `enum` in the OpenAPI schema, and a membership
+    /// check on write (a value outside the list is a `422`, where before *any* string was accepted).
+    ///
+    /// **Set it by hand for the common SQLite shape.** A `DeriveActiveEnum` with `db_type = "String"` is a
+    /// text column as far as the schema is concerned, so there is nothing to introspect:
+    /// `model.field("status").options = vec!["draft".into(), "live".into()]`. Doing that on any text
+    /// column turns it into a closed set — the check and the `<select>` key off this list, not off the
+    /// logical type.
+    ///
+    /// Values are matched **exactly**; database enums are case-sensitive.
+    pub options: Vec<String>,
     /// Whether a write must carry a value for this column. Introspected as **NOT NULL, no default
     /// declared on the entity, and not the primary key** — the three facts that make an omission a
     /// database error rather than a legitimate blank.
@@ -162,6 +176,19 @@ impl MetaField {
     /// model.field("target").validate_str(validate::all_of(vec![
     ///     Box::new(validate::non_empty), Box::new(validate::fqdn)]));
     /// ```
+    /// The membership error for an enum column, if the submitted value isn't one of [`options`]. `None`
+    /// when the column is not an enumeration, or the value is `null` (absence is
+    /// [`required`](MetaField::required)'s business, not this one).
+    ///
+    /// [`options`]: MetaField::options
+    fn options_error(&self, v: &Value) -> Option<String> {
+        if self.options.is_empty() || v.is_null() {
+            return None;
+        }
+        let ok = v.as_str().is_some_and(|s| self.options.iter().any(|o| o == s));
+        (!ok).then(|| format!("must be one of: {}", self.options.join(", ")))
+    }
+
     pub fn validate_str<F>(&mut self, f: F) -> &mut Self
     where
         F: Fn(&str) -> std::result::Result<(), String> + Send + Sync + 'static,
@@ -202,6 +229,15 @@ pub struct MetaRelation {
 }
 
 // ---- Introspection helpers ----
+
+/// The variants of an enum column, in declaration order — empty for any other type. `ColumnType` is
+/// `#[non_exhaustive]` upstream, hence the wildcard.
+fn enum_variants(ct: &ColumnType) -> Vec<String> {
+    match ct {
+        ColumnType::Enum { variants, .. } => variants.iter().map(|v| v.to_string()).collect(),
+        _ => Vec::new(),
+    }
+}
 
 fn logical_type(ct: &ColumnType) -> LogicalType {
     match ct {
@@ -475,6 +511,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                 let def = c.def();
                 MetaField {
                     logical_type: logical_type(def.get_column_type()),
+                    options: enum_variants(def.get_column_type()),
                     // NOT NULL, nothing to fall back on, and not the key the database assigns.
                     required: !def.is_null() && def.get_column_default().is_none() && !is_pk,
                     nullable: def.is_null(),
@@ -602,6 +639,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                     // can't be required of a caller. Kept here rather than in `MetaField::required` so
                     // flipping `read_only` after `MetaModel::new` does the right thing.
                     required: f.required && !f.read_only && !f.hidden,
+                    options: f.options.clone(),
                     label: f.label.clone(),
                     description: f.description.clone(),
                     default: f.default.clone(),
@@ -664,6 +702,13 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                     // *update* too — nulling such a column can never succeed.
                     if f.required && norm.is_null() {
                         errs.field(&f.name, "required");
+                        continue;
+                    }
+                    // A closed set is checked before the app's own validator, so a predicate never sees a
+                    // value the column can't hold. Without this the database decided — a 500 on a real
+                    // enum column, or silently-stored nonsense where the "enum" is a text column.
+                    if let Some(e) = f.options_error(&norm) {
+                        errs.field(&f.name, e);
                         continue;
                     }
                     if let Some(v) = &f.validate {
@@ -1261,6 +1306,114 @@ mod nullable_tests {
         }
     }
 
+    /// An entity with a **real** enum column, so introspection has variants to find. `db_type = "Enum"`
+    /// is what makes `ColumnDef::get_column_type()` report `ColumnType::Enum`; a `DeriveActiveEnum` with
+    /// `db_type = "String"` is a text column as far as the schema knows, which is the case the app has to
+    /// declare `options` for by hand (tested separately below).
+    mod enum_thing {
+        use sea_orm::entity::prelude::*;
+
+        #[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, serde::Serialize, serde::Deserialize)]
+        #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "post_status")]
+        pub enum Status {
+            #[sea_orm(string_value = "draft")]
+            Draft,
+            #[sea_orm(string_value = "review")]
+            Review,
+            #[sea_orm(string_value = "published")]
+            Published,
+        }
+
+        #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, serde::Serialize, serde::Deserialize)]
+        #[sea_orm(table_name = "enum_thing")]
+        pub struct Model {
+            #[sea_orm(primary_key)]
+            pub id: i32,
+            pub status: Status,          // NOT NULL enum
+            pub mood: Option<Status>,    // nullable enum
+        }
+
+        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+        pub enum Relation {}
+
+        impl ActiveModelBehavior for ActiveModel {}
+    }
+
+    #[test]
+    fn enum_variants_are_introspected_and_published() {
+        let mm = MetaModel::new(enum_thing::Entity);
+        let opts: Vec<(String, Vec<String>)> =
+            mm.fields().map(|f| (f.name.clone(), f.options.clone())).collect();
+        assert_eq!(
+            opts,
+            vec![
+                ("id".to_string(), vec![]),
+                ("status".to_string(), vec!["draft".into(), "review".into(), "published".into()]),
+                ("mood".to_string(), vec!["draft".into(), "review".into(), "published".into()]),
+            ],
+            "declaration order, for both the NOT NULL and the nullable column"
+        );
+        // …and they reach the published shape, which is what the form and OpenAPI read.
+        let published: Vec<Vec<String>> = mm
+            .columns()
+            .iter()
+            .filter_map(|c| match c {
+                Column::Field { name, options, .. } if name == "status" => Some(options.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(published, vec![vec!["draft".to_string(), "review".into(), "published".into()]]);
+    }
+
+    #[test]
+    fn a_value_outside_the_set_is_refused() {
+        let mm = MetaModel::new(enum_thing::Entity);
+        let write = |body: Value| {
+            let obj = body.as_object().unwrap().clone();
+            mm.prepare_write(&obj, true)
+        };
+
+        // A variant goes through.
+        assert!(write(serde_json::json!({ "status": "review" })).is_ok());
+        // Anything else is a field error rather than whatever the database would have said — including a
+        // near miss, a wrong case (database enums are case-sensitive), and a non-string.
+        for bad in [
+            serde_json::json!({ "status": "reviewed" }),
+            serde_json::json!({ "status": "Review" }),
+            serde_json::json!({ "status": "" }),
+            serde_json::json!({ "status": 1 }),
+        ] {
+            match write(bad.clone()) {
+                Err(Error::Validation(v)) => assert_eq!(
+                    v.fields.get("status").map(String::as_str),
+                    Some("must be one of: draft, review, published"),
+                    "{bad}"
+                ),
+                other => panic!("{bad} should have been refused, got {:?}", other.map(|_| "ok")),
+            }
+        }
+
+        // A nullable enum still accepts null — absence is `required`'s business, not the set's.
+        assert!(write(serde_json::json!({ "status": "draft", "mood": null })).is_ok());
+    }
+
+    #[test]
+    fn options_can_be_declared_by_hand_on_a_text_column() {
+        // The common SQLite shape: a `DeriveActiveEnum` with `db_type = "String"` is just text, so there
+        // is nothing to introspect and the app supplies the set. The check and the widget key off the
+        // list, not off the logical type.
+        let mut mm = MetaModel::new(thing::Entity);
+        assert!(mm.field("name").options.is_empty(), "a text column has no set by default");
+        mm.field("name").options = vec!["alpha".into(), "beta".into()];
+
+        let ok = serde_json::json!({ "name": "beta" }).as_object().unwrap().clone();
+        assert!(mm.prepare_write(&ok, true).is_ok());
+        let bad = serde_json::json!({ "name": "gamma" }).as_object().unwrap().clone();
+        let errs = write_errors(&mm, serde_json::json!({ "name": "gamma" }), true);
+        assert_eq!(errs.fields.get("name").map(String::as_str), Some("must be one of: alpha, beta"));
+        let _ = bad;
+    }
+
     #[test]
     fn a_required_field_is_introspected_from_the_schema() {
         let mm = MetaModel::new(thing::Entity);
@@ -1436,6 +1589,7 @@ mod tests {
             is_pk: false,
             is_fk: false,
             required: true,
+            options: Vec::new(),
             nullable: false,
             blank_is_null: true,
             read_only: false,

@@ -146,6 +146,15 @@ already using `auth`.
   a caller then can't supply it. **That last one is the upgrade risk**: an entity whose `NOT NULL`
   `created_at` is filled by an `ActiveModelBehavior::before_save` hook must be marked `read_only`, or
   creates through the API/admin form will start failing. Both examples already do.
+- **`Column::Field` gained `options`, and enum columns are now a closed set.** Introspected from
+  `ColumnType::Enum`, so a Postgres/MySQL enum needs no per-model code: the variants become a `<select>` in
+  the admin form, an `enum` in the OpenAPI schema, and a membership check on write
+  (`422 {"fields":{"status":"must be one of: …"}}`). Previously such a column was a free-text input that
+  accepted **any** string — which the database then rejected with a `500` on a real enum column, or silently
+  stored as a typo where the "enum" was text. Declare it by hand for the common SQLite shape, where a
+  `DeriveActiveEnum` with `db_type = "String"` leaves nothing to introspect:
+  `model.field("status").options = vec!["draft".into(), …]` — which works on any column, so it is also how
+  you close a set the database doesn't model as an enum.
 - **The public data types are `#[non_exhaustive]`**, so that *this* is the last release in which adding a
   field or a variant to them is a breaking change. Affected: `Lockout`, `Identity`, `MetaField`,
   `MetaRelation`, `ListQuery`, `ValidationErrors`, `Page`, `RowItem`, `PasswordPolicy`, `WriteEvent`, and

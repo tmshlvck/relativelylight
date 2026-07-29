@@ -12,6 +12,12 @@ pub struct Model {
     /// Optional publish time — Unix seconds, UTC. Demonstrates an *editable* datetime column
     /// (`.datetime()` in the admin config → a timezone-aware datetime picker in the form).
     pub published_at: Option<i64>,
+    /// A closed set of values held as text — the shape a SQLite app has, since a `DeriveActiveEnum` with
+    /// `db_type = "String"` is just a text column to the schema. The examples declare the allowed values
+    /// with `field("status").options = …`, which turns the form input into a dropdown and makes anything
+    /// outside the list a 422. (A Postgres/MySQL `ColumnType::Enum` needs none of that — the variants are
+    /// introspected.)
+    pub status: Option<String>,
     pub author_id: i32,
 }
 

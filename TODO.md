@@ -89,21 +89,12 @@ adding to it.)
 
 ## crud / engine
 
-> **Adding to `MetaField` is free now** (it's `#[non_exhaustive]`); publishing through `Column::Field`
-> still isn't, because that *variant* can't be non-exhaustive without making the `Accessor` seam
-> unimplementable out of crate — see the type's doc comment. With no out-of-crate `Accessor` today that
-> break costs nobody, so it is a reason to batch metadata additions if several are wanted, not a reason to
-> rush any one of them.
+> **Adding to `MetaField` is free** (it's `#[non_exhaustive]`); publishing through `Column::Field` is not,
+> because that *variant* can't be non-exhaustive without making the `Accessor` seam unimplementable out of
+> crate — see the type's doc comment. `required` and enum `options`, the two additions this note was written
+> for, have both shipped (CRUD.md § Required columns, § Enumerations), so the batching advice now applies
+> only to whatever comes next.
 
-- [ ] **Enum `options`** — the remaining half of the richer-metadata item; `required` shipped (CRUD.md
-  § Required columns: introspected, published, enforced on create and on an explicit null, with
-  `required = false` and `read_only` as the two escapes). SeaORM reports `ColumnType::Enum { name, variants }`, so the variant list is
-  **introspectable** — auto-discovered, no per-model code, consistent with the rest of the crate. Today
-  an enum column falls through to a free-text input in the admin form and any string is accepted on
-  write. Wanted: `MetaField::options: Vec<String>` (empty = not an enum), carried into `Column`, the
-  `_meta` JSON and OpenAPI (`"enum": [..]`), a `<select>` in the form, and membership enforced on write.
-  Must stay hand-settable — a `DeriveActiveEnum` column stored as text (the common SQLite shape) reports
-  as `String`, so the app supplies the list: `field("status").options = vec![..]`.
 - [ ] Batch relation reads (avoid N+1 on relation resolution). Keep it inside the SeaORM backend — the
   resolution already happens behind `Accessor::list`, so this can be **purely internal**; a new
   `Accessor` method would be a break for anyone implementing the seam.

@@ -91,6 +91,12 @@ async fn seed(db: &DatabaseConnection) -> Result<(), DbErr> {
             // Spread publish times across ~45 hours from a fixed base (2023-11-14T22:13:20Z), and
             // leave drafts unpublished (None) — so the datetime column shows both values and blanks.
             published_at: Set((i % 4 != 0).then(|| 1_700_000_000i64 + i as i64 * 3600)),
+            // Cycle through the allowed values, leaving every 7th row blank so the dropdown's "—" choice
+            // has something to show (the column is nullable).
+            status: Set(match i % 7 {
+                0 => None,
+                r => Some(["draft", "review", "published", "archived"][(r as usize - 1) % 4].to_string()),
+            }),
             author_id: Set((i - 1) % authors.len() as i32 + 1),
         }
         .insert(db)

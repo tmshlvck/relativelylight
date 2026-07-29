@@ -158,6 +158,10 @@ pub enum Column {
         /// lists it in the create schema's `required`. See
         /// [`MetaField::required`](crate::crud::seaorm::MetaField::required).
         required: bool,
+        /// The allowed values when this column is an enumeration, else empty. Drives a `<select>` in the
+        /// form, `enum` in the OpenAPI schema, and a membership check on write. See
+        /// [`MetaField::options`](crate::crud::seaorm::MetaField::options).
+        options: Vec<String>,
         label: Option<String>,
         description: Option<String>,
         default: Option<Value>,
@@ -489,6 +493,7 @@ impl Engine {
                 write_only,
                 nullable,
                 required,
+                options,
                 label,
                 description,
                 default,
@@ -499,6 +504,11 @@ impl Engine {
                     "read_only": read_only, "write_only": write_only,
                     "nullable": nullable, "required": required,
                 });
+                // Only when there is a set — an `"options": []` on every column would be noise in a
+                // payload the UI reads on every page load.
+                if !options.is_empty() {
+                    o["options"] = json!(options);
+                }
                 if let Some(l) = label {
                     o["label"] = json!(l);
                 }
