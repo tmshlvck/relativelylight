@@ -122,7 +122,16 @@ adding to it.)
 
 - [ ] Standalone `Form` component + per-field widget overrides. The widget override means another public
   `MetaField` field — batch it with the metadata additions above rather than breaking twice.
-- [ ] Nicer timezone abbreviations in `time` (Intl `short` yields `GMT+2`, not `CEST`).
+- **Timezone abbreviations — decided: `GMT+1`/`GMT+2` is the better output, nothing to do.** The item used
+  to read "Intl `short` yields `GMT+2`, not `CEST`" as if that were a defect. It isn't: the offset form is
+  unambiguous and locale-independent, where an abbreviation asks the reader to know that CEST means +2 —
+  and getting abbreviations would mean either `timeZoneName: 'long'`/`'shortGeneric'` (locale-dependent,
+  and sometimes *worse*: "Central European Standard Time") or maintaining our own table. Verified against
+  the shipped `rl-time.js`: `Europe/Prague` renders `2026-01-01T12:00Z` as `13:00 GMT+1` and
+  `2026-06-01T12:00Z` as `14:00 GMT+2`, the spring-forward correctly skips 02:00 local and the fall-back
+  correctly repeats it, and the picker round-trips a datetime either side of a transition. DST is the
+  browser's IANA database via `Intl`, so it also survives a government moving a transition date without a
+  release from us.
 
 ## Transformative — deferred until there is real demand
 

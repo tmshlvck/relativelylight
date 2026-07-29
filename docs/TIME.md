@@ -56,10 +56,26 @@ All take a timezone *selection* `sel = { mode, zone }` (see §3); `mode` is `'ut
 | `RLTime.offsetMinutes(zone, sec)` | Zone's UTC offset (minutes) at an instant. |
 | `RLTime.ZONES` | The curated zone list (see §4). |
 
-Formatting uses `Intl.DateTimeFormat`, so DST and offsets are handled by the platform. Note the zone
-label comes from `Intl` `timeZoneName: 'short'`, which on most engines renders as `GMT+2` rather
-than `CEST`; that's cosmetic. Parse-back for a **named** zone does the standard two-pass offset
-computation; the `'utc'` and `'browser'` paths are exact and free.
+Formatting hands the instant to `Intl.DateTimeFormat` with a named `timeZone`, so **nothing here computes
+an offset or a DST rule** — the browser's own IANA database does, which is why half-hour zones work, why
+historical rule changes are right, and why a government moving a transition date needs no release from us.
+For `Europe/Prague`, verified end to end:
+
+| UTC instant | Rendered |
+|---|---|
+| `2026-01-01T12:00:00Z` | `2026-01-01 13:00:00 GMT+1` (winter, +60 min) |
+| `2026-06-01T12:00:00Z` | `2026-06-01 14:00:00 GMT+2` (summer, +120 min) |
+| `2026-03-29T00:59Z` → `01:00Z` | `01:59 GMT+1` → `03:00 GMT+2` — 02:00 local never exists, and is skipped |
+| `2026-10-25T00:59Z` → `01:00Z` | `02:59 GMT+2` → `02:00 GMT+1` — 02:00 local happens twice, and does |
+
+The zone label is `Intl`'s `timeZoneName: 'short'`, which renders `GMT+1`/`GMT+2` rather than `CET`/`CEST`.
+That is **deliberate, not a limitation**: the offset is unambiguous and locale-independent, where an
+abbreviation asks the reader to know which one means +2 — and the alternatives are worse (`'long'` gives
+"Central European Standard Time" and varies by locale; a hand-maintained abbreviation table is ours to keep
+correct forever).
+
+Parse-back for a **named** zone does the standard two-pass offset computation, so the picker round-trips a
+datetime on either side of a transition; the `'utc'` and `'browser'` paths are exact and free.
 
 Use these directly in your own templates, e.g. a detail page:
 
