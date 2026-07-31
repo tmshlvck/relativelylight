@@ -21,7 +21,7 @@ sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 | Feature | Default | Gives you |
 |---|---|---|
 | `crud` | ✅ | the CRUD engine + SeaORM backend (the `crud` module) |
-| `axum` | ✅ | the HTTP router (`Crud::into_router`, `Engine::router`) + the `middleware` module (`resolve_real_ip`, **required**; `access_log`) |
+| `axum` | ✅ | the HTTP router (`Crud::into_router`, `Engine::router`) + the `middleware` module (`resolve_real_ip`, **required**) |
 | `ui` | | the web UI components (`crud::ui::Form`, `Table`, `Admin`) |
 | `openapi` | | runtime OpenAPI 3.1 (`crud::openapi`) |
 | `csv` | | CSV import/export endpoints |
@@ -161,8 +161,8 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
   account has one budget everywhere. The unlock is **deleting the row** in the admin panel (register
   `lockout::username_entity` / `ip_entity`), which is gated, CSRF-checked and audited for free.
   The per-address half takes the address from `middleware::RealIp` — resolved once, at the edge, by the
-  **mandatory** `middleware::resolve_real_ip` layer, so the lockout, the access log and the audit events
-  can't disagree about who called. One trusted hop is the **final** design — no CIDR list, no RFC 7239, no
+  **mandatory** `middleware::resolve_real_ip` layer, so the lockout, the audit events and whatever the app
+  logs can't disagree about who called. One trusted hop is the **final** design — no CIDR list, no RFC 7239, no
   CDN headers, and no resolver hook: a stranger topology writes its own middleware inserting the same
   `RealIp`.
   `Lockout::ip_whitelist` (CIDRs via `net::parse_nets`) exempts addresses from locking on every surface;
@@ -206,15 +206,15 @@ Full design + wiring: **[docs/AUTH.md](docs/AUTH.md)**.
 **One layer is mandatory.** `middleware::resolve_real_ip` resolves the caller's address once, at the
 outermost layer, into a `RealIp` request extension; `auth`'s login routes and the `crud` write handlers
 read it, and answer `500` naming the layer if it isn't there. Everything that needs to know who called —
-the lockout, the access log, the audit events, your own handlers — reads that one value, which is what
+the lockout, the audit events, your own handlers, your request log — reads that one value, which is what
 stops them disagreeing:
 
 ```rust
 use axum::middleware::{from_fn, from_fn_with_state};
-use relativelylight::middleware::{access_log, resolve_real_ip, TrustProxy};
+use relativelylight::middleware::{resolve_real_ip, TrustProxy};
 
 let app = app
-    .layer(from_fn(access_log))                                     // inner
+    .layer(from_fn(my_access_log))                                  // inner: yours, if any
     .layer(from_fn_with_state(TrustProxy(cfg.trust_proxy), resolve_real_ip)); // OUTERMOST
 
 axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
@@ -222,6 +222,10 @@ axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).a
 
 `Router::layer` wraps, so the **last** layer added runs **first** — `resolve_real_ip` must be last.
 Behind a CDN, write your own middleware inserting a `RealIp` instead; there is no hook, on purpose.
+
+**Logging is the app's.** This crate writes nothing to stdout or stderr — no `access_log`, deliberately
+(a request log is a dozen lines, every app wants different ones, and one shape would have cost a logging
+dependency here). Copy `examples/access_log`.
 
 `relativelylight` is always *part of* a larger app:
 
@@ -239,11 +243,13 @@ cargo run -p crud-example         # :3000  per-entity pages, standalone Form (/p
 cargo run -p adminpanel-example   # :3000  crud::ui::Admin, login-gated, inline accounts + 2FA (admin/password, editor/password)
 cargo run -p auth-example         # :3000  auth alone (no crud): login, /secret, /profile + 2FA, re-auth demo (admin/password)
 cargo run -p time-example         # :3000  timezone picker, DST-straddling rows, server/user-TZ hooks (see docs/TIME.md)
+cargo run -p access-log-example   # :3000  the request log an app writes for itself: RealIp + naming the user, two ways
 ```
 
-**Run one at a time — they all bind port 3000** (fresh seeded in-memory SQLite each start); they print
-an access-log line per request. The first two put the JSON API under `/api/v1` with Swagger at `/docs`.
-The first three share `examples/model`; `time-example` has its own one-column-that-matters table.
+**Run one at a time — they all bind port 3000** (fresh seeded in-memory SQLite each start). Only
+`access-log-example` prints a line per request: the crate itself logs nothing, which is that example's
+subject. The first two put the JSON API under `/api/v1` with Swagger at `/docs`. `crud`, `adminpanel` and
+`auth` share `examples/model`; `time-example` has its own one-column-that-matters table.
 
 ## Documentation
 

@@ -1,0 +1,15 @@
+[package]
+name = "access-log-example"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# The request log an app writes for itself. relativelylight ships no `access_log`: it resolves *who is
+# calling* (`middleware::resolve_real_ip` → `RealIp`) and leaves logging to the app, because a log line
+# is a dozen lines of code and every app wants different ones. This example is those dozen lines, twice.
+# `auth` (without `crud`) so there is a real session, and therefore a real user to name.
+[dependencies]
+relativelylight = { path = "../../relativelylight", default-features = false, features = ["auth"] }
+sea-orm = { workspace = true, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+axum = "0.8"
+tokio = { workspace = true, features = ["net"] }

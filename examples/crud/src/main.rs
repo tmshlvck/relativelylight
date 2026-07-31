@@ -198,8 +198,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/docs", get(docs))
         .with_state(app);
 
-    let app_router =
-        ui.merge(engine.router()).layer(axum::middleware::from_fn(relativelylight::middleware::access_log))
+    // No request log: this crate ships none (it writes nothing anywhere). `examples/access_log` is a
+    // dozen lines you can copy, in two variants.
+    let app_router = ui
+        .merge(engine.router())
         // One resolution of the caller's address for the whole app (see relativelylight::middleware).
         .layer(axum::middleware::from_fn_with_state(
             relativelylight::middleware::TrustProxy(false),

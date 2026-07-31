@@ -31,8 +31,8 @@ The crate is **`relativelylight`**, organized into feature-gated modules:
   search→select), boolean switches, bulk actions, CSV, custom cell renderers — plus an `Admin`
   side-panel composing many models into one page.
 - **Runtime OpenAPI 3.1** (`openapi`) with request/response schemas, mergeable into your own document.
-- **Two request-pipeline layers** (`middleware`): `resolve_real_ip`, which decides who the caller is once
-  and is **required**, and `access_log`.
+- **One request-pipeline layer** (`middleware`): `resolve_real_ip`, which decides who the caller is once
+  and is **required**. The crate logs nothing itself — `examples/access_log` is a request log you can copy.
 
 The core is backend- and transport-agnostic; SeaORM is one backend behind a small `Accessor` seam.
 
@@ -72,9 +72,8 @@ let app = axum::Router::new()
     .route("/", axum::routing::get(|| async { /* serve admin_html in your shell */ }))
     .merge(crud.into_router())
     // REQUIRED, and outermost: resolves the caller's address once into a `RealIp` extension, which the
-    // write handlers, the auth lockout, the access log and your own handlers all read. Without it those
+    // write handlers, the auth lockout, your own handlers and whatever you log all read. Without it those
     // routes answer 500 and say so. `TrustProxy(true)` believes your reverse proxy's forwarded hop.
-    .layer(axum::middleware::from_fn(relativelylight::middleware::access_log))
     .layer(axum::middleware::from_fn_with_state(
         relativelylight::middleware::TrustProxy(false),
         relativelylight::middleware::resolve_real_ip,

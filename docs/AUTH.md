@@ -19,7 +19,8 @@ per-request UI control-hiding via `Admin`/`Table::render_for` — **double-submi
 **lockout** on the unauthenticated credential checks (§5e: two DB-backed counters, by account name and
 by source address, shared with the app's own credential checks and cleared by deleting a row in the
 admin panel). **Not yet:** the
-a CORS layer (client-IP resolution and the access log are shipped as middleware — §4), PassKeys. The rest of this doc is the design these grow into.
+a CORS layer (client-IP resolution is shipped as middleware — §4; request logging is deliberately the
+app's), PassKeys. The rest of this doc is the design these grow into.
 
 The login, password-change, and 2FA pages are plain **MPA `<form>` posts** — no JS (the enrolment QR
 is a server-rendered inline PNG). The library renders the form fragment (Bootstrap-friendly classes);
@@ -125,35 +126,43 @@ All optional, all applied by the app; defaults chosen for "safe but works out of
   is served by writing your own middleware that inserts the same `RealIp`, which every consumer then reads
   without knowing. Reading CDN headers *by default* was rejected: nginx and friends don't strip them, so a
   client behind such a proxy could forge one and beat the proxy's honest `X-Forwarded-For`.
-- **Request logging** — **shipped** as [`middleware::access_log`](../relativelylight/src/middleware.rs):
-  one line per request with the resolved address, method, path, status and latency, on stderr. It carries
-  **no principal**, deliberately — naming the user means an `Auth::identify` (session + user + groups) on
-  *every* request, a large bill for a log field, and the write side is already better served by the audit
-  hook (§5d). Put it inside `resolve_real_ip`; without an address it logs `-` and warns once rather than
-  failing the request, because an app shouldn't fall over when a log field is unavailable.
+- **Request logging** — **yours; this crate ships none and writes nothing** to stdout or stderr anywhere.
+  A request log is a dozen lines built on the `RealIp` above, and the dozen differ per app: a structured
+  `tracing` event or a line on stderr, the query string or just the path, and above all a **level** you
+  can turn down on a high-volume endpoint — the one thing a hardcoded `eprintln!` in a library could never
+  give you. Shipping one shape would have meant a logging dependency here and an opinion about all of it,
+  so **[`examples/access_log`](../examples/access_log/src/main.rs)** carries the dozen lines instead,
+  runnable and in two variants. (An `access_log` middleware existed briefly during 0.2.0 development and
+  was removed before the tag.)
 
-  **To log who called, log it from your handler**, in a second line — that is the intended pattern, not a
-  workaround. It also beats a principal in this line for anything token-authenticated: a bearer token is
-  verified *inside* your handler while `access_log` wraps it, so a request that fails authentication —
-  the one most worth naming — could never have contributed a name on the way out. Extract
-  [`RealIp`](../relativelylight/src/middleware.rs) in the handler and the two lines carry the *same*
-  canonical address, so they need no correlation id:
+  Contrast `resolve_real_ip`, which stays: mandatory, security-relevant, and coupled to `auth`, which
+  fails without it. Logging is none of those.
+
+  **Naming the caller** is the interesting half, and the reason the example has two variants:
+
+  | Where | Names | Costs |
+  |---|---|---|
+  | the handler writes an `Actor` into the **response** extensions, the layer reads it after `next.run` | routes that opt in | nothing — the handler had already resolved it |
+  | the layer calls `Auth::identify` itself | every request with a session, this module's own routes included | one session + user + groups lookup per request |
+
+  Neither can name a **bearer-token** caller, because that credential isn't verified until it is already
+  inside the handler — and a request that *fails* authentication, the one most worth naming, never gets
+  far enough to contribute anything. For those, log a second line from the handler. That is the intended
+  pattern, not a workaround: extract [`RealIp`](../relativelylight/src/middleware.rs) there and both lines
+  carry the *same* canonical address, so they need no correlation id.
 
   ```rust
   use relativelylight::middleware::RealIp;
 
   async fn api_write(RealIp(ip): RealIp, headers: HeaderMap) -> Response {
       let Some(principal) = verify_api_token(&headers).await else {
-          eprintln!("{ip} api-token rejected");     // access_log prints the 401 too; this says why
+          eprintln!("{ip} api-token rejected");   // your access log prints the 401; this says why
           return StatusCode::UNAUTHORIZED.into_response();
       };
       eprintln!("{ip} {principal} api-write ok");
       // …
   }
   ```
-
-  An app that insists on a *single* line writes its own `access_log`: it takes no state, reads the same
-  `RealIp` extension, and is a dozen lines — replacing it costs nothing and forks nothing.
 - **CORS** — **use `tower_http::cors::CorsLayer` directly; this crate ships no wrapper**, deliberately.
   `CorsLayer` is a self-contained middleware that answers preflight `OPTIONS` and sets the
   `Access-Control-*` response headers; there is no library state it needs and nothing we could add but
@@ -1178,8 +1187,9 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   and admin-disable-for-`editor` both work; a non-manager gets 403 disabling someone else's.
 - **`examples/crud`** — the ungated counterpart (`Open`), so there's a no-login demo.
 
-All three examples print an **access log** line per request (source IP · method · URI · HTTP status)
-via a small `axum::middleware::from_fn` layer + `into_make_service_with_connect_info`.
+None of them print a request log — this crate ships no `access_log` and writes nothing itself (§4).
+**`examples/access_log`** is the one that does: a dozen lines over `RealIp` +
+`into_make_service_with_connect_info`, in two variants, including one that names the signed-in user.
 
 > **Note — UI vs API enforcement.** The adminpanel renders the panel *per request* via
 > `Admin::render_for(&headers)`, which hides each model's Create/Edit/Delete controls when its gate

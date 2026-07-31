@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "access-log-example"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "relativelylight",
+ "sea-orm",
+ "tokio",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

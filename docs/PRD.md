@@ -14,7 +14,7 @@ For the concrete backlog see **[../TODO.md](../TODO.md)**.
 | **`crud`** (§1) | SeaORM entities → JSON CRUD + machine-readable metadata API | ✅ implemented | [CRUD.md](CRUD.md) |
 | **`crud::ui`** (§2) | auto-generated web UI: standalone form, table, side-panel, bulk + CSV | ✅ implemented | [CRUD.md → Web UI](CRUD.md#web-ui-ui) |
 | **`auth`** (§3) | user/group model, sessions, login, TOTP 2FA, OIDC SSO, per-model `Authz` gate | 🟡 major slice done | [AUTH.md](AUTH.md) |
-| **`middleware`** | `resolve_real_ip` (required — the caller's address, resolved once into a `RealIp` extension) + `access_log` | ✅ | [AUTH.md §4](AUTH.md) |
+| **`middleware`** | `resolve_real_ip` (required — the caller's address, resolved once into a `RealIp` extension). No logging: the crate writes nothing, see `examples/access_log` | ✅ | [AUTH.md §4](AUTH.md) |
 | **`observe`** (§4) | write-observer hook for audit logging (change + request context) | ✅ implemented | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
 | **`time`** (§5) | timezone-aware display of UTC timestamps (helpers + `$store.tz` + picker) | ✅ implemented | [TIME.md](TIME.md) |
 | **`validate`** | reusable typed field validators + normalizers, shared by CRUD and hand-written APIs | ✅ implemented | [DATAINPUT.md](DATAINPUT.md) |
@@ -111,7 +111,8 @@ non-manager profile writes, each gate preset) are covered by an automated negati
 
 **Roadmap / deferred (see [../TODO.md](../TODO.md) for the ordered backlog):**
 re-auth through the IdP for SSO accounts, breached-password screening, and CSRF on multipart bodies.
-(Client-IP resolution and the access log shipped as `middleware`; CORS is documented rather than wrapped,
+(Client-IP resolution shipped as `middleware`; request logging is the app's — the crate writes nothing,
+see `examples/access_log`. CORS is documented rather than wrapped,
 and **app-issued API tokens are deliberately the app's** — the gate is handed the request headers, so an
 API-first service verifies its own tokens and gates the generated CRUD routes with them, while this crate
 owns the web door.) **PassKeys/WebAuthn** is parked at

@@ -1,20 +1,20 @@
-//! `relativelylight::middleware` — the request-pipeline layers: `resolve_real_ip` (who is calling)
-//! and `access_log` (one line per request). Feature `axum`.
+//! `relativelylight::middleware` — one request-pipeline layer: [`resolve_real_ip`], which decides who
+//! the caller is. Feature `axum`.
 //!
-//! **`resolve_real_ip` is mandatory for any app using this crate.** It resolves the caller's address
-//! **once**, at the edge, and puts it in a request extension as `RealIp`; everything downstream — the
-//! `auth` lockout, the access log, your own handlers, the audit events — reads that one value. Before it
-//! existed, each of those resolved the address itself, and they disagreed: the lockout counted the
-//! forwarded hop while the access log printed the socket peer, so a log line and the thing it described
-//! named different clients.
+//! **It is mandatory for any app using this crate.** It resolves the caller's address **once**, at the
+//! edge, and puts it in a request extension as [`RealIp`]; everything downstream — the `auth` lockout,
+//! your own handlers, the audit events, your request log — reads that one value. Before it existed, each
+//! of those resolved the address itself, and they disagreed: the lockout counted the forwarded hop while
+//! the request log printed the socket peer, so a log line and the thing it described named different
+//! clients.
 //!
 //! ```ignore
 //! use axum::middleware::from_fn_with_state;
-//! use relativelylight::middleware::{access_log, resolve_real_ip, TrustProxy};
+//! use relativelylight::middleware::{resolve_real_ip, TrustProxy};
 //!
 //! let app = app
-//!     .layer(from_fn_with_state((), access_log))                       // inner: logs the request
-//!     .layer(from_fn_with_state(TrustProxy(cfg.trust_proxy), resolve_real_ip)); // outer: resolves first
+//!     .layer(from_fn(my_access_log))                                           // inner: the app's own
+//!     .layer(from_fn_with_state(TrustProxy(cfg.trust_proxy), resolve_real_ip)); // OUTERMOST
 //!
 //! // …and the server must supply the socket address:
 //! axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
@@ -22,6 +22,16 @@
 //!
 //! **Order matters**: `Router::layer` wraps, so the layer added *last* is outermost and runs *first*.
 //! `resolve_real_ip` must be outermost, or the layers inside it won't see a `RealIp`.
+//!
+//! **This crate does not log.** It writes nothing to stdout or stderr — it returns responses and errors,
+//! and what happens to them is the app's business. There is deliberately no `access_log` here: a request
+//! log is a dozen lines that read [`RealIp`], and every app wants different ones (a structured `tracing`
+//! event vs. a line on stderr; the query string or not; a level it can turn down on a high-volume
+//! endpoint). Shipping one shape would have forced a logging dependency on every user of this crate to
+//! decide none of that. **`examples/access_log`** is a runnable one, in two variants — including naming
+//! the signed-in user, which a library layer structurally cannot do (it would owe an `Auth::identify` on
+//! every request, and a token-authenticated caller isn't verified until it is already inside the
+//! handler).
 //!
 //! **If your topology is stranger than one proxy**, don't look for a hook — there isn't one, on purpose.
 //! Write your own middleware that inserts a `RealIp` extension however your CDN reports the client, put
@@ -130,56 +140,6 @@ pub async fn resolve_real_ip(
     next.run(req).await
 }
 
-/// One line per request on stderr: method, path, status, latency and the caller's [`RealIp`].
-///
-/// ```text
-/// 127.0.0.1 POST /login 303 12ms
-/// ```
-///
-/// Put it **inside** [`resolve_real_ip`] (i.e. add it to the router first) so it can see the address. If
-/// it can't — the layer is missing or ordered wrongly — it logs `-` and warns **once** rather than failing
-/// the request: taking an app down because a log field is unavailable would be a self-inflicted outage.
-/// `auth` is the surface that hard-fails without an address, because there a missing one silently degrades
-/// the lockout.
-///
-/// **No principal.** Naming the user would mean an `Auth::identify` — a session, user and groups lookup —
-/// on *every* request, including the ones that never needed an identity. That's a large bill for a log
-/// field, and the write-side story is already better served by the audit hook
-/// ([`observe`](crate::observe)), which sees who changed what. If you want it anyway, write your own
-/// version of this function; it is fifteen lines.
-pub async fn access_log(req: Request, next: Next) -> Response {
-    let started = std::time::Instant::now();
-    let method = req.method().clone();
-    let path = req.uri().path().to_string();
-    let ip = req.extensions().get::<RealIp>().copied();
-    if ip.is_none() {
-        warn_missing_real_ip_once();
-    }
-    let res = next.run(req).await;
-    let who = match ip {
-        Some(RealIp(ip)) => ip.to_string(),
-        None => "-".to_string(),
-    };
-    eprintln!(
-        "{who} {method} {path} {} {}ms",
-        res.status().as_u16(),
-        started.elapsed().as_millis()
-    );
-    res
-}
-
-/// Complain about a missing [`RealIp`] the first time only — a per-request warning would bury the log it
-/// is trying to help with.
-fn warn_missing_real_ip_once() {
-    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        eprintln!(
-            "relativelylight: access_log found no RealIp — add resolve_real_ip as the OUTERMOST layer \
-             (the router's last .layer call). Logging '-' for the address until then."
-        );
-    }
-}
-
 /// The resolution itself, as a pure function — what [`resolve_real_ip`] calls, and what a hand-written
 /// middleware for an exotic topology can fall back to ("read my CDN's header, else the normal rules").
 ///
@@ -211,6 +171,7 @@ mod tests {
     use axum::routing::get;
     use axum::Router;
     use http::Request as HttpRequest;
+    use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
 
     /// A router that echoes the resolved address, so a test sees exactly what a handler would.
@@ -348,17 +309,6 @@ mod tests {
         assert_eq!(body, "::cb00:7107", "the compatible form stays IPv6, rendered canonically");
     }
 
-    #[tokio::test]
-    async fn the_access_log_survives_a_missing_address() {
-        // It logs '-' and warns rather than failing the request: an app must not fall over because a log
-        // field is unavailable.
-        let app = Router::new()
-            .route("/", get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn(access_log));
-        let (status, body) = call(app, req(&[], Some("203.0.113.7"))).await;
-        assert_eq!((status, body.as_str()), (StatusCode::OK, "ok"));
-    }
-
     #[test]
     fn a_caller_cannot_choose_its_own_address_behind_an_appending_proxy() {
         // nginx's `$proxy_add_x_forwarded_for` (and HAProxy's `option forwardfor`, and Caddy) append what
@@ -384,15 +334,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_documented_layer_order_puts_the_address_in_the_log() {
-        // `Router::layer` wraps, so the *last* layer added is outermost and runs first. If this ordering
-        // were wrong, `access_log` would never see a RealIp — which is the mistake the docs warn about.
+    async fn an_inner_app_layer_sees_the_resolved_address() {
+        // `Router::layer` wraps, so the *last* layer added is outermost and runs first. This is the
+        // ordering the docs insist on and the one an app's own request log depends on: added **before**
+        // `resolve_real_ip`, it runs **inside** it and therefore sees the extension. Get it backwards and
+        // the app logs `-` forever — which is why this is a test and not just a sentence.
+        let seen: Arc<Mutex<Option<IpAddr>>> = Arc::new(Mutex::new(None));
+        let recorder = seen.clone();
         let app = Router::new()
             .route("/", get(|RealIp(ip): RealIp| async move { ip.to_string() }))
-            .layer(axum::middleware::from_fn(access_log))
+            // Stands in for whatever the app logs with; all it needs is the extension.
+            .layer(axum::middleware::from_fn(move |req: Request, next: Next| {
+                let recorder = recorder.clone();
+                async move {
+                    *recorder.lock().unwrap() = req.extensions().get::<RealIp>().map(|r| r.0);
+                    next.run(req).await
+                }
+            }))
             .layer(axum::middleware::from_fn_with_state(TrustProxy(true), resolve_real_ip));
         let (status, body) =
             call(app, req(&[("x-forwarded-for", "203.0.113.7")], Some("10.0.0.1"))).await;
         assert_eq!((status, body.as_str()), (StatusCode::OK, "203.0.113.7"));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            "203.0.113.7".parse().ok(),
+            "the inner layer must see the same address the handler did"
+        );
     }
 }

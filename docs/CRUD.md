@@ -774,7 +774,7 @@ best-effort pre-fetch; a **bulk delete** reports the affected count in `after` (
 every row, so a "delete all" can't blow up the audit. The library provides only the hook and the
 `WriteEvent` type — the app owns the audit **table**, resolves the actor from `headers` (e.g.
 `auth.identify`), writes the row, and handles retention — the address arrives already resolved, so every
-audit row names the same client the lockout counted and the access log printed. The same
+audit row names the same client the lockout counted and your request log printed. The same
 `Arc` can also be handed to `Auth::on_write` (see [AUTH.md](AUTH.md)) so one sink captures both the
 auto-CRUD and the auth surfaces. **Times are UTC** (`i64` Unix seconds) — see the timezone note in
 [PRD.md](PRD.md).

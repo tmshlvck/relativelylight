@@ -71,18 +71,21 @@ Highest priority first.
   whole of what's wanted here. `None` should stay **unsupported**: it trades away the defence AUTH.md §7
   calls defence-in-depth, and the case for it — a cross-origin client — is better served by that client
   sending an app-issued token, which needs no cookie at all.
-- **A principal in the access log — decided: the app logs its own line, we don't plumb identity.**
-  `access_log` stays address/method/path/status/latency. Naming a user would cost an `Auth::identify`
-  (session + user + groups) on *every* request, including the ones that never needed an identity — but the
-  reason not to build it is the shape, not the bill. The mechanism would be a response extension a handler
-  writes the caller back into, and that is wrong for the case that wanted it: an **API token** is verified
-  *inside* the handler, while `access_log` wraps it, so a request that **fails** auth — the one most worth
-  naming — never gets far enough to write anything and logs `-` regardless. The two-line pattern is both
-  simpler and strictly more informative: this crate's line says a request arrived, then the app's own line,
-  after it has verified the token, says who it was and whether it succeeded. Those lines need no
-  correlation id because the handler can extract [`RealIp`] and print the *same canonical address* the
-  access log did. An app that genuinely wants one line writes its own `access_log` — it takes no state and
-  is a dozen lines.
+- **Request logging — decided: not ours at all.** `access_log` was removed before the 0.2.0 tag and lives
+  in `examples/access_log`. The crate now writes **nothing** to stdout or stderr, which is a better thing
+  for a back-office library to be than "ships an opinionated log line", and it retires the
+  `tracing`-vs-`log`-dependency question before it is asked. The middleware was a dozen lines every app
+  wants slightly differently — structured event or stderr line, path or path+query, and a **level**, which
+  a hardcoded `eprintln!` cannot have. `resolve_real_ip` stays because it is the opposite case: mandatory,
+  security-relevant, and coupled to `auth`.
+  A **principal** in that line is the app's call too, and the example shows both ways: a handler writing an
+  `Actor` into the response extensions (free, opt-in per route) or the layer calling `Auth::identify`
+  (names every session-authenticated request, costs a lookup on each). Neither can name an **API token**
+  caller — that credential is verified *inside* the handler, so a request that **fails** auth, the one most
+  worth naming, never gets far enough to contribute anything. For those the two-line pattern is strictly
+  more informative: the access line says a request arrived, the handler's line says who it was and whether
+  it succeeded. They need no correlation id, because the handler extracts [`RealIp`] and prints the *same
+  canonical address*.
 - **CORS — no wrapper; document it instead.** `tower_http::cors::CorsLayer` is self-contained (it answers
   preflight `OPTIONS` and sets the `Access-Control-*` headers); wrapping it would add a dependency and a
   layer of our opinions over zero logic. AUTH.md §4 carries the guidance, including the two things only
