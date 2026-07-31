@@ -45,6 +45,7 @@ use relativelylight::auth::lockout::Lockout;
 use relativelylight::auth::{self, Auth};
 use relativelylight::middleware::{resolve_real_ip, RealIp, TrustProxy};
 use sea_orm::{ConnectOptions, Database};
+use std::time::Duration;
 
 /// The username to print for a request, put in the **response** extensions by a handler that has
 /// already resolved one. That's the trick that makes the cheap variant work: the log line is written
@@ -58,10 +59,11 @@ struct Actor(String);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // An in-memory SQLite database lives inside its connection, and a pool recycles connections — so
-    // pin it to one permanent connection or the tables vanish after 30 minutes (see the CHANGELOG).
+    // An in-memory SQLite database lives inside its connection, and a pool recycles connections — so pin
+    // it to one connection that never retires, or the tables vanish after 30 minutes (see the CHANGELOG).
+    const FOREVER: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
     let mut opt = ConnectOptions::new("sqlite::memory:".to_owned());
-    opt.max_connections(1).min_connections(1);
+    opt.max_connections(1).min_connections(1).idle_timeout(FOREVER).max_lifetime(FOREVER);
     let db = Database::connect(opt).await?;
     auth::migrate(&db).await?;
     auth::make_admin(&db, "admin", "admin", "password").await?;

@@ -24,8 +24,9 @@ use relativelylight::auth::lockout::{IpLockout, Lockout, UsernameLockout};
 use relativelylight::middleware::RealIp;
 use relativelylight::auth::sso::{Sso, SsoButton, SsoProvider};
 use relativelylight::auth::{self, Auth, Identity};
-use sea_orm::{ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait, QueryFilter};
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 // The superadmin group name is the app's choice — a constant here, but it could come from config.
 // **Use the one name everywhere**: the gate / `admin_group`, the boot-time seeder, and break-glass
@@ -34,7 +35,15 @@ const ADMIN_GROUP: &str = "superadmin";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = Database::connect("sqlite::memory:").await?;
+    // One permanent connection, deliberately: an in-memory database lives *inside* its connection, and a
+    // pool recycles connections (SeaORM defaults to a 30-minute `max_lifetime` and a 10-minute
+    // `idle_timeout`) — so retiring it would take `auth_user` with it, and this demo would answer
+    // "no such table" half an hour after it started working. A second connection would open its own empty
+    // database and be just as bad. A real app points at a file or a server and needs none of this.
+    const FOREVER: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
+    let mut opt = ConnectOptions::new("sqlite::memory:".to_owned());
+    opt.max_connections(1).min_connections(1).idle_timeout(FOREVER).max_lifetime(FOREVER);
+    let db = Database::connect(opt).await?;
     auth::migrate(&db).await?;
 
     // How an app wires a `--set-admin-pw` CLI flag: **break-glass** admin recovery — create-or-reset
