@@ -39,9 +39,9 @@ The core is backend- and transport-agnostic; SeaORM is one backend behind a smal
 ## Quick start
 
 ```toml
-# Cargo.toml  (not yet on crates.io — use a path or git dependency)
+# Cargo.toml
 [dependencies]
-relativelylight = { path = "relativelylight", features = ["ui", "openapi", "csv"] }
+relativelylight = { version = "0.2", features = ["ui", "openapi", "csv"] }
 sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 ```
 

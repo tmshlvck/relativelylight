@@ -14,7 +14,7 @@ This file is a using-it orientation. For the complete guides see **[docs/CRUD.md
 
 ```toml
 [dependencies]
-relativelylight = { version = "*", features = ["ui", "openapi", "csv", "auth"] }
+relativelylight = { version = "0.2", features = ["ui", "openapi", "csv", "auth"] }
 sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 ```
 
