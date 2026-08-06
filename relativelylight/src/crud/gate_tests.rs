@@ -65,6 +65,7 @@ impl Accessor for Stub {
             description: None,
             default: None,
             display: None,
+            sortable: true,
         };
         let mut status = field("status", true);
         if let Column::Field { options, .. } = &mut status {

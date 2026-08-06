@@ -38,6 +38,7 @@ fn field(name: &str, required: bool, read_only: bool, default: Option<Value>) ->
         description: None,
         default,
         display: None,
+        sortable: true,
     }
 }
 
@@ -68,6 +69,7 @@ impl Accessor for MockPost {
                 description: None,
                 default: None,
                 display: None,
+                sortable: true,
             },
             Column::Relation {
                 name: "author".into(),
@@ -77,6 +79,7 @@ impl Accessor for MockPost {
                 read_only: false,
                 label: None,
                 description: None,
+                sortable: true,
             },
         ]
     }
@@ -302,6 +305,7 @@ impl Accessor for MockWidgets {
                 description: None,
                 default: None,
                 display: d,
+                sortable: true,
             }
         };
         vec![
@@ -475,4 +479,65 @@ async fn an_edit_form_is_gated_on_update_not_create() {
 fn an_unregistered_entity_is_an_error() {
     let e = engine();
     assert!(matches!(Form::new(&e, "nope").render(), Err(Error::NotFound)));
+}
+
+// ---------- Table: sorting + filtering render-time checks ----------
+
+use super::ui::{Admin, Table};
+
+#[test]
+fn a_table_refuses_an_initial_sort_the_api_would_reject() {
+    let e = engine();
+    // Naming a column that isn't there, or one the engine won't order by, must be an error at render
+    // rather than a header whose first click returns a 400.
+    let err = Table::new(&e, "post").sort("nope").render().unwrap_err();
+    assert!(err.to_string().contains("nope"), "names the offender: {err}");
+
+    Table::new(&e, "post").sort("title").sort_desc("author").render().expect("both are sortable");
+}
+
+#[test]
+fn a_table_refuses_a_filter_on_something_it_has_no_column_for() {
+    let e = engine();
+    let err = Table::new(&e, "post").filter("zone").render().unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("zone"), "names the offender: {msg}");
+
+    // A filter the entity *does* have renders, and its control reaches the markup.
+    let html = Table::new(&e, "post").filter("author").render().unwrap();
+    assert!(html.contains(r#""name":"author""#), "the filter def is in the component state");
+    assert!(html.contains("filter[") , "the filter is applied to the request");
+}
+
+#[test]
+fn a_fixed_filter_is_pinned_and_not_offered_as_a_control() {
+    let e = engine();
+    let html = Table::new(&e, "post").fixed_filter("author", "7").render().unwrap();
+    assert!(html.contains(r#""fixed":"7""#), "the pinned value is in the component state");
+}
+
+#[test]
+fn the_sortable_flag_reaches_the_rendered_columns() {
+    let e = engine();
+    let html = Table::new(&e, "post").render().unwrap();
+    assert!(html.contains(r#""sortable":true"#), "the UI needs to know which headers to make active");
+    assert!(html.contains("toggleSort"), "and the header handler must be present");
+}
+
+#[test]
+fn an_admin_shared_filter_is_offered_to_every_table_that_has_the_column() {
+    let e = engine();
+    let html = Admin::new(&e).entity("post").filter("author").render().unwrap();
+    // One control in the side-panel…
+    assert!(html.contains("ruAdminFilters"), "the shared control is rendered");
+    assert!(html.contains("rl.filter."), "the choice is remembered across visits");
+    // …and the table below marks that filter as shared, so it shows a chip but no local control.
+    assert!(html.contains(r#""shared":true"#));
+}
+
+#[test]
+fn an_admin_filter_no_listed_entity_has_is_an_error() {
+    let e = engine();
+    let err = Admin::new(&e).entity("post").filter("zone").render().unwrap_err();
+    assert!(err.to_string().contains("zone"), "an inert control reads as a broken one: {err}");
 }

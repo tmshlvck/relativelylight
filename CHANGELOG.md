@@ -9,6 +9,50 @@ Work that has landed on `main` but isn't tagged yet lives under **Unreleased**; 
 heading to the version + date and adds a compare link. Per-entry commit hashes are given where a change
 is easy to miss in a diff.
 
+## Unreleased
+
+Sorting and filtering, in both the API and the admin UI — driven by what a records-management console
+needs: order the table by the *zone* column, and work inside one zone at a time.
+
+### Added
+
+- **`filter[<name>]=<value>`** — exact-match filtering on the list and bulk-delete routes. `<name>` is
+  a column **or a to-one relation** (`filter[author]=7` matches `author_id = 7`, so a caller stays in
+  the vocabulary the metadata publishes); an empty value matches rows that have none (`IS NULL`).
+  `search[<col>]=<term>` is the explicit spelling of the existing substring search. Brackets can't occur
+  in a column or relation name, so the namespace can't collide with one — and OpenAPI describes both as
+  `deepObject` parameters, so Swagger UI renders real inputs for them.
+- **Sorting by a relation's label.** `?sort=author` left-joins the target and orders by the column its
+  label comes from, so the order matches what the cells show rather than the foreign key behind them.
+  Requires the target to know that column: **`MetaModel::label_column(col)`** declares it, and at
+  registration an existing `row_label` closure is *probed* once, so the common one-column closure keeps
+  working unchanged. A label that isn't a single column, a to-many, or an N:M reports
+  `sortable: false` and 400s an attempt, rather than ordering by a guess.
+- **`sortable`** on every published column in the metadata, so a UI knows which headers to activate.
+- **Admin UI: sortable headers** (asc → desc → off, shift-click for a secondary key) and
+  **`Table::sort` / `sort_desc`** for the initial order. A `.sort()` naming a column the API won't
+  order by is a render-time error, not a header that fails on first click.
+- **Admin UI: filters.** `Table::filter(name)` adds a toolbar control (dropdown, enum options, Yes/No,
+  or a live search box for a large relation target); `Table::fixed_filter(name, value)` pins one with no
+  control. The choice reaches the listing, the **CSV export** and **"delete all matching"** alike, shows
+  as a chip above the table, and pre-selects the value when creating a row.
+- **`Admin::filter(name)`** — one side-panel control applied to every listed table that has that column,
+  remembered in `localStorage` and mirrored to the URL fragment so a filtered admin can be linked to.
+  Tables without the column ignore it. This is what makes an admin of many same-shaped tables usable.
+
+### Fixed
+
+- **Paginating an unsorted or tied listing could repeat and skip rows.** There was no fallback
+  `ORDER BY`, so the order *within* a tie was the database's choice and needn't be the same for the
+  page-1 and page-2 queries. The primary key is now appended as a final sort key, making every ordering
+  total. `NULL`s now sort last on every backend (SQLite put them first on `ASC`, PostgreSQL last).
+- **`?<col>=<value>` on a non-text column now answers 400** instead of a wrong answer or a crash. It
+  became `<col> LIKE '%value%'`, which on SQLite matched too much (`?zone_id=3` also matching 13, 30 and
+  103) and on PostgreSQL was a type error (a 500). Use `filter[<col>]` for an exact match. Text columns
+  are unchanged.
+- Repeated query parameters no longer drop all but the last: the list handlers took a `HashMap`, so
+  `?search[a]=x&search[b]=y` silently applied only one condition.
+
 ## [0.2.0] — 2026-08-01
 
 This cycle turns security defaults *on*, which is a behaviour break for anything already using `auth`:

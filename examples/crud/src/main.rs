@@ -56,6 +56,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     post_mm.relate(&tag_mm);
     tag_mm.relate(&post_mm);
 
+    // Label author rows by their name — and, because the column is *declared* rather than computed in
+    // a closure, `post` can be sorted by its `author` column: the engine turns `?sort=author` into an
+    // ORDER BY on `author.name`, so the order matches the labels on screen. A model whose label isn't a
+    // single column simply reports the relation as unsortable instead of guessing.
+    author_mm.label_column("name");
+
     // Per-field presentation config (labels / help text / create defaults) — demo of the hooks.
     post_mm.field("title").label = Some("Title".into());
     post_mm.field("title").description = Some("The post headline (required).".into());
@@ -169,6 +175,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "title",
                 r#"(v, row) => `<a href="/post/${row.id}/edit">${v}</a>`"#,
             );
+            // A filter on a *relation*: the toolbar gets an author picker, and choosing one narrows
+            // the listing, the CSV export and "delete all matching" alike. Sorting by `author` orders
+            // by the name shown in the cell rather than the foreign key — `author_mm.label_column`
+            // below is what makes that possible.
+            table = table.filter("author").sort("title");
         }
         let table = table.render()?;
         let page = Shell {

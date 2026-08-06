@@ -77,8 +77,16 @@ let html = relativelylight::crud::ui::Admin::new(crud.engine())
     .render()?;                                   // or .render_for(&headers) to gate write controls
 ```
 
-`Table` renders one entity (search, pager, create/edit modal, relation pickers, bulk delete, CSV,
-custom cell renderers); `Admin` composes many `Table`s behind a side-panel.
+`Table` renders one entity (search, **sortable headers**, **filters**, pager, create/edit modal, relation
+pickers, bulk delete, CSV, custom cell renderers); `Admin` composes many `Table`s behind a side-panel.
+
+**Sorting and filtering** work on relations, not just columns. `?sort=author` orders by the label the
+cell *shows* (a join onto the target's label column — declare it with `MetaModel::label_column`, or keep
+your `row_label` closure, which is probed at registration); `?filter[author]=7` is an exact match on the
+FK behind the relation name. In the UI: `Table::sort` / `filter` / `fixed_filter`, and
+`Admin::filter("zone")` for one side-panel control that filters *every* listed table that has that
+column — the shape that matters when an admin lists many tables of the same kind. A filter applies to
+the CSV export and "delete all matching" too, so no button acts on a wider set than the one on screen.
 
 **`Form` is the same form standalone**, for your app's *own* pages rather than the admin — the building
 block `Table` and `Admin` are assembled from (they share the widget + behaviour partials, so a fix lands

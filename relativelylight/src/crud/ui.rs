@@ -41,9 +41,15 @@ struct TableTemplate {
     formatters: String, // JS object literal: { "col": (value, row) => htmlString, … }
     /// CSRF cookie name to echo in write requests, or empty when the engine doesn't enforce CSRF.
     csrf_cookie: String,
+    /// JS array literal of filter controls: `[{name, fixed, shared}]` (`fixed` = a pinned value the
+    /// user can't change, else `null`).
+    filters_json: String,
+    /// JS array literal of the initial sort keys: `[{col, desc}]`.
+    sort_json: String,
 }
 
 /// A table for one registered entity, rendered as an HTML fragment for the app shell.
+#[derive(Clone)]
 pub struct Table<'a> {
     engine: &'a Engine,
     slug: String,
@@ -56,6 +62,17 @@ pub struct Table<'a> {
     confirm: bool,
     picker_threshold: u64,
     formatters: Vec<(String, String)>,
+    filters: Vec<FilterSpec>,
+    sort: Vec<(String, bool)>,
+}
+
+/// One filter control on a table: a column or relation name, optionally pinned to a value.
+#[derive(Clone)]
+struct FilterSpec {
+    name: String,
+    fixed: Option<String>,
+    /// Driven by an [`Admin`]-level control shared across tables rather than one of this table's own.
+    shared: bool,
 }
 
 impl<'a> Table<'a> {
@@ -72,6 +89,8 @@ impl<'a> Table<'a> {
             confirm: true,
             picker_threshold: 20,
             formatters: Vec::new(),
+            filters: Vec::new(),
+            sort: Vec::new(),
         }
     }
 
@@ -115,6 +134,48 @@ impl<'a> Table<'a> {
         self
     }
 
+    /// Initial sort: ascending by `column`. A relation sorts by the label its cells show — provided
+    /// the target declares which column that is (see
+    /// [`MetaModel::label_column`](crate::crud::seaorm::MetaModel::label_column)); a column the API
+    /// won't sort by is a render-time error naming it. Call repeatedly for secondary keys.
+    pub fn sort(mut self, column: impl Into<String>) -> Self {
+        self.sort.push((column.into(), false));
+        self
+    }
+    /// Initial sort: descending by `column`. See [`sort`](Table::sort).
+    pub fn sort_desc(mut self, column: impl Into<String>) -> Self {
+        self.sort.push((column.into(), true));
+        self
+    }
+
+    /// A filter control in the toolbar, narrowing the table to rows whose `name` equals the chosen
+    /// value. `name` is a column or a to-one relation — `filter("zone")` on a records table gives a
+    /// zone picker, reusing the same widget the form's relation field uses (a `<select>`, or a live
+    /// search box once the target outgrows [`picker_threshold`](Table::picker_threshold)).
+    ///
+    /// The choice applies to the listing, the CSV export and "delete all matching" alike, so the
+    /// buttons can't act on a wider set than the one on screen, and it shows as a chip above the table
+    /// — a filtered table that looked unfiltered is how someone concludes their rows were deleted.
+    pub fn filter(mut self, name: impl Into<String>) -> Self {
+        self.filters.push(FilterSpec { name: name.into(), fixed: None, shared: false });
+        self
+    }
+
+    /// A filter pinned to one value and not offered as a control — a table that is *about* one zone,
+    /// e.g. on a `/zone/{id}/records` page.
+    ///
+    /// This narrows a **view**, it is not an authorization boundary: the API is still queryable for
+    /// other values by anyone the model's gate admits. Scoping who may see what is
+    /// [`authz`](crate::authz)'s job.
+    pub fn fixed_filter(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.filters.push(FilterSpec {
+            name: name.into(),
+            fixed: Some(value.into()),
+            shared: false,
+        });
+        self
+    }
+
     /// Custom cell renderer for a column, as a JS arrow function `(value, row) => htmlString`
     /// (the returned HTML is inserted verbatim, so escape any untrusted content yourself). Overrides
     /// the default rendering for that column — e.g. turn a name into a link:
@@ -141,7 +202,10 @@ impl<'a> Table<'a> {
     }
 
     fn render_inner(&self, editable: bool) -> Result<String> {
-        check_widgets(&self.slug, &self.engine.columns(&self.slug)?)?;
+        let cols = self.engine.columns(&self.slug)?;
+        check_widgets(&self.slug, &cols)?;
+        check_sort(&self.slug, &cols, &self.sort)?;
+        let filters = self.applicable_filters(&cols)?;
         let desc = self.engine.meta_one(&self.slug)?;
         let columns_json = desc
             .get("columns")
@@ -169,8 +233,53 @@ impl<'a> Table<'a> {
             picker_threshold: self.picker_threshold,
             formatters,
             csrf_cookie: self.engine.csrf_cookie_name().unwrap_or_default().to_string(),
+            filters_json: Value::Array(
+                filters
+                    .iter()
+                    .map(|f| {
+                        serde_json::json!({
+                            "name": f.name,
+                            "fixed": f.fixed,
+                            "shared": f.shared,
+                        })
+                    })
+                    .collect(),
+            )
+            .to_string(),
+            sort_json: Value::Array(
+                self.sort
+                    .iter()
+                    .map(|(c, d)| serde_json::json!({ "col": c, "desc": d }))
+                    .collect(),
+            )
+            .to_string(),
         };
         tmpl.render().map_err(|e| Error::Backend(e.to_string()))
+    }
+
+    /// The filters this table will actually render.
+    ///
+    /// A filter named directly is an error if the entity has no such column or relation — a silently
+    /// dropped control would leave the operator filtering nothing and not knowing it. A **shared**
+    /// filter is different: [`Admin`] offers one control to every table it lists, and most of them
+    /// legitimately have no such column, so those are skipped rather than refused.
+    fn applicable_filters(&self, cols: &[Column]) -> Result<Vec<FilterSpec>> {
+        let mut out = Vec::new();
+        for f in &self.filters {
+            let known = cols.iter().any(|c| match c {
+                Column::Field { name, .. } => *name == f.name,
+                Column::Relation { name, fk_column, .. } => *name == f.name && fk_column.is_some(),
+            });
+            if known {
+                out.push(f.clone());
+            } else if !f.shared {
+                return Err(Error::BadRequest(format!(
+                    "crud::ui({}): cannot filter by '{}': no such column or to-one relation",
+                    self.slug, f.name
+                )));
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -178,6 +287,32 @@ impl<'a> Table<'a> {
 /// `Range` on text, a `Textarea` on a number. Checked by **both** hosts at render time, because the
 /// alternative is a form quietly showing a different input than the model asked for, which is the sort of
 /// thing that's noticed in production and not in review. See [`FieldDisplay::fits`].
+/// Refuse an initial sort the API would reject, naming the column — same reasoning as
+/// [`check_widgets`]: a table that silently ignored `.sort("zone")` would look like it worked.
+fn check_sort(slug: &str, cols: &[Column], sort: &[(String, bool)]) -> Result<()> {
+    for (want, _) in sort {
+        let found = cols.iter().find(|c| match c {
+            Column::Field { name, .. } | Column::Relation { name, .. } => name == want,
+        });
+        let ok = match found {
+            Some(Column::Field { sortable, .. }) | Some(Column::Relation { sortable, .. }) => {
+                *sortable
+            }
+            None => {
+                return Err(Error::BadRequest(format!(
+                    "crud::ui({slug}): cannot sort by '{want}': no such column or relation"
+                )))
+            }
+        };
+        if !ok {
+            return Err(Error::BadRequest(format!(
+                "crud::ui({slug}): column '{want}' is not sortable"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn check_widgets(slug: &str, cols: &[Column]) -> Result<()> {
     for c in cols {
         if let Column::Field { name, logical_type, options, display: Some(d), .. } = c {
@@ -523,6 +658,17 @@ struct AdminPanel {
     html: String,
 }
 
+/// A side-panel filter control shared by every table that has the named column.
+struct AdminFilter {
+    name: String,
+    label: String,
+    /// Terse list URL of the relation's target, for the picker; empty when the filter is a plain
+    /// column rather than a relation.
+    list_url: String,
+    /// JS array of `{id,label}` for an enum column; `[]` otherwise.
+    options_json: String,
+}
+
 #[derive(Template)]
 #[template(path = "admin.html")]
 struct AdminTemplate {
@@ -531,6 +677,12 @@ struct AdminTemplate {
     nav: Vec<AdminNav>,
     panels: Vec<AdminPanel>,
     first: String,
+    filters: Vec<AdminFilter>,
+    picker_threshold: u64,
+    /// JS array of the shared filter names, for the pre-Alpine restore script.
+    filter_names_json: String,
+    /// JS array of `{name, list_url, options}` for the side-panel controls.
+    filter_defs_json: String,
 }
 
 enum AdminItem<'a> {
@@ -560,11 +712,26 @@ pub struct Admin<'a> {
     engine: &'a Engine,
     title: Option<String>,
     items: Vec<AdminItem<'a>>,
+    filters: Vec<String>,
 }
 
 impl<'a> Admin<'a> {
     pub fn new(engine: &'a Engine) -> Self {
-        Self { engine, title: None, items: Vec::new() }
+        Self { engine, title: None, items: Vec::new(), filters: Vec::new() }
+    }
+
+    /// One filter control in the side-panel, applied to **every** listed table that has a column or
+    /// to-one relation of that name; tables without one are unaffected.
+    ///
+    /// This is the shape that matters when an admin lists many tables of the same shape — fifteen
+    /// per-type DNS record tables, say. An operator works inside one zone at a time, so they pick it
+    /// once here rather than re-picking it on every table they switch to. The choice is remembered
+    /// across visits and travels in the URL fragment, so a filtered admin can be linked to.
+    ///
+    /// Like [`Table::fixed_filter`], this narrows a **view** and is not an authorization boundary.
+    pub fn filter(mut self, name: impl Into<String>) -> Self {
+        self.filters.push(name.into());
+        self
     }
 
     /// Heading shown above the side-panel.
@@ -641,7 +808,7 @@ impl<'a> Admin<'a> {
 
     /// Build the side-panel nav (in item order), the first entity slug, and the entity tables (in
     /// order) — everything except the rendered panel HTML, which the caller renders sync or async.
-    fn nav_and_entities(&self) -> (Vec<AdminNav>, String, Vec<&Table<'a>>) {
+    fn nav_and_entities(&self) -> (Vec<AdminNav>, String, Vec<Table<'a>>) {
         let mut nav = Vec::new();
         let mut first = String::new();
         let mut entities = Vec::new();
@@ -654,6 +821,16 @@ impl<'a> Admin<'a> {
                         first = slug.clone();
                     }
                     nav.push(AdminNav { kind: "entity", slug, label, href: String::new() });
+                    // Offer every shared filter to every table; `applicable_filters` drops the ones
+                    // this entity has no column for (most of them, usually) without complaining.
+                    let mut table = table.clone();
+                    for name in &self.filters {
+                        table.filters.push(FilterSpec {
+                            name: name.clone(),
+                            fixed: None,
+                            shared: true,
+                        });
+                    }
                     entities.push(table);
                 }
                 AdminItem::Group(name) => nav.push(AdminNav {
@@ -680,14 +857,96 @@ impl<'a> Admin<'a> {
     }
 
     fn assemble(&self, nav: Vec<AdminNav>, first: String, panels: Vec<AdminPanel>) -> Result<String> {
+        let filters = self.shared_filters()?;
+        let filter_names_json =
+            Value::Array(filters.iter().map(|f| Value::String(f.name.clone())).collect()).to_string();
+        let filter_defs: Vec<String> = filters
+            .iter()
+            .map(|f| {
+                format!(
+                    r#"{{"name": {}, "list_url": {}, "options": {}}}"#,
+                    Value::String(f.name.clone()),
+                    Value::String(f.list_url.clone()),
+                    f.options_json,
+                )
+            })
+            .collect();
         AdminTemplate {
             has_title: self.title.is_some(),
             title: self.title.clone().unwrap_or_default(),
             nav,
             panels,
             first,
+            filters,
+            picker_threshold: 20,
+            filter_names_json,
+            filter_defs_json: format!("[{}]", filter_defs.join(", ")),
         }
         .render()
         .map_err(|e| Error::Backend(e.to_string()))
+    }
+
+    /// Resolve each shared filter against the listed entities: what to label it, and where its choices
+    /// come from. A name no listed entity has is an error — the control would be inert, and an inert
+    /// filter reads as a broken one.
+    fn shared_filters(&self) -> Result<Vec<AdminFilter>> {
+        let slugs: Vec<String> = self
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                AdminItem::Entity(t) => Some(t.slug.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut out = Vec::new();
+        for name in &self.filters {
+            let mut found = None;
+            for slug in &slugs {
+                let Ok(cols) = self.engine.columns(slug) else { continue };
+                for c in cols {
+                    match &c {
+                        Column::Relation { name: n, target, fk_column: Some(_), label, .. }
+                            if n == name =>
+                        {
+                            found = Some(AdminFilter {
+                                name: name.clone(),
+                                label: label.clone().unwrap_or_else(|| name.clone()),
+                                list_url: self.engine.entity_url(target),
+                                options_json: "[]".into(),
+                            });
+                        }
+                        Column::Field { name: n, options, label, .. } if n == name => {
+                            found = Some(AdminFilter {
+                                name: name.clone(),
+                                label: label.clone().unwrap_or_else(|| name.clone()),
+                                list_url: String::new(),
+                                options_json: Value::Array(
+                                    options
+                                        .iter()
+                                        .map(|o| serde_json::json!({ "id": o, "label": o }))
+                                        .collect(),
+                                )
+                                .to_string(),
+                            });
+                        }
+                        _ => continue,
+                    }
+                    break;
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+            match found {
+                Some(f) => out.push(f),
+                None => {
+                    return Err(Error::BadRequest(format!(
+                        "crud::ui(Admin): cannot filter by '{name}': no listed entity has such a \
+                         column or to-one relation"
+                    )))
+                }
+            }
+        }
+        Ok(out)
     }
 }

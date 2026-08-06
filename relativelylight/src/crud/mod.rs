@@ -13,6 +13,10 @@ pub mod seaorm;
 #[cfg(all(test, feature = "axum", feature = "auth"))]
 mod gate_tests;
 
+/// Listing over a real database: sorting by a relation's label, `filter[…]`, page stability.
+#[cfg(all(test, feature = "axum"))]
+mod list_tests;
+
 #[cfg(feature = "ui")]
 pub mod ui;
 

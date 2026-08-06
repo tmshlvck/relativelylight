@@ -8,7 +8,8 @@
 use crate::crud::engine::{Cardinality, Column, Engine, LogicalType};
 use utoipa::openapi::content::{Content, ContentBuilder};
 use utoipa::openapi::path::{
-    HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn, PathItem, PathsBuilder,
+    HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn, ParameterStyle, PathItem,
+    PathsBuilder,
 };
 use utoipa::openapi::request_body::{RequestBody, RequestBodyBuilder};
 use utoipa::openapi::schema::{
@@ -231,6 +232,31 @@ fn query(name: &str) -> utoipa::openapi::path::Parameter {
         .build()
 }
 
+/// A bracketed parameter family — `filter[zone]=7`, `search[title]=hello`.
+///
+/// `deepObject` is what OpenAPI calls this shape, and it is the reason the brackets were chosen over a
+/// `filter.zone` prefix: the dot form is equally collision-proof but nothing in the schema can describe
+/// it, so a generated client (or the Swagger UI this crate's `/docs` example serves) would only ever
+/// learn about it from prose. `additionalProperties` carries the per-entity key list in the
+/// description, since the keys are the entity's own columns.
+fn deep_object(name: &str, description: &str, keys: &[String]) -> utoipa::openapi::path::Parameter {
+    let keys = if keys.is_empty() { "—".to_string() } else { keys.join(", ") };
+    ParameterBuilder::new()
+        .name(name)
+        .parameter_in(ParameterIn::Query)
+        .required(Required::False)
+        .style(Some(ParameterStyle::DeepObject))
+        .explode(Some(true))
+        .description(Some(format!("{description} Keys: {keys}.")))
+        .schema(Some(
+            ObjectBuilder::new()
+                .schema_type(SchemaType::Type(Type::Object))
+                .additional_properties(Some(str_schema()))
+                .build(),
+        ))
+        .build()
+}
+
 fn id_param() -> utoipa::openapi::path::Parameter {
     ParameterBuilder::new()
         .name("id")
@@ -238,6 +264,42 @@ fn id_param() -> utoipa::openapi::path::Parameter {
         .required(Required::True)
         .schema(Some(str_schema()))
         .build()
+}
+
+/// Names `filter[…]` accepts: every published field, plus each to-one relation (which resolves to the
+/// FK column behind it — the FK itself is hidden from the published columns, so the relation name is
+/// the only spelling a caller has).
+fn filter_keys(cols: &[Column]) -> Vec<String> {
+    cols.iter()
+        .filter_map(|c| match c {
+            Column::Field { name, write_only: false, .. } => Some(name.clone()),
+            Column::Relation { name, fk_column: Some(_), .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Names `search[…]` accepts — substring matching only means something on text.
+fn search_keys(cols: &[Column]) -> Vec<String> {
+    cols.iter()
+        .filter_map(|c| match c {
+            Column::Field { name, logical_type, write_only: false, .. } if logical_type.is_text() => {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Names `sort` accepts, relations included.
+fn sort_keys(cols: &[Column]) -> Vec<String> {
+    cols.iter()
+        .filter_map(|c| match c {
+            Column::Field { name, sortable: true, write_only: false, .. }
+            | Column::Relation { name, sortable: true, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Build an OpenAPI document describing the registered entities' CRUD endpoints + payload schemas.
@@ -255,17 +317,38 @@ pub fn build(engine: &Engine, title: &str) -> OpenApi {
         let list = engine.entity_url(&slug);
         let item = format!("{list}/{{id}}");
 
+        let filter_p = |d| deep_object("filter", d, &filter_keys(&cols));
+        let search_p = || deep_object("search", "Substring match on one column.", &search_keys(&cols));
+
         let list_op = OperationBuilder::new()
             .tag(slug.clone())
             .summary(Some(format!("List {slug}")))
             .parameter(query("q"))
-            .parameter(query("sort"))
+            .parameter(filter_p(
+                "Exact match. A relation name matches its foreign key; an empty value matches rows \
+                 that have none.",
+            ))
+            .parameter(search_p())
+            .parameter(
+                ParameterBuilder::new()
+                    .name("sort")
+                    .parameter_in(ParameterIn::Query)
+                    .required(Required::False)
+                    .description(Some(format!(
+                        "Comma-separated sort keys, each optionally `:desc` — e.g. `a:desc,b`. \
+                         A relation sorts by the label shown for it. Sortable: {}.",
+                        sort_keys(&cols).join(", ")
+                    )))
+                    .schema(Some(str_schema()))
+                    .build(),
+            )
             .parameter(query("page"))
             .parameter(query("per_page"))
             .parameter(query("view"))
             .parameter(query("all"))
             .parameter(query("format"))
             .responses(json_response("200", "A page of rows", page_schema(&slug)))
+
             .build();
         let create_op = OperationBuilder::new()
             .tag(slug.clone())
@@ -277,6 +360,8 @@ pub fn build(engine: &Engine, title: &str) -> OpenApi {
             .tag(slug.clone())
             .summary(Some(format!("Bulk delete {slug}")))
             .parameter(query("q"))
+            .parameter(filter_p("Exact match — deletes only the matching rows."))
+            .parameter(search_p())
             .parameter(query("ids"))
             .parameter(query("all"))
             .responses(json_response("200", "Number of rows deleted", deleted_schema()))
@@ -358,6 +443,7 @@ mod tests {
             description: None,
             default: None,
             display: None,
+            sortable: true,
         };
         let cols = vec![field("name", false), field("nickname", true)];
 

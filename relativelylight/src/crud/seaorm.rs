@@ -7,12 +7,14 @@ use crate::crud::engine::{
     FieldDisplay, ListQuery, LogicalType, Page, Result, RowItem, ValidationErrors,
 };
 use async_trait::async_trait;
-use sea_orm::sea_query::{Alias, DynIden, Expr, Query, TableRef};
+use sea_orm::sea_query::{
+    Alias, ConditionType, DynIden, Expr, IntoIden, JoinType, NullOrdering, Query, TableRef,
+};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ColumnType, Condition, ConnectionTrait, DatabaseConnection,
     DbErr, EntityName, EntityTrait, IdenStatic, Identity, IntoActiveModel, Iterable, ModelTrait,
     Order, PaginatorTrait, PrimaryKeyToColumn, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
-    Related, RelationTrait, RelationType, SqlErr, TransactionTrait, Value as DbValue,
+    Related, RelationDef, RelationTrait, RelationType, SqlErr, TransactionTrait, Value as DbValue,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -498,6 +500,9 @@ trait SeaRow: Send + Sync {
     fn slug(&self) -> &str;
     fn pk_col(&self) -> String;
     fn label_of(&self, raw: &Value) -> String;
+    /// The column `label_of` reads, when it reads exactly one — what lets an entity pointing *here*
+    /// turn `?sort=<relation>` into an `ORDER BY` on this table. `None` = not sortable through.
+    fn label_col(&self) -> Option<String>;
     async fn get_raw(&self, pk: &str) -> Result<Option<Value>>;
     async fn list_by(&self, col: &str, val: &Value) -> Result<Vec<Value>>;
 }
@@ -542,6 +547,12 @@ pub struct MetaModel<E: EntityTrait> {
     pub slug: String,
     pub row_label: RowLabel,
     pub validate_row: Option<RowValidator>,
+    /// The column `row_label` reads, when it reads exactly one — which is what makes a *pointing*
+    /// relation sortable (`ORDER BY <target>.<label_col>`). Set explicitly by
+    /// [`label_column`](MetaModel::label_column), otherwise discovered at registration by
+    /// [`probe_label_column`]. `None` means "the label isn't a column", and relations pointing here
+    /// report `sortable: false`.
+    label_col: Option<String>,
     table: String,
     fields: Vec<MetaField>,
     relations: Vec<MetaRelation>,
@@ -611,6 +622,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
             slug,
             row_label: Box::new(default_label),
             validate_row: None,
+            label_col: None,
             table,
             fields,
             relations,
@@ -631,6 +643,44 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
     }
     pub fn relation(&mut self, name: &str) -> &mut MetaRelation {
         self.relations.iter_mut().find(|r| r.name == name).unwrap_or_else(|| panic!("no relation '{name}'"))
+    }
+
+    /// Label rows by one column, and make relations *pointing at this model* sortable by it.
+    ///
+    /// Sets `row_label` to read `col` and records the name, so another entity's `?sort=<relation>`
+    /// can become `ORDER BY <this table>.<col>` — see [`Column::Relation::sortable`]. Equivalent to
+    /// assigning `row_label` yourself, except that the sort survives:
+    ///
+    /// ```ignore
+    /// zone.label_column("origin");                                   // labelled *and* sortable
+    /// zone.row_label = Box::new(|r| r["origin"].as_str().unwrap_or_default().into()); // same label
+    /// ```
+    ///
+    /// The second form is not second-class — registration probes `row_label` and recognises a closure
+    /// that reads a single column, so the two behave alike. Declaring it is simply the version that
+    /// can't be broken by an edit to the closure.
+    ///
+    /// Panics if `col` isn't a column of this entity, matching [`field`](MetaModel::field).
+    pub fn label_column(&mut self, col: &str) -> &mut Self {
+        if !self.fields.iter().any(|f| f.name == col) {
+            panic!("relativelylight: no field '{col}' on '{}' to label rows by", self.slug);
+        }
+        let owned = col.to_string();
+        self.row_label = Box::new(move |row: &Value| match row.get(&owned) {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Null) | None => String::new(),
+            Some(other) => other.to_string(),
+        });
+        self.label_col = Some(col.to_string());
+        self
+    }
+
+    /// Settle `label_col` at registration — after the app has finished configuring the model, which is
+    /// the earliest moment `row_label` is final.
+    fn resolve_label_column(&mut self) {
+        if self.label_col.is_none() {
+            self.label_col = probe_label_column(&self.fields, &self.row_label);
+        }
     }
 
     /// Declare a relation to another model (required for N:M). Chainable.
@@ -700,6 +750,9 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                     description: f.description.clone(),
                     default: f.default.clone(),
                     display: f.display,
+                    // `Json`/`Other` order by whatever the backend's internal representation happens
+                    // to compare as — a total order, but not one that means anything to a reader.
+                    sortable: !matches!(f.logical_type, LogicalType::Json | LogicalType::Other),
                 });
             }
         }
@@ -823,7 +876,51 @@ fn relation_column(r: &MetaRelation) -> Column {
         read_only: r.read_only,
         label: r.label.clone(),
         description: r.description.clone(),
+        // Filled in by `SeaAccessor::columns`, which can ask the registry whether the *target* has a
+        // label column. A bare `MetaModel` can't know: the target is another model entirely.
+        sortable: false,
     }
+}
+
+/// Discover which column (if any) `row_label` reads, by calling it once on a synthetic row.
+///
+/// Each text-ish column gets a distinct sentinel; the label that comes back either **is** one of them —
+/// in which case the closure is "read that column", and an `ORDER BY` on it reproduces exactly the
+/// order a reader sees — or it isn't, and relations pointing at this model are simply not sortable.
+///
+/// Probing beats assuming. `row_label` is a public field with no setter to hook, so a model that
+/// overrode it is indistinguishable from one that didn't; picking a likely-looking column by name
+/// instead would order the list by a column whose values are not the ones on screen, which is worse
+/// than refusing. It also means an app that already assigns the common one-column closure gets
+/// sortable relations without changing a line.
+///
+/// Non-text columns get a type-appropriate value rather than a sentinel, so a closure like
+/// `|r| r["ttl"].as_i64().unwrap()` doesn't panic on the probe row; a label built from a number is
+/// not something we would order as text anyway.
+fn probe_label_column(fields: &[MetaField], row_label: &RowLabel) -> Option<String> {
+    let mut probe = Map::new();
+    let mut sentinels: Vec<(String, String)> = Vec::new();
+    for (i, f) in fields.iter().enumerate() {
+        let v = match f.logical_type {
+            LogicalType::Text
+            | LogicalType::Uuid
+            | LogicalType::Enum
+            | LogicalType::Date
+            | LogicalType::DateTime => {
+                // Control characters at both ends: no real label can collide with it by accident.
+                let s = format!("\u{1}rl-label-probe-{i}\u{1}");
+                sentinels.push((f.name.clone(), s.clone()));
+                Value::String(s)
+            }
+            LogicalType::Int => json!(0),
+            LogicalType::Float => json!(0.0),
+            LogicalType::Bool => json!(false),
+            LogicalType::Json | LogicalType::Other => Value::Null,
+        };
+        probe.insert(f.name.clone(), v);
+    }
+    let got = row_label(&Value::Object(probe));
+    sentinels.into_iter().find(|(_, s)| *s == got).map(|(name, _)| name)
 }
 
 struct RawRel {
@@ -868,6 +965,43 @@ where
     E::Model: Serialize + Sync,
     E::ActiveModel: ActiveModelTrait<Entity = E>,
 {
+    /// Resolve a relation name from `?sort=` into the relation and the target column its label comes
+    /// from — or say, specifically, why that relation can't be ordered.
+    fn sortable_relation(&self, name: &str) -> Result<(&MetaRelation, String)> {
+        let rel = self
+            .model
+            .relations
+            .iter()
+            .find(|r| r.name == name)
+            .ok_or_else(|| Error::BadRequest(format!("unknown column: {name}")))?;
+        if !rel.owns_fk || rel.cardinality != Cardinality::ToOne {
+            return Err(Error::BadRequest(format!(
+                "cannot sort by '{name}': a row has many {name}, so there is no single label to order on"
+            )));
+        }
+        let label_col = self
+            .registry
+            .by_table(&rel.target)
+            .and_then(|t| t.label_col())
+            .ok_or_else(|| {
+                Error::BadRequest(format!(
+                    "cannot sort by '{name}': its label is not a single column of '{}' \
+                     (declare one with MetaModel::label_column)",
+                    rel.target
+                ))
+            })?;
+        Ok((rel, label_col))
+    }
+
+    /// The FK column behind a to-one relation name, if `name` is one — `"zone"` → `"zone_id"`.
+    fn fk_column_of(&self, name: &str) -> Option<String> {
+        self.model
+            .relations
+            .iter()
+            .find(|r| r.name == name && r.owns_fk && r.cardinality == Cardinality::ToOne)
+            .and_then(|r| r.fk_column.clone())
+    }
+
     /// Build the query condition from a `ListQuery` (shared by `list` and `delete_many`).
     fn build_condition(&self, q: &ListQuery) -> Result<Condition> {
         let mut cond = Condition::all();
@@ -876,6 +1010,14 @@ where
                 Some(name) => {
                     let c = column::<E>(name)
                         .ok_or_else(|| Error::BadRequest(format!("unknown column: {name}")))?;
+                    // A substring match only means something on text. On an int/bool/date column it
+                    // silently matched the wrong rows on SQLite (`3` also matching 13, 30, 103) and
+                    // was a type error on PostgreSQL, so it is refused rather than guessed at.
+                    if !logical_type(c.def().get_column_type()).is_text() {
+                        return Err(Error::BadRequest(format!(
+                            "column '{name}' is not text: use filter[{name}] for an exact match"
+                        )));
+                    }
                     cond = cond.add(c.contains(pat));
                 }
                 None => {
@@ -890,9 +1032,20 @@ where
             }
         }
         for (name, val) in &q.eq {
-            let c = column::<E>(name)
+            // A filter may name a *relation* rather than a column — `filter[zone]=7` on a record table
+            // is the FK match its user means, spelled in the vocabulary `_meta` publishes, so a caller
+            // never has to know the column is called `zone_id`.
+            let col_name = self.fk_column_of(name).unwrap_or_else(|| name.clone());
+            let c = column::<E>(&col_name)
                 .ok_or_else(|| Error::BadRequest(format!("unknown column: {name}")))?;
-            cond = cond.add(c.eq(str_to_db(c.def().get_column_type(), val)));
+            // An empty value means "no value" — `filter[zone]=` finds the rows with no zone, which an
+            // equality can't otherwise express. Clearing a filter in the UI drops the key entirely, so
+            // the two stay distinct.
+            cond = cond.add(if val.is_empty() {
+                c.is_null()
+            } else {
+                c.eq(str_to_db(c.def().get_column_type(), val))
+            });
         }
         if !q.pk_in.is_empty() {
             let name = self.model.pk.first().cloned().unwrap_or_default();
@@ -1025,6 +1178,9 @@ where
     fn label_of(&self, raw: &Value) -> String {
         (self.model.row_label)(raw)
     }
+    fn label_col(&self) -> Option<String> {
+        self.model.label_col.clone()
+    }
     async fn get_raw(&self, pk: &str) -> Result<Option<Value>> {
         let model = E::find().filter(pk_condition::<E>(pk)?).one(&self.db).await?;
         Ok(model.map(|m| serde_json::to_value(m).unwrap()))
@@ -1124,7 +1280,15 @@ where
                     read_only,
                     label,
                     description,
+                    ..
                 } => Column::Relation {
+                    // Sortable exactly when the cell's label can be turned into an `ORDER BY`: one
+                    // target row per row (so there is a single label to order on), reached through a
+                    // column of *this* table (so it can be joined), and a target that knows which of
+                    // its columns the label comes from.
+                    sortable: cardinality == Cardinality::ToOne
+                        && fk_column.is_some()
+                        && self.registry.by_table(&target).and_then(|t| t.label_col()).is_some(),
                     target: self.registry.slug_for(&target).unwrap_or(target),
                     name,
                     cardinality,
@@ -1141,9 +1305,48 @@ where
     async fn list(&self, q: &ListQuery, terse: bool) -> Result<Page> {
         let mut sel = E::find().filter(self.build_condition(q)?);
         for (name, desc) in &q.sort {
-            let c = column::<E>(name)
-                .ok_or_else(|| Error::BadRequest(format!("unknown column: {name}")))?;
-            sel = sel.order_by(c, if *desc { Order::Desc } else { Order::Asc });
+            let ord = if *desc { Order::Desc } else { Order::Asc };
+            // SQLite sorts NULL first on ASC, PostgreSQL sorts it last. Say which, so the same query
+            // doesn't put the row with no zone at opposite ends of the list on two backends.
+            if let Some(c) = column::<E>(name) {
+                sel = sel.order_by_with_nulls(c, ord, NullOrdering::Last);
+                continue;
+            }
+            let (rel, label_col) = self.sortable_relation(name)?;
+            // Order by the label the cell actually shows, not the FK id behind it. A to-one join
+            // cannot multiply rows (the FK points at a unique key), so `total` and the page
+            // boundaries are unaffected.
+            let target = Alias::new(rel.target.clone());
+            sel = sel
+                .join(
+                    JoinType::LeftJoin,
+                    RelationDef {
+                        rel_type: RelationType::HasOne,
+                        from_tbl: TableRef::Table(Alias::new(self.model.table.clone()).into_iden()),
+                        to_tbl: TableRef::Table(target.clone().into_iden()),
+                        from_col: Identity::Unary(Alias::new(rel.from_col.clone()).into_iden()),
+                        to_col: Identity::Unary(Alias::new(rel.to_col.clone()).into_iden()),
+                        is_owner: false,
+                        on_delete: None,
+                        on_update: None,
+                        on_condition: None,
+                        fk_name: None,
+                        condition_type: ConditionType::All,
+                    },
+                )
+                .order_by_with_nulls(
+                    Expr::col((target, Alias::new(label_col))),
+                    ord,
+                    NullOrdering::Last,
+                );
+        }
+        // Always break ties on the primary key. Without it an `ORDER BY` on a non-unique column — the
+        // ttl of ten thousand records that nearly all share one value — leaves the row order inside a
+        // tie up to the database, and nothing obliges it to choose the same one for the query that
+        // fetches page 1 and the query that fetches page 2. Rows then duplicate across pages and
+        // others are never shown at all. Unique key last = every ordering total, every page stable.
+        for k in <E::PrimaryKey as Iterable>::iter() {
+            sel = sel.order_by(k.into_column(), Order::Asc);
         }
         if q.all {
             let rows = sel.all(&self.db).await?;
@@ -1330,6 +1533,10 @@ impl Crud {
         G: crate::authz::Authz + 'static,
     {
         let table = model.table.clone();
+        // Last moment the app can still have been configuring `row_label`, so the first at which
+        // asking what column it reads gives a stable answer.
+        let mut model = model;
+        model.resolve_label_column();
         let acc = Arc::new(SeaAccessor {
             db: self.db.clone(),
             model,

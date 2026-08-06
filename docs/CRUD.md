@@ -88,6 +88,7 @@ add labels/help/defaults, attach validators, or declare N:M.
 | `.relate(&other)` | mut | Declare a relation to another model — **required for N:M**. Chainable. |
 | `slug: String` | field | URL segment; default `slugify(table_name)`. Override before register. |
 | `row_label: Box<dyn Fn(&Value) -> String + ...>` | field | Row's display label; default fallback chain (below). |
+| `.label_column(col)` | mut | Label rows by one column — and let *other* entities sort by a relation pointing here (below). |
 | `validate_row: Option<...>` | field | Cross-field validator (see [validation](#validation--transforms)). |
 
 `Crud::register(mm, gate)` consumes the model and takes its authorization gate (`authz::Open` for
@@ -106,6 +107,21 @@ post.relate(&tag);
 
 **Row label** (used in relation links, terse rows, pickers): default is the first present of
 `name | title | username | bio | label`, else `#<pk>`. Reassign the closure to override.
+
+**Labels and sorting.** Another entity can sort by a relation pointing here — `?sort=author` ordering
+by `author.name` rather than `author_id` — but only if the label is expressible as SQL. At registration
+the label closure is **probed** once with a synthetic row, so the common one-column case is recognised
+whether you wrote it as a closure or declared it:
+
+```rust
+author.label_column("name");                                              // declared
+author.row_label = Box::new(|r| r["name"].as_str().unwrap_or_default().into()); // probed — same result
+author.row_label = Box::new(|r| format!("{} <{}>", r["name"], r["email"]));     // not a column → not sortable
+```
+
+The third form still labels rows perfectly; relations pointing at it just report `sortable: false` and
+400 an attempt to order by them, rather than quietly sorting by one part of a label. `label_column`
+panics on an unknown column, like `field`.
 
 ### `MetaField`
 
@@ -296,17 +312,41 @@ pickers, CSV export, and bulk delete).
 | Param | Meaning |
 |---|---|
 | `q=<term>` | naive full-text: `LIKE '%term%'` across text columns |
-| `<col>=<val>` | column `LIKE '%val%'` (any non-reserved key) |
-| `sort=views:desc,title` | whitelisted column sort (unknown column → 400) |
+| `filter[<name>]=<val>` | **exact** match. `<name>` is a column *or* a to-one relation (`filter[author]=7` → `author_id = 7`); an empty value matches rows that have none (`IS NULL`) |
+| `search[<col>]=<term>` | substring match on one **text** column |
+| `<col>=<val>` | the legacy spelling of `search[<col>]` (text columns only) |
+| `sort=views:desc,title` | whitelisted sort (unknown key → 400). A **relation** sorts by the label its cells show |
 | `page` / `per_page` | pagination (default `per_page=25`) |
 | `all=true` | return every match unpaginated; also the guard that permits a whole-table bulk delete |
 | `ids=1,2,3` | restrict to these primary keys (`pk IN (…)`) — drives "delete selected" |
 | `view=terse` | list items omit `row` |
 | `format=csv` | CSV export instead of JSON |
 
+**Why brackets.** The reserved words above (`page`, `sort`, `all`, `format`, …) are matched *before* a
+bare `<col>=`, so an entity with a column called `page` or `format` can't be searched on it — the
+parameter means pagination instead, silently. Brackets can't occur in a column or relation name (those
+come from Rust identifiers), so `filter[…]`/`search[…]` are collision-proof by construction whatever an
+app calls its columns, and OpenAPI can describe them natively as `deepObject` parameters, which a bare
+prefix like `f.col` can't be. Repeated keys all apply (`?search[a]=x&search[b]=y` is both conditions).
+
+**Sorting is total.** The primary key is appended as a final sort key, always. Without it an `ORDER BY`
+on a non-unique column leaves the order *within* a tie up to the database, which needn't pick the same
+one for the query that fetches page 1 and the query that fetches page 2 — so rows duplicate across
+pages while others are never shown. `NULL`s sort last on every backend (SQLite would otherwise put them
+first on `ASC`, PostgreSQL last); text ordering follows the database's collation.
+
+**Sorting by a relation** turns `?sort=author` into `ORDER BY author.name` through a left join, so the
+list is ordered by the label the cell *shows* rather than the foreign key behind it. It needs the
+target to know which column its label comes from — see
+[`label_column`](#metamodele) — and applies to a **to-one that owns its FK** only: a row has many tags,
+so there is no single label to order it by, and to-many/N:M report `sortable: false` and 400 an
+attempt. Each published column carries `sortable` in its metadata, so a UI knows which headers to make
+active without guessing.
+
 **Bulk delete** (`DELETE /{entity}`) runs one set-based `DELETE … WHERE` in the backend (plus a
 subquery to clear N:M junctions) — not a per-row loop, so it scales to large tables. It refuses to
-wipe the whole unfiltered table unless you pass `?all=true`, and returns a count (not the rows).
+wipe the whole unfiltered table unless you pass `?all=true`, and returns a count (not the rows). A
+`filter[…]` counts as narrowing it, so a filtered delete needs no `all=true`.
 
 ### Errors
 
@@ -472,13 +512,17 @@ The structural description a UI needs is available **in-process** (there is no `
 {
   "entity": "post", "url": "/api/v1/post", "primary_key": ["id"],
   "columns": [
-    { "kind": "field", "name": "id", "type": "Int", "read_only": true, "write_only": false },
+    { "kind": "field", "name": "id", "type": "Int", "read_only": true, "write_only": false,
+      "sortable": true },
     { "kind": "field", "name": "title", "type": "Text", "read_only": false, "write_only": false,
-      "label": "Title", "description": "The post headline." },
+      "sortable": true, "label": "Title", "description": "The post headline." },
+    // sortable: the target declares a label column, so ?sort=author orders by author.name
     { "kind": "relation", "name": "author", "target": "author", "cardinality": "ToOne",
-      "fk_column": "author_id", "read_only": false, "list_url": "/api/v1/author" },
+      "fk_column": "author_id", "read_only": false, "sortable": true,
+      "list_url": "/api/v1/author" },
+    // not sortable: a row has many tags, so there's no single label to order it by
     { "kind": "relation", "name": "tag", "target": "tag", "cardinality": "ToMany", "read_only": false,
-      "list_url": "/api/v1/tag" }
+      "sortable": false, "list_url": "/api/v1/tag" }
   ]
 }
 ```
@@ -548,15 +592,35 @@ let html: String = relativelylight::crud::ui::Table::new(&engine, "post")
     .per_page(30)
     .confirm(true)          // confirm before delete
     .picker_threshold(20)   // relations with > N target rows use a search→select picker (default 20)
+    .sort("title")          // initial order; .sort_desc(col) for descending, repeat for secondary keys
+    .filter("author")       // a filter control in the toolbar — a column or a to-one relation
+    .fixed_filter("author", "7")  // …or pin it: no control, just the restriction
     // custom cell renderer — turn the title into a link built from the row:
     .format("title", r#"(v, row) => `<a href="/posts/${row.id}">${v}</a>`"#)
     .render()?;
 ```
 
-Gives you: search, a `|< << N-3…N…N+3 >> >|` pager, a create/edit **modal form** (inline field + row
-validation errors), per-row and bulk delete (delete-selected / delete-all-matching), and CSV
-import/export (tucked into a `⋮` overflow menu). Field labels/help/defaults and validators come from
-the `MetaModel` you registered.
+Gives you: search, **sortable headers**, an optional **filter control**, a `|< << N-3…N…N+3 >> >|`
+pager, a create/edit **modal form** (inline field + row validation errors), per-row and bulk delete
+(delete-selected / delete-all-matching), and CSV import/export (tucked into a `⋮` overflow menu). Field
+labels/help/defaults and validators come from the `MetaModel` you registered.
+
+**Sorting.** Every header the API will order by is clickable: asc → desc → unsorted, shift-click for a
+secondary key (numbered when there's more than one). Headers for columns the API refuses — a `Json`
+column, a to-many relation, a relation whose target has no label column — are inert rather than
+clickable-and-then-broken. `.sort(col)` on a column that can't be sorted is a **render-time error
+naming it**, not a header that 400s on first click.
+
+**Filtering.** `.filter(name)` puts a control in the toolbar: a `<select>` for a relation, an enum's
+options, or a Yes/No for a boolean — and a live search→select box once a relation's target outgrows
+`picker_threshold`, reusing the form picker's machinery. The choice reaches the listing, the **CSV
+export** and **"delete all matching"** alike, so no button can act on a wider set than the one on
+screen. An active filter always shows as a chip above the table, and creating a row pre-selects the
+filtered value (it only pre-selects — the picker still offers everything).
+
+`.fixed_filter(name, value)` is the same restriction with no control, for a page that is *about* one
+value (`/zone/{id}/records`). Both narrow a **view, not access**: the API stays queryable for other
+values by anyone the model's gate admits, so per-row scoping remains [`authz`](AUTH.md)'s job.
 
 **Form inputs** are derived from the column type — numbers/text as typed inputs, **booleans as a toggle
 switch**, a closed `options` set as a dropdown — and can be overridden per field with
@@ -674,6 +738,20 @@ per model. Switching happens in the browser (all tables render into the page; th
 which is visible), so it's a single fragment you drop into your shell — no extra routes. See
 `examples/adminpanel`.
 
+**`Admin::filter(name)`** puts one filter control in the side-panel and applies it to every listed table
+that has such a column; tables that don't are unaffected. This is the shape that matters once an admin
+lists many tables of the same kind — fifteen per-type DNS record tables, say, where an operator works
+inside one zone at a time and would otherwise re-pick it on every table they switch to:
+
+```rust
+Admin::new(&engine).filter("zone").entity("rr_a").entity("rr_aaaa").entity("rr_mx") /* … */
+```
+
+The choice is remembered in `localStorage` and mirrored into the URL fragment (`#filter.zone=7`), so a
+filtered admin can be bookmarked or sent to a colleague; it shows as a chip on every affected table, and
+the tables adopt it on their first load rather than flashing an unfiltered page. A name **no** listed
+entity has is an error — an inert control reads as a broken one.
+
 Builder methods:
 
 | Method | Effect |
@@ -685,6 +763,7 @@ Builder methods:
 | `.group(name)` | a group heading in the side-panel |
 | `.separator()` | an `<hr>` |
 | `.link(label, href)` | a custom static link (navigates normally) |
+| `.filter(name)` | one side-panel filter control applied to **every** listed table that has that column or to-one relation |
 | `.render()` | the HTML fragment (`Result<String>`) — all write controls shown |
 | `.render_for(&headers)` | async; per-request fragment that hides a model's write controls when its auth gate denies a write for the caller (see [docs/AUTH.md](AUTH.md)) |
 

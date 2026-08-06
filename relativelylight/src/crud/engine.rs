@@ -277,6 +277,9 @@ pub enum Column {
         default: Option<Value>,
         /// Presentation override (e.g. render an int-seconds column as a datetime).
         display: Option<FieldDisplay>,
+        /// Whether `?sort=<name>` is accepted. False for `Json`/`Other`, whose ordering the database
+        /// would happily invent but nobody could predict.
+        sortable: bool,
     },
     Relation {
         name: String,
@@ -288,6 +291,12 @@ pub enum Column {
         read_only: bool,
         label: Option<String>,
         description: Option<String>,
+        /// Whether `?sort=<name>` is accepted — i.e. whether the label shown in the cell can be
+        /// expressed as an `ORDER BY` on the target. True only for a to-one that owns its FK *and*
+        /// whose target has a known label column (see
+        /// [`MetaModel::label_column`](crate::crud::seaorm::MetaModel::label_column)). A to-many has
+        /// many labels per row, so there is no ordering to give.
+        sortable: bool,
     },
 }
 
@@ -660,11 +669,12 @@ impl Engine {
                 description,
                 default,
                 display,
+                sortable,
             } => {
                 let mut o = json!({
                     "kind": "field", "name": name, "type": logical_type,
                     "read_only": read_only, "write_only": write_only,
-                    "nullable": nullable, "required": required,
+                    "nullable": nullable, "required": required, "sortable": sortable,
                 });
                 // Only when there is a set — an `"options": []` on every column would be noise in a
                 // payload the UI reads on every page load.
@@ -696,6 +706,7 @@ impl Engine {
                 read_only,
                 label,
                 description,
+                sortable,
             } => {
                 // `list_url` lets a form picker search the target in terse mode:
                 //   GET {list_url}?q=…&view=terse  → [{id,label}]. No per-row item link is emitted
@@ -703,6 +714,7 @@ impl Engine {
                 let mut o = json!({
                     "kind": "relation", "name": name, "target": target,
                     "cardinality": cardinality, "read_only": read_only,
+                    "sortable": sortable,
                     "list_url": self.entity_url(&target),
                 });
                 if let Some(fk) = fk_column {
@@ -806,7 +818,6 @@ mod http {
     use axum::routing::get;
     use axum::{Json, Router};
     use serde_json::{json, Value};
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     impl IntoResponse for Error {
@@ -904,9 +915,32 @@ mod http {
         }
     }
 
-    fn parse_list_query(params: HashMap<String, String>) -> ListQuery {
+    /// `name[inner]` → `Some(inner)`, for the bracketed parameter families (`filter[…]`,
+    /// `search[…]`). Brackets can't occur in a column or relation name — those come from Rust
+    /// identifiers — so this namespace can never collide with one, however an app names its columns.
+    /// That is the whole reason for the spelling: the reserved words below (`page`, `sort`, `all`, …)
+    /// *would* shadow a column of the same name, and a bare `?<col>=` has no way to say otherwise.
+    fn bracketed<'a>(key: &'a str, name: &str) -> Option<&'a str> {
+        let rest = key.strip_prefix(name)?.strip_prefix('[')?;
+        rest.strip_suffix(']')
+    }
+
+    /// Parse the list/bulk-delete query string.
+    ///
+    /// Takes a `Vec` rather than a `HashMap` on purpose: a map keeps only the last of a repeated key,
+    /// so `?search[a]=x&search[b]=y` would silently lose one condition — and `ListQuery::search` is a
+    /// `Vec` precisely because several are meant to combine.
+    fn parse_list_query(params: Vec<(String, String)>) -> ListQuery {
         let mut q = ListQuery::default();
         for (key, value) in params {
+            if let Some(name) = bracketed(&key, "filter") {
+                q.eq.push((name.to_string(), value));
+                continue;
+            }
+            if let Some(name) = bracketed(&key, "search") {
+                q.search.push((Some(name.to_string()), value));
+                continue;
+            }
             match key.as_str() {
                 "page" => q.page = value.parse().unwrap_or(0),
                 "per_page" => q.per_page = value.parse().unwrap_or(0),
@@ -932,15 +966,20 @@ mod http {
         q
     }
 
+    /// First value for `key` — the handlers' own (non-`ListQuery`) parameters.
+    fn param<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        params.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
     async fn list(
         State(e): St,
         headers: HeaderMap,
         Path(entity): Path<String>,
-        Query(params): Query<HashMap<String, String>>,
+        Query(params): Query<Vec<(String, String)>>,
     ) -> std::result::Result<Response, Error> {
         authorize(&e, Operation::List, &entity, &headers).await?;
         #[cfg(feature = "csv")]
-        if params.get("format").map(|v| v == "csv").unwrap_or(false) {
+        if param(&params, "format") == Some("csv") {
             let body = crate::crud::csv_io::export(&e, &entity, &parse_list_query(params)).await?;
             let disposition = format!("attachment; filename=\"{entity}.csv\"");
             return Ok((
@@ -952,7 +991,7 @@ mod http {
             )
                 .into_response());
         }
-        let terse = params.get("view").map(|v| v == "terse").unwrap_or(false);
+        let terse = param(&params, "view") == Some("terse");
         Ok(Json(e.list(&entity, &parse_list_query(params), terse).await?).into_response())
     }
 
@@ -1012,7 +1051,7 @@ mod http {
         headers: HeaderMap,
         RealIp(client_ip): RealIp,
         Path(entity): Path<String>,
-        Query(params): Query<HashMap<String, String>>,
+        Query(params): Query<Vec<(String, String)>>,
     ) -> std::result::Result<Json<Value>, Error> {
         authorize_write(&e, Operation::Delete, &entity, &headers).await?;
         let res = e.delete_where(&entity, &parse_list_query(params)).await?;

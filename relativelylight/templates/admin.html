@@ -1,8 +1,71 @@
+<!-- Restore the shared filter selection *before* Alpine initialises, so each table's x-init can adopt
+     it on its first load rather than fetching an unfiltered page and then re-fetching. Runs during
+     parse; Alpine starts on DOMContentLoaded. The URL fragment wins over the remembered value, so a
+     link to a filtered admin means what it says. -->
+<script>
+  (function () {
+    var out = {};
+    try {
+      var hash = new URLSearchParams((location.hash || "").replace(/^#/, ""));
+      var names = {{ filter_names_json|safe }};
+      for (var i = 0; i < names.length; i++) {
+        var n = names[i];
+        var v = hash.get("filter." + n);
+        var label = null;
+        if (v === null) {
+          var raw = localStorage.getItem("rl.filter." + n);
+          if (raw) { try { var o = JSON.parse(raw); v = o.value; label = o.label; } catch (e) {} }
+        }
+        if (v !== null && v !== undefined && v !== "") out[n] = { value: String(v), label: label };
+      }
+    } catch (e) { /* no storage / bad hash: start unfiltered */ }
+    window.rlSharedFilters = out;
+  })();
+</script>
 <div class="d-flex align-items-start gap-4" x-data="ruAdmin('{{ first }}')">
   <!-- Side panel: model list + group headings + separators + custom links. -->
   <nav class="flex-shrink-0" style="width: 210px;">
     {% if has_title %}
     <h6 class="text-uppercase text-muted fw-semibold px-2 mb-2">{{ title }}</h6>
+    {% endif %}
+
+    {% if !filters.is_empty() %}
+    <!-- Filters applied to every listed table that has the column. One choice, made once, rather than
+         re-made on each table an operator switches to. -->
+    <div class="px-2 mb-3" x-data="ruAdminFilters()" x-init="init()">
+      {% for f in filters %}
+      <div class="mb-2" x-data="{ f: defs[{{ loop.index0 }}] }">
+        <label class="form-label small text-muted mb-1" :for="'rlf-' + f.name">{{ f.label }}</label>
+        <template x-if="!big(f)">
+          <select class="form-select form-select-sm" :id="'rlf-' + f.name"
+                  x-model="vals[f.name]" @change="choose(f, vals[f.name])">
+            <option value="">All</option>
+            <template x-for="o in options[f.name] || []" :key="o.id">
+              <option :value="o.id" x-text="o.label"></option>
+            </template>
+          </select>
+        </template>
+        <template x-if="big(f)">
+          <div class="position-relative" @click.away="open[f.name] = false">
+            <input type="text" class="form-control form-control-sm" :id="'rlf-' + f.name"
+                   :placeholder="vals[f.name] ? labelOf(f, vals[f.name]) : 'All'"
+                   x-model="query[f.name]" @focus="search(f)"
+                   @input.debounce.250ms="search(f)" @keydown.enter.prevent="search(f)">
+            <ul class="list-group position-absolute w-100 shadow"
+                style="z-index:1060; max-height:220px; overflow:auto"
+                x-show="open[f.name] && (results[f.name] || []).length">
+              <li class="list-group-item list-group-item-action py-1 small" style="cursor:pointer"
+                  @click="choose(f, '')"><em>All</em></li>
+              <template x-for="o in (results[f.name] || [])" :key="o.id">
+                <li class="list-group-item list-group-item-action py-1 small" style="cursor:pointer"
+                    @click="choose(f, String(o.id), o.label)" x-text="o.label"></li>
+              </template>
+            </ul>
+          </div>
+        </template>
+      </div>
+      {% endfor %}
+    </div>
     {% endif %}
     <ul class="nav nav-pills flex-column">
       {% for e in nav %}
@@ -34,5 +97,77 @@
 
   <script>
     function ruAdmin(first) { return { active: first }; }
+
+    function ruAdminFilters() {
+      return {
+        defs: {{ filter_defs_json|safe }},
+        pickerThreshold: {{ picker_threshold }},
+        vals: {}, labels: {}, options: {}, total: {}, query: {}, results: {}, open: {},
+
+        async init() {
+          const restored = window.rlSharedFilters || {};
+          for (const f of this.defs) {
+            if (f.list_url) {
+              const res = await fetch(f.list_url + "?view=terse&per_page=" + this.pickerThreshold);
+              const d = await res.json();
+              this.total[f.name] = d.total || 0;
+              this.remember(f.name, d.data || []);
+              if (!this.big(f)) {
+                this.options[f.name] = (d.data || []).map(x => ({ id: String(x.id), label: x.label }));
+              }
+            } else {
+              this.options[f.name] = f.options;
+            }
+          }
+          // Only now select the restored value: a <select> can't hold a value whose <option> hasn't
+          // been rendered yet, so setting it before the fetch would silently snap back to "All" and
+          // show an unfiltered control over a filtered table.
+          await this.$nextTick();
+          for (const f of this.defs) {
+            const r = restored[f.name];
+            if (!r) continue;
+            this.vals[f.name] = r.value;
+            if (r.label) this.remember(f.name, [{ id: r.value, label: r.label }]);
+          }
+        },
+        big(f) { return (this.total[f.name] || 0) > this.pickerThreshold; },
+        remember(name, items) {
+          const m = this.labels[name] || {};
+          for (const it of items) m[String(it.id)] = it.label;
+          this.labels[name] = m;
+        },
+        labelOf(f, v) { return (this.labels[f.name] || {})[String(v)] || v; },
+        async search(f) {
+          const term = this.query[f.name] ? "&q=" + encodeURIComponent(this.query[f.name]) : "";
+          const res = await fetch(f.list_url + "?view=terse&per_page=20" + term);
+          const d = await res.json();
+          this.results[f.name] = (d.data || []).map(x => ({ id: String(x.id), label: x.label }));
+          this.remember(f.name, this.results[f.name]);
+          this.open[f.name] = true;
+        },
+        // Tell every table on the page, remember the choice, and put it in the URL so the filtered
+        // admin can be linked to. Tables without that column ignore the event.
+        choose(f, value, label) {
+          this.vals[f.name] = value || "";
+          this.open[f.name] = false;
+          if (label) this.remember(f.name, [{ id: value, label }]);
+          const shown = value ? this.labelOf(f, value) : null;
+          try {
+            if (value) {
+              localStorage.setItem("rl.filter." + f.name, JSON.stringify({ value, label: shown }));
+            } else {
+              localStorage.removeItem("rl.filter." + f.name);
+            }
+          } catch (e) { /* private mode: the choice just doesn't outlive the page */ }
+          const hash = new URLSearchParams((location.hash || "").replace(/^#/, ""));
+          if (value) hash.set("filter." + f.name, value); else hash.delete("filter." + f.name);
+          const s = hash.toString();
+          history.replaceState(null, "", s ? "#" + s : location.pathname + location.search);
+          window.dispatchEvent(new CustomEvent("ru-filter", {
+            detail: { name: f.name, value: value || "", label: shown },
+          }));
+        },
+      };
+    }
   </script>
 </div>

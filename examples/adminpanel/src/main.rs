@@ -70,6 +70,11 @@ struct App {
 fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
     let mut admin = Admin::new(engine)
         .title("relativelylight")
+        // One control in the side-panel, applied to every listed table that has an `author` column —
+        // here just `post`, but this is the shape that pays off when an admin lists many tables of the
+        // same kind (fifteen per-type DNS record tables, say) and an operator works inside one of them
+        // at a time. The choice is remembered and travels in the URL fragment, so it can be linked.
+        .filter("author")
         .group("Content")
         .entity_with("post", |t| {
             t.per_page(10).format(
@@ -202,7 +207,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let author_mm = MetaModel::new(author::Entity);
+    let mut author_mm = MetaModel::new(author::Entity);
+    // Declaring the label column makes `post`'s `author` header sortable: the engine can turn
+    // "order by the label in the cell" into `ORDER BY author.name`. Without it the relation would
+    // still render, just without a clickable header.
+    author_mm.label_column("name");
     let user_mm = MetaModel::new(user::Entity);
     let profile_mm = MetaModel::new(profile::Entity);
     let mut post_mm = MetaModel::new(post::Entity);
