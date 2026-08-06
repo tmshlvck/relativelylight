@@ -9,7 +9,7 @@ Work that has landed on `main` but isn't tagged yet lives under **Unreleased**; 
 heading to the version + date and adds a compare link. Per-entry commit hashes are given where a change
 is easy to miss in a diff.
 
-## Unreleased
+## [0.2.1] — 2026-08-06
 
 Sorting and filtering, in both the API and the admin UI — driven by what a records-management console
 needs: order the table by the *zone* column, and work inside one zone at a time.
@@ -546,6 +546,7 @@ Renames the authorization presets to a consistent `<ReadAudience>Read<WriteAudie
 First published release: the `crud` engine + SeaORM backend, the Bootstrap/Alpine admin UI, OpenAPI and
 CSV adapters, and the `auth` module (sessions, login, TOTP 2FA, OIDC SSO, per-model gates).
 
+[0.2.1]: https://github.com/tmshlvck/relativelylight/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/tmshlvck/relativelylight/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/tmshlvck/relativelylight/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/tmshlvck/relativelylight/compare/v0.1.0...v0.1.1
