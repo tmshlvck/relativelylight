@@ -21,15 +21,18 @@ The crate is **`relativelylight`**, organized into feature-gated modules:
 
 - **Full CRUD JSON API** per entity — list/get/create/update/delete, relations written by name
   (`"author": 1`, `"tag": [1,3]`).
-- **Search, sort, pagination**, and **set-based bulk delete** (`DELETE …?q=…` / `?ids=…` / `?all=true`).
+- **Search, filter, sort, pagination**, and **set-based bulk delete** (`DELETE …?q=…` / `?ids=…` /
+  `?all=true`). Relations count as columns here: `?filter[author]=7` matches the FK behind the name, and
+  `?sort=author` orders by the label the cell shows rather than the id behind it.
 - **Machine-readable metadata** (ordered fields + relations, logical types) that drives the UI and
   OpenAPI — no per-model schema code.
 - **Validation & transforms** — field + cross-field validators, `on_read`/`on_write` hooks (redact,
   hash), typed coercion.
 - **CSV import/export** reusing the same validation pipeline.
-- **A web admin** (`ui`): tables with a create/edit modal form, relation pickers (dropdown or live
-  search→select), boolean switches, bulk actions, CSV, custom cell renderers — plus an `Admin`
-  side-panel composing many models into one page.
+- **A web admin** (`ui`): tables with sortable headers, filter controls, a create/edit modal form,
+  relation pickers (dropdown or live search→select), boolean switches, bulk actions, CSV, custom cell
+  renderers — plus an `Admin` side-panel composing many models into one page, optionally under one
+  filter shared across all of them.
 - **Runtime OpenAPI 3.1** (`openapi`) with request/response schemas, mergeable into your own document.
 - **One request-pipeline layer** (`middleware`): `resolve_real_ip`, which decides who the caller is once
   and is **required**. The crate logs nothing itself — `examples/access_log` is a request log you can copy.
@@ -112,14 +115,15 @@ Enable only what you use — an unused feature pulls no dependencies.
 
 ## Examples
 
-Four runnable examples; the first three share one seeded in-memory SQLite model (`examples/model`),
-while `time-example` carries its own single table:
+Five runnable examples; the first three share one seeded in-memory SQLite model (`examples/model`),
+while `time-example` and `access-log-example` carry their own:
 
 ```bash
-cargo run -p crud-example          # :3000  per-entity pages (MPA), a standalone Form at /post/new, CSV, Swagger UI — open (no auth)
-cargo run -p adminpanel-example    # :3000  the crud::ui::Admin side-panel — login-gated (admin / password)
+cargo run -p crud-example          # :3000  per-entity pages (MPA), a standalone Form at /post/new, sort + filter, CSV, Swagger UI — open (no auth)
+cargo run -p adminpanel-example    # :3000  the crud::ui::Admin side-panel with an admin-wide filter — login-gated (admin / password)
 cargo run -p auth-example          # :3000  auth alone: argon2 login/session gating a page (admin / password)
 cargo run -p time-example          # :3000  timezone picker + DST-straddling rows + server/user-TZ hooks (docs/TIME.md)
+cargo run -p access-log-example    # :3000  the request log an app writes for itself: RealIp + naming the user
 ```
 
 **Run one at a time** — they all serve on port 3000. The first two put the JSON API under `/api/v1`

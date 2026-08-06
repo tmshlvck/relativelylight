@@ -39,9 +39,15 @@ hard design invariant, not a convenience.
 ## 1. `crud` — CRUD + metadata API ✅
 
 **Requirement:** given SeaORM entities, serve a complete data API with *no per-model code* — full CRUD
-(including relations), search / sort / paginate, bulk delete, CSV import/export, and a
+(including relations), search / filter / sort / paginate, bulk delete, CSV import/export, and a
 machine-readable, structural `columns` description that drives both the UI and OpenAPI. Per-entity
 config (labels, visibility, defaults, validators, N:M) is a light, optional layer over introspection.
+
+**Relations are first-class in queries, not just in reads:** `filter[<relation>]` matches the foreign
+key behind the name a caller already knows, and `sort=<relation>` orders by the *label* the relation
+renders as (a join onto the target's label column) rather than the id behind it — so a list can be
+ordered the way it is read. Where a label isn't a single column, or a row has many of them, the
+metadata says `sortable: false` and the API refuses, rather than ordering by a guess.
 
 The metadata is the **backend-agnostic contract** every backend satisfies and every frontend consumes:
 the backend returns finished JSON; the engine forwards it and adds the metadata envelope.
@@ -66,12 +72,16 @@ the shell (Bootstrap 5 + Alpine.js) and drops the fragment in.
   order, per-field widget overrides (textarea / radio / slider / email / url / datetime), gate-aware rendering (`401`/`403` rather than a form that can't submit), redirect-or-callback
   after save, and render-time refusal of a form that could never work (unknown / read-only / required-but
   -unrendered column).
-- **`Table`** — one entity: search, windowed pager, that same form in a modal (typed inputs, boolean
-  switch, enum dropdown, relation dropdown or search→select picker, timezone-aware datetime picker,
-  inline validation), per-row + bulk delete, CSV import/export, boolean/relation badges, custom cell
-  renderers.
+- **`Table`** — one entity: search, **sortable headers** (relations included), **filter controls** (a
+  relation picker, an enum's values, a boolean, or a value pinned by the page), windowed pager, that
+  same form in a modal (typed inputs, boolean switch, enum dropdown, relation dropdown or search→select
+  picker, timezone-aware datetime picker, inline validation), per-row + bulk delete, CSV import/export,
+  boolean/relation badges, custom cell renderers. A filter governs the export and the bulk delete as
+  well as the listing, so no control can act on a wider set than the one on screen.
 - **`Admin`** — a model side-panel over many `Table`s (configurable order, group headings,
-  separators, custom links) with client-side model switching.
+  separators, custom links) with client-side model switching, plus **one filter shared across every
+  listed table that has the column** — the difference between usable and unusable once an admin lists
+  many tables of the same shape.
 
 `Form` and `Table`'s modal are **one implementation** behind shared partials (widgets in one, behaviour
 in the other), so the requirement above — *no hand-written forms* — is met once and `Admin` stays a

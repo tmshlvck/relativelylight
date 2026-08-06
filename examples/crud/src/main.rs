@@ -205,6 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ui/{slug}", get(ui_page))
         .route("/post/new", get(post_new))
         .route("/post/{id}/edit", get(post_edit))
+        .route("/author/{id}/posts", get(author_posts))
         .route("/openapi.json", get(openapi_json))
         .route("/docs", get(docs))
         .with_state(app);
@@ -265,6 +266,38 @@ async fn post_new(State(app): State<Arc<App>>) -> Response {
         .redirect("/post/{id}/edit")
         .render();
     render_form(&app, "post", form)
+}
+
+/// One author's posts — a page that is *about* one value, so the filter is pinned rather than offered.
+///
+/// `fixed_filter` gives no control to change it; the table shows it as a chip so the listing can't be
+/// mistaken for the whole set, and the create form pre-selects that author. It narrows the **view**
+/// only — the API is still queryable for other authors, which is [`authz`]'s business, not the table's.
+/// Rendered per request because the pinned value comes from the URL.
+async fn author_posts(State(app): State<Arc<App>>, Path(id): Path<String>) -> Response {
+    let table = Table::new(&app.engine, "post")
+        .title("Posts")
+        .fixed_filter("author", &id)
+        .sort("title")
+        .per_page(5)
+        .render();
+    match table {
+        Ok(html) => {
+            let page = Shell {
+                title: "relativelylight".into(),
+                entities: app.entities.clone(),
+                current: "post".into(),
+                body: html,
+                boxed: true,
+            }
+            .render();
+            match page {
+                Ok(p) => Html(p).into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            }
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 /// Edit an existing post on its own page.

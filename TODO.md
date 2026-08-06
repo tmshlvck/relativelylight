@@ -8,14 +8,10 @@ tick/remove items as they ship, and add new ones with a one-line rationale.
 > and rejected, or bounded on purpose — kept so the reasoning isn't re-derived when the idea resurfaces.
 > An item whose only content is "this shipped" belongs in [CHANGELOG.md](CHANGELOG.md), not here.
 
-## Next: cut 0.2.0
+## Next
 
-Everything the 0.2.0 cycle set out to do has landed — the security defaults are on, the schema and API
-breaks are in, and `CHANGELOG.md`'s `## Unreleased` has the full upgrade path. Nothing below blocks the
-tag; all of it is post-0.2.0 work.
-
-- [ ] **Release 0.2.0**: rename `## Unreleased` to `## [0.2.0] — YYYY-MM-DD` + compare link, bump
-  `relativelylight/Cargo.toml`, commit `Release v0.2.0`, tag, push the tag.
+0.2.0 (security defaults) and 0.2.1 (sorting + filtering) are tagged. Nothing below blocks a release;
+all of it is follow-on work.
 
 ## Security hardening (auth)
 
@@ -128,9 +124,18 @@ Highest priority first.
 - [ ] Batch relation reads (avoid N+1 on relation resolution). Keep it inside the SeaORM backend — the
   resolution already happens behind `Accessor::list`, so this can be **purely internal**; a new
   `Accessor` method would be a break for anyone implementing the seam.
+- [ ] Filter **operators** — `filter[ttl][gt]=300`, `filter[name][in]=a,b`, `filter[zone][is_null]=true`.
+  The bracket grammar was chosen to nest, and `deepObject` already describes it, so this is additive on
+  the wire; the work is in `ListQuery` (today's `eq: Vec<(String, String)>` would need a comparison
+  alongside the value) and in `build_condition`. Wait for a real need — an exact match plus `q` covers
+  what the console asks for so far.
 
 ## crud::ui / time
 
+- [ ] **Remember a table's sort the way its filter is remembered.** A shared filter survives a reload
+  (localStorage + URL fragment); the sort doesn't — reload and you're back to the configured
+  `Table::sort`, losing whatever was clicked. The asymmetry is defensible (a filter changes *which* rows
+  you're responsible for, an order doesn't) but it is an asymmetry, and the machinery already exists.
 - **Per-field widget overrides — shipped** (CRUD.md § Widget overrides), and they needed **no** new
   `MetaField`/`Column::Field` field after all: `display: Option<FieldDisplay>` already existed as the
   presentation override, so the widgets became variants of *that* — `Textarea { rows }`, `Radio`,

@@ -248,7 +248,7 @@ dependency here). Copy `examples/access_log`.
 ## Run the examples
 
 ```bash
-cargo run -p crud-example         # :3000  per-entity pages, standalone Form (/post/new), CSV, Swagger — no auth
+cargo run -p crud-example         # :3000  per-entity pages, standalone Form (/post/new), sort + filter, a pinned filter at /author/{id}/posts, CSV, Swagger — no auth
 cargo run -p adminpanel-example   # :3000  crud::ui::Admin, login-gated, inline accounts + 2FA (admin/password, editor/password)
 cargo run -p auth-example         # :3000  auth alone (no crud): login, /secret, /profile + 2FA, re-auth demo (admin/password)
 cargo run -p time-example         # :3000  timezone picker, DST-straddling rows, server/user-TZ hooks (see docs/TIME.md)

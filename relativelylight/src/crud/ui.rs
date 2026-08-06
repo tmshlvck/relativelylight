@@ -266,11 +266,7 @@ impl<'a> Table<'a> {
     fn applicable_filters(&self, cols: &[Column]) -> Result<Vec<FilterSpec>> {
         let mut out = Vec::new();
         for f in &self.filters {
-            let known = cols.iter().any(|c| match c {
-                Column::Field { name, .. } => *name == f.name,
-                Column::Relation { name, fk_column, .. } => *name == f.name && fk_column.is_some(),
-            });
-            if known {
+            if is_filterable(cols, &f.name) {
                 out.push(f.clone());
             } else if !f.shared {
                 return Err(Error::BadRequest(format!(
@@ -283,36 +279,49 @@ impl<'a> Table<'a> {
     }
 }
 
-/// Refuse a widget that can't render its column, naming the field — a `Radio` with no `options`, a
-/// `Range` on text, a `Textarea` on a number. Checked by **both** hosts at render time, because the
-/// alternative is a form quietly showing a different input than the model asked for, which is the sort of
-/// thing that's noticed in production and not in review. See [`FieldDisplay::fits`].
+/// Whether `name` is something this entity can be filtered by: any published field, or a to-one
+/// relation (whose FK the engine resolves). Shared by [`Table`] and [`Admin`], which ask the same
+/// question and only differ in what they do with a `false`.
+fn is_filterable(cols: &[Column], name: &str) -> bool {
+    cols.iter().any(|c| match c {
+        Column::Field { name: n, .. } => n == name,
+        Column::Relation { name: n, fk_column, .. } => n == name && fk_column.is_some(),
+    })
+}
+
 /// Refuse an initial sort the API would reject, naming the column — same reasoning as
 /// [`check_widgets`]: a table that silently ignored `.sort("zone")` would look like it worked.
 fn check_sort(slug: &str, cols: &[Column], sort: &[(String, bool)]) -> Result<()> {
     for (want, _) in sort {
-        let found = cols.iter().find(|c| match c {
-            Column::Field { name, .. } | Column::Relation { name, .. } => name == want,
+        let sortable = cols.iter().find_map(|c| match c {
+            Column::Field { name, sortable, .. } | Column::Relation { name, sortable, .. }
+                if name == want =>
+            {
+                Some(*sortable)
+            }
+            _ => None,
         });
-        let ok = match found {
-            Some(Column::Field { sortable, .. }) | Some(Column::Relation { sortable, .. }) => {
-                *sortable
+        match sortable {
+            Some(true) => {}
+            Some(false) => {
+                return Err(Error::BadRequest(format!(
+                    "crud::ui({slug}): column '{want}' is not sortable"
+                )))
             }
             None => {
                 return Err(Error::BadRequest(format!(
                     "crud::ui({slug}): cannot sort by '{want}': no such column or relation"
                 )))
             }
-        };
-        if !ok {
-            return Err(Error::BadRequest(format!(
-                "crud::ui({slug}): column '{want}' is not sortable"
-            )));
         }
     }
     Ok(())
 }
 
+/// Refuse a widget that can't render its column, naming the field — a `Radio` with no `options`, a
+/// `Range` on text, a `Textarea` on a number. Checked by **both** hosts at render time, because the
+/// alternative is a form quietly showing a different input than the model asked for, which is the sort of
+/// thing that's noticed in production and not in review. See [`FieldDisplay::fits`].
 fn check_widgets(slug: &str, cols: &[Column]) -> Result<()> {
     for c in cols {
         if let Column::Field { name, logical_type, options, display: Some(d), .. } = c {
@@ -864,14 +873,9 @@ impl<'a> Admin<'a> {
     fn check_filters(&self) -> Result<()> {
         for name in &self.filters {
             let known = self.items.iter().any(|i| match i {
-                AdminItem::Entity(t) => self.engine.columns(&t.slug).is_ok_and(|cols| {
-                    cols.iter().any(|c| match c {
-                        Column::Field { name: n, .. } => n == name,
-                        Column::Relation { name: n, fk_column, .. } => {
-                            n == name && fk_column.is_some()
-                        }
-                    })
-                }),
+                AdminItem::Entity(t) => {
+                    self.engine.columns(&t.slug).is_ok_and(|cols| is_filterable(&cols, name))
+                }
                 _ => false,
             });
             if !known {

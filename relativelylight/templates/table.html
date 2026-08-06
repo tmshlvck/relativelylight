@@ -92,8 +92,6 @@
     <template x-for="chip in activeChips()" :key="chip.name">
       <span class="badge text-bg-light border">
         <span x-text="chip.label"></span>: <strong x-text="chip.value"></strong>
-        <a href="#" class="ms-1 text-decoration-none" x-show="chip.clearable"
-           @click.prevent="clearFilter(chip.name)" aria-label="Clear filter">&times;</a>
       </span>
     </template>
   </div>
@@ -334,13 +332,12 @@
         // step. A pinned filter has nothing on screen otherwise, and a narrowed table that looks
         // whole is how an operator concludes their rows are gone.
         activeChips() {
-          return Object.entries(this.activeFilters())
-            .map(([name, v]) => [name, v, this.filterDefs.find(x => x.name === name) || {}])
-            .filter(([, , f]) => f.fixed !== null && f.fixed !== undefined)
-            .map(([name, v, f]) => ({
-              name,
+          return this.filterDefs
+            .filter(f => f.fixed)
+            .map(f => ({
+              name: f.name,
               label: this.filterLabel(f),
-              value: (this.filterLabels[name] || {})[String(v)] || v,
+              value: this.labelOfFilter(f, f.fixed),
             }));
         },
         onFilter(f) {
@@ -372,9 +369,19 @@
         },
         // Fill each own-filter's choices: a relation lists its target terse, an enum uses its options.
         async loadFilterOptions() {
-          for (const f of this.ownFilters()) {
+          for (const f of this.filterDefs) {
             const c = this.colOf(f.name);
             if (!c) continue;
+            // A pinned filter has no control, so it needs no option list — only the label for its one
+            // value, so its chip can read "Zone: example.com." rather than "Zone: 7".
+            if (f.fixed) {
+              if (c.kind === "relation" && c.list_url) {
+                const d = await this.terse(
+                  c.list_url + "?view=terse&ids=" + encodeURIComponent(f.fixed));
+                this.rememberLabels(f.name, d.data || []);
+              }
+              continue;
+            }
             if (c.kind === "relation" && c.list_url) {
               const d = await this.terse(c.list_url + "?view=terse&per_page=" + this.pickerThreshold);
               this.filterTotal[f.name] = d.total || 0;

@@ -619,8 +619,8 @@ than the one on screen. Creating a row pre-selects the filtered value (it only p
 still offers everything).
 
 `.fixed_filter(name, value)` is the same restriction with no control, for a page that is *about* one
-value (`/zone/{id}/records`). Having nothing on screen to show it, a pinned filter renders as a chip
-above the table instead — a narrowed table that looks whole is how someone concludes their rows were
+value — `examples/crud`'s `/author/{id}/posts` is the worked case. Having nothing on screen to show it,
+a pinned filter renders as a chip above the table instead — a narrowed table that looks whole is how someone concludes their rows were
 deleted. Both narrow a **view, not access**: the API stays queryable for other values by anyone the
 model's gate admits, so per-row scoping remains [`authz`](AUTH.md)'s job.
 
