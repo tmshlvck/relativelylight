@@ -32,12 +32,15 @@ needs: order the table by the *zone* column, and work inside one zone at a time.
 - **Admin UI: sortable headers** (asc → desc → off, shift-click for a secondary key) and
   **`Table::sort` / `sort_desc`** for the initial order. A `.sort()` naming a column the API won't
   order by is a render-time error, not a header that fails on first click.
-- **Admin UI: filters.** `Table::filter(name)` adds a toolbar control (dropdown, enum options, Yes/No,
-  or a live search box for a large relation target); `Table::fixed_filter(name, value)` pins one with no
-  control. The choice reaches the listing, the **CSV export** and **"delete all matching"** alike, shows
-  as a chip above the table, and pre-selects the value when creating a row.
-- **`Admin::filter(name)`** — one side-panel control applied to every listed table that has that column,
-  remembered in `localStorage` and mirrored to the URL fragment so a filtered admin can be linked to.
+- **Admin UI: filters.** `Table::filter(name)` adds a control to the toolbar, left of the search box
+  (dropdown, enum options, Yes/No, or a live search box for a large relation target);
+  `Table::fixed_filter(name, value)` pins one with no control, showing it as a chip instead. The choice
+  reaches the listing, the **CSV export** and **"delete all matching"** alike, and pre-selects the value
+  when creating a row.
+- **`Admin::filter(name)`** — one filter applied to every listed table that has that column, its control
+  rendered in each of those tables' toolbars (only one table is visible at a time, so there is one
+  control on screen) and changes propagated to the rest. Remembered in `localStorage` and mirrored to
+  the URL fragment so a filtered admin can be linked to; the target list is fetched once per page.
   Tables without the column ignore it. This is what makes an admin of many same-shaped tables usable.
 
 ### Fixed

@@ -84,9 +84,10 @@ pickers, bulk delete, CSV, custom cell renderers); `Admin` composes many `Table`
 cell *shows* (a join onto the target's label column — declare it with `MetaModel::label_column`, or keep
 your `row_label` closure, which is probed at registration); `?filter[author]=7` is an exact match on the
 FK behind the relation name. In the UI: `Table::sort` / `filter` / `fixed_filter`, and
-`Admin::filter("zone")` for one side-panel control that filters *every* listed table that has that
-column — the shape that matters when an admin lists many tables of the same kind. A filter applies to
-the CSV export and "delete all matching" too, so no button acts on a wider set than the one on screen.
+`Admin::filter("zone")` for one filter across *every* listed table that has that column — the shape that
+matters when an admin lists many tables of the same kind. Filter controls sit in the table toolbar, left
+of the search box, and a filter applies to the CSV export and "delete all matching" too, so no button
+acts on a wider set than the one on screen.
 
 **`Form` is the same form standalone**, for your app's *own* pages rather than the admin — the building
 block `Table` and `Admin` are assembled from (they share the widget + behaviour partials, so a fix lands

@@ -658,17 +658,6 @@ struct AdminPanel {
     html: String,
 }
 
-/// A side-panel filter control shared by every table that has the named column.
-struct AdminFilter {
-    name: String,
-    label: String,
-    /// Terse list URL of the relation's target, for the picker; empty when the filter is a plain
-    /// column rather than a relation.
-    list_url: String,
-    /// JS array of `{id,label}` for an enum column; `[]` otherwise.
-    options_json: String,
-}
-
 #[derive(Template)]
 #[template(path = "admin.html")]
 struct AdminTemplate {
@@ -677,12 +666,9 @@ struct AdminTemplate {
     nav: Vec<AdminNav>,
     panels: Vec<AdminPanel>,
     first: String,
-    filters: Vec<AdminFilter>,
-    picker_threshold: u64,
-    /// JS array of the shared filter names, for the pre-Alpine restore script.
+    /// JS array of the shared filter names, for the pre-Alpine restore script. The controls
+    /// themselves are rendered by each `Table`.
     filter_names_json: String,
-    /// JS array of `{name, list_url, options}` for the side-panel controls.
-    filter_defs_json: String,
 }
 
 enum AdminItem<'a> {
@@ -857,96 +843,44 @@ impl<'a> Admin<'a> {
     }
 
     fn assemble(&self, nav: Vec<AdminNav>, first: String, panels: Vec<AdminPanel>) -> Result<String> {
-        let filters = self.shared_filters()?;
-        let filter_names_json =
-            Value::Array(filters.iter().map(|f| Value::String(f.name.clone())).collect()).to_string();
-        let filter_defs: Vec<String> = filters
-            .iter()
-            .map(|f| {
-                format!(
-                    r#"{{"name": {}, "list_url": {}, "options": {}}}"#,
-                    Value::String(f.name.clone()),
-                    Value::String(f.list_url.clone()),
-                    f.options_json,
-                )
-            })
-            .collect();
+        self.check_filters()?;
         AdminTemplate {
             has_title: self.title.is_some(),
             title: self.title.clone().unwrap_or_default(),
             nav,
             panels,
             first,
-            filters,
-            picker_threshold: 20,
-            filter_names_json,
-            filter_defs_json: format!("[{}]", filter_defs.join(", ")),
+            filter_names_json: Value::Array(
+                self.filters.iter().cloned().map(Value::String).collect(),
+            )
+            .to_string(),
         }
         .render()
         .map_err(|e| Error::Backend(e.to_string()))
     }
 
-    /// Resolve each shared filter against the listed entities: what to label it, and where its choices
-    /// come from. A name no listed entity has is an error — the control would be inert, and an inert
-    /// filter reads as a broken one.
-    fn shared_filters(&self) -> Result<Vec<AdminFilter>> {
-        let slugs: Vec<String> = self
-            .items
-            .iter()
-            .filter_map(|i| match i {
-                AdminItem::Entity(t) => Some(t.slug.clone()),
-                _ => None,
-            })
-            .collect();
-        let mut out = Vec::new();
+    /// A shared filter no listed entity has any column for is an error: every table would drop it, so
+    /// the admin would render no control at all — which reads as a broken feature rather than a typo.
+    fn check_filters(&self) -> Result<()> {
         for name in &self.filters {
-            let mut found = None;
-            for slug in &slugs {
-                let Ok(cols) = self.engine.columns(slug) else { continue };
-                for c in cols {
-                    match &c {
-                        Column::Relation { name: n, target, fk_column: Some(_), label, .. }
-                            if n == name =>
-                        {
-                            found = Some(AdminFilter {
-                                name: name.clone(),
-                                label: label.clone().unwrap_or_else(|| name.clone()),
-                                list_url: self.engine.entity_url(target),
-                                options_json: "[]".into(),
-                            });
+            let known = self.items.iter().any(|i| match i {
+                AdminItem::Entity(t) => self.engine.columns(&t.slug).is_ok_and(|cols| {
+                    cols.iter().any(|c| match c {
+                        Column::Field { name: n, .. } => n == name,
+                        Column::Relation { name: n, fk_column, .. } => {
+                            n == name && fk_column.is_some()
                         }
-                        Column::Field { name: n, options, label, .. } if n == name => {
-                            found = Some(AdminFilter {
-                                name: name.clone(),
-                                label: label.clone().unwrap_or_else(|| name.clone()),
-                                list_url: String::new(),
-                                options_json: Value::Array(
-                                    options
-                                        .iter()
-                                        .map(|o| serde_json::json!({ "id": o, "label": o }))
-                                        .collect(),
-                                )
-                                .to_string(),
-                            });
-                        }
-                        _ => continue,
-                    }
-                    break;
-                }
-                if found.is_some() {
-                    break;
-                }
-            }
-            match found {
-                Some(f) => out.push(f),
-                None => {
-                    return Err(Error::BadRequest(format!(
-                        "crud::ui(Admin): cannot filter by '{name}': no listed entity has such a \
-                         column or to-one relation"
-                    )))
-                }
+                    })
+                }),
+                _ => false,
+            });
+            if !known {
+                return Err(Error::BadRequest(format!(
+                    "crud::ui(Admin): cannot filter by '{name}': no listed entity has such a \
+                     column or to-one relation"
+                )));
             }
         }
-        Ok(out)
+        Ok(())
     }
 }

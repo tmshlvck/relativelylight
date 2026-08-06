@@ -525,14 +525,16 @@ fn the_sortable_flag_reaches_the_rendered_columns() {
 }
 
 #[test]
-fn an_admin_shared_filter_is_offered_to_every_table_that_has_the_column() {
+fn an_admin_shared_filter_is_rendered_by_the_table_and_remembered() {
     let e = engine();
     let html = Admin::new(&e).entity("post").filter("author").render().unwrap();
-    // One control in the side-panel…
-    assert!(html.contains("ruAdminFilters"), "the shared control is rendered");
+    // The control lives in the table's own toolbar (next to its search box), not the side-panel…
+    assert!(html.contains(r#""shared":true"#), "the table is told the filter is Admin-wide");
+    assert!(html.contains("shareFilter"), "changing it there tells the other tables");
+    // …and the selection outlives the page, restored before Alpine starts so the first fetch is
+    // already filtered.
     assert!(html.contains("rl.filter."), "the choice is remembered across visits");
-    // …and the table below marks that filter as shared, so it shows a chip but no local control.
-    assert!(html.contains(r#""shared":true"#));
+    assert!(html.contains("rlSharedFilters"), "…and restored on the next load");
 }
 
 #[test]

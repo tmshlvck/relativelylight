@@ -8,20 +8,21 @@
            writes, the other side of an N:M — need a reload to appear). -->
       <button class="btn btn-outline-secondary btn-sm" type="button" @click="load()"
               :disabled="loading" title="Refresh" aria-label="Refresh">&#8635;</button>
-      {% if search %}
-      <input type="search" class="form-control form-control-sm w-auto"
-             placeholder="Search…" x-model="q" @input.debounce.300ms="onSearch()">
-      {% endif %}
-      <!-- Per-table filter controls (Table::filter). A relation with more rows than the picker
-           threshold gets a search box instead of a <select>; a fixed or shared filter has no control
-           here (it's pinned, or driven from the Admin side-panel) — only the chip below. -->
+      <!-- Filter controls, left of the search box: the control sits with the data it narrows. A
+           relation whose target outgrows the picker threshold gets a search box instead of a
+           <select>. A `fixed_filter` has no control (it's pinned) — just the chip below. An
+           Admin-wide filter renders here too, in every table that has the column; since only one
+           table is visible at a time there is still just one control on screen, and changing it
+           tells the others. -->
       <template x-for="f in ownFilters()" :key="f.name">
         <span>
           <template x-if="!filterBig(f)">
             <select class="form-select form-select-sm w-auto"
                     :aria-label="'Filter by ' + filterLabel(f)"
-                    x-model="filterVals[f.name]" @change="onFilter()">
-              <option value="">All <span x-text="filterLabel(f)"></span></option>
+                    x-model="filterVals[f.name]" @change="onFilter(f)">
+              <!-- Names the column while nothing is chosen ("Zone: all"), which is exactly when a bare
+                   "All" next to a search box would leave you guessing what it filters. -->
+              <option value="" x-text="filterLabel(f) + ': all'"></option>
               <template x-for="o in filterOptions[f.name] || []" :key="o.id">
                 <option :value="o.id" x-text="o.label"></option>
               </template>
@@ -31,7 +32,7 @@
           <template x-if="filterBig(f)">
             <div class="position-relative d-inline-block" @click.away="fOpen[f.name] = false">
               <input type="text" class="form-control form-control-sm" style="width:14rem"
-                     :placeholder="'Filter by ' + filterLabel(f) + '…'"
+                     :placeholder="filterVals[f.name] ? filterLabel(f) + ': ' + labelOfFilter(f, filterVals[f.name]) : 'Filter by ' + filterLabel(f) + '…'"
                      x-model="fQuery[f.name]" @focus="filterSearch(f)"
                      @input.debounce.250ms="filterSearch(f)" @keydown.enter.prevent="filterSearch(f)">
               <ul class="list-group position-absolute shadow" style="z-index:1060; width:14rem; max-height:220px; overflow:auto"
@@ -47,6 +48,10 @@
           </template>
         </span>
       </template>
+      {% if search %}
+      <input type="search" class="form-control form-control-sm w-auto"
+             placeholder="Search…" x-model="q" @input.debounce.300ms="onSearch()">
+      {% endif %}
       {% if editable %}
       <button class="btn btn-outline-danger btn-sm" x-show="selected.length" x-cloak
               @click="deleteSelected()">Delete selected (<span x-text="selected.length"></span>)</button>
@@ -265,6 +270,10 @@
         // be rendered after the side-panel has restored one), then fetch the first page.
         async start() {
           await this.loadFilterOptions();
+          // Only now adopt the Admin-wide selection: a <select> can't hold a value whose <option>
+          // hasn't rendered yet, so setting it any earlier snaps the control back to "All" while the
+          // table below shows filtered rows.
+          await this.$nextTick();
           const shared = (window.rlSharedFilters || {});
           for (const f of this.filterDefs) {
             if (f.shared && shared[f.name] !== undefined) {
@@ -311,42 +320,63 @@
           return out;
         },
         colOf(name) { return this.columns.find(c => c.name === name); },
-        // Filters this table renders a control for: not the pinned ones (nothing to choose) and not
-        // the shared ones (the Admin side-panel owns that control — a second copy of it here would be
-        // two widgets for one value, and the loser would show the wrong thing).
+        // Filters this table renders a control for — everything except the pinned ones, which have
+        // nothing to choose.
         ownFilters() {
-          return this.filterDefs.filter(f => (f.fixed === null || f.fixed === undefined) && !f.shared);
+          return this.filterDefs.filter(f => f.fixed === null || f.fixed === undefined);
         },
+        labelOfFilter(f, v) { return (this.filterLabels[f.name] || {})[String(v)] || v; },
         filterLabel(f) { const c = this.colOf(f.name); return (c && (c.label || c.name)) || f.name; },
         // Big target → search box instead of a dropdown, same cutover the form's picker uses.
         filterBig(f) { return (this.filterTotal[f.name] || 0) > this.pickerThreshold; },
+        // Only filters with no control of their own — a pinned one. Everything else is already
+        // legible in its dropdown, and a chip repeating it would just be a second copy to keep in
+        // step. A pinned filter has nothing on screen otherwise, and a narrowed table that looks
+        // whole is how an operator concludes their rows are gone.
         activeChips() {
-          return Object.entries(this.activeFilters()).map(([name, v]) => {
-            const f = this.filterDefs.find(x => x.name === name) || {};
-            return {
+          return Object.entries(this.activeFilters())
+            .map(([name, v]) => [name, v, this.filterDefs.find(x => x.name === name) || {}])
+            .filter(([, , f]) => f.fixed !== null && f.fixed !== undefined)
+            .map(([name, v, f]) => ({
               name,
               label: this.filterLabel(f),
               value: (this.filterLabels[name] || {})[String(v)] || v,
-              // A pinned filter is the page's, a shared one is the side-panel's: neither is this
-              // table's to clear, so no ✕ that would silently do nothing on the next reload.
-              clearable: (f.fixed === null || f.fixed === undefined) && !f.shared,
-            };
-          });
+            }));
         },
-        clearFilter(name) {
-          this.filterVals[name] = "";
-          this.fQuery[name] = "";
-          this.onFilter();
+        onFilter(f) {
+          this.page = 1;
+          this.selected = [];
+          if (f && f.shared) this.shareFilter(f);
+          this.load();
         },
-        onFilter() { this.page = 1; this.selected = []; this.load(); },
+        // An Admin-wide filter changed here: remember it, put it in the URL so the view can be
+        // linked, and tell the other tables. They're all showing the same value, so whichever one
+        // the operator happened to be looking at is as good a place to change it as any.
+        shareFilter(f) {
+          const value = this.filterVals[f.name] || "";
+          const label = value ? this.labelOfFilter(f, value) : null;
+          try {
+            if (value) {
+              localStorage.setItem("rl.filter." + f.name, JSON.stringify({ value, label }));
+            } else {
+              localStorage.removeItem("rl.filter." + f.name);
+            }
+          } catch (e) { /* private mode: the choice just doesn't outlive the page */ }
+          const hash = new URLSearchParams((location.hash || "").replace(/^#/, ""));
+          if (value) hash.set("filter." + f.name, value); else hash.delete("filter." + f.name);
+          const s = hash.toString();
+          history.replaceState(null, "", s ? "#" + s : location.pathname + location.search);
+          window.dispatchEvent(new CustomEvent("ru-filter", {
+            detail: { name: f.name, value, label, from: this.dataUrl },
+          }));
+        },
         // Fill each own-filter's choices: a relation lists its target terse, an enum uses its options.
         async loadFilterOptions() {
           for (const f of this.ownFilters()) {
             const c = this.colOf(f.name);
             if (!c) continue;
             if (c.kind === "relation" && c.list_url) {
-              const res = await fetch(c.list_url + "?view=terse&per_page=" + this.pickerThreshold);
-              const d = await res.json();
+              const d = await this.terse(c.list_url + "?view=terse&per_page=" + this.pickerThreshold);
               this.filterTotal[f.name] = d.total || 0;
               this.rememberLabels(f.name, d.data || []);
               if (!this.filterBig(f)) {
@@ -364,6 +394,15 @@
           for (const it of items) m[String(it.id)] = it.label;
           this.filterLabels[name] = m;
         },
+        // One fetch per URL for the whole page. An Admin-wide filter is rendered by every table that
+        // has the column — fourteen record tables asking for the same zone list on load would be
+        // fourteen identical requests. Shared across components via the window, and shared as the
+        // *promise*, so tables initialising concurrently wait on one request rather than racing.
+        async terse(url) {
+          const cache = (window.rlTerseCache = window.rlTerseCache || {});
+          if (!cache[url]) cache[url] = fetch(url).then(r => r.json());
+          return await cache[url];
+        },
         async filterSearch(f) {
           const c = this.colOf(f.name);
           if (!c || !c.list_url) return;
@@ -376,17 +415,21 @@
         },
         pickFilter(f, o) {
           this.filterVals[f.name] = o ? String(o.id) : "";
-          this.fQuery[f.name] = o ? o.label : "";
+          this.fQuery[f.name] = "";
           this.fOpen[f.name] = false;
-          this.onFilter();
+          this.onFilter(f);
         },
-        // An Admin-wide control changed. Only react if this table actually has that column — the event
-        // goes to every table on the page.
+        // A shared filter changed on another table. The event reaches every table on the page, so
+        // ignore the ones this table has no column for — and our own broadcast, which would
+        // otherwise reload the list a second time.
         onSharedFilter(detail) {
+          if (detail.from === this.dataUrl) return;
           if (!this.filterDefs.some(f => f.name === detail.name && f.shared)) return;
           this.filterVals[detail.name] = detail.value || "";
           if (detail.label) this.rememberLabels(detail.name, [{ id: detail.value, label: detail.label }]);
-          this.onFilter();
+          this.page = 1;
+          this.selected = [];
+          this.load();
         },
 
         sortDir(c) { const s = this.sortKeys.find(k => k.col === c.name); return s ? (s.desc ? "desc" : "asc") : ""; },

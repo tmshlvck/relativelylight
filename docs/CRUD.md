@@ -611,16 +611,18 @@ column, a to-many relation, a relation whose target has no label column — are 
 clickable-and-then-broken. `.sort(col)` on a column that can't be sorted is a **render-time error
 naming it**, not a header that 400s on first click.
 
-**Filtering.** `.filter(name)` puts a control in the toolbar: a `<select>` for a relation, an enum's
-options, or a Yes/No for a boolean — and a live search→select box once a relation's target outgrows
-`picker_threshold`, reusing the form picker's machinery. The choice reaches the listing, the **CSV
-export** and **"delete all matching"** alike, so no button can act on a wider set than the one on
-screen. An active filter always shows as a chip above the table, and creating a row pre-selects the
-filtered value (it only pre-selects — the picker still offers everything).
+**Filtering.** `.filter(name)` puts a control in the toolbar, **left of the search box** — a `<select>`
+for a relation, an enum's options, or a Yes/No for a boolean, and a live search→select box once a
+relation's target outgrows `picker_threshold`, reusing the form picker's machinery. The choice reaches
+the listing, the **CSV export** and **"delete all matching"** alike, so no button can act on a wider set
+than the one on screen. Creating a row pre-selects the filtered value (it only pre-selects — the picker
+still offers everything).
 
 `.fixed_filter(name, value)` is the same restriction with no control, for a page that is *about* one
-value (`/zone/{id}/records`). Both narrow a **view, not access**: the API stays queryable for other
-values by anyone the model's gate admits, so per-row scoping remains [`authz`](AUTH.md)'s job.
+value (`/zone/{id}/records`). Having nothing on screen to show it, a pinned filter renders as a chip
+above the table instead — a narrowed table that looks whole is how someone concludes their rows were
+deleted. Both narrow a **view, not access**: the API stays queryable for other values by anyone the
+model's gate admits, so per-row scoping remains [`authz`](AUTH.md)'s job.
 
 **Form inputs** are derived from the column type — numbers/text as typed inputs, **booleans as a toggle
 switch**, a closed `options` set as a dropdown — and can be overridden per field with
@@ -738,19 +740,22 @@ per model. Switching happens in the browser (all tables render into the page; th
 which is visible), so it's a single fragment you drop into your shell — no extra routes. See
 `examples/adminpanel`.
 
-**`Admin::filter(name)`** puts one filter control in the side-panel and applies it to every listed table
-that has such a column; tables that don't are unaffected. This is the shape that matters once an admin
-lists many tables of the same kind — fifteen per-type DNS record tables, say, where an operator works
-inside one zone at a time and would otherwise re-pick it on every table they switch to:
+**`Admin::filter(name)`** applies one filter to every listed table that has such a column; tables that
+don't are unaffected. The control appears in each of those tables' own toolbars — it belongs with the
+data it narrows, and only one table is visible at a time, so there is still just one control on screen.
+Changing it on any table updates the rest. This is the shape that matters once an admin lists many
+tables of the same kind — fifteen per-type DNS record tables, say, where an operator works inside one
+zone at a time and would otherwise re-pick it on every table they switch to:
 
 ```rust
 Admin::new(&engine).filter("zone").entity("rr_a").entity("rr_aaaa").entity("rr_mx") /* … */
 ```
 
 The choice is remembered in `localStorage` and mirrored into the URL fragment (`#filter.zone=7`), so a
-filtered admin can be bookmarked or sent to a colleague; it shows as a chip on every affected table, and
-the tables adopt it on their first load rather than flashing an unfiltered page. A name **no** listed
-entity has is an error — an inert control reads as a broken one.
+filtered admin can be bookmarked or sent to a colleague, and the tables adopt it on their first load
+rather than flashing an unfiltered page. The target list is fetched **once per page**, not once per
+table. A name **no** listed entity has is an error — a filter that every table drops would render no
+control at all, which reads as a broken feature rather than a typo.
 
 Builder methods:
 
