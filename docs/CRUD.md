@@ -838,7 +838,7 @@ logging. Each write handler fires a `WriteEvent` carrying the change *and* the r
 
 ```rust
 pub struct WriteEvent<'a> {
-    pub source: &'static str,   // "crud" here
+    pub source: &'static str,   // "autocrud" here (an `auth` handler names itself too)
     pub op: Operation,          // Create | Update | Delete
     pub entity: &'a str,        // slug, e.g. "post"
     pub key: Option<String>,    // pk (None for a bulk delete)
@@ -860,8 +860,11 @@ every row, so a "delete all" can't blow up the audit. The library provides only 
 `auth.identify`), writes the row, and handles retention — the address arrives already resolved, so every
 audit row names the same client the lockout counted and your request log printed. The same
 `Arc` can also be handed to `Auth::on_write` (see [AUTH.md](AUTH.md)) so one sink captures both the
-auto-CRUD and the auth surfaces. **Times are UTC** (`i64` Unix seconds) — see the timezone note in
-[PRD.md](PRD.md).
+auto-CRUD and the auth surfaces — which is why each emitter names **itself** in `source`: with one sink
+behind several of them, that value is what tells them apart. It says `autocrud` (this crate's
+auto-generated CRUD), not a bare `crud`, which names nothing in particular in an app that has CRUD
+screens of its own; store it as it arrives rather than translating it. **Times are UTC**
+(`i64` Unix seconds) — see the timezone note in [PRD.md](PRD.md).
 
 ## Architecture & extending
 

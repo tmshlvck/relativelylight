@@ -9,6 +9,16 @@ Work that has landed on `main` but isn't tagged yet lives under **Unreleased**; 
 heading to the version + date and adds a compare link. Per-entry commit hashes are given where a change
 is easy to miss in a diff.
 
+## Unreleased
+
+### Changed
+
+- **`WriteEvent::source` for the crud engine is now `"autocrud"`** (was `"crud"`). Cosmetic: the value
+  is written into an app's audit table and read by people, and a bare `crud` names nothing in
+  particular in an app that has CRUD screens of its own — `autocrud` is this crate's auto-generated
+  one. A sink that just persists `ev.source` needs no change beyond expecting the new spelling
+  alongside the old in rows already stored (nothing rewrites them).
+
 ## [0.2.1] — 2026-08-06
 
 Sorting and filtering, in both the API and the admin UI — driven by what a records-management console

@@ -33,9 +33,14 @@ use std::sync::Arc;
 /// costs you nothing and means a field added later (a request id, a trace context) isn't a break.
 #[non_exhaustive]
 pub struct WriteEvent<'a> {
-    /// Which surface produced it — `"crud"` (the auto-CRUD API/admin) or an `auth` handler
+    /// Which surface produced it — `"autocrud"` (the auto-CRUD API/admin) or an `auth` handler
     /// (`"auth-profile"`, `"auth-login"`, `"auth-admin"`, …). Apps use their own labels for their
     /// hand-written surfaces.
+    ///
+    /// Each emitter names **itself** here, because one sink is normally registered with both
+    /// `Crud::on_write` and `Auth::on_write` (and usually takes the app's own events too), so this is
+    /// what tells them apart. It says `autocrud` — this crate's auto-generated CRUD — rather than a
+    /// bare `crud`, which in an app that has CRUD screens of its own names nothing in particular.
     pub source: &'static str,
     /// The mutation kind (`Create` / `Update` / `Delete`).
     pub op: Operation,

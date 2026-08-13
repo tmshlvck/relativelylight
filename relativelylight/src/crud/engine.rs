@@ -1076,7 +1076,7 @@ mod http {
             return;
         };
         let ev = crate::observe::WriteEvent {
-            source: "crud",
+            source: "autocrud",
             op,
             entity,
             key: key.map(str::to_string),
