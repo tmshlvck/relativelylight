@@ -10,6 +10,8 @@
 # Playwright / MCP scratch output
 .playwright-mcp/
 *.png
+# …except the README screenshots, which are checked in
+!docs/img/*.png
 
 # Local test scratch (curl cookie jars, etc.)
 *.cookies

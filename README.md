@@ -5,6 +5,36 @@ your ORM entities — with no per-model code**, gated by built-in authentication
 your app: you keep your own router, page shell, and OpenAPI document; `relativelylight` plugs into
 them.
 
+## What it looks like
+
+Nothing below is hand-written per model: the tables, the forms and their widgets are generated from
+the entities, and the login / 2FA screens come with `auth`. Every shot is a runnable example —
+`cargo run -p adminpanel-example` and `cargo run -p crud-example`.
+
+[![Admin panel — many models behind one side panel](docs/img/admin.png)](docs/img/admin.png)
+
+<sub>`crud::ui::Admin` — every registered model behind one side panel, login-gated
+(`examples/adminpanel`).</sub>
+
+<table>
+<tr>
+<td width="50%"><a href="docs/img/table.png"><img src="docs/img/table.png" alt="Table: sortable headers, a relation filter, search, pager"></a><br>
+<sub><b>Table</b> — sortable headers, a filter on the <code>author</code> <i>relation</i>, search, bulk
+actions, CSV, pager.</sub></td>
+<td width="50%"><a href="docs/img/form.png"><img src="docs/img/form.png" alt="Form: text, textarea, range, switch, datetime, relation picker, tag combobox"></a><br>
+<sub><b>Form</b> — the same form the table opens in a modal, standalone on your own page; widgets
+picked per column type (or overridden).</sub></td>
+</tr>
+<tr>
+<td width="50%"><a href="docs/img/login.png"><img src="docs/img/login.png" alt="Login page rendered in the app's own shell"></a><br>
+<sub><b>Login</b> — an HTML fragment wrapped in <i>your</i> page shell; sessions, lockout and CSRF
+included.</sub></td>
+<td width="50%"><a href="docs/img/totp.png"><img src="docs/img/totp.png" alt="TOTP enrolment: QR code, otpauth URL, verify-before-activate"></a><br>
+<sub><b>TOTP 2FA</b> — self-service enrolment from <code>/profile</code>: QR + <code>otpauth://</code>
+URL, verified (and re-authenticated) before it's on.</sub></td>
+</tr>
+</table>
+
 The crate is **`relativelylight`**, organized into feature-gated modules:
 - **`crud`** (default) — the CRUD engine, SeaORM backend, admin UI (`ui`), OpenAPI, CSV.
 - **`auth`** — sessions, login, TOTP 2FA, OIDC SSO, and a per-model authorization gate (usable
