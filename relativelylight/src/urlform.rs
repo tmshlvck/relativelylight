@@ -33,6 +33,10 @@ pub(crate) fn decode(s: &str) -> String {
 
 /// Encode one component. Everything outside the unreserved set is escaped — including `[`/`]`, which
 /// `filter[name]` keys contain, and `~`, which is unreserved but cheap to escape anyway.
+///
+/// Used by the UI (building links) and by `time` (the zone cookie); a build with neither has no
+/// caller for it, hence the gate rather than an `allow(dead_code)` that would hide a real one.
+#[cfg(any(feature = "ui", feature = "tz"))]
 pub(crate) fn encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
@@ -47,9 +51,12 @@ pub(crate) fn encode(s: &str) -> String {
 
 /// Split a query string or form body into decoded `(key, value)` pairs, in order.
 ///
+/// Only the UI splits whole bodies — `csrf` looks for one field and stops.
+///
 /// A `Vec`, not a map, on purpose: repeated keys are meaningful here — `ids=1&ids=2` is a bulk
 /// selection, `filter[a]=x&filter[b]=y` are two conditions, and a multi-select sends one pair per
 /// chosen option. A map would silently keep the last of each.
+#[cfg(feature = "ui")]
 pub(crate) fn pairs(body: &str) -> Vec<(String, String)> {
     body.split('&')
         .filter(|p| !p.is_empty())
@@ -60,7 +67,8 @@ pub(crate) fn pairs(body: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Render `(key, value)` pairs as a query string — no leading `?`.
+/// Render `(key, value)` pairs as a query string — no leading `?`. The UI builds every link with it.
+#[cfg(feature = "ui")]
 pub(crate) fn query(pairs: &[(String, String)]) -> String {
     pairs
         .iter()
@@ -69,7 +77,7 @@ pub(crate) fn query(pairs: &[(String, String)]) -> String {
         .join("&")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ui"))]
 mod tests {
     use super::*;
 

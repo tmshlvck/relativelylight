@@ -25,15 +25,22 @@
 //! TRUST_PROXY=1 cargo run -p access-log-example              # …behind a proxy: believe X-Forwarded-For
 //! ```
 //!
-//! Then watch the log while you visit `/`, log in, and hit `/private` and `/profile`:
+//! Log in and watch. The lesson is the **third column**, and which lines have something in it:
 //!
 //! ```text
-//! 127.0.0.1       -      GET  /            200 0ms
-//! 127.0.0.1       -      POST /login       303 431ms
-//! 127.0.0.1       admin  GET  /private     200 1ms
-//! 127.0.0.1       -      GET  /profile     200 2ms     <- named under NAME_EVERY_REQUEST=1 only:
-//! ```                                                      /profile is the library's route, so no
-//!                                                          handler of ours is there to volunteer a name.
+//! 127.0.0.1       -      GET  /            200 0ms      before logging in: nobody to name
+//! 127.0.0.1       -      POST /login       303 431ms    the library's route  ─┐
+//! 127.0.0.1       admin  GET  /            200 1ms      ours: it knows you    │ under variant 1,
+//! 127.0.0.1       admin  GET  /private     200 1ms      ours: it knows you    │ only our own
+//! 127.0.0.1       -      GET  /profile     200 2ms      the library's route  ─┘ handlers can say
+//! ```
+//!
+//! A route of **ours** names the caller because its handler had to resolve one anyway, and hands
+//! that name to the log on the way out — no second lookup. A route of the **library's** (`/login`,
+//! `/profile`, `/logout`) prints `-`, because there is no handler of ours in it to volunteer
+//! anything. If you want those named too, that is what `NAME_EVERY_REQUEST=1` buys, and what it
+//! costs is one session lookup on every request in the process — including the ones that never
+//! needed an identity.
 
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -97,11 +104,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "naming: {}",
         if name_everyone {
-            "every request with a session (Auth::identify per request)"
+            "every request with a session — one Auth::identify per request, including /login and /profile"
         } else {
-            "only routes that return an Actor (free)"
+            "this app's own routes (/ and /private), which name themselves for free; the library's \
+             routes (/login, /profile, /logout) log `-` — set NAME_EVERY_REQUEST=1 to name those too"
         }
     );
+    println!("{:<15} {:<6} {:<4} {:<12} status ms", "address", "user", "verb", "path");
     // `into_make_service_with_connect_info` is what gives `resolve_real_ip` a socket peer to fall back
     // on. Without it, a request carrying no usable forwarded header is refused with a 500 that says so.
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
@@ -188,14 +197,34 @@ struct AppState {
     auth: Auth,
 }
 
-/// Anonymous: logs as `-` under variant 1, and under variant 2 too until you log in.
-async fn public() -> Html<&'static str> {
-    Html(
+/// The app's own landing page, and the first thing you see after logging in — so this is where the
+/// mechanism has to be visible. It resolves the caller because the page greets them, and hands that
+/// name to the log rather than letting the log go and find it again.
+async fn public(State(app): State<AppState>, req: Request) -> Response {
+    let who = app.auth.identify(req.headers()).await;
+    let body = Html(format!(
         r#"<h1>access-log demo</h1>
-<p>Watch the terminal. This page is anonymous, so the log line names no user.</p>
-<p><a href="/private">/private</a> — needs a login (admin / password); its line is named.</p>
+<p>{}</p>
+<p>Watch the terminal:</p>
+<ul>
+  <li><b>this page</b> and <a href="/private">/private</a> are <i>ours</i> — their log lines name you
+      once you are logged in, at no extra cost: the handler already knew.</li>
+  <li><a href="/profile">/profile</a>, <a href="/login">/login</a> and <a href="/logout">/logout</a>
+      are the <i>library's</i> — no handler of ours is in them to volunteer a name, so they log
+      <code>-</code>. Restart with <code>NAME_EVERY_REQUEST=1</code> to name those too, at one
+      session lookup per request.</li>
+</ul>
 <p><a href="/login">log in</a> · <a href="/profile">profile</a> · <a href="/logout">log out</a></p>"#,
-    )
+        match &who {
+            Some(id) => format!("Signed in as <b>{}</b> — this request's log line says so.", id.username),
+            None => "Not signed in, so this request's log line names nobody.".to_string(),
+        }
+    ));
+    let mut res = (StatusCode::OK, body).into_response();
+    if let Some(id) = who {
+        res.extensions_mut().insert(Actor(id.username));
+    }
+    res
 }
 
 /// Login-gated, and the worked example of variant 1: it already resolved an identity to decide whether

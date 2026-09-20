@@ -532,7 +532,7 @@ impl Engine {
 
     /// Whether this request satisfies the CSRF check (always `true` when CSRF isn't configured).
     /// `form_token` is the `_csrf` field of a posted form — the carrier the UI's own forms use.
-    #[cfg(feature = "csrf")]
+    #[cfg(all(feature = "ui", feature = "csrf"))]
     pub(crate) fn csrf_ok(&self, headers: &::http::HeaderMap, form_token: Option<&str>) -> bool {
         match &self.csrf {
             Some(csrf) => csrf.verify(headers, form_token),
@@ -540,19 +540,20 @@ impl Engine {
         }
     }
 
-    #[cfg(not(feature = "csrf"))]
+    #[cfg(all(feature = "ui", not(feature = "csrf")))]
     pub(crate) fn csrf_ok(&self, _h: &::http::HeaderMap, _form_token: Option<&str>) -> bool {
         true
     }
 
     /// The CSRF checker this engine enforces, if any — the UI renders its hidden `_csrf` input from it.
-    #[cfg(feature = "csrf")]
+    #[cfg(all(feature = "ui", feature = "csrf"))]
     pub(crate) fn csrf(&self) -> Option<&crate::csrf::Csrf> {
         self.csrf.as_ref()
     }
 
     /// Hand a committed write to the audit sink, if the app registered one. Called by
     /// [`crud::ui`](crate::crud::ui) after each write it applies.
+    #[cfg(feature = "ui")]
     pub(crate) async fn observe(&self, event: crate::observe::WriteEvent<'_>) {
         if let Some(observer) = self.observer.as_ref() {
             observer.on_write(&event).await;

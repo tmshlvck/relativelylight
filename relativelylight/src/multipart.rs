@@ -20,7 +20,9 @@
 //! never a panic. (`multer` is the crate to reach for if this ever needs to stream; that would be a
 //! contained swap.)
 
-/// One part of a posted form.
+/// One part of a posted form, owned. Only the UI needs every part; `csrf` wants one field and is
+/// served by [`field`], which copies nothing else.
+#[cfg(feature = "ui")]
 pub(crate) struct Part {
     pub(crate) name: String,
     /// Present when the part came from a file input — even when the file was empty, which is how an
@@ -54,6 +56,7 @@ struct Raw<'a> {
 }
 
 /// Split a buffered body into its parts.
+#[cfg(feature = "ui")]
 pub(crate) fn parse(body: &[u8], boundary: &str) -> Result<Vec<Part>, String> {
     Ok(scan(body, boundary)?
         .into_iter()
@@ -63,6 +66,7 @@ pub(crate) fn parse(body: &[u8], boundary: &str) -> Result<Vec<Part>, String> {
 
 /// The value of the first **text** field named `name`, without copying any file part. This is what
 /// [`csrf::enforce`](crate::csrf::enforce) looks for in an upload.
+#[cfg(feature = "csrf")]
 pub(crate) fn field(body: &[u8], boundary: &str, name: &str) -> Result<Option<String>, String> {
     Ok(scan(body, boundary)?
         .into_iter()
@@ -144,7 +148,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ui"))]
 mod tests {
     use super::*;
 

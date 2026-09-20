@@ -45,7 +45,8 @@ pub mod crud;
 #[cfg(feature = "auth")]
 pub mod auth;
 
-/// `application/x-www-form-urlencoded` encode/decode, shared by `csrf` and `crud::ui`.
+/// `application/x-www-form-urlencoded` encode/decode, shared by `csrf`, `time` and `crud::ui`.
+#[cfg(any(feature = "csrf", feature = "tz", feature = "ui"))]
 mod urlform;
 
 /// A strict reader for a buffered `multipart/form-data` body — how a file reaches the server

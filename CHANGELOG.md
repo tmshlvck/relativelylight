@@ -145,6 +145,10 @@ because `?entity=post` renders one table instead of nine.
   asks for, defaulting to `Table::DEFAULT_PER_PAGE_MAX` (**10,000**). `?per_page=100000000` was
   otherwise a cheap way to make a server read a whole table into memory and render it. The clamp
   normalises the view state, so links carry the clamped number instead of propagating the greedy one.
+- **Narrow feature builds are warning-free.** Helpers shared between features (`urlform`,
+  `multipart`, `Engine::csrf_ok`/`observe`) are gated to the features that actually call them, so a
+  build with only `auth` — or only `crud` — no longer emits `never used` warnings from a library the
+  app didn't write. CLAUDE.md's pre-release matrix now greps for warnings, not just errors.
 - **`Admin::base("/admin")`** — address each model by **path** (`/admin/post`, `/admin/tag`) rather
   than by `?entity=post` on one page. Only the side panel's links change: everything inside a table
   is relative, so it resolves against whichever path the panel is served from, and a write still

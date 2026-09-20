@@ -320,11 +320,16 @@ forgets to enable what it uses (`auth` did exactly this with `axum`, and `exampl
 without anyone noticing). Before a release, also build the combinations that real apps ask for:
 
 ```bash
-for f in "" crud axum csrf tz csv auth auth,sso crud,ui,csv; do
-  cargo build -p relativelylight --no-default-features ${f:+--features $f} || break
+for f in "" crud axum csrf tz csv auth auth,sso crud,ui crud,ui,csv; do
+  cargo build -p relativelylight --no-default-features ${f:+--features $f} 2>&1 \
+    | grep -E "^(error|warning: )" | grep -v "the following packages"    # WARNINGS too, not just errors
 done
 cargo build --workspace      # and the examples, which pin their own narrow feature sets
-``` Deps: SeaORM 1.1, axum 0.8, askama 0.13, jiff 0.2, totp-rs 5.7.
+```
+
+**Check the warnings, not only the exit status.** A helper used by one feature and compiled into
+another is dead code *there* — `--all-features` never shows it, and an app that enables only `auth`
+gets a wall of `never used` from a library it didn't write. Five of those were found this way. Deps: SeaORM 1.1, axum 0.8, askama 0.13, jiff 0.2, totp-rs 5.7.
 
 **Security behavior is tested by rejection.** `auth/security_tests.rs` and `crud/gate_tests.rs` assert
 the *negative* cases over in-memory SQLite — bad password, bogus/expired/half-authenticated session,
