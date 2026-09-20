@@ -1,15 +1,20 @@
 //! Backend-agnostic core: the `Accessor` seam, the contract types, and the `Engine` that composes
-//! accessors into the CRUD + metadata API — plus the axum HTTP surface (feature `axum`).
+//! accessors into one registry.
 //!
-//! The engine is deliberately thin: it holds the registry of entities, owns URLs / metadata (for
-//! OpenAPI and the UI), forwards data to and from accessors, does the generic JSON↔CSV transform
-//! (feature `csv`), and wires routes. Every backend (SeaORM today; memory / no-SQL / filesystem
-//! later) hands the engine **finished JSON** — rows already projected (visible fields, transforms
-//! applied) with relations embedded as `{id, label}`. All the heavy lifting lives in the backend.
+//! The engine is deliberately thin: it holds the registry of entities, consults each model's
+//! authorization gate, and forwards data to and from accessors. Every backend (SeaORM today; memory /
+//! no-SQL / filesystem later) hands it **finished rows** — already projected (visible fields,
+//! transforms applied) with relations embedded as `{id, label}`. All the heavy lifting lives in the
+//! backend, and all rendering lives in [`crud::ui`](crate::crud::ui).
+//!
+//! Everything here is **typed and in-process**: there is no JSON/metadata API any more, so
+//! `Vec<Column>` + [`Page`] go straight from the accessor to the renderer without a wire format in
+//! between (see `MPA.md`). An app that wants to publish its own JSON API writes the handlers and calls
+//! these same methods.
 
 use async_trait::async_trait;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -17,7 +22,7 @@ use std::sync::Arc;
 
 /// Structured validation errors: field-keyed + cross-field/general messages. **`#[non_exhaustive]`** —
 /// build one with [`ValidationErrors::new`], which was always the intended path.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 #[non_exhaustive]
 pub struct ValidationErrors {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -110,7 +115,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 // ===================== Contract types =====================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogicalType {
     Int,
     Float,
@@ -140,10 +145,6 @@ pub enum LogicalType {
 ///
 /// **`#[non_exhaustive]`**, for the same reason as [`LogicalType`]: more of these are likely (currency,
 /// percentage, colour, …), and an out-of-crate `match` shouldn't break when one arrives.
-///
-/// **On the wire** it publishes as a plain lowercase string in `display` (`"datetime"`, `"textarea"`, …)
-/// with any parameters in a sibling `widget` object (`{"rows": 6}`), so a client switches on a string
-/// instead of unpacking a tagged shape. That's also why [`Serialize`] emits only the tag.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum FieldDisplay {
@@ -177,15 +178,10 @@ impl FieldDisplay {
         }
     }
 
-    /// This widget's parameters, published beside the tag as `widget`; `None` when it has none.
-    pub fn params(self) -> Option<Value> {
-        match self {
-            FieldDisplay::Textarea { rows } => Some(json!({ "rows": rows })),
-            FieldDisplay::Range { min, max, step } => {
-                Some(json!({ "min": min, "max": max, "step": step }))
-            }
-            _ => None,
-        }
+    /// Whether this is the integer-Unix-seconds datetime override — asked often enough by the
+    /// renderer and the form decoder to be worth a name.
+    pub fn is_datetime(self) -> bool {
+        matches!(self, FieldDisplay::DateTime)
     }
 
     /// Whether this widget can render a column of `lt` (given whether it has a closed option set).
@@ -215,43 +211,33 @@ impl FieldDisplay {
     }
 }
 
-/// Emits the tag alone — parameters travel in the sibling `widget` key (see the type's docs).
-impl Serialize for FieldDisplay {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-        s.serialize_str(self.tag())
-    }
-}
-
 impl LogicalType {
     pub fn is_text(self) -> bool {
         matches!(self, LogicalType::Text)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cardinality {
     ToOne,
     ToMany,
 }
 
 /// One entry in an entity's published shape — a scalar field or a relation — **backend-agnostic**.
-/// The `Accessor` produces these, the `Engine` renders them into the `_meta` JSON (adding URLs) and into
-/// OpenAPI, and the UI builds tables and forms from that JSON.
+/// The [`Accessor`] produces these and [`crud::ui`](crate::crud::ui) renders tables and forms straight
+/// from them: one `match` per cell and per form input, checked by the compiler.
 ///
-/// The name matches the wire: `_meta` emits `"columns": [{ "kind": "field" | "relation", … }]`, so the
-/// Rust type and the payload a reader is cross-referencing use one word. (A to-many relation is not a
-/// database column, but it *is* one of these entries — the JSON made that choice first.) Note this is
-/// the description the engine **publishes**; the thing you *configure* is
+/// (A to-many relation is not a database column, but it *is* one of these entries.) Note this is the
+/// shape the engine **reports**; the thing you *configure* is
 /// [`MetaField`](crate::crud::seaorm::MetaField), which is a different direction despite the family
 /// resemblance the old name `ColumnMeta` implied.
 ///
-/// **`#[non_exhaustive]` covers new *variants*, not new *fields* — and that limit is deliberate.** A
-/// `#[non_exhaustive]` enum *variant* cannot be constructed from another crate at all, which would make
-/// [`Accessor`] unimplementable outside this one; since producing these values is the whole job of that
-/// trait, the variants stay open. So adding a field here (the planned `required` / enum `options` — see
-/// `TODO.md`) is still a source break for an out-of-crate `Accessor` or an exhaustive `match`. Making
-/// *that* free would mean moving each variant's payload into its own non-exhaustive struct with a
-/// constructor, which is worth doing the day a second backend exists and not before.
+/// **`#[non_exhaustive]` covers new *variants*, not new *fields*.** A non-exhaustive enum *variant*
+/// cannot be constructed from another crate at all, which would make [`Accessor`] unimplementable
+/// outside this one; since producing these values is that trait's whole job, the variants stay open. So
+/// adding a field here is a source break for an out-of-crate `Accessor` or an exhaustive `match` — which
+/// is acceptable because the seam is no longer a stability promise (see [`Accessor`]).
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Column {
     Field {
@@ -326,6 +312,7 @@ pub struct ListQuery {
 /// **`#[non_exhaustive]` plus a constructor**, because an [`Accessor`] outside this crate has to be able
 /// to produce one — marking it non-exhaustive without [`RowItem::new`] would make the seam
 /// unimplementable, which is the opposite of the point.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RowItem {
     pub id: Value,
@@ -343,6 +330,7 @@ impl RowItem {
 
 /// One page of a listing. **`#[non_exhaustive]`** with a constructor, for the same reason as
 /// [`RowItem`].
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Page {
     pub total: u64,
@@ -436,8 +424,13 @@ pub(crate) fn value_key(v: &Value) -> String {
 
 /// The meeting point between a backend (SeaORM / memory / no-SQL / …) and the generic engine.
 /// One instance per entity; owns its own handle, so this interface names no ORM types. Every data
-/// method returns **finished JSON**: rows already projected (visible fields, `on_read` applied) with
+/// method returns **finished rows**: already projected (visible fields, `on_read` applied) with
 /// relations resolved to `{id, label}` — the engine forwards them as-is.
+///
+/// **Not a stability promise.** Its real job is *type erasure*: `Arc<dyn Accessor>` lets one registry
+/// hold entities of different Rust types (`SeaAccessor<E>` is generic over the entity), which is why the
+/// trait exists even with a single backend. Implement it out-of-crate if you like, but expect it — and
+/// [`Column`] — to gain methods and fields in any release.
 #[async_trait]
 pub trait Accessor: Send + Sync {
     fn slug(&self) -> &str;
@@ -500,7 +493,6 @@ pub struct BatchApplied {
 // ===================== The Engine =====================
 
 pub struct Engine {
-    base_path: String,
     accessors: BTreeMap<String, Arc<dyn Accessor>>,
     /// The authorization gate for each model, keyed by slug (set at registration; `Open` = ungated).
     authz: BTreeMap<String, Arc<dyn crate::authz::Authz>>,
@@ -512,16 +504,10 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(base_path: impl Into<String>) -> Self {
-        let mut base_path = base_path.into();
-        while base_path.ends_with('/') {
-            base_path.pop();
-        }
-        if !base_path.is_empty() && !base_path.starts_with('/') {
-            base_path.insert(0, '/');
-        }
+    /// An empty registry. There is no mount path: a [`crud::ui`](crate::crud::ui) component renders
+    /// links relative to whatever URL the app serves it on, so nothing here needs to know that URL.
+    pub fn new() -> Self {
         Self {
-            base_path,
             accessors: BTreeMap::new(),
             authz: BTreeMap::new(),
             observer: None,
@@ -544,31 +530,33 @@ impl Engine {
         self.csrf = Some(csrf);
     }
 
-    /// The CSRF cookie name writes must echo, or `None` when this engine doesn't enforce CSRF. The
-    /// `crud::ui` tables read it to decide whether their `fetch` calls send the header.
-    #[cfg(feature = "csrf")]
-    pub fn csrf_cookie_name(&self) -> Option<&str> {
-        self.csrf.as_ref().map(|c| c.cookie())
-    }
-
-    /// The CSRF cookie name writes must echo — always `None` in a build without the `csrf` feature.
-    #[cfg(not(feature = "csrf"))]
-    pub fn csrf_cookie_name(&self) -> Option<&str> {
-        None
-    }
-
     /// Whether this request satisfies the CSRF check (always `true` when CSRF isn't configured).
+    /// `form_token` is the `_csrf` field of a posted form — the carrier the UI's own forms use.
     #[cfg(feature = "csrf")]
-    fn csrf_ok(&self, headers: &::http::HeaderMap) -> bool {
+    pub(crate) fn csrf_ok(&self, headers: &::http::HeaderMap, form_token: Option<&str>) -> bool {
         match &self.csrf {
-            Some(csrf) => csrf.verify(headers, None), // JSON/CSV API: the header is the only carrier
+            Some(csrf) => csrf.verify(headers, form_token),
             None => true,
         }
     }
 
     #[cfg(not(feature = "csrf"))]
-    fn csrf_ok(&self, _headers: &::http::HeaderMap) -> bool {
+    pub(crate) fn csrf_ok(&self, _h: &::http::HeaderMap, _form_token: Option<&str>) -> bool {
         true
+    }
+
+    /// The CSRF checker this engine enforces, if any — the UI renders its hidden `_csrf` input from it.
+    #[cfg(feature = "csrf")]
+    pub(crate) fn csrf(&self) -> Option<&crate::csrf::Csrf> {
+        self.csrf.as_ref()
+    }
+
+    /// Hand a committed write to the audit sink, if the app registered one. Called by
+    /// [`crud::ui`](crate::crud::ui) after each write it applies.
+    pub(crate) async fn observe(&self, event: crate::observe::WriteEvent<'_>) {
+        if let Some(observer) = self.observer.as_ref() {
+            observer.on_write(&event).await;
+        }
     }
 
     /// The gate governing `slug` (or `None` for an unregistered slug).
@@ -613,9 +601,7 @@ impl Engine {
         self.accessors.insert(slug, acc);
     }
 
-    pub fn base_path(&self) -> &str {
-        &self.base_path
-    }
+    /// Every registered slug, in registration order.
     pub fn tables(&self) -> Vec<String> {
         self.accessors.keys().cloned().collect()
     }
@@ -623,133 +609,22 @@ impl Engine {
         self.accessors.get(slug).ok_or(Error::NotFound)
     }
 
-    pub fn entity_url(&self, slug: &str) -> String {
-        format!("{}/{}", self.base_path, slug)
-    }
-
-    // ---- Metadata ----
-
-    /// Catalog of registered entities (for a frontend). Not routed by default.
-    pub fn meta_all(&self) -> Value {
-        let entities: Vec<Value> = self
-            .accessors
-            .keys()
-            .map(|s| json!({ "entity": s, "url": self.entity_url(s) }))
-            .collect();
-        json!({ "entities": entities })
-    }
-
-    pub fn meta_one(&self, slug: &str) -> Result<Value> {
-        let acc = self.accessor(slug)?;
-        let columns: Vec<Value> = acc.columns().into_iter().map(|e| self.column_json(e)).collect();
-        Ok(json!({
-            "entity": slug,
-            "url": self.entity_url(slug),
-            "primary_key": [acc.pk()],
-            "columns": columns,
-        }))
-    }
-
-    /// Typed column metadata for one entity (fields + relations) — for schema / OpenAPI generation.
+    /// Typed column metadata for one entity (fields + relations) — what the UI renders from.
     pub fn columns(&self, slug: &str) -> Result<Vec<Column>> {
         Ok(self.accessor(slug)?.columns())
     }
 
-    fn column_json(&self, e: Column) -> Value {
-        match e {
-            Column::Field {
-                name,
-                logical_type,
-                read_only,
-                write_only,
-                nullable,
-                required,
-                options,
-                label,
-                description,
-                default,
-                display,
-                sortable,
-            } => {
-                let mut o = json!({
-                    "kind": "field", "name": name, "type": logical_type,
-                    "read_only": read_only, "write_only": write_only,
-                    "nullable": nullable, "required": required, "sortable": sortable,
-                });
-                // Only when there is a set — an `"options": []` on every column would be noise in a
-                // payload the UI reads on every page load.
-                if !options.is_empty() {
-                    o["options"] = json!(options);
-                }
-                if let Some(l) = label {
-                    o["label"] = json!(l);
-                }
-                if let Some(d) = description {
-                    o["description"] = json!(d);
-                }
-                if let Some(dv) = default {
-                    o["default"] = dv;
-                }
-                if let Some(disp) = display {
-                    o["display"] = json!(disp); // the lowercase tag
-                    if let Some(w) = disp.params() {
-                        o["widget"] = w; // e.g. {"rows": 6} / {"min":0,"max":100,"step":1}
-                    }
-                }
-                o
-            }
-            Column::Relation {
-                name,
-                target,
-                cardinality,
-                fk_column,
-                read_only,
-                label,
-                description,
-                sortable,
-            } => {
-                // `list_url` lets a form picker search the target in terse mode:
-                //   GET {list_url}?q=…&view=terse  → [{id,label}]. No per-row item link is emitted
-                //   — the table shows relation labels/badges, not links into the JSON API.
-                let mut o = json!({
-                    "kind": "relation", "name": name, "target": target,
-                    "cardinality": cardinality, "read_only": read_only,
-                    "sortable": sortable,
-                    "list_url": self.entity_url(&target),
-                });
-                if let Some(fk) = fk_column {
-                    o["fk_column"] = json!(fk);
-                }
-                if let Some(l) = label {
-                    o["label"] = json!(l);
-                }
-                if let Some(d) = description {
-                    o["description"] = json!(d);
-                }
-                o
-            }
-        }
+    /// The entity's (single) primary-key field name.
+    pub fn pk(&self, slug: &str) -> Result<String> {
+        Ok(self.accessor(slug)?.pk())
     }
 
-    // ---- Data (pure forwarding; the backend produces finished JSON) ----
+    // ---- Data (pure forwarding; the backend produces finished rows) ----
 
-    /// List rows. Each item is `{ id, label, row? }`; `terse` (and the backend) omit `row`.
-    pub async fn list(&self, slug: &str, q: &ListQuery, terse: bool) -> Result<Value> {
-        let page = self.accessor(slug)?.list(q, terse).await?;
-        let data: Vec<Value> = page
-            .data
-            .into_iter()
-            .map(|it| {
-                let mut o = json!({ "id": it.id, "label": it.label });
-                if let Some(row) = it.row {
-                    o["row"] = row;
-                }
-                o
-            })
-            .collect();
-        Ok(json!({
-            "total": page.total, "page": page.page, "per_page": page.per_page, "data": data,
-        }))
+    /// One page of rows. `terse` items carry only `id` + `label` (relation pickers and filter
+    /// controls); otherwise each item also carries the finished row.
+    pub async fn list(&self, slug: &str, q: &ListQuery, terse: bool) -> Result<Page> {
+        self.accessor(slug)?.list(q, terse).await
     }
 
     pub async fn get(&self, slug: &str, pk: &str) -> Result<Value> {
@@ -768,7 +643,6 @@ impl Engine {
         self.accessor(slug)?.delete(pk).await?.ok_or(Error::NotFound)
     }
 
-    /// Bulk delete matching rows. Refuses to wipe the whole (unfiltered) table unless `q.all`.
     /// Apply many writes to one entity as a single unit — see [`Accessor::write_batch`]. Used by CSV
     /// import to make a file all-or-nothing.
     pub async fn write_batch(
@@ -779,15 +653,47 @@ impl Engine {
         self.accessor(slug)?.write_batch(rows).await
     }
 
-    pub async fn delete_where(&self, slug: &str, q: &ListQuery) -> Result<Value> {
+    /// Bulk delete, returning how many rows went. Refuses to wipe the whole (unfiltered) table
+    /// unless `q.all` — the flag the UI's "Delete all (N)" button sets and its "Delete selected"
+    /// button does not.
+    pub async fn delete_where(&self, slug: &str, q: &ListQuery) -> Result<u64> {
         let has_filter = !q.search.is_empty() || !q.eq.is_empty() || !q.pk_in.is_empty();
         if !has_filter && !q.all {
             return Err(Error::BadRequest(
-                "refusing to delete every row; pass ?all=true to confirm".into(),
+                "refusing to delete every row; say all=true to confirm".into(),
             ));
         }
-        let deleted = self.accessor(slug)?.delete_many(q).await?;
-        Ok(json!({ "deleted": deleted }))
+        self.accessor(slug)?.delete_many(q).await
+    }
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ===================== HTTP error mapping (feature `axum`) =====================
+
+/// How an engine failure becomes a response, for an app that wants to hand one straight back.
+/// Plain text, deliberately: this crate serves HTML pages now, and a page-level error belongs in the
+/// app's own shell (see [`crud::ui`](crate::crud::ui), whose `submit` returns the `Error` for exactly
+/// that reason).
+#[cfg(feature = "axum")]
+impl axum::response::IntoResponse for Error {
+    fn into_response(self) -> axum::response::Response {
+        use axum::http::StatusCode as S;
+        let code = match &self {
+            Error::NotFound => S::NOT_FOUND,
+            Error::ReadOnly => S::METHOD_NOT_ALLOWED,
+            Error::BadRequest(_) => S::BAD_REQUEST,
+            Error::Conflict(_) => S::CONFLICT,
+            Error::Validation(_) | Error::BatchRejected(_) => S::UNPROCESSABLE_ENTITY,
+            Error::Unauthorized => S::UNAUTHORIZED,
+            Error::Forbidden | Error::Csrf => S::FORBIDDEN,
+            Error::Backend(_) => S::INTERNAL_SERVER_ERROR,
+        };
+        (code, self.one_line()).into_response()
     }
 }
 
@@ -801,303 +707,5 @@ mod tests {
         assert_eq!(slugify("BlogPost"), "blog_post");
         assert_eq!(slugify("authorId"), "author_id");
         assert_eq!(slugify("My Table!"), "my_table");
-    }
-}
-
-// ===================== Axum HTTP surface (feature `axum`) =====================
-
-#[cfg(feature = "axum")]
-mod http {
-    use super::{Engine, Error, ListQuery};
-    use crate::middleware::RealIp;
-    use axum::extract::{Path, Query, State};
-    use axum::http::HeaderMap;
-
-    use axum::http::StatusCode;
-    use axum::response::{IntoResponse, Response};
-    use axum::routing::get;
-    use axum::{Json, Router};
-    use serde_json::{json, Value};
-    use std::sync::Arc;
-
-    impl IntoResponse for Error {
-        fn into_response(self) -> Response {
-            match self {
-                Error::NotFound => (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))),
-                Error::ReadOnly => (
-                    StatusCode::METHOD_NOT_ALLOWED,
-                    Json(json!({ "error": "read-only" })),
-                ),
-                Error::BadRequest(m) => (StatusCode::BAD_REQUEST, Json(json!({ "error": m }))),
-                Error::Conflict(m) => (StatusCode::CONFLICT, Json(json!({ "error": m }))),
-                Error::Backend(e) => {
-                    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e })))
-                }
-                Error::Validation(v) => {
-                    let mut body = serde_json::to_value(&v).unwrap_or_else(|_| json!({}));
-                    body["error"] = json!("validation failed");
-                    (StatusCode::UNPROCESSABLE_ENTITY, Json(body))
-                }
-                Error::BatchRejected(rows) => (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(json!({
-                        "error": "nothing was applied",
-                        "rows": rows
-                            .iter()
-                            .map(|(row, e)| json!({ "row": row, "message": e.one_line() }))
-                            .collect::<Vec<_>>(),
-                    })),
-                ),
-                Error::Unauthorized => {
-                    (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" })))
-                }
-                Error::Forbidden => (StatusCode::FORBIDDEN, Json(json!({ "error": "forbidden" }))),
-                Error::Csrf => (
-                    StatusCode::FORBIDDEN,
-                    Json(json!({ "error": "csrf token missing or invalid" })),
-                ),
-            }
-            .into_response()
-        }
-    }
-
-    type St = State<Arc<Engine>>;
-
-    use crate::authz::{Decision, Operation};
-
-    /// The guard every **write** handler runs first: the CSRF check (when the engine enforces one)
-    /// before the gate, so a forged cross-site request is rejected without a session lookup or any
-    /// other work. Safe methods don't call it — they need no token.
-    async fn authorize_write(
-        e: &Engine,
-        op: Operation,
-        model: &str,
-        headers: &HeaderMap,
-    ) -> Result<(), Error> {
-        if !e.csrf_ok(headers) {
-            return Err(Error::Csrf);
-        }
-        authorize(e, op, model, headers).await
-    }
-
-    /// Consult the model's gate: resolve the caller from the request headers and map the
-    /// [`Decision`](crate::authz::Decision) to `401`/`403`. An unregistered model has no gate — let
-    /// the handler proceed and return its own `404`.
-    async fn authorize(e: &Engine, op: Operation, model: &str, headers: &HeaderMap) -> Result<(), Error> {
-        let Some(gate) = e.authz_for(model) else {
-            return Ok(());
-        };
-        match gate.authorize(op, headers).await {
-            Decision::Allow => Ok(()),
-            Decision::NeedsLogin => Err(Error::Unauthorized),
-            Decision::Denied => Err(Error::Forbidden),
-        }
-    }
-
-    impl Engine {
-        /// Build the axum router for the registered entities, mounted under `base_path`.
-        pub fn router(self: Arc<Self>) -> Router {
-            let base = self.base_path.clone();
-            #[allow(unused_mut)]
-            let mut inner = Router::new()
-                .route("/{entity}", get(list).post(create).delete(delete_many))
-                .route("/{entity}/{pk}", get(get_one).patch(update).delete(delete_one));
-            #[cfg(feature = "csv")]
-            {
-                inner = inner.route("/{entity}/_import", axum::routing::post(import));
-            }
-            let inner = inner.with_state(self);
-            if base.is_empty() {
-                inner
-            } else {
-                Router::new().nest(&base, inner)
-            }
-        }
-    }
-
-    /// `name[inner]` → `Some(inner)`, for the bracketed parameter families (`filter[…]`,
-    /// `search[…]`). Brackets can't occur in a column or relation name — those come from Rust
-    /// identifiers — so this namespace can never collide with one, however an app names its columns.
-    /// That is the whole reason for the spelling: the reserved words below (`page`, `sort`, `all`, …)
-    /// *would* shadow a column of the same name, and a bare `?<col>=` has no way to say otherwise.
-    fn bracketed<'a>(key: &'a str, name: &str) -> Option<&'a str> {
-        let rest = key.strip_prefix(name)?.strip_prefix('[')?;
-        rest.strip_suffix(']')
-    }
-
-    /// Parse the list/bulk-delete query string.
-    ///
-    /// Takes a `Vec` rather than a `HashMap` on purpose: a map keeps only the last of a repeated key,
-    /// so `?search[a]=x&search[b]=y` would silently lose one condition — and `ListQuery::search` is a
-    /// `Vec` precisely because several are meant to combine.
-    fn parse_list_query(params: Vec<(String, String)>) -> ListQuery {
-        let mut q = ListQuery::default();
-        for (key, value) in params {
-            if let Some(name) = bracketed(&key, "filter") {
-                q.eq.push((name.to_string(), value));
-                continue;
-            }
-            if let Some(name) = bracketed(&key, "search") {
-                q.search.push((Some(name.to_string()), value));
-                continue;
-            }
-            match key.as_str() {
-                "page" => q.page = value.parse().unwrap_or(0),
-                "per_page" => q.per_page = value.parse().unwrap_or(0),
-                "view" => {}   // rendering mode, handled by the handler
-                "format" => {} // response format (e.g. csv), handled by the handler
-                "all" => q.all = value == "true",
-                "ids" => {
-                    q.pk_in = value.split(',').filter(|s| !s.is_empty()).map(String::from).collect()
-                }
-                "q" => q.search.push((None, value)),
-                "sort" => {
-                    for part in value.split(',').filter(|s| !s.is_empty()) {
-                        match part.split_once(':') {
-                            Some((c, "desc")) => q.sort.push((c.to_string(), true)),
-                            Some((c, _)) => q.sort.push((c.to_string(), false)),
-                            None => q.sort.push((part.to_string(), false)),
-                        }
-                    }
-                }
-                _ => q.search.push((Some(key), value)),
-            }
-        }
-        q
-    }
-
-    /// First value for `key` — the handlers' own (non-`ListQuery`) parameters.
-    fn param<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
-        params.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
-    }
-
-    async fn list(
-        State(e): St,
-        headers: HeaderMap,
-        Path(entity): Path<String>,
-        Query(params): Query<Vec<(String, String)>>,
-    ) -> std::result::Result<Response, Error> {
-        authorize(&e, Operation::List, &entity, &headers).await?;
-        #[cfg(feature = "csv")]
-        if param(&params, "format") == Some("csv") {
-            let body = crate::crud::csv_io::export(&e, &entity, &parse_list_query(params)).await?;
-            let disposition = format!("attachment; filename=\"{entity}.csv\"");
-            return Ok((
-                [
-                    (axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
-                    (axum::http::header::CONTENT_DISPOSITION, disposition),
-                ],
-                body,
-            )
-                .into_response());
-        }
-        let terse = param(&params, "view") == Some("terse");
-        Ok(Json(e.list(&entity, &parse_list_query(params), terse).await?).into_response())
-    }
-
-    async fn get_one(
-        State(e): St,
-        headers: HeaderMap,
-        Path((entity, pk)): Path<(String, String)>,
-    ) -> std::result::Result<Json<Value>, Error> {
-        authorize(&e, Operation::Read, &entity, &headers).await?;
-        Ok(Json(e.get(&entity, &pk).await?))
-    }
-
-    async fn create(
-        State(e): St,
-        headers: HeaderMap,
-        RealIp(client_ip): RealIp,
-        Path(entity): Path<String>,
-        Json(body): Json<Value>,
-    ) -> std::result::Result<(StatusCode, Json<Value>), Error> {
-        authorize_write(&e, Operation::Create, &entity, &headers).await?;
-        let created = e.create(&entity, &body).await?;
-        notify(&e, Operation::Create, &entity, None, None, Some(&created), &headers, client_ip).await;
-        Ok((StatusCode::CREATED, Json(created)))
-    }
-
-    async fn update(
-        State(e): St,
-        headers: HeaderMap,
-        RealIp(client_ip): RealIp,
-        Path((entity, pk)): Path<(String, String)>,
-        Json(body): Json<Value>,
-    ) -> std::result::Result<Json<Value>, Error> {
-        authorize_write(&e, Operation::Update, &entity, &headers).await?;
-        // Snapshot the prior state for the audit event (best-effort).
-        let before = e.get(&entity, &pk).await.ok();
-        let updated = e.update(&entity, &pk, &body).await?;
-        notify(&e, Operation::Update, &entity, Some(&pk), before.as_ref(), Some(&updated), &headers, client_ip).await;
-        Ok(Json(updated))
-    }
-
-    async fn delete_one(
-        State(e): St,
-        headers: HeaderMap,
-        RealIp(client_ip): RealIp,
-        Path((entity, pk)): Path<(String, String)>,
-    ) -> std::result::Result<Json<Value>, Error> {
-        authorize_write(&e, Operation::Delete, &entity, &headers).await?;
-        // `delete` returns the deleted row — that is the "before" state.
-        let deleted = e.delete(&entity, &pk).await?;
-        notify(&e, Operation::Delete, &entity, Some(&pk), Some(&deleted), None, &headers, client_ip).await;
-        Ok(Json(deleted))
-    }
-
-    /// `DELETE /{entity}?<filters>` — bulk delete. `?all=true` permits wiping the whole table.
-    async fn delete_many(
-        State(e): St,
-        headers: HeaderMap,
-        RealIp(client_ip): RealIp,
-        Path(entity): Path<String>,
-        Query(params): Query<Vec<(String, String)>>,
-    ) -> std::result::Result<Json<Value>, Error> {
-        authorize_write(&e, Operation::Delete, &entity, &headers).await?;
-        let res = e.delete_where(&entity, &parse_list_query(params)).await?;
-        // Bulk delete: record the affected count, not every row.
-        notify(&e, Operation::Delete, &entity, None, Some(&res), None, &headers, client_ip).await;
-        Ok(Json(res))
-    }
-
-    /// Fire the audit observer (if one is registered) for a committed write.
-    #[allow(clippy::too_many_arguments)]
-    async fn notify(
-        e: &Engine,
-        op: Operation,
-        entity: &str,
-        key: Option<&str>,
-        before: Option<&Value>,
-        after: Option<&Value>,
-        headers: &HeaderMap,
-        client_ip: std::net::IpAddr,
-    ) {
-        let Some(observer) = e.observer.as_ref() else {
-            return;
-        };
-        let ev = crate::observe::WriteEvent {
-            source: "autocrud",
-            op,
-            entity,
-            key: key.map(str::to_string),
-            before: before.cloned(),
-            after: after.cloned(),
-            headers,
-            client_ip,
-        };
-        observer.on_write(&ev).await;
-    }
-
-    /// `POST /{entity}/_import` — body is CSV text; returns an `ImportReport` as JSON.
-    #[cfg(feature = "csv")]
-    async fn import(
-        State(e): St,
-        headers: HeaderMap,
-        Path(entity): Path<String>,
-        body: String,
-    ) -> std::result::Result<Json<Value>, Error> {
-        authorize_write(&e, Operation::Create, &entity, &headers).await?;
-        let report = crate::crud::csv_io::import(&e, &entity, &body).await?;
-        Ok(Json(serde_json::to_value(report).unwrap_or_else(|_| json!({}))))
     }
 }

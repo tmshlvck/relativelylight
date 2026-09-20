@@ -3,7 +3,7 @@ name = "relativelylight"
 version = "0.2.1"
 edition = "2021"
 license = "MIT"
-description = "Web-app building blocks: auto-generated CRUD JSON API from your ORM entities, an auto-generated Alpine.js CRUD UI bound to that API, plus sessions, user authentication (password, TOTP 2FA, OIDC SSO), and user management."
+description = "Web-app building blocks: an auto-generated, server-rendered CRUD admin UI over your ORM entities (no JavaScript framework, no per-model code), plus sessions, user authentication (password, TOTP 2FA, OIDC SSO), and user management."
 repository = "https://github.com/tmshlvck/relativelylight"
 homepage = "https://github.com/tmshlvck/relativelylight"
 readme = "../README.md"
@@ -18,8 +18,8 @@ http = "1"                       # the `authz` gate trait takes `http::HeaderMap
 sea-orm = { workspace = true, optional = true }
 axum = { version = "0.8", optional = true }
 askama = { version = "0.13", optional = true }
-utoipa = { version = "5", optional = true }
 csv = { version = "1", optional = true }
+jiff = { version = "0.2", optional = true }   # IANA tz database: render a UTC epoch in the user's zone, and read a `datetime-local` back
 argon2 = { version = "0.5", optional = true }
 rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 axum-extra = { version = "0.10", features = ["cookie"], optional = true }
@@ -45,9 +45,13 @@ chrono = "0.4"
 default = ["crud", "axum"]
 crud = ["dep:sea-orm"]        # the CRUD engine + SeaORM backend (the `crud` module)
 axum = ["dep:axum"]           # the HTTP router/handlers
-ui = ["dep:askama", "crud"]   # the Bootstrap/Alpine admin components (Table, Admin)
-openapi = ["dep:utoipa", "crud"]
-csv = ["dep:csv", "crud"]
+# `ui` needs the **`axum` feature**, not merely askama: it parses a request's query string into a
+# `ViewState`, decodes posted form bodies, and answers with `axum::Response`. Depending on askama alone
+# would leave `ui`-without-`axum` a combination that doesn't compile — the mistake `auth` already made
+# once, and one `--all-features` cannot catch.
+ui = ["dep:askama", "crud", "axum", "tz"]  # the server-rendered admin components (Table, Form, Admin)
+csv = ["dep:csv", "crud", "tz"]  # export formats datetime columns in the caller's zone, so it needs `tz`
+tz = ["dep:jiff"]             # timezone-aware rendering of integer-UTC timestamps (the `time` module)
 # `auth` needs the **`axum` feature**, not merely the axum dependency: it serves routes, and it reads the
 # caller's address from `middleware::RealIp`, which is `#[cfg(feature = "axum")]`. Depending on `dep:axum`
 # alone left `auth`-without-`axum` a combination that didn't compile (and `--all-features` can't catch that,

@@ -1,5 +1,12 @@
 # Sorting by relation label + predefined relation filters
 
+> **Status (0.3):** the sorting and filtering behaviour described here shipped in 0.2.1 and is
+> unchanged — `?sort=`, `filter[…]`, the relation join, the total ordering. What *has* changed is
+> where it is read from: the parameters are parsed by `crud::ui::ViewState` out of the page's own URL
+> rather than by a JSON API, and the OpenAPI arguments below (`deepObject`, schema descriptions) are
+> historical — that document generator was removed with the API in 0.3. See `MPA.md` and
+> `MPA_MIGRATION.md`.
+
 > **Status: implemented and shipped for 0.2.1.** This file is kept as the design record — the analysis
 > of *why* the shape is what it is (the bracket namespace, the label probe, the primary-key tiebreaker)
 > is the part worth having later. See `CHANGELOG.md` § Unreleased for what landed and

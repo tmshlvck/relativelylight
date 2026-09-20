@@ -54,8 +54,8 @@ pub struct MetaField {
     /// The allowed values, when the column is an enumeration — empty for everything else.
     ///
     /// **Introspected** from `ColumnType::Enum`, so a Postgres/MySQL enum needs no per-model code: the
-    /// variants become a `<select>` in the admin form, an `enum` in the OpenAPI schema, and a membership
-    /// check on write (a value outside the list is a `422`, where before *any* string was accepted).
+    /// variants become a `<select>` (or a radio group) in the admin form and a membership check on
+    /// write — a value outside the list is refused, where before *any* string was accepted.
     ///
     /// **Set it by hand for the common SQLite shape.** A `DeriveActiveEnum` with `db_type = "String"` is a
     /// text column as far as the schema is concerned, so there is nothing to introspect:
@@ -80,8 +80,8 @@ pub struct MetaField {
     /// supply it — which is what spares a `created_at` filled by an `ActiveModelBehavior::before_save`
     /// hook, provided you marked it read-only (both examples do).
     pub required: bool,
-    /// Whether the column accepts SQL NULL (read from the entity's `ColumnDef`). Reported in the
-    /// metadata + OpenAPI schema, and it decides what an **empty** submitted string means — see
+    /// Whether the column accepts SQL NULL (read from the entity's `ColumnDef`). Published on the
+    /// column, and it decides what an **empty** submitted input means — see
     /// [`blank_is_null`](Self::blank_is_null).
     pub nullable: bool,
     // Visibility — you may change these:
@@ -138,10 +138,11 @@ impl MetaField {
     }
 
     /// Render this integer column — which must hold **Unix seconds (UTC)** — as a datetime in the
-    /// admin UI: the table cell shows a readable UTC timestamp and the create/edit form uses a
-    /// datetime picker (edited in UTC), storing back the integer seconds. Storage, validation, and
-    /// the OpenAPI schema are unchanged (still an integer). For a read-only column (e.g. an
-    /// auto-stamped `created_at`) this affects only the cell, since read-only fields have no input.
+    /// admin UI: the table cell shows a readable timestamp and the create/edit form uses a datetime
+    /// picker — both in the caller's timezone, rendered server-side (see [`crate::time`]) — storing
+    /// back the integer seconds. Storage and validation are unchanged (still an integer). For a
+    /// read-only column (e.g. an auto-stamped `created_at`) this affects only the cell, since
+    /// read-only fields have no input.
     ///
     /// ```ignore
     /// let mut zone = MetaModel::new(zone::Entity);
@@ -1510,10 +1511,11 @@ pub struct Crud {
 }
 
 impl Crud {
-    /// `base_path` is the mount prefix (e.g. `"/api/v1"`; `""` for root).
-    pub fn new(db: DatabaseConnection, base_path: impl Into<String>) -> Self {
+    /// A registry over one database connection. There is no mount path: the UI components render
+    /// links relative to whatever URL the app serves them on.
+    pub fn new(db: DatabaseConnection) -> Self {
         Self {
-            engine: Engine::new(base_path),
+            engine: Engine::new(),
             db,
             registry: Arc::new(SeaRegistry::default()),
         }
@@ -1558,35 +1560,31 @@ impl Crud {
         self
     }
 
-    /// Require a valid **CSRF token** on every write through this API — the double-submit token from
-    /// [`crate::csrf`]. Pass the app's checker so the API and the `auth` login/profile forms share one
-    /// token cookie:
+    /// Require a valid **CSRF token** on every write through this registry — the double-submit token
+    /// from [`crate::csrf`]. Pass the app's checker so the UI's forms and the `auth` login/profile
+    /// forms share one token cookie:
     ///
     /// ```ignore
-    /// crud.csrf(auth.csrf());   // writes now need the X-CSRF-Token header
+    /// crud.csrf(auth.csrf());   // the UI's forms now carry a hidden `_csrf`, and writes check it
     /// ```
     ///
-    /// Writes then answer `403 {"error":"csrf token missing or invalid"}` unless the request echoes the
-    /// cookie in `X-CSRF-Token` (or carries an `Authorization` header, which is exempt). The
-    /// `crud::ui` tables add the header automatically. Off by default — a browserless API that
-    /// authenticates some other way needs no token.
+    /// Writes then answer `403` unless the posted form echoes the cookie (or the request carries an
+    /// `Authorization` header, which is exempt). Any app whose writes are cookie-authenticated wants
+    /// this; it is off by default only because a `crud` build without `auth` may have no cookies at
+    /// all. See `docs/AUTH.md` §7.
     #[cfg(feature = "csrf")]
     pub fn csrf(&mut self, csrf: crate::csrf::Csrf) -> &mut Self {
         self.engine.set_csrf(csrf);
         self
     }
 
-    /// The underlying backend-agnostic engine (for direct use or a custom transport).
+    /// The underlying backend-agnostic engine — what the UI components render from, and what an app
+    /// publishing its own JSON API would call.
     pub fn engine(&self) -> &Engine {
         &self.engine
     }
     pub fn into_engine(self) -> Engine {
         self.engine
-    }
-
-    #[cfg(feature = "axum")]
-    pub fn into_router(self) -> axum::Router {
-        Arc::new(self.engine).router()
     }
 }
 
@@ -1616,7 +1614,7 @@ mod nullable_tests {
         impl ActiveModelBehavior for ActiveModel {}
     }
 
-    /// The metadata a frontend/OpenAPI consumer sees for each column.
+    /// The published shape the renderer sees for each column.
     fn nullability(mm: &MetaModel<thing::Entity>) -> Vec<(String, bool)> {
         mm.columns()
             .into_iter()
@@ -1705,7 +1703,7 @@ mod nullable_tests {
             ],
             "declaration order, for both the NOT NULL and the nullable column"
         );
-        // …and they reach the published shape, which is what the form and OpenAPI read.
+        // …and they reach the published shape, which is what the form reads.
         let published: Vec<Vec<String>> = mm
             .columns()
             .iter()
@@ -1826,7 +1824,7 @@ mod nullable_tests {
         let stmt = schema.create_table_from_entity(stamped::Entity);
         db.execute(db.get_database_backend().build(&stmt)).await.expect("create table");
 
-        let mut crud = Crud::new(db.clone(), "");
+        let mut crud = Crud::new(db.clone());
         crud.register(mm, Open);
         let engine = crud.into_engine();
         // A create body with no `created_at` — which is how every real client writes.
@@ -1870,7 +1868,7 @@ mod nullable_tests {
         db.execute(db.get_database_backend().build(&stmt)).await.expect("create table");
         let mut mm = MetaModel::new(stamped::Entity);
         mm.field("created_at").read_only = true;
-        let mut crud = Crud::new(db.clone(), "");
+        let mut crud = Crud::new(db.clone());
         crud.register(mm, Open);
         (db, crud.into_engine())
     }
@@ -1917,13 +1915,16 @@ mod nullable_tests {
         assert_eq!(stamped_count(&db).await, 3);
     }
 
+    #[cfg(feature = "csv")]
     #[tokio::test]
     async fn a_csv_import_is_all_or_nothing() {
         // The same guarantee through the CSV surface, which is where it matters to a user.
         let (db, engine) = stamped_engine().await;
+        let cols = engine.columns("stamped").expect("registered");
+        use crate::time::Tz;
 
         let good = "title\nalpha\nbeta\n";
-        let report = crate::crud::csv_io::import(&engine, "stamped", good).await.expect("import");
+        let report = crate::crud::csv_io::import(&engine, "stamped", &cols, good, &Tz::UTC).await.expect("import");
         assert_eq!((report.created, report.updated, report.failed), (2, 0, 0));
         assert_eq!(stamped_count(&db).await, 2);
 
@@ -1933,7 +1934,7 @@ mod nullable_tests {
         let before = stamped::Entity::find().one(&db).await.unwrap().unwrap();
         assert_eq!(before.title, "alpha");
         let bad = "id,title\n1,ALPHA\n999,ghost\n";
-        let report = crate::crud::csv_io::import(&engine, "stamped", bad).await.expect("import ran");
+        let report = crate::crud::csv_io::import(&engine, "stamped", &cols, bad, &Tz::UTC).await.expect("import ran");
         assert_eq!((report.created, report.updated), (0, 0), "nothing applied");
         assert_eq!(report.failed, 1);
         assert_eq!(report.errors[0].row, 3, "1-based line, header counted");

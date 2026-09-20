@@ -22,78 +22,89 @@ For the concrete backlog see **[../TODO.md](../TODO.md)**.
 
 > ✅ implemented & verified · 🟡 partial (core done, hardening/extras ahead) · ⛔ future.
 
-## Vision: one API, many backends and frontends
+## Vision: one contract, many backends and frontends
 
-`relativelylight` is an **umbrella**. A *backend flavor* turns some data source into a stable JSON +
-metadata HTTP API (§1); a *frontend flavor* consumes that API to render an admin UI (§2). The API is
-the fixed contract in the middle, so backends and frontends vary independently. Today there is one
-backend (SeaORM) and one frontend (`crud::ui`); the seam is designed so a second of either drops in
-without a core change.
+`relativelylight` is an **umbrella**. A *backend flavor* turns some data source into entities the
+engine can serve (§1); a *frontend flavor* renders them (§2). The contract in the middle is
+**`Vec<Column>` + `Page`** — typed Rust, in-process — so backends and frontends vary independently.
+Today there is one backend (SeaORM) and one frontend (`crud::ui`).
 
-The library is always **part of** a larger app — the app owns its axum router, its page shell, and its
-OpenAPI document; the library contributes routes, HTML fragments, and API schemas into them. This is a
-hard design invariant, not a convenience.
+That contract used to be a JSON + metadata HTTP API. **0.3 removed it** (see `MPA.md`): its only
+consumer was this crate's own JavaScript, and publishing a wire format for an in-process seam cost an
+untyped middle, a 477-line OpenAPI generator, and ~1,450 lines of client code no compiler read. An app
+that wants a JSON API for its *own* clients writes those handlers over the same `Engine` — where the
+versioning and shape decisions belong to it.
+
+The library is always **part of** a larger app — the app owns its axum router and its page shell; the
+library contributes HTML fragments and the write path behind them. This is a hard design invariant, not
+a convenience.
 
 ---
 
-## 1. `crud` — CRUD + metadata API ✅
+## 1. `crud` — the CRUD engine ✅
 
-**Requirement:** given SeaORM entities, serve a complete data API with *no per-model code* — full CRUD
-(including relations), search / filter / sort / paginate, bulk delete, CSV import/export, and a
-machine-readable, structural `columns` description that drives both the UI and OpenAPI. Per-entity
-config (labels, visibility, defaults, validators, N:M) is a light, optional layer over introspection.
+**Requirement:** given SeaORM entities, provide complete CRUD with *no per-model code* — relations
+included, plus search / filter / sort / paginate, bulk delete, CSV import/export, and a typed,
+structural `columns` description the renderer matches on. Per-entity config (labels, visibility,
+defaults, validators, N:M) is a light, optional layer over introspection.
 
 **Relations are first-class in queries, not just in reads:** `filter[<relation>]` matches the foreign
 key behind the name a caller already knows, and `sort=<relation>` orders by the *label* the relation
 renders as (a join onto the target's label column) rather than the id behind it — so a list can be
-ordered the way it is read. Where a label isn't a single column, or a row has many of them, the
-metadata says `sortable: false` and the API refuses, rather than ordering by a guess.
+ordered the way it is read. Where a label isn't a single column, or a row has many of them, the column
+reports `sortable: false` and the engine refuses, rather than ordering by a guess.
 
-The metadata is the **backend-agnostic contract** every backend satisfies and every frontend consumes:
-the backend returns finished JSON; the engine forwards it and adds the metadata envelope.
+`Vec<Column>` + `Page` is the **backend-agnostic contract** every backend satisfies and every frontend
+consumes: the backend returns finished rows; the engine forwards them.
 
 **Roadmap / deferred:**
 - A second backend (in-memory, another ORM) behind the ORM-neutral `Accessor` seam — no core change.
 - Batch relation reads (relation resolution is currently per-target — N+1).
 - Composite-PK URL token + a `row_key` escape hatch.
-- Richer field metadata: **done** — `nullable` (canonicalizing an empty submitted string to `NULL`),
-  `required` (enforced on create and on an explicit `null`, replacing a database `500` with a `422`), and
-  enum `options` (introspected from `ColumnType::Enum` or declared by hand; a `<select>`, an OpenAPI `enum`,
-  and a membership check).
+- Richer field description: **done** — `nullable` (canonicalizing an empty submitted string to `NULL`),
+  `required` (enforced on create and on an explicit `null`, replacing a database `500` with a validation
+  message), and enum `options` (introspected from `ColumnType::Enum` or declared by hand; a `<select>`
+  or radio group, plus a membership check).
 
 ## 2. `crud::ui` — auto-generated web admin ✅
 
 **Requirement:** a customizable admin UI generated from the model, with no hand-written forms.
-Rendering is hybrid: the column **shape** is read from the engine in-process and embedded in a
-server-rendered HTML **fragment**; **data** is fetched client-side from the JSON API. The app supplies
-the shell (Bootstrap 5 + Alpine.js) and drops the fragment in.
+Rendering is **entirely server-side**: columns and rows go from the engine into HTML in one pass, with
+a Rust `match` per cell and per input. The app supplies the shell (Bootstrap 5's stylesheet plus
+`crud::ui::CSS`) and drops the fragment in; there is no JavaScript framework and no client-side state.
+
+The **URL is the view** — page, sort, filters, search, active entity, open dialog — so every screen is
+linkable; writes are `POST` → `303` → `GET` from the app's own route, via `submit`.
 
 - **`Form`** — one entity's create/edit form, standalone, for the **app's own** pages: field subset +
-  order, per-field widget overrides (textarea / radio / slider / email / url / datetime), gate-aware rendering (`401`/`403` rather than a form that can't submit), redirect-or-callback
-  after save, and render-time refusal of a form that could never work (unknown / read-only / required-but
-  -unrendered column).
+  order, per-field widget overrides (textarea / radio / slider / email / url / datetime), gate-aware
+  rendering (`401`/`403` rather than a form that can't submit), a redirect or a saved message after a
+  save, and render-time refusal of a form that could never work (unknown / read-only /
+  required-but-unrendered column).
 - **`Table`** — one entity: search, **sortable headers** (relations included), **filter controls** (a
   relation picker, an enum's values, a boolean, or a value pinned by the page), windowed pager, that
-  same form in a modal (typed inputs, boolean switch, enum dropdown, relation dropdown or search→select
-  picker, timezone-aware datetime picker, inline validation), per-row + bulk delete, CSV import/export,
+  same form in a native `<dialog>` (typed inputs, boolean switch, enum dropdown or radio group,
+  relation dropdown, timezone-aware datetime picker, inline validation that keeps the operator's
+  input), per-row + bulk delete, CSV import/export,
   boolean/relation badges, custom cell renderers. A filter governs the export and the bulk delete as
   well as the listing, so no control can act on a wider set than the one on screen.
-- **`Admin`** — a model side-panel over many `Table`s (configurable order, group headings,
-  separators, custom links) with client-side model switching, plus **one filter shared across every
-  listed table that has the column** — the difference between usable and unusable once an admin lists
-  many tables of the same shape.
+- **`Admin`** — a model side panel over many `Table`s (configurable order, group headings, separators,
+  custom links), rendering **one** of them per request (`?entity=post`), plus **one filter shared
+  across every listed table that has the column** — the difference between usable and unusable once an
+  admin lists many tables of the same shape.
 
-`Form` and `Table`'s modal are **one implementation** behind shared partials (widgets in one, behaviour
-in the other), so the requirement above — *no hand-written forms* — is met once and `Admin` stays a
-composition of the parts rather than a fourth thing to maintain.
+All three are **one implementation**, so the requirement above — *no hand-written forms* — is met once
+and `Admin` stays a composition of the parts rather than a fourth thing to maintain.
 
-**Roadmap / deferred:** transactional CSV
-import, and (further out) a server-rendered `htmx` frontend on the same seam.
+**Roadmap / deferred:** search-as-you-type on relations whose target is too large to list (it needs a
+fetch endpoint, deliberately absent — an id input is the current answer); multipart CSRF so CSV import
+can take a file rather than a paste; optional cross-document view transitions.
 
 ## 3. `auth` — authentication & authorization 🟡
 
 **Requirement:** a feature-gated module (usable **without** `crud`) providing a user + group model
-(SeaORM), authentication, and per-operation authorization gating for both the API and the admin.
+(SeaORM), authentication, and per-operation authorization gating for every rendered and written
+surface.
 Identity is resolved **on demand** (no middleware, nothing injected into the request).
 
 **Implemented:** argon2id login/logout with a server-side session cookie; `Auth::identify → Identity`;
@@ -104,7 +115,7 @@ password change; **TOTP 2FA**
 claim→group
 mapping, optional auto-registration, cached provider discovery, and a callback whose rejection paths are
 tested against a fake IdP); **double-submit CSRF protection** (feature `csrf`: always on for
-the login/profile forms, `Crud::csrf` for the API, a `csrf::enforce` layer for the app's own routes, and an
+the login/profile forms, `Crud::csrf` for the admin's writes, a `csrf::enforce` layer for the app's own routes, and an
 app-supplied rejection page); **attempt limiting** on the unauthenticated
 credential checks (DB-backed lockout → 429, by account name and by source address, both mandatory, the
 unlock being a row delete in the admin panel); **session lifetime + revocation** (absolute *and* idle
@@ -146,19 +157,20 @@ Retention/pruning is the app's responsibility.
 
 ## 5. `time` — timezone-aware presentation ✅
 
-**Requirement:** the DB and every API standardize on **UTC** (`i64` Unix seconds); showing times in a
-viewer's local or a chosen timezone is a **frontend** concern only — the wire contract never carries
-offsets. The library must let an app render/edit timestamps in UTC, browser-local, or a named zone
-without touching the data model or storing anything on `auth_user`.
+**Requirement:** the database standardizes on **UTC** (`i64` Unix seconds); showing times in a chosen
+timezone is a presentation concern only — nothing stored ever carries an offset. The library must let
+an app render and edit timestamps in UTC or a named zone without touching the data model or storing
+anything on `auth_user`.
 
-`time::JS` ships `RLTime` (UTC / browser-local / named-zone formatting, an explicit UTC formatter, a
-"local (UTC)" helper, and DST-correct `datetime-local` ⇆ Unix-seconds conversion), an Alpine
-`$store.tz` selection, and `time::TzPicker` (the picker). `Table` datetime columns follow the
-selection; conversion happens only at render time. The app owns the policy (hardcoded UTC /
-browser-local / per-session / app-stored / server-defined) via `window.RL_TZ`.
+**Rendering happens on the server** (feature `tz`, one dependency: `jiff`). The selected zone rides in
+a cookie, `Tz::from_headers` reads it, and `Tz::format` / `format_input` / `parse` do the work — so a
+table cell, a `datetime-local` input and **a CSV export** all agree, which they could not while the
+zone was known only to the browser. `time::TzPicker` renders the control; setting the cookie is a
+four-line route of the app's own, because a fragment renderer can't write a response header. DST gaps
+and folds resolve by the IANA rules and are covered by unit tests.
 
-**Roadmap / deferred:** nicer zone abbreviations (Intl `short` yields `GMT+2`, not `CEST`); an optional
-app-side helper for the "store the user's TZ" case (kept out of `auth_user`).
+**Roadmap / deferred:** nicer zone abbreviations (`CEST` rather than `GMT+2`); seeding the cookie from
+the browser's own zone on a first visit (three lines of app-side JavaScript, deliberately not shipped).
 
 ## 6. Files — file handling ⛔ (planned)
 

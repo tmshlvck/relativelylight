@@ -20,7 +20,7 @@ path *and* in an app's hand-written endpoints. It is a design proposal — nothi
 - A curated set of the validators every back-office needs (numbers-in-range, network addresses,
   email/URL, enums, lengths, regex), plus combinators to compose them.
 - **Write once, use on every surface.** relativelylight generates the CRUD API and admin, but apps
-  also expose hand-written endpoints (teleddns-server has three: DDNS, a native JSON API, and a
+  also expose hand-written endpoints (teleddns-server has three: DDNS, its own JSON API, and a
   Cloudflare facade). The identical validator must be callable from a `MetaField.validate` closure
   *and* directly from app code, so the rule lives in one place.
 - Dependency-light and feature-gated: pulling in `validate` must not force `regex`/`url`/`idna` on

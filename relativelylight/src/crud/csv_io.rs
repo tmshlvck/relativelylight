@@ -1,22 +1,28 @@
-//! `relativelylight::crud::csv_io` — CSV import/export over the JSON API (feature `csv`).
+//! `relativelylight::crud::csv_io` — CSV import/export for the admin UI (feature `csv`).
 //!
-//! CSV is the one exchange format the JSON API doesn't cover, so it lives here as a thin layer over
-//! the backend-agnostic `Engine`: export reads via `Engine::list`, import writes via
-//! `Engine::create`/`update` — so every row goes through the same coerce/validate pipeline as the
-//! HTTP API. Columns and their kinds come from `Engine::meta_one`, so this is ORM-neutral too.
+//! CSV is the one exchange format the UI can't render, so it lives here as a thin layer over the
+//! backend-agnostic [`Engine`]: export reads via [`Engine::list`], import writes via
+//! [`Engine::write_batch`] — so every row goes through the same coerce/validate/hook pipeline as a
+//! form does. It reads the same typed `&[Column]` the renderer does, which is what keeps a file's
+//! columns and a screen's columns the same set.
+//!
+//! **A file matches the screen.** The caller's [`Tz`] is applied to datetime columns, so an exported
+//! timestamp reads the way the cell above it did, and re-importing that file means what it says. That
+//! was impossible while the export was an API endpoint with no idea what zone the browser had chosen.
 //!
 //! Shape (round-trippable — export then re-import):
 //! - Header row = column names (write-only fields omitted).
-//! - Fields → the scalar value. To-one relation → the target **id** (blank if none).
-//!   To-many / N:M relation → the target ids joined with `|` (e.g. `1|3`).
-//! - On import, a row carrying a primary-key value **updates** that row; a row with a blank/absent
-//!   PK **creates** one. Read-only columns (PK, inverse relations) are ignored on import.
+//! - Field → the scalar value; a `datetime` field → `YYYY-MM-DD HH:MM` in the caller's zone.
+//!   To-one relation → the target **id** (blank if none). To-many → ids joined with `|` (`1|3`).
+//! - On import, a row carrying a primary-key value **updates** that row; a blank/absent PK
+//!   **creates** one. Read-only columns (the PK aside, inverse relations) are ignored.
 
-use crate::crud::engine::{Engine, Error, ListQuery, Result};
+use crate::crud::engine::{Cardinality, Column, Engine, Error, ListQuery, LogicalType, Result};
+use crate::time::Tz;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
-/// Summary of an import run (best-effort: each row is applied independently; failures are collected).
+/// Summary of an import run. All-or-nothing: either every row applied, or `errors` says why none did.
 #[derive(Debug, Default, Serialize)]
 pub struct ImportReport {
     pub created: usize,
@@ -36,8 +42,62 @@ fn be<E: std::fmt::Display>(e: E) -> Error {
     Error::Backend(e.to_string())
 }
 
-/// Render a JSON scalar as a CSV cell (objects/arrays shouldn't occur here; `null` → empty).
-fn cell_str(v: &Value) -> String {
+/// The columns a file carries: everything except write-only ones, which have nothing to export and
+/// would import a secret in clear text.
+fn exported(cols: &[Column]) -> Vec<&Column> {
+    cols.iter().filter(|c| !matches!(c, Column::Field { write_only: true, .. })).collect()
+}
+
+fn name_of(col: &Column) -> &str {
+    match col {
+        Column::Field { name, .. } | Column::Relation { name, .. } => name,
+    }
+}
+
+fn is_datetime(col: &Column) -> bool {
+    matches!(col, Column::Field { display: Some(d), .. } if d.is_datetime())
+}
+
+/// Export every row matching `q` (search / filters / sort apply; pagination is lifted) as CSV text.
+pub async fn export(
+    engine: &Engine,
+    slug: &str,
+    cols: &[Column],
+    q: &ListQuery,
+    tz: &Tz,
+) -> Result<String> {
+    let cols = exported(cols);
+    let mut wtr = csv::Writer::from_writer(vec![]);
+    wtr.write_record(cols.iter().map(|c| name_of(c))).map_err(be)?;
+
+    let mut all = q.clone();
+    all.all = true; // the full (filtered) set, unpaginated
+    for item in engine.list(slug, &all, false).await?.data {
+        let row = item.row.unwrap_or(Value::Null);
+        let record: Vec<String> = cols.iter().map(|c| cell(&row, c, tz)).collect();
+        wtr.write_record(&record).map_err(be)?;
+    }
+    String::from_utf8(wtr.into_inner().map_err(be)?).map_err(be)
+}
+
+/// One CSV cell, from an assembled row (relations arrive as `{id, label}`).
+fn cell(row: &Value, col: &Column, tz: &Tz) -> String {
+    let raw = row.get(name_of(col));
+    match col {
+        Column::Relation { cardinality: Cardinality::ToMany, .. } => raw
+            .and_then(Value::as_array)
+            .map(|items| {
+                items.iter().filter_map(|i| i.get("id")).map(scalar).collect::<Vec<_>>().join("|")
+            })
+            .unwrap_or_default(),
+        Column::Relation { .. } => raw.and_then(|r| r.get("id")).map(scalar).unwrap_or_default(),
+        _ if is_datetime(col) => raw.and_then(Value::as_i64).map(|s| tz.format(s)).unwrap_or_default(),
+        _ => raw.map(scalar).unwrap_or_default(),
+    }
+}
+
+/// A JSON scalar as a cell (`null` → empty, a string without its quotes).
+fn scalar(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
@@ -45,96 +105,33 @@ fn cell_str(v: &Value) -> String {
     }
 }
 
-/// The entity's columns (from metadata), as parsed JSON objects.
-fn columns(engine: &Engine, slug: &str) -> Result<Vec<Value>> {
-    let meta = engine.meta_one(slug)?;
-    Ok(meta
-        .get("columns")
-        .and_then(|c| c.as_array())
-        .cloned()
-        .unwrap_or_default())
-}
-
-/// Export all rows matching `q` (search / filters / sort apply; pagination is lifted) as CSV text.
-pub async fn export(engine: &Engine, slug: &str, q: &ListQuery) -> Result<String> {
-    let cols = columns(engine, slug)?;
-    let exported: Vec<&Value> = cols
-        .iter()
-        .filter(|c| c.get("write_only").and_then(|b| b.as_bool()) != Some(true))
-        .collect();
-
-    let mut wtr = csv::Writer::from_writer(vec![]);
-    let headers: Vec<&str> = exported.iter().map(|c| c["name"].as_str().unwrap_or("")).collect();
-    wtr.write_record(&headers).map_err(be)?;
-
-    let mut qq = q.clone();
-    qq.all = true; // export the full (filtered) set, unpaginated
-    let listing = engine.list(slug, &qq, false).await?;
-    let empty = vec![];
-    let data = listing.get("data").and_then(|d| d.as_array()).unwrap_or(&empty);
-    for item in data {
-        let row = item.get("row").cloned().unwrap_or(Value::Null);
-        let rec: Vec<String> = exported.iter().map(|c| export_cell(&row, c)).collect();
-        wtr.write_record(&rec).map_err(be)?;
-    }
-
-    let bytes = wtr.into_inner().map_err(be)?;
-    String::from_utf8(bytes).map_err(be)
-}
-
-/// One CSV cell for a column, read from an assembled row (relations are `{id,label,url}` shaped).
-fn export_cell(row: &Value, col: &Value) -> String {
-    let name = col["name"].as_str().unwrap_or("");
-    let v = row.get(name);
-    match col["kind"].as_str() {
-        Some("relation") => match col["cardinality"].as_str() {
-            Some("ToMany") => v
-                .and_then(|a| a.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|l| l.get("id"))
-                        .map(cell_str)
-                        .collect::<Vec<_>>()
-                        .join("|")
-                })
-                .unwrap_or_default(),
-            _ => v.and_then(|o| o.get("id")).map(cell_str).unwrap_or_default(),
-        },
-        _ => v.map(cell_str).unwrap_or_default(),
-    }
-}
-
-/// Import CSV text: create/update one row per record, returning a per-row report (best-effort).
-pub async fn import(engine: &Engine, slug: &str, text: &str) -> Result<ImportReport> {
-    let cols = columns(engine, slug)?;
-    let by_name: Map<String, Value> = cols
-        .iter()
-        .filter_map(|c| c.get("name").and_then(|n| n.as_str()).map(|n| (n.to_string(), c.clone())))
-        .collect();
-    let meta = engine.meta_one(slug)?;
-    let pk: Vec<String> = meta
-        .get("primary_key")
-        .and_then(|p| p.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-
+/// Import CSV text: create/update one row per record, as **one unit**.
+///
+/// One backend transaction for the whole file ([`Engine::write_batch`]), so a file that fails on line
+/// 40 leaves the first 39 rows unapplied rather than half-importing a spreadsheet. Validation runs
+/// across every row before the transaction opens, so a file with four bad cells reports all four in
+/// one pass instead of one per re-upload.
+pub async fn import(
+    engine: &Engine,
+    slug: &str,
+    cols: &[Column],
+    text: &str,
+    tz: &Tz,
+) -> Result<ImportReport> {
+    let pk = engine.pk(slug)?;
     let mut rdr = csv::ReaderBuilder::new().flexible(true).from_reader(text.as_bytes());
     let headers = rdr.headers().map_err(be)?.clone();
     let mut report = ImportReport::default();
 
-    // Parse every record first. A malformed line is reported without attempting any write — the import is
-    // all-or-nothing (see below), so there is nothing to half-apply while collecting these.
+    // Parse every record first: the import is all-or-nothing, so there is nothing to half-apply while
+    // collecting these.
     let mut rows: Vec<(Option<String>, Value)> = Vec::new();
-    for (i, result) in rdr.records().enumerate() {
-        let row_no = i + 2; // header is line 1; first data record is line 2
-        match result {
-            Ok(rec) => {
-                let (body, pk_val) = build_body(&headers, &rec, &by_name, &pk);
-                rows.push((pk_val, Value::Object(body)));
-            }
+    for (i, record) in rdr.records().enumerate() {
+        match record {
+            Ok(record) => rows.push(body(&headers, &record, cols, &pk, tz)),
             Err(e) => {
                 report.failed += 1;
-                report.errors.push(ImportError { row: row_no, message: e.to_string() });
+                report.errors.push(ImportError { row: i + 2, message: e.to_string() });
             }
         }
     }
@@ -142,10 +139,6 @@ pub async fn import(engine: &Engine, slug: &str, text: &str) -> Result<ImportRep
         return Ok(report); // unparseable CSV: say so, write nothing
     }
 
-    // **All or nothing.** One backend transaction for the whole file (`Accessor::write_batch`), so a file
-    // that fails on line 40 leaves the first 39 rows unapplied rather than half-importing a spreadsheet.
-    // Validation runs across every row before the transaction opens, so a file with four bad cells reports
-    // all four in one pass instead of one per re-upload.
     match engine.write_batch(slug, rows).await {
         Ok(applied) => {
             report.created = applied.created as usize;
@@ -162,69 +155,77 @@ pub async fn import(engine: &Engine, slug: &str, text: &str) -> Result<ImportRep
     Ok(report)
 }
 
-/// Build a create/update JSON body from one CSV record; also extract a PK value if the CSV carries one.
-fn build_body(
+/// One CSV record → a write body, plus the primary key if the file carried one.
+fn body(
     headers: &csv::StringRecord,
-    rec: &csv::StringRecord,
-    by_name: &Map<String, Value>,
-    pk: &[String],
-) -> (Map<String, Value>, Option<String>) {
-    let mut body = Map::new();
-    let mut pk_val = None;
-    for (h, cell) in headers.iter().zip(rec.iter()) {
-        if pk.iter().any(|p| p == h) {
-            if !cell.is_empty() {
-                pk_val = Some(cell.to_string());
+    record: &csv::StringRecord,
+    cols: &[Column],
+    pk: &str,
+    tz: &Tz,
+) -> (Option<String>, Value) {
+    let mut out = Map::new();
+    let mut key = None;
+    for (header, raw) in headers.iter().zip(record.iter()) {
+        if header == pk {
+            if !raw.is_empty() {
+                key = Some(raw.to_string());
             }
             continue; // the PK itself is never written into the body
         }
-        let Some(col) = by_name.get(h) else { continue };
-        if col.get("read_only").and_then(|b| b.as_bool()) == Some(true) {
-            continue; // inverse relations, generated columns, …
-        }
-        match col.get("kind").and_then(|k| k.as_str()) {
-            Some("relation") => {
-                if col.get("cardinality").and_then(|c| c.as_str()) == Some("ToMany") {
-                    let ids: Vec<Value> = cell
-                        .split('|')
-                        .map(|s| s.trim())
-                        .filter(|s| !s.is_empty())
-                        .map(parse_id)
-                        .collect();
-                    body.insert(h.to_string(), Value::Array(ids));
-                } else {
-                    body.insert(h.to_string(), if cell.is_empty() { Value::Null } else { parse_id(cell) });
-                }
+        let Some(col) = cols.iter().find(|c| name_of(c) == header) else { continue };
+        match col {
+            Column::Relation { read_only: true, .. } | Column::Field { read_only: true, .. } => {}
+            Column::Relation { cardinality: Cardinality::ToMany, .. } => {
+                let ids: Vec<Value> = raw
+                    .split('|')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(id_value)
+                    .collect();
+                out.insert(header.to_string(), Value::Array(ids));
             }
-            _ => {
-                let ty = col.get("type").and_then(|t| t.as_str()).unwrap_or("Text");
-                if let Some(v) = csv_to_json(ty, cell) {
-                    body.insert(h.to_string(), v);
+            Column::Relation { .. } => {
+                out.insert(
+                    header.to_string(),
+                    if raw.is_empty() { Value::Null } else { id_value(raw) },
+                );
+            }
+            Column::Field { logical_type, .. } => {
+                if let Some(v) = scalar_value(*logical_type, is_datetime(col), raw.trim(), tz) {
+                    out.insert(header.to_string(), v);
                 }
             }
         }
     }
-    (body, pk_val)
+    (key, Value::Object(out))
 }
 
-/// Parse a relation target id: numeric when possible (our PKs), else the raw string.
-fn parse_id(s: &str) -> Value {
-    match s.parse::<i64>() {
-        Ok(n) => json!(n),
-        Err(_) => json!(s),
+/// Coerce a cell by its column's logical type. `None` = omit the field (an empty numeric cell, where
+/// sending `0` would be inventing a value).
+fn scalar_value(lt: LogicalType, datetime: bool, cell: &str, tz: &Tz) -> Option<Value> {
+    if datetime {
+        // Written in the caller's zone by `export`, so read back in it too.
+        return match cell.is_empty() {
+            true => Some(Value::Null),
+            false => Some(tz.parse(cell).map(|s| json!(s)).unwrap_or_else(|| json!(cell))),
+        };
     }
-}
-
-/// Coerce a CSV string to JSON by the column's logical type. `None` = omit (empty numeric/bool cell).
-fn csv_to_json(ty: &str, cell: &str) -> Option<Value> {
-    let cell = cell.trim();
-    match ty {
-        "Int" => (!cell.is_empty()).then(|| cell.parse::<i64>().map(|n| json!(n)).unwrap_or(json!(cell))),
-        "Float" => (!cell.is_empty()).then(|| cell.parse::<f64>().map(|n| json!(n)).unwrap_or(json!(cell))),
-        "Bool" => (!cell.is_empty())
+    match lt {
+        LogicalType::Int => (!cell.is_empty())
+            .then(|| cell.parse::<i64>().map(|n| json!(n)).unwrap_or_else(|_| json!(cell))),
+        LogicalType::Float => (!cell.is_empty())
+            .then(|| cell.parse::<f64>().map(|n| json!(n)).unwrap_or_else(|_| json!(cell))),
+        LogicalType::Bool => (!cell.is_empty())
             .then(|| json!(matches!(cell.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y" | "t"))),
-        // Text / Uuid / Date / … — send the string as-is (incl. "") so field validators can run.
+        // Text / Uuid / Date / … — the string as-is (including "") so field validators can run.
         _ => Some(json!(cell)),
     }
 }
 
+/// A relation target id: numeric when possible (our PKs), else the raw string.
+fn id_value(s: &str) -> Value {
+    match s.trim().parse::<i64>() {
+        Ok(n) => json!(n),
+        Err(_) => json!(s.trim()),
+    }
+}

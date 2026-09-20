@@ -53,7 +53,8 @@ Sibling docs: [docs/CRUD.md](CRUD.md) (the API/UI), [PRD.md](PRD.md) (roadmap).
   calls what it needs where it needs it.
 - **One identity, everywhere.** The same `Auth::identify` resolves the caller for the `crud` API, the
   admin UI, *and* the app's own handlers — one lookup, one `Identity`.
-- **The app owns the roots.** As with the router / shell / OpenAPI (see CRUD.md § Composing with your
+- **The app owns the roots.** As with the router and the page shell (see [APP.md](APP.md) for the
+  whole composition, and CRUD.md § Composing with your
   app), auth is applied *by the app* to its router. `auth` provides login routes, the gate trait,
   gate builders, and SeaORM models — the app wires them where it wants, so it can leave `/metrics`
   public, IP-gate an internal API, or bearer-auth its own namespace.
@@ -90,7 +91,7 @@ only when the `auth` feature is enabled (see §9).
 `Set-Cookie: HttpOnly; Secure; SameSite=Strict` cookie, backed by a SeaORM `session` table (user id,
 created/expires, and later a 2FA/assurance level + IP/UA).
 
-Comparison for *our* model (a server-rendered admin + same-origin JSON API inside one app):
+Comparison for *our* model (a server-rendered admin inside one app, same origin throughout):
 
 | | Cookie + server-side session (rec.) | Stateless signed/encrypted cookie | Bearer JWT (Authorization header) |
 |---|---|---|---|
@@ -167,14 +168,14 @@ All optional, all applied by the app; defaults chosen for "safe but works out of
   `CorsLayer` is a self-contained middleware that answers preflight `OPTIONS` and sets the
   `Access-Control-*` response headers; there is no library state it needs and nothing we could add but
   opinions. What *is* worth knowing is crate-specific, and no wrapper would say it better:
-  - **Most deployments need no CORS at all.** The app serves the admin UI and the JSON API from one origin,
+  - **Most deployments need no CORS at all.** The app serves every page and every form post from one origin,
     so nothing is cross-origin.
   - **A cross-origin browser client cannot use the session cookie.** It is `SameSite=Strict` (so is the CSRF
     cookie), which means the browser won't send it on a cross-site request however permissive your CORS
     config is. `allow_credentials(true)` therefore buys nothing here — a cross-origin SPA needs a token in
     an `Authorization` header — which the app issues (§8) and which is CSRF-exempt anyway (§7).
   - **If you do allow a cross-origin caller**, allow the headers this crate's clients send: `content-type`,
-    and **`x-csrf-token`** for any write the admin UI makes (its `fetch` calls include it, so a preflight
+    and **`x-csrf-token`** for any write a browser client of *yours* makes from script (a preflight
     that doesn't permit it fails every write). Add `text/csv` handling if you expose CSV import.
   - Never pair `allow_credentials(true)` with `Any` origins: the spec forbids the combination and browsers
     reject the response.
@@ -506,7 +507,7 @@ viewer's timezone is a frontend concern (see [docs/TIME.md](TIME.md)).
 
 ## 5d. Write observer — audit hook (implemented)
 
-`auth` fires the shared [`WriteObserver`](../src/observe.rs) (see [CRUD.md](CRUD.md#write-observer-audit))
+`auth` fires the shared [`WriteObserver`](../relativelylight/src/observe.rs) (see [CRUD.md](CRUD.md#write-observer-audit))
 from its **mutating handlers**, so auth-table changes made *outside* the crud engine are still audited:
 
 - `POST /profile` — password change (`source = "auth-profile"`).
@@ -770,7 +771,7 @@ auth.password_check(|pw, username| my_rules(pw, username))  // your own predicat
 `reset_admin_access` are unaffected, so a seeder or a break-glass CLI still sets whatever the operator
 says — if the policy governed those, a deployment could be left with no way to set a first password.
 
-**Both surfaces or neither.** `Auth` covers its own pages; the admin UI and JSON API are a separate
+**Both surfaces or neither.** `Auth` covers its own pages; the admin UI's writes are a separate
 `crud` field validator, and whichever you skip becomes the way around the other:
 
 ```rust
@@ -972,7 +973,7 @@ let auth = Auth::new(db.clone(), Lockout::default())
 
 // 2. crud: each model registered with its gate. Share one gate via Arc, or vary per model.
 let content = Arc::new(UserReadGroupWrite::new(&auth, ["editors", "admin"]));
-let mut crud = Crud::new(db, "/api/v1");
+let mut crud = Crud::new(db);
 crud.register(post_mm, content.clone());                          // logged-in read, group write
 crud.register(user_mm, GroupReadWrite::new(&auth, ["admin"]));    // admins only (read + write)
 crud.register(healthcheck_mm, Open);                              // ungated
@@ -982,7 +983,7 @@ let engine = Arc::new(crud.into_engine());
 let app = axum::Router::new()
     .merge(auth.routes())              // GET/POST /login, /logout, (/password …)
     .route("/", get(admin_page))       // the app's own (gated) pages/handlers
-    .merge(engine.clone().router());   // the gated JSON API
+    ;                                  // your own gated admin routes (see CRUD.md § Quick start)
 
 // The app's own page resolves the caller on demand — this is the whole of page-level auth:
 async fn admin_page(headers: HeaderMap, State(app): State<AppState>) -> Response {
@@ -1016,14 +1017,14 @@ host. That asymmetry *is* the protection.
 An unsafe request presents it in either:
 - the **`_csrf` form field** — MPA `<form>` posts (every fragment `auth` renders embeds the hidden
   input), or
-- the **`X-CSRF-Token` header** — `fetch`/XHR clients, including `crud::ui`.
+- the **`X-CSRF-Token` header** — for `fetch`/XHR clients of your own.
 
 **Where it's enforced.**
 
 | Surface | Enforcement | Rejection |
 |---|---|---|
 | `Auth::routes()` — `/login`, `/login/totp`, `/profile*` | **always on** | `403` + a bare "Security check failed" page |
-| the `crud` JSON API | **opt-in**: `crud.csrf(auth.csrf())` | `403 {"error":"csrf token missing or invalid"}` |
+| the `crud` admin UI's writes | **opt-in**: `crud.csrf(auth.csrf())` | `403`, before the gate or the database |
 | your own unsafe routes | **`csrf::enforce`** as a layer, or call `Csrf::verify` yourself | the shared page (see below) |
 
 On the auth routes the check runs **first** — before the password comparison, before any DB work — so a
@@ -1066,20 +1067,21 @@ hasn't proved it came from your site, so nothing about the caller is rendered an
 `Auth::csrf_rejection(|| ..)` (or `Csrf::on_reject`) replaces it with your own, and because the closure
 travels on the `csrf()` handle, one setting covers the library's forms **and** `csrf::enforce` on your
 routes. Keep the same discipline: don't name the user, don't set cookies, stay a `403`. It deliberately
-does **not** apply to the `crud` JSON API, which is answering a machine.
+does **not** apply to a hand-written API of yours answering a machine.
 
-**Wiring it up.** `auth`'s own pages need nothing. For the API, hand the engine the same checker so both
-surfaces share one cookie:
+**Wiring it up.** `auth`'s own pages need nothing. For the admin UI's writes, hand the engine the same
+checker so both surfaces share one cookie:
 
 ```rust
 let auth = Auth::new(db.clone(), Lockout::default()).secure_cookies(false); // configure Auth fully first
-let mut crud = Crud::new(db, "/api/v1");
+let mut crud = Crud::new(db);
 crud.register(post, gate);
-crud.csrf(auth.csrf());          // writes now require X-CSRF-Token
+crud.csrf(auth.csrf());          // every rendered form now carries `_csrf`, and writes check it
 ```
 
-`Table`/`Admin` then read the cookie name off the engine and add the header to every write `fetch`
-(create, update, both deletes, CSV import) — nothing to pass in. An app-owned page that posts to its own
+`Table`/`Form`/`Admin` then render a hidden `_csrf` input in every form they emit, and `submit` checks
+it on every write (create, update, both deletes, CSV import) — nothing to pass in. The **cookie must
+already exist** when the page renders: `auth`'s login issues it. An app-owned page that posts to its own
 route does the two halves itself:
 
 ```rust
@@ -1178,7 +1180,7 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   `editor`'s password via `/profile/2`; `editor` → read-only panel with no Accounts section, own
   `/profile` works, `/profile/1` and the `auth_user` API both 403. **CSRF** is on for the API
   (`crud.csrf(auth.csrf())`) and verified end-to-end in a browser: the panel's create/update/delete
-  `fetch` calls carry `X-CSRF-Token` and succeed, the same write by `curl` without the header is
+  rendered forms carry `_csrf` and succeed, the same write by `curl` without it is
   `403 {"error":"csrf token missing or invalid"}`, reads are unaffected, and `POST /profile` without the
   hidden `_csrf` field is 403. Empty-password accounts cannot log in
   with any password (`verify_password` fails against the empty hash). **TOTP 2FA** verified
@@ -1341,7 +1343,7 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
   gate checked after the write would fail, not pass quietly), an unregistered model is a plain 404,
   and the real `UserReadGroupWrite` preset over a real login cookie gives anonymous 401 everywhere,
   a non-member reads-only (403 on writes, zero backend writes), and a member full access. With
-  `set_csrf` configured, writes without a matching `X-CSRF-Token` are `403` and never reach the backend
+  `set_csrf` configured, writes without a matching `_csrf` are `403` and never reach the backend
   (header alone, cookie alone, mismatch, blank), reads still need no token, a Bearer client is exempt,
   and `Table` emits the header logic only when the engine enforces CSRF.
 
@@ -1361,7 +1363,7 @@ don't follow.
    authz together). Usable without `crud`; `crud` optionally consults it.
 2. **Identity** — ✅ cookie + **server-side session** (SeaORM `session` table).
 3. **CSRF** — ✅ **double-submit token** (feature `csrf`, §7): always on for the module's own forms,
-   `Crud::csrf(auth.csrf())` for the JSON API; `Authorization`-bearing requests exempt.
+   `Crud::csrf(auth.csrf())` for the admin UI's writes; `Authorization`-bearing requests exempt.
 4. **authz config** — ✅ **one gate per model, explicit at registration**: `Crud::register(model,
    gate)`. Each gate is attached per model (no slug arg), is handed the request headers, and resolves
    the identity itself → a `Decision`. The trait lives in the always-on `authz` module (`Open` for

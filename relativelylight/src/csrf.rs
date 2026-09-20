@@ -319,38 +319,14 @@ fn form_field(body: &[u8], name: &str) -> Option<String> {
     let body = std::str::from_utf8(body).ok()?;
     for pair in body.split('&') {
         let (k, v) = pair.split_once('=')?;
-        if percent_decode(k) == name {
-            return Some(percent_decode(v));
+        if crate::urlform::decode(k) == name {
+            return Some(crate::urlform::decode(v));
         }
     }
     None
 }
 
 #[cfg(feature = "axum")]
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => out.push(b' '),
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                    Some(b) => {
-                        out.push(b);
-                        i += 2;
-                    }
-                    None => out.push(b'%'),
-                }
-            }
-            b => out.push(b),
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 fn header_token(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(HEADER)?.to_str().ok()?.trim();
     (!value.is_empty()).then(|| value.to_string())
@@ -454,9 +430,9 @@ mod tests {
         assert_eq!(form_field(b"", FIELD), None);
         // Percent- and plus-decoding, on both sides of the pair.
         assert_eq!(form_field(b"%5Fcsrf=x", "_csrf").as_deref(), Some("x"), "encoded name");
-        assert_eq!(percent_decode("a+b%20c"), "a b c");
-        assert_eq!(percent_decode("100%"), "100%", "a trailing % is not an escape");
-        assert_eq!(percent_decode("%zz"), "%zz", "invalid hex is left alone");
+        assert_eq!(crate::urlform::decode("a+b%20c"), "a b c");
+        assert_eq!(crate::urlform::decode("100%"), "100%", "a trailing % is not an escape");
+        assert_eq!(crate::urlform::decode("%zz"), "%zz", "invalid hex is left alone");
 
         assert!(is_urlencoded_form(&{
             let mut h = HeaderMap::new();

@@ -1,0 +1,49 @@
+/* relativelylight — the few rules Bootstrap 5's CSS doesn't cover, because the components use a
+   native dialog element (whose styling Bootstrap leaves alone, its own .modal assuming its own
+   JavaScript). Inline it once per page inside a style element; see crud::ui::CSS.
+   (No closing style tag anywhere in this file, including in a comment: it would end the element.) */
+
+.rl-dialog {
+  border: 0;
+  padding: 0;
+  max-width: 720px;
+  width: calc(100% - 2rem);
+  background: transparent;
+  /* A dialog rendered with the `open` attribute is not in the top layer, so give it the same
+     placement Bootstrap's modal has and let the row underneath stay visible. */
+  position: fixed;
+  inset: 0;
+  margin: 3rem auto auto;
+  z-index: 1055;
+}
+.rl-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+/* `open` without showModal() means no backdrop pseudo-element, so paint one. */
+.rl-dialog::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: -1;
+}
+/* A form taller than the window scrolls inside the dialog rather than off the bottom of it. */
+.rl-dialog > form { text-align: left; max-height: calc(100vh - 6rem); overflow-y: auto; }
+/* The toolbar's CSV menu: a `<details>` styled as a dropdown, so it opens without JavaScript.
+   (Bootstrap's own .dropdown assumes its JS bundle, which these components don't load.) */
+.rl-menu { position: relative; display: inline-block; }
+.rl-menu > summary { list-style: none; cursor: pointer; }
+.rl-menu > summary::-webkit-details-marker { display: none; }
+.rl-menu-items {
+  position: absolute;
+  right: 0;
+  z-index: 1000;
+  min-width: 11rem;
+  padding: 0.25rem 0;
+  white-space: nowrap;
+}
+.rl-table .table > thead th { white-space: nowrap; }
+/* The "add a secondary sort key" affordance: present for the pointer and for the keyboard, but not
+   shouting `+` from every header of every table. */
+.rl-table th .rl-add { opacity: 0; transition: opacity .1s; }
+.rl-table th:hover .rl-add,
+.rl-table th .rl-add:focus { opacity: 1; }
+.rl-table .badge + .badge { margin-left: 0.15rem; }

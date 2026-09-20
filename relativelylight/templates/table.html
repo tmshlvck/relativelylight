@@ -1,615 +1,152 @@
-<div x-data="ruTable_{{ id }}()" x-init="start()" x-cloak
-     @ru-panel-show.window="if ($event.detail === mySlug()) load()"
-     @ru-filter.window="onSharedFilter($event.detail)">
-  <div class="d-flex justify-content-between align-items-center {% if description.is_empty() %}mb-2{% else %}mb-1{% endif %}">
-    <h5 class="mb-0">{{ title }}</h5>
-    <div class="d-flex gap-2">
-      <!-- Refresh: re-fetch the current page (the table loads once, so external changes — DDNS/API
-           writes, the other side of an N:M — need a reload to appear). -->
-      <button class="btn btn-outline-secondary btn-sm" type="button" @click="load()"
-              :disabled="loading" title="Refresh" aria-label="Refresh">&#8635;</button>
-      <!-- Filter controls, left of the search box: the control sits with the data it narrows. A
-           relation whose target outgrows the picker threshold gets a search box instead of a
-           <select>. A `fixed_filter` has no control (it's pinned) — just the chip below. An
-           Admin-wide filter renders here too, in every table that has the column; since only one
-           table is visible at a time there is still just one control on screen, and changing it
-           tells the others. -->
-      <template x-for="f in ownFilters()" :key="f.name">
-        <span>
-          <template x-if="!filterBig(f)">
-            <select class="form-select form-select-sm w-auto"
-                    :aria-label="'Filter by ' + filterLabel(f)"
-                    x-model="filterVals[f.name]" @change="onFilter(f)">
-              <!-- Names the column while nothing is chosen ("Zone: all"), which is exactly when a bare
-                   "All" next to a search box would leave you guessing what it filters. -->
-              <option value="" x-text="filterLabel(f) + ': all'"></option>
-              <template x-for="o in filterOptions[f.name] || []" :key="o.id">
-                <option :value="o.id" x-text="o.label"></option>
-              </template>
-            </select>
-          </template>
-          <!-- Large target: the same search→pick shape the form's relation picker uses. -->
-          <template x-if="filterBig(f)">
-            <div class="position-relative d-inline-block" @click.away="fOpen[f.name] = false">
-              <input type="text" class="form-control form-control-sm" style="width:14rem"
-                     :placeholder="filterVals[f.name] ? filterLabel(f) + ': ' + labelOfFilter(f, filterVals[f.name]) : 'Filter by ' + filterLabel(f) + '…'"
-                     x-model="fQuery[f.name]" @focus="filterSearch(f)"
-                     @input.debounce.250ms="filterSearch(f)" @keydown.enter.prevent="filterSearch(f)">
-              <ul class="list-group position-absolute shadow" style="z-index:1060; width:14rem; max-height:220px; overflow:auto"
-                  x-show="fOpen[f.name] && (fResults[f.name] || []).length">
-                <li class="list-group-item list-group-item-action" style="cursor:pointer"
-                    @click="pickFilter(f, null)"><em>All</em></li>
-                <template x-for="o in (fResults[f.name] || [])" :key="o.id">
-                  <li class="list-group-item list-group-item-action" style="cursor:pointer"
-                      @click="pickFilter(f, o)" x-text="o.label"></li>
-                </template>
-              </ul>
-            </div>
-          </template>
-        </span>
-      </template>
-      {% if search %}
-      <input type="search" class="form-control form-control-sm w-auto"
-             placeholder="Search…" x-model="q" @input.debounce.300ms="onSearch()">
-      {% endif %}
-      {% if editable %}
-      <button class="btn btn-outline-danger btn-sm" x-show="selected.length" x-cloak
-              @click="deleteSelected()">Delete selected (<span x-text="selected.length"></span>)</button>
-      {% endif %}
-      <!-- Overflow menu (⋮): CSV export/import + delete-all. -->
-      <div class="dropdown">
-        <button class="btn btn-outline-secondary btn-sm" type="button"
-                data-bs-toggle="dropdown" aria-expanded="false" aria-label="More actions">&#8942;</button>
-        <ul class="dropdown-menu dropdown-menu-end">
-          <li><a class="dropdown-item" :href="exportUrl()">Export CSV</a></li>
-          {% if editable %}
-          <li>
-            <label class="dropdown-item mb-0" style="cursor:pointer">Import CSV
-              <input type="file" accept=".csv,text/csv" hidden @change="importCsv($event)">
-            </label>
-          </li>
-          <li><hr class="dropdown-divider"></li>
-          <li x-show="total">
-            <a class="dropdown-item text-danger" href="#" @click.prevent="deleteAllMatching()"
-               x-text="(q ? 'Delete all matching (' : 'Delete all (') + total + ')'"></a>
-          </li>
-          {% endif %}
-        </ul>
-      </div>
-      {% if editable %}
-      <button class="btn btn-primary btn-sm" @click="openCreate()">+ New</button>
-      {% endif %}
+{#- One entity's table: toolbar, rows, bulk actions, pager, and (when a row is being created or
+    edited) the dialog. Every link is query-only and relative, so this fragment works on whatever path
+    the app serves it from. Two `|safe` values, both HTML this crate rendered itself: `dialog` and
+    `import` (their own templates), plus `Cell::Raw` below, which is a `Table::format` closure's
+    output — the one place app-supplied HTML is inserted verbatim. -#}
+<section class="rl-table"{% if !dom_id.is_empty() %} id="{{ dom_id }}"{% endif %}>
+  <div class="d-flex justify-content-between align-items-start gap-3 mb-2">
+    <div>
+      <h5 class="mb-0">{{ title }}</h5>
+      {% if !description.is_empty() %}<p class="text-muted small mb-0">{{ description }}</p>{% endif %}
+    </div>
+    <div class="d-flex gap-2 align-items-center flex-wrap justify-content-end">
+      {%- if search || !controls.is_empty() %}
+      {#- The view's own state travels as hidden inputs: a GET form replaces the query string, so
+          anything not restated here would be dropped by the next search. -#}
+      <form method="get" class="d-flex gap-2 align-items-center">
+        {%- for h in keep %}<input type="hidden" name="{{ h.0 }}" value="{{ h.1 }}">{% endfor %}
+        {%- for c in controls %}
+        <select class="form-select form-select-sm w-auto" name="filter[{{ c.name }}]"
+                aria-label="Filter by {{ c.label }}" onchange="this.form.submit()">
+          <option value="">{{ c.label }}: all</option>
+          {%- for o in c.options %}
+          <option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>
+          {%- endfor %}
+        </select>
+        {%- endfor %}
+        {%- if search %}
+        <input type="search" class="form-control form-control-sm w-auto" name="q" value="{{ q }}"
+               placeholder="Search…" aria-label="Search">
+        {%- endif %}
+        <button class="btn btn-outline-secondary btn-sm" type="submit">Apply</button>
+      </form>
+      {%- endif %}
+      {#- CSV lives in a disclosure rather than two more buttons. `<details>` is the dropdown: it
+          opens and closes itself, so the toolbar needs no JavaScript to have a menu. -#}
+      {%- if csv %}
+      <details class="rl-menu">
+        <summary class="btn btn-outline-secondary btn-sm">CSV</summary>
+        <div class="rl-menu-items card shadow-sm">
+          <a class="dropdown-item py-1 px-3" href="{{ csv_href }}">Export CSV</a>
+          {%- if editable %}
+          <a class="dropdown-item py-1 px-3" href="{{ import_href }}">Import CSV…</a>
+          {%- endif %}
+        </div>
+      </details>
+      {%- endif %}
+      {%- if editable %}<a class="btn btn-primary btn-sm" href="{{ new_href }}">+ New</a>{% endif %}
     </div>
   </div>
-  {% if !description.is_empty() %}
-  <p class="text-muted small mb-3">{{ description }}</p>
-  {% endif %}
 
-  <!-- Active filters, always visible. A narrowed table that looked like a whole one is how an operator
-       concludes their rows are gone; the chip is what stops "where did everything go?". A pinned or
-       shared filter shows without a ✕ — it isn't this table's to clear. -->
-  <div class="mb-2 d-flex flex-wrap gap-1 align-items-center" x-show="activeChips().length" x-cloak>
-    <template x-for="chip in activeChips()" :key="chip.name">
-      <span class="badge text-bg-light border">
-        <span x-text="chip.label"></span>: <strong x-text="chip.value"></strong>
-      </span>
-    </template>
+  {#- What the last write did — a delete or an import, reported once. A create or an update doesn't
+      report: the redirect already lands on the row it changed. -#}
+  {%- if !flash.is_empty() %}
+  <div class="alert alert-success d-flex justify-content-between align-items-center py-2" role="status">
+    <span>{{ flash }}</span>
+    <a class="btn-close" href="{{ flash_dismiss }}" aria-label="Dismiss"></a>
   </div>
+  {%- endif %}
 
-  <div class="table-responsive">
-    <table class="table table-striped table-hover align-middle">
-      <thead>
-        <tr>
-          {% if editable %}
-          <th style="width:1%"><input type="checkbox" class="form-check-input"
-                 :checked="pageAllSelected()" @change="togglePage($event.target.checked)"></th>
-          {% endif %}
-          <!-- Sortable headers. Click cycles asc → desc → unsorted; shift-click adds a secondary key
-               (the API takes a list), with a small ordinal so a multi-key sort is readable. -->
-          <template x-for="c in columns" :key="c.name">
-            <th :class="c.sortable ? 'user-select-none' : ''"
-                :style="c.sortable ? 'cursor:pointer' : ''"
-                :aria-sort="sortAria(c)"
-                @click="c.sortable && toggleSort(c, $event.shiftKey)">
-              <span x-text="c.label || c.name"></span>
-              <span class="text-muted" x-show="sortDir(c)" x-cloak
-                    x-text="(sortDir(c) === 'desc' ? ' ▼' : ' ▲') + sortRank(c)"></span>
+  {#- A narrowed table that looked like a whole one is how an operator concludes their rows are gone. -#}
+  {%- if !chips.is_empty() %}
+  <p class="mb-2 d-flex flex-wrap gap-1 align-items-center">
+    {%- for c in chips %}
+    <span class="badge text-bg-light border">{{ c.label }}: <strong>{{ c.value }}</strong>
+      {%- match c.clear_href %}{% when Some with (href) %} <a href="{{ href }}" class="text-decoration-none" aria-label="Clear {{ c.label }} filter">&times;</a>{% when None %}{% endmatch %}
+    </span>
+    {%- endfor %}
+  </p>
+  {%- endif %}
+
+  <form method="post">
+    {%- if !csrf.is_empty() %}<input type="hidden" name="_csrf" value="{{ csrf }}">{% endif %}
+    <div class="table-responsive">
+      <table class="table table-sm table-hover align-middle">
+        <thead>
+          <tr>
+            {%- if editable %}
+            <th style="width:1%"><input type="checkbox" class="form-check-input" aria-label="Select all on this page"
+                   onclick="for (const c of this.closest('form').querySelectorAll('input[name=ids]')) c.checked = this.checked"></th>
+            {%- endif %}
+            {%- for h in heads %}
+            <th aria-sort="{{ h.aria }}">
+              {%- match h.sort_href %}
+              {%- when Some with (href) %}<a class="text-body text-decoration-none" href="{{ href }}">{{ h.label }}{{ h.mark }}</a>
+              {%- when None %}{{ h.label }}
+              {%- endmatch %}
+              {%- match h.add_href %}{% when Some with (href) %} <a href="{{ href }}" class="rl-add text-muted text-decoration-none" title="Add as a secondary sort key">+</a>{% when None %}{% endmatch %}
             </th>
-          </template>
-          {% if editable %}<th class="text-end">Actions</th>{% endif %}
-        </tr>
-      </thead>
-      <tbody>
-        <template x-for="item in rows" :key="item.id">
-          <tr :class="{ 'table-active': selected.includes(item.id) }">
-            {% if editable %}
-            <td><input type="checkbox" class="form-check-input"
-                   :checked="selected.includes(item.id)" @change="toggleRow(item.id)"></td>
-            {% endif %}
-            <template x-for="c in columns" :key="c.name">
-              <td>
-                <template x-if="c.kind === 'field'">
-                  <span>
-                    <!-- custom formatter → default bool badge → plain text -->
-                    <template x-if="hasFmt(c)"><span x-html="fmt(c, item)"></span></template>
-                    <template x-if="!hasFmt(c) && c.type === 'Bool'">
-                      <span>
-                        <template x-if="cellRaw(item, c) === true"><span class="badge text-bg-success">Yes</span></template>
-                        <template x-if="cellRaw(item, c) === false"><span class="badge text-bg-danger">No</span></template>
-                        <template x-if="cellRaw(item, c) === null || cellRaw(item, c) === undefined"><span class="text-muted">—</span></template>
-                      </span>
-                    </template>
-                    <template x-if="!hasFmt(c) && c.type !== 'Bool'"><span x-text="cellVal(item, c)"></span></template>
-                  </span>
-                </template>
-                <template x-if="c.kind === 'relation'">
-                  <span>
-                    <!-- to-one → label text; to-many/N:M → badges -->
-                    <template x-if="c.cardinality === 'ToOne'">
-                      <span x-text="(links(item, c)[0] || {}).label || ''"></span>
-                    </template>
-                    <template x-if="c.cardinality === 'ToMany'">
-                      <span class="d-inline-flex flex-wrap gap-1">
-                        <template x-for="(lnk, i) in links(item, c)" :key="i">
-                          <span class="badge text-bg-secondary" x-text="lnk.label"></span>
-                        </template>
-                      </span>
-                    </template>
-                  </span>
-                </template>
-              </td>
-            </template>
-            {% if editable %}
-            <td class="text-end text-nowrap">
-              <button class="btn btn-outline-secondary btn-sm" @click="openEdit(item)">Edit</button>
-              <button class="btn btn-outline-danger btn-sm" @click="del(item)">Delete</button>
-            </td>
-            {% endif %}
+            {%- endfor %}
+            {%- if editable %}<th class="text-end">Actions</th>{% endif %}
           </tr>
-        </template>
-        <tr x-show="loading">
-          <td :colspan="columns.length + {{ editable }} * 2" class="text-center text-muted py-4">
-            <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-            <span class="ms-2">Loading…</span>
-          </td>
-        </tr>
-        <tr x-show="!loading && rows.length === 0">
-          <td :colspan="columns.length + {{ editable }} * 2" class="text-center text-muted">No rows</td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
+        </thead>
+        <tbody>
+          {%- for r in rows %}
+          <tr id="row-{{ r.id }}">
+            {%- if editable %}
+            <td><input type="checkbox" class="form-check-input" name="ids" value="{{ r.id }}"
+                       aria-label="Select row {{ r.id }}"></td>
+            {%- endif %}
+            {%- for c in r.cells %}
+            <td>
+              {%- match c %}
+              {%- when Cell::Text with (s) %}{{ s }}
+              {%- when Cell::Bool with (Some(true)) %}<span class="badge text-bg-success">Yes</span>
+              {%- when Cell::Bool with (Some(false)) %}<span class="badge text-bg-danger">No</span>
+              {%- when Cell::Bool with (None) %}<span class="text-muted">—</span>
+              {%- when Cell::Badges with (labels) %}{% for l in labels %}<span class="badge text-bg-secondary">{{ l }}</span> {% endfor %}
+              {%- when Cell::Raw with (html) %}{{ html|safe }}
+              {%- endmatch %}
+            </td>
+            {%- endfor %}
+            {%- if editable %}
+            <td class="text-end text-nowrap">
+              <a class="btn btn-outline-secondary btn-sm" href="{{ r.edit_href }}">Edit</a>
+              <button class="btn btn-outline-danger btn-sm" type="submit" name="_del" value="{{ r.id }}"
+                      {% if confirm %}onclick="return confirm('Delete this row?')"{% endif %}>Delete</button>
+            </td>
+            {%- endif %}
+          </tr>
+          {%- endfor %}
+          {%- if rows.is_empty() %}
+          <tr><td colspan="{{ span }}" class="text-center text-muted py-3">No rows</td></tr>
+          {%- endif %}
+        </tbody>
+      </table>
+    </div>
+    {%- if editable && !rows.is_empty() %}
+    <div class="d-flex gap-2 mb-2">
+      <button class="btn btn-outline-danger btn-sm" type="submit" name="_op" value="delete_selected"
+              {% if confirm %}onclick="return confirm('Delete the selected rows?')"{% endif %}>Delete selected</button>
+      <button class="btn btn-outline-danger btn-sm" type="submit" name="_op" value="delete_all"
+              {% if confirm %}onclick="return confirm('Delete every row this view matches?')"{% endif %}>Delete all {{ pager.total }} matching</button>
+    </div>
+    {%- endif %}
+  </form>
 
-  {% if pagination %}
+  {%- if !pager.links.is_empty() %}
   <div class="d-flex justify-content-between align-items-center">
-    <small class="text-muted">
-      Total: <span x-text="total"></span> · Page <span x-text="page"></span> / <span x-text="pages"></span>
-    </small>
-    <nav>
-      <!-- First  «  N-3 … N … N+3  »  Last   (« / » step by jump(); window clamped to [1, pages]) -->
+    <small class="text-muted">Total: {{ pager.total }} · Page {{ pager.page }} / {{ pager.pages }}</small>
+    <nav aria-label="Pagination">
       <ul class="pagination pagination-sm mb-0">
-        <li class="page-item" :class="{ disabled: page <= 1 }">
-          <a class="page-link" href="#" title="First page" @click.prevent="goto(1)">First</a>
+        {%- for l in pager.links %}
+        <li class="page-item{% if l.active %} active{% endif %}{% if l.disabled %} disabled{% endif %}">
+          <a class="page-link" href="{{ l.href }}">{{ l.label }}</a>
         </li>
-        <li class="page-item" :class="{ disabled: page <= 1 }">
-          <a class="page-link" href="#" :title="'Back ' + jump() + ' pages'" @click.prevent="goto(page - jump())">&laquo;</a>
-        </li>
-        <template x-for="p in pageWindow()" :key="p">
-          <li class="page-item" :class="{ active: p === page }">
-            <a class="page-link" href="#" @click.prevent="goto(p)" x-text="p"></a>
-          </li>
-        </template>
-        <li class="page-item" :class="{ disabled: page >= pages }">
-          <a class="page-link" href="#" :title="'Forward ' + jump() + ' pages'" @click.prevent="goto(page + jump())">&raquo;</a>
-        </li>
-        <li class="page-item" :class="{ disabled: page >= pages }">
-          <a class="page-link" href="#" title="Last page" @click.prevent="goto(pages)">Last</a>
-        </li>
+        {%- endfor %}
       </ul>
     </nav>
   </div>
-  {% endif %}
-
-  {% if editable %}
-  <!-- Create / edit overlay: a plain block div toggled by Alpine x-show (no Bootstrap .modal class,
-       whose display:none would fight x-show). Bootstrap classes used only for styling. -->
-  <div x-show="modalOpen" x-cloak
-       style="position:fixed; inset:0; z-index:1050; overflow-y:auto; background:rgba(0,0,0,.5);">
-    <div class="card shadow-lg" style="max-width:720px; margin:3rem auto;">
-      <div class="card-content">
-        <div class="card-header d-flex justify-content-between align-items-center">
-          <h5 class="mb-0">
-            <span x-text="mode === 'create' ? 'New' : 'Edit'"></span> {{ title }}
-          </h5>
-          <button type="button" class="btn-close" @click="closeModal()"></button>
-        </div>
-        <!-- A real <form>: submitting it (Save, or Enter in a field) is the signal a browser's password
-             manager needs to offer to save a credential *once*, at the right moment. We post it
-             ourselves with fetch (@submit.prevent) and clear the secret fields right after, so the
-             previous account's password can't linger in the DOM and get re-offered on the next save. -->
-        <form x-ref="editForm" @submit.prevent="save()" autocomplete="off" novalidate>
-        <div class="card-body">
-          <div class="alert alert-danger" x-show="rowErrors.length">
-            <template x-for="e in rowErrors" :key="e"><div x-text="e"></div></template>
-          </div>
-          {% include "_form_fields.html" %}
-        </div>
-        <div class="card-footer text-end">
-          <button type="button" class="btn btn-secondary" @click="closeModal()">Cancel</button>
-          <button type="submit" class="btn btn-primary" :disabled="saving">Save</button>
-        </div>
-        </form>
-      </div>
-    </div>
-  </div>
-  {% endif %}
-
-  <script>
-    function ruTable_{{ id }}() {
-      return {
-        {% include "_form_core.html" %}
-        formatters: {{ formatters|safe }},
-        perPage: {{ per_page }},
-        confirmDelete: {{ confirm }},
-        // `loading` starts true: `x-init` always calls load() immediately, so the table shows the
-        // spinner from first paint rather than a momentary empty "No rows".
-        q: "", page: 1, total: 0, rows: [], loading: true, selected: [],
-        // Filters: `filterDefs` is the configuration, `filterVals` the chosen values (by name).
-        // `filterLabels` remembers the label for a chosen id so the chip can name it without a refetch.
-        filterDefs: {{ filters_json|safe }},
-        filterVals: {}, filterLabels: {}, filterOptions: {}, filterTotal: {},
-        fQuery: {}, fResults: {}, fOpen: {},
-        sortKeys: {{ sort_json|safe }},
-        // The modal is this host's contribution to the shared form core: `mode`/`editId` are what the
-        // core switches POST-vs-PATCH on, and `afterSave` below is the one behaviour the two hosts differ on.
-        modalOpen: false, mode: "create", editId: null,
-
-        // Seed the filter controls, adopt whatever the Admin-wide selection already is (this table may
-        // be rendered after the side-panel has restored one), then fetch the first page.
-        async start() {
-          await this.loadFilterOptions();
-          // Only now adopt the Admin-wide selection: a <select> can't hold a value whose <option>
-          // hasn't rendered yet, so setting it any earlier snaps the control back to "All" while the
-          // table below shows filtered rows.
-          await this.$nextTick();
-          const shared = (window.rlSharedFilters || {});
-          for (const f of this.filterDefs) {
-            if (f.shared && shared[f.name] !== undefined) {
-              this.filterVals[f.name] = shared[f.name].value || "";
-              if (shared[f.name].label) {
-                this.rememberLabels(f.name, [{ id: shared[f.name].value, label: shared[f.name].label }]);
-              }
-            }
-          }
-          await this.load();
-        },
-        async load() {
-          this.loading = true;
-          const p = new URLSearchParams();
-          p.set("page", this.page);
-          p.set("per_page", this.perPage);
-          if (this.q) p.set("q", this.q);
-          this.applyQuery(p);
-          const res = await fetch(this.dataUrl + "?" + p.toString());
-          const d = await res.json();
-          this.rows = d.data || [];
-          this.total = d.total || 0;
-          this.page = d.page || 1;
-          this.loading = false;
-        },
-
-        // ---- filters + sort: one place, so the listing, the CSV export and "delete all matching"
-        // can't disagree about which rows they mean ----
-        applyQuery(p) {
-          for (const [name, v] of Object.entries(this.activeFilters())) {
-            p.set("filter[" + name + "]", v);
-          }
-          if (this.sortKeys.length) {
-            p.set("sort", this.sortKeys.map(s => s.desc ? s.col + ":desc" : s.col).join(","));
-          }
-        },
-        // name → value for every filter that is set: a pinned one wins, else the chosen value.
-        activeFilters() {
-          const out = {};
-          for (const f of this.filterDefs) {
-            const v = (f.fixed !== null && f.fixed !== undefined) ? f.fixed : this.filterVals[f.name];
-            if (v !== undefined && v !== null && v !== "") out[String(f.name)] = v;
-          }
-          return out;
-        },
-        colOf(name) { return this.columns.find(c => c.name === name); },
-        // Filters this table renders a control for — everything except the pinned ones, which have
-        // nothing to choose.
-        ownFilters() {
-          return this.filterDefs.filter(f => f.fixed === null || f.fixed === undefined);
-        },
-        labelOfFilter(f, v) { return (this.filterLabels[f.name] || {})[String(v)] || v; },
-        filterLabel(f) { const c = this.colOf(f.name); return (c && (c.label || c.name)) || f.name; },
-        // Big target → search box instead of a dropdown, same cutover the form's picker uses.
-        filterBig(f) { return (this.filterTotal[f.name] || 0) > this.pickerThreshold; },
-        // Only filters with no control of their own — a pinned one. Everything else is already
-        // legible in its dropdown, and a chip repeating it would just be a second copy to keep in
-        // step. A pinned filter has nothing on screen otherwise, and a narrowed table that looks
-        // whole is how an operator concludes their rows are gone.
-        activeChips() {
-          return this.filterDefs
-            .filter(f => f.fixed)
-            .map(f => ({
-              name: f.name,
-              label: this.filterLabel(f),
-              value: this.labelOfFilter(f, f.fixed),
-            }));
-        },
-        onFilter(f) {
-          this.page = 1;
-          this.selected = [];
-          if (f && f.shared) this.shareFilter(f);
-          this.load();
-        },
-        // An Admin-wide filter changed here: remember it, put it in the URL so the view can be
-        // linked, and tell the other tables. They're all showing the same value, so whichever one
-        // the operator happened to be looking at is as good a place to change it as any.
-        shareFilter(f) {
-          const value = this.filterVals[f.name] || "";
-          const label = value ? this.labelOfFilter(f, value) : null;
-          try {
-            if (value) {
-              localStorage.setItem("rl.filter." + f.name, JSON.stringify({ value, label }));
-            } else {
-              localStorage.removeItem("rl.filter." + f.name);
-            }
-          } catch (e) { /* private mode: the choice just doesn't outlive the page */ }
-          const hash = new URLSearchParams((location.hash || "").replace(/^#/, ""));
-          if (value) hash.set("filter." + f.name, value); else hash.delete("filter." + f.name);
-          const s = hash.toString();
-          history.replaceState(null, "", s ? "#" + s : location.pathname + location.search);
-          window.dispatchEvent(new CustomEvent("ru-filter", {
-            detail: { name: f.name, value, label, from: this.dataUrl },
-          }));
-        },
-        // Fill each own-filter's choices: a relation lists its target terse, an enum uses its options.
-        async loadFilterOptions() {
-          for (const f of this.filterDefs) {
-            const c = this.colOf(f.name);
-            if (!c) continue;
-            // A pinned filter has no control, so it needs no option list — only the label for its one
-            // value, so its chip can read "Zone: example.com." rather than "Zone: 7".
-            if (f.fixed) {
-              if (c.kind === "relation" && c.list_url) {
-                const d = await this.terse(
-                  c.list_url + "?view=terse&ids=" + encodeURIComponent(f.fixed));
-                this.rememberLabels(f.name, d.data || []);
-              }
-              continue;
-            }
-            if (c.kind === "relation" && c.list_url) {
-              const d = await this.terse(c.list_url + "?view=terse&per_page=" + this.pickerThreshold);
-              this.filterTotal[f.name] = d.total || 0;
-              this.rememberLabels(f.name, d.data || []);
-              if (!this.filterBig(f)) {
-                this.filterOptions[f.name] = (d.data || []).map(x => ({ id: x.id, label: x.label }));
-              }
-            } else if ((c.options || []).length) {
-              this.filterOptions[f.name] = c.options.map(o => ({ id: o, label: o }));
-            } else if (c.type === "Bool") {
-              this.filterOptions[f.name] = [{ id: "true", label: "Yes" }, { id: "false", label: "No" }];
-            }
-          }
-        },
-        rememberLabels(name, items) {
-          const m = this.filterLabels[name] || {};
-          for (const it of items) m[String(it.id)] = it.label;
-          this.filterLabels[name] = m;
-        },
-        // One fetch per URL for the whole page. An Admin-wide filter is rendered by every table that
-        // has the column — fourteen record tables asking for the same zone list on load would be
-        // fourteen identical requests. Shared across components via the window, and shared as the
-        // *promise*, so tables initialising concurrently wait on one request rather than racing.
-        async terse(url) {
-          const cache = (window.rlTerseCache = window.rlTerseCache || {});
-          if (!cache[url]) cache[url] = fetch(url).then(r => r.json());
-          return await cache[url];
-        },
-        async filterSearch(f) {
-          const c = this.colOf(f.name);
-          if (!c || !c.list_url) return;
-          const term = this.fQuery[f.name] ? "&q=" + encodeURIComponent(this.fQuery[f.name]) : "";
-          const res = await fetch(c.list_url + "?view=terse&per_page=20" + term);
-          const d = await res.json();
-          this.fResults[f.name] = (d.data || []).map(x => ({ id: x.id, label: x.label }));
-          this.rememberLabels(f.name, this.fResults[f.name]);
-          this.fOpen[f.name] = true;
-        },
-        pickFilter(f, o) {
-          this.filterVals[f.name] = o ? String(o.id) : "";
-          this.fQuery[f.name] = "";
-          this.fOpen[f.name] = false;
-          this.onFilter(f);
-        },
-        // A shared filter changed on another table. The event reaches every table on the page, so
-        // ignore the ones this table has no column for — and our own broadcast, which would
-        // otherwise reload the list a second time.
-        onSharedFilter(detail) {
-          if (detail.from === this.dataUrl) return;
-          if (!this.filterDefs.some(f => f.name === detail.name && f.shared)) return;
-          this.filterVals[detail.name] = detail.value || "";
-          if (detail.label) this.rememberLabels(detail.name, [{ id: detail.value, label: detail.label }]);
-          this.page = 1;
-          this.selected = [];
-          this.load();
-        },
-
-        sortDir(c) { const s = this.sortKeys.find(k => k.col === c.name); return s ? (s.desc ? "desc" : "asc") : ""; },
-        sortAria(c) { return c.sortable ? (this.sortDir(c) ? this.sortDir(c) + "ending" : "none") : null; },
-        // Only worth numbering once there's more than one key.
-        sortRank(c) {
-          if (this.sortKeys.length < 2) return "";
-          const i = this.sortKeys.findIndex(k => k.col === c.name);
-          return i === -1 ? "" : String(i + 1);
-        },
-        toggleSort(c, additive) {
-          const cur = this.sortKeys.find(k => k.col === c.name);
-          const next = !cur ? { col: c.name, desc: false } : (!cur.desc ? { col: c.name, desc: true } : null);
-          const keys = additive ? this.sortKeys.filter(k => k.col !== c.name) : [];
-          if (next) keys.push(next);
-          this.sortKeys = keys;
-          this.page = 1;
-          this.load();
-        },
-        // This entity's slug (last path segment of the data URL) — used to match panel-show events
-        // from the Admin side-panel so the table reloads when re-shown (its data may be stale after a
-        // change elsewhere, e.g. the other side of an N:M relation).
-        mySlug() { return this.dataUrl.split("/").filter(Boolean).pop(); },
-
-        // ---- row selection + bulk delete ----
-        toggleRow(id) {
-          const i = this.selected.indexOf(id);
-          if (i === -1) this.selected.push(id); else this.selected.splice(i, 1);
-        },
-        pageAllSelected() {
-          return this.rows.length > 0 && this.rows.every(r => this.selected.includes(r.id));
-        },
-        togglePage(on) {
-          const ids = this.rows.map(r => r.id);
-          if (on) this.selected = [...new Set([...this.selected, ...ids])];
-          else this.selected = this.selected.filter(id => !ids.includes(id));
-        },
-        async deleteSelected() {
-          const n = this.selected.length;
-          if (!n) return;
-          if (this.confirmDelete && !confirm(`Delete ${n} selected {{ title }}?`)) return;
-          const p = new URLSearchParams({ ids: this.selected.join(",") });
-          const res = await fetch(this.dataUrl + "?" + p.toString(),
-                                  { method: "DELETE", headers: this.csrfHeaders() });
-          const r = await res.json();
-          this.selected = [];
-          if (r.deleted != null) { await this.load(); } else { alert(r.error || "delete failed"); }
-        },
-        async deleteAllMatching() {
-          const narrowed = this.q || Object.keys(this.activeFilters()).length > 0;
-          const scope = narrowed ? `all ${this.total} matching rows` : `ALL ${this.total} rows`;
-          if (this.confirmDelete && !confirm(`Delete ${scope}? This cannot be undone.`)) return;
-          const p = new URLSearchParams();
-          // A filter counts as a filter for the engine's "don't wipe the whole table" guard, so
-          // `all=true` is needed only when nothing narrows the set.
-          if (this.q) p.set("q", this.q);
-          for (const [name, v] of Object.entries(this.activeFilters())) p.set("filter[" + name + "]", v);
-          if (!narrowed) p.set("all", "true");
-          const res = await fetch(this.dataUrl + "?" + p.toString(),
-                                  { method: "DELETE", headers: this.csrfHeaders() });
-          const r = await res.json();
-          if (r.deleted != null) { this.page = 1; await this.load(); } else { alert(r.error || "delete failed"); }
-        },
-        get pages() { return Math.max(1, Math.ceil(this.total / this.perPage)); },
-        onSearch() { this.page = 1; this.load(); },
-        // Go to page `p`, clamped to [1, pages]; reload only if it actually changed.
-        goto(p) {
-          const t = Math.min(this.pages, Math.max(1, p));
-          if (t !== this.page) { this.page = t; this.load(); }
-        },
-        // << / >> step: ±10 pages normally, ±100 once there are more than 1000 pages.
-        jump() { return this.pages > 1000 ? 100 : 10; },
-        // The N-3 … N … N+3 window, clamped to the available range (fewer near the edges).
-        pageWindow() {
-          const r = 3;
-          const start = Math.max(1, this.page - r);
-          const end = Math.min(this.pages, this.page + r);
-          const list = [];
-          for (let i = start; i <= end; i++) list.push(i);
-          return list;
-        },
-        cellRaw(item, c) { return item.row ? item.row[c.name] : undefined; },
-        cellVal(item, c) {
-          const v = this.cellRaw(item, c);
-          if (this.isDateTime(c)) return this.fmtDateTime(v);
-          return (v === null || v === undefined) ? "" : v;
-        },
-        links(item, c) {
-          const v = this.cellRaw(item, c);
-          if (Array.isArray(v)) return v;
-          return v ? [v] : [];
-        },
-        // Custom per-column cell renderer (from Table::format), inserted via x-html.
-        hasFmt(c) { return typeof this.formatters[c.name] === "function"; },
-        fmt(c, item) {
-          try { return this.formatters[c.name](this.cellRaw(item, c), item.row || {}); }
-          catch (e) { return ""; }
-        },
-
-        // Close the modal, leaving no secret behind (also resets the DOM form, so a browser autofill
-        // that never touched our model is cleared too).
-        async closeModal() {
-          this.clearSecrets();
-          await this.$nextTick();
-          if (this.$refs.editForm) this.$refs.editForm.reset();
-          this.modalOpen = false;
-        },
-        async openCreate() {
-          this.mode = "create"; this.editId = null;
-          this.fieldErrors = {}; this.rowErrors = [];
-          this.resetPicker();
-          await this.fetchOptions();
-          await this.$nextTick();          // let relation <option>s render…
-          this.form = this.blankForm();
-          // Adding a record while looking at one zone means adding it *to* that zone. Pre-select, not
-          // restrict: the picker still offers everything, because a narrowed view is not a permission.
-          for (const [name, v] of Object.entries(this.activeFilters())) {
-            if (name in this.form) this.form[name] = String(v);
-          }
-          this.modalOpen = true;
-        },
-        async openEdit(item) {
-          this.mode = "edit"; this.editId = item.id;
-          this.fieldErrors = {}; this.rowErrors = [];
-          this.resetPicker();
-          await this.fetchOptions();
-          await this.$nextTick();          // …before setting form values, so x-model can
-          // Re-fetch the row so relations edited elsewhere (e.g. the other side of an N:M) aren't
-          // seeded from a stale cached list row. Fall back to the cached row on any error.
-          let row = item.row;
-          try {
-            const res = await fetch(this.dataUrl + "/" + item.id);
-            if (res.ok) row = await res.json();
-          } catch (e) { /* keep cached row */ }
-          this.form = this.fromRow(row); // select options that now exist in the DOM.
-          this.modalOpen = true;
-        },
-        // The shared core saved a row; this host closes the modal (which wipes the secret — the submit
-        // already gave the password manager its one chance) and reloads the current page of rows.
-        async afterSave(row) {
-          await this.closeModal();
-          await this.load();
-        },
-        async del(item) {
-          if (this.confirmDelete && !confirm("Delete this {{ title }} (#" + item.id + ")?")) return;
-          await fetch(this.dataUrl + "/" + item.id, { method: "DELETE", headers: this.csrfHeaders() });
-          await this.load();
-        },
-
-        exportUrl() {
-          const p = new URLSearchParams();
-          p.set("format", "csv");
-          if (this.q) p.set("q", this.q);       // export respects the current search…
-          this.applyQuery(p);                   // …and the current filters + sort
-          return this.dataUrl + "?" + p.toString();
-        },
-        async importCsv(ev) {
-          const file = ev.target.files[0];
-          if (!file) return;
-          const text = await file.text();
-          const res = await fetch(this.dataUrl + "/_import", {
-            method: "POST", headers: { "content-type": "text/csv", ...this.csrfHeaders() }, body: text,
-          });
-          ev.target.value = "";              // allow re-importing the same file
-          const r = await res.json();
-          let msg = `Imported: ${r.created} created, ${r.updated} updated, ${r.failed} failed.`;
-          if (r.errors && r.errors.length) {
-            msg += "\n\n" + r.errors.slice(0, 10).map(e => `row ${e.row}: ${e.message}`).join("\n");
-          }
-          alert(msg);
-          await this.load();
-        },
-      };
-    }
-  </script>
-</div>
+  {%- endif %}
+  {{ dialog|safe }}
+</section>

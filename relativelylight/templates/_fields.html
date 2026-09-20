@@ -1,0 +1,64 @@
+{#- The form's inputs: one block per rendered column, chosen by a Rust `match` on the column (see
+    `ui::widgets`), so exactly one branch can apply and a new widget is a compile error until it has
+    one here. Included by both hosts — the table's dialog and the standalone form — which is why both
+    name their field list `fields`. -#}
+{%- for f in fields %}
+<div class="mb-3">
+  <label class="form-label" for="f-{{ f.name }}">{{ f.label }}{% if f.required %} <span class="text-danger" title="Required">*</span>{% endif %}</label>
+  {%- match f.widget %}
+  {%- when Widget::Text with { value, kind, placeholder } %}
+  <input class="form-control{% if !f.error.is_empty() %} is-invalid{% endif %}" id="f-{{ f.name }}"
+         type="{{ kind }}" name="{{ f.name }}" value="{{ value }}" placeholder="{{ placeholder }}">
+  {%- when Widget::Textarea with { value, rows } %}
+  <textarea class="form-control{% if !f.error.is_empty() %} is-invalid{% endif %}" id="f-{{ f.name }}"
+            name="{{ f.name }}" rows="{{ rows }}">{{ value }}</textarea>
+  {%- when Widget::Number with { value, step } %}
+  <input class="form-control{% if !f.error.is_empty() %} is-invalid{% endif %}" id="f-{{ f.name }}"
+         type="number" step="{{ step }}" name="{{ f.name }}" value="{{ value }}">
+  {%- when Widget::Range with { value, min, max, step } %}
+  <div class="d-flex align-items-center gap-2">
+    <input class="form-range" id="f-{{ f.name }}" type="range" name="{{ f.name }}" value="{{ value }}"
+           min="{{ min }}" max="{{ max }}" step="{{ step }}"
+           oninput="this.nextElementSibling.value = this.value">
+    <output class="badge text-bg-secondary" style="min-width:3.5rem">{{ value }}</output>
+  </div>
+  {%- when Widget::Switch with { on } %}
+  <div class="form-check form-switch">
+    {#- A checkbox posts nothing when unchecked; the decoder reads absence as false (see ui::decode). -#}
+    <input class="form-check-input" id="f-{{ f.name }}" type="checkbox" role="switch"
+           name="{{ f.name }}" value="true"{% if on %} checked{% endif %}>
+  </div>
+  {%- when Widget::Select with { options, blank } %}
+  <select class="form-select{% if !f.error.is_empty() %} is-invalid{% endif %}" id="f-{{ f.name }}" name="{{ f.name }}">
+    {%- if blank %}<option value="">—</option>{% endif %}
+    {%- for o in options %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
+  </select>
+  {%- when Widget::Radio with { options } %}
+  {%- for o in options %}
+  <div class="form-check">
+    <input class="form-check-input" type="radio" id="f-{{ f.name }}-{{ o.value }}" name="{{ f.name }}"
+           value="{{ o.value }}"{% if o.selected %} checked{% endif %}>
+    <label class="form-check-label" for="f-{{ f.name }}-{{ o.value }}">{{ o.label }}</label>
+  </div>
+  {%- endfor %}
+  {%- when Widget::DateTime with { value, zone } %}
+  <input class="form-control{% if !f.error.is_empty() %} is-invalid{% endif %}" id="f-{{ f.name }}"
+         type="datetime-local" step="60" name="{{ f.name }}" value="{{ value }}">
+  <div class="form-text">Times are {{ zone }}.</div>
+  {%- when Widget::Multi with { options } %}
+  <select class="form-select{% if !f.error.is_empty() %} is-invalid{% endif %}" id="f-{{ f.name }}"
+          name="{{ f.name }}" multiple size="6">
+    {%- for o in options %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
+  </select>
+  {%- when Widget::Reference with { value, current, target, count } %}
+  <input class="form-control{% if !f.error.is_empty() %} is-invalid{% endif %}" id="f-{{ f.name }}"
+         type="text" name="{{ f.name }}" value="{{ value }}" placeholder="{{ target }} id">
+  <div class="form-text">
+    {%- if !current.is_empty() %}Currently <strong>{{ current }}</strong>. {% endif -%}
+    {{ count }} {{ target }} rows — too many to list, so this takes the id.
+  </div>
+  {%- endmatch %}
+  {%- if !f.error.is_empty() %}<div class="invalid-feedback d-block">{{ f.error }}</div>{% endif %}
+  {%- if !f.help.is_empty() %}<div class="form-text">{{ f.help }}</div>{% endif %}
+</div>
+{%- endfor %}

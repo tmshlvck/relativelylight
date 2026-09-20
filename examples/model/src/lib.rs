@@ -3,6 +3,7 @@
 
 pub mod entities {
     pub mod author;
+    pub mod event;
     pub mod post;
     pub mod post_tag;
     pub mod profile;
@@ -10,7 +11,7 @@ pub mod entities {
     pub mod user;
 }
 
-pub use entities::{author, post, post_tag, profile, tag, user};
+pub use entities::{author, event, post, post_tag, profile, tag, user};
 
 use sea_orm::{
     ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbErr,
@@ -45,6 +46,7 @@ pub async fn setup() -> Result<DatabaseConnection, DbErr> {
     create_table(&db, profile::Entity).await?;
     create_table(&db, tag::Entity).await?;
     create_table(&db, post_tag::Entity).await?;
+    create_table(&db, event::Entity).await?;
     seed(&db).await?;
     Ok(db)
 }
@@ -157,5 +159,27 @@ async fn seed(db: &DatabaseConnection) -> Result<(), DbErr> {
         .insert(db)
         .await?;
     }
+    // Timezone demo rows (registered by `crud-example`). They **straddle both 2026 DST transitions**
+    // on purpose: in `Europe/Prague` the January rows read GMT+1 and the June ones GMT+2, from the
+    // same integers. The EU switches on the last Sunday of March and October at 01:00 UTC.
+    let events: &[(&str, Option<i64>)] = &[
+        ("New Year's fireworks", Some(1767268800)), // 2026-01-01 12:00 UTC → 13:00 GMT+1
+        ("Winter standup", Some(1768212000)),       // 2026-01-12 10:00 UTC → 11:00 GMT+1
+        ("Spring forward (01:00Z)", Some(1774746000)), // 2026-03-29 01:00 UTC → 03:00 GMT+2 (02:00 skipped)
+        ("Midsummer picnic", Some(1780315200)),     // 2026-06-01 12:00 UTC → 14:00 GMT+2
+        ("Summer release", Some(1783238400)),       // 2026-07-05 08:00 UTC → 10:00 GMT+2
+        ("Fall back (01:00Z)", Some(1792890000)),   // 2026-10-25 01:00 UTC → 02:00 GMT+1 (02:00 repeats)
+        ("Someday (no date yet)", None),            // a nullable timestamp, cleared
+    ];
+    for (i, (name, happens_at)) in events.iter().enumerate() {
+        event::ActiveModel {
+            id: Set(i as i32 + 1),
+            name: Set((*name).into()),
+            happens_at: Set(*happens_at),
+        }
+        .insert(db)
+        .await?;
+    }
+
     Ok(())
 }

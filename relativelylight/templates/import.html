@@ -1,0 +1,40 @@
+{#- CSV import, opened by `?import=1`. Two ways in, each with its own button and its own form — a
+    file that goes **straight to the server** (multipart; the browser does no reading, so encoding,
+    size and odd bytes are the server's problem, where they can be handled), and a paste for the
+    quick case. Both post `_op=import` and carry `_csrf`, which `ui::submit` checks either way. -#}
+<dialog open class="rl-dialog">
+  <div class="card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="mb-0">Import {{ title }} from CSV</h5>
+      <a class="btn-close" href="{{ cancel_href }}" aria-label="Close"></a>
+    </div>
+    <div class="card-body">
+      {%- if !errors.is_empty() %}
+      <div class="alert alert-danger">
+        {%- for e in errors %}<div>{{ e }}</div>{% endfor %}
+      </div>
+      {%- endif %}
+
+      <form method="post" enctype="multipart/form-data" class="d-flex gap-2 align-items-start">
+        <input type="hidden" name="_op" value="import">
+        {%- if !csrf.is_empty() %}<input type="hidden" name="_csrf" value="{{ csrf }}">{% endif %}
+        <input class="form-control" type="file" name="file" accept=".csv,text/csv" required
+               aria-label="CSV file">
+        <button class="btn btn-primary text-nowrap" type="submit">Upload</button>
+      </form>
+
+      <hr class="my-3">
+
+      <form method="post">
+        <input type="hidden" name="_op" value="import">
+        {%- if !csrf.is_empty() %}<input type="hidden" name="_csrf" value="{{ csrf }}">{% endif %}
+        <textarea class="form-control font-monospace" name="csv" rows="8" spellcheck="false"
+                  aria-label="Paste CSV rows" placeholder="{{ header }}">{{ csv }}</textarea>
+        <div class="d-flex justify-content-between align-items-center mt-2">
+          <small class="text-muted">A header row, then one per record; a row with an id updates it.</small>
+          <button class="btn btn-primary" type="submit">Import</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</dialog>

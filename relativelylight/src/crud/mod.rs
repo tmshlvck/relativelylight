@@ -1,31 +1,29 @@
 //! `relativelylight::crud` — auto-generated CRUD/search/relations over ORM entities, with no
-//! per-model code, plus a JSON API and an admin UI.
+//! per-model code, rendered as a server-side admin UI.
 //!
-//! [`engine`] is the backend-agnostic core (the [`Accessor`] seam, contract types, the [`Engine`],
-//! and — behind the `axum` feature — the HTTP router); [`seaorm`] is the SeaORM backend
-//! (introspection + `MetaModel` + `Crud`). [`ui`] (feature `ui`) is the Bootstrap/Alpine admin
-//! components; [`openapi`] and [`csv_io`] are optional adapters. See `docs/CRUD.md`.
+//! [`engine`] is the backend-agnostic core (the [`Accessor`] seam, the contract types and the
+//! [`Engine`] registry); [`seaorm`] is the SeaORM backend (introspection + `MetaModel` + `Crud`).
+//! [`ui`] (feature `ui`) renders the tables and forms — plain HTML, no JavaScript framework, no JSON
+//! in between. [`csv_io`] is an optional adapter. See `docs/CRUD.md`.
 
 pub mod engine;
 pub mod seaorm;
 
-/// Negative-path tests for the HTTP gate enforcement (needs `auth` for the real presets).
-#[cfg(all(test, feature = "axum", feature = "auth"))]
+/// Negative-path tests for gate enforcement on the UI's write path (needs `auth` for the presets).
+#[cfg(all(test, feature = "ui", feature = "auth"))]
 mod gate_tests;
 
 /// Listing over a real database: sorting by a relation's label, `filter[…]`, page stability.
-#[cfg(all(test, feature = "axum"))]
+/// Needs `ui` — it lists through the `ViewState` a URL parses to, exactly as a rendered table does.
+#[cfg(all(test, feature = "ui"))]
 mod list_tests;
 
 #[cfg(feature = "ui")]
 pub mod ui;
 
-/// Tests for the standalone `ui::Form` (its render-time checks, field selection, and gating).
+/// Tests for the rendered UI: render-time checks, field selection, gating, escaping, form decoding.
 #[cfg(all(test, feature = "ui"))]
 mod ui_tests;
-
-#[cfg(feature = "openapi")]
-pub mod openapi;
 
 #[cfg(feature = "csv")]
 pub mod csv_io;

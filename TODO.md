@@ -10,8 +10,33 @@ tick/remove items as they ship, and add new ones with a one-line rationale.
 
 ## Next
 
-0.2.0 (security defaults) and 0.2.1 (sorting + filtering) are tagged. Nothing below blocks a release;
-all of it is follow-on work.
+0.2.0 (security defaults) and 0.2.1 (sorting + filtering) are tagged. **The MPA rewrite is on `main`
+unreleased** (see `CHANGELOG.md` → Unreleased and `MPA.md`): the UI renders server-side and the JSON +
+metadata API and OpenAPI generation are gone. Nothing below blocks a release; all of it is follow-on
+work.
+
+## Web UI follow-ups (post-MPA)
+
+- [ ] **Search-as-you-type for a relation whose target is too large to list.** Above
+  `picker_threshold` the form asks for the target's id, which is honest but poor: an operator has to
+  know the id or open another tab. The fix needs a *fetch endpoint* — the one thing the MPA rewrite
+  deliberately removed — so the options are (a) a zero-JS "browse and pick" sub-dialog that carries
+  the in-progress form values through a GET round trip (real work: the values have to survive in the
+  URL), or (b) one small app-mounted search route the library renders a datalist from, which
+  reintroduces an internal API and needs to be honestly labelled as one. Waiting for a user with a
+  genuinely large target table to say which hurts more.
+- [ ] **Cross-document view transitions.** `@view-transition { navigation: auto }` plus a
+  `view-transition-name` on the edited row would make POST→303→GET feel continuous. Cheap to try,
+  easy to get subtly wrong (a transition that animates a 422 re-render as a navigation), so it wants
+  a careful look rather than a line of CSS.
+- [ ] **Render `auth`'s pages with Askama too.** `auth/mod.rs` builds its HTML with `format!` + `esc`
+  (2,700 lines, from before there was a template engine in the dependency tree); `crud::ui` now uses
+  Askama, which auto-escapes. Converting would shorten `auth` and put both surfaces on one escaping
+  story — but it touches every security-tested page, so it is a change to make on its own, with the
+  negative-path suite as the guard.
+- **Per-column search in the URL is gone, on purpose.** The old API parsed `search[col]=term`; the UI
+  never rendered a control for it, so it was surface with no user. `ListQuery::search` still carries
+  it for app code calling the engine directly, which is where a per-column search belongs.
 
 ## Security hardening (auth)
 
@@ -36,11 +61,16 @@ Highest priority first.
   are app-level calls, which is why `Auth::password_check(closure)` exists; the open question is only
   whether a *helper* for the HIBP form earns a feature flag, given it needs an HTTP client and a caching
   story.
-- [ ] **CSRF on a multipart body** — the one deliberate gap. `csrf::enforce` reads the `X-CSRF-Token`
-  header and, for URL-encoded bodies under 64 KiB, the `_csrf` field; a **multipart** body isn't parsed,
-  because buffering an upload to find a token is worse than asking that surface to send the header. The fix
-  is a streaming pre-scan that stops at the first non-field part — a chunk of work for a narrow case, so it
-  waits for a real one (a file upload from a JS-less form).
+- [ ] **CSRF on a multipart body, in the `csrf::enforce` layer.** The UI's own write path handles
+  multipart now (`multipart.rs` reads the buffered body; `submit` takes the token from a part), so
+  CSV upload works. What is still missing is the **layer**: `csrf::enforce` reads the
+  `X-CSRF-Token` header and, for URL-encoded bodies under 64 KiB, the `_csrf` field, and refuses
+  anything else — so an app that puts the UI's POST route behind it breaks uploads. It fails closed
+  and `docs/CRUD.md` says not to do it, but that is a footgun that wants removing.
+  The fix is now small: `enforce` can reuse `multipart::parse` on a **bounded prefix** of the body
+  (browsers post parts in document order, and the hidden `_csrf` is first), rejecting if the token
+  isn't in that prefix — which keeps the "don't buffer an upload to find a token" property that made
+  this a gap in the first place. The `files` module (PRD §6) will want the same thing.
 - **No *username* whitelist for lockout.** Addresses can be exempted (`Lockout::ip_whitelist`); accounts
   can't, on purpose. An account that can never be locked out is an account whose password can be guessed
   at forever. If one is ever wanted it needs a better story than "skip the counter" — a raised limit, say.
@@ -116,38 +146,36 @@ Highest priority first.
 
 ## crud / engine
 
-> **Adding to `MetaField` is free** (it's `#[non_exhaustive]`); publishing through `Column::Field` is not,
-> because that *variant* can't be non-exhaustive without making the `Accessor` seam unimplementable out of
-> crate — see the type's doc comment. So batch anything that needs publishing to the front end into one
-> release rather than breaking twice.
+> **Adding to `MetaField` is free** (it's `#[non_exhaustive]`); adding to `Column::Field` is a source
+> break for an out-of-crate `Accessor` or an exhaustive `match`. That is now *accepted* rather than
+> avoided — `Accessor` is documented as a type-erasure seam, not a stability promise (there is one
+> implementor, in this crate) — but it is still worth batching such additions into one release.
 
 - [ ] Batch relation reads (avoid N+1 on relation resolution). Keep it inside the SeaORM backend — the
   resolution already happens behind `Accessor::list`, so this can be **purely internal**; a new
   `Accessor` method would be a break for anyone implementing the seam.
 - [ ] Filter **operators** — `filter[ttl][gt]=300`, `filter[name][in]=a,b`, `filter[zone][is_null]=true`.
-  The bracket grammar was chosen to nest, and `deepObject` already describes it, so this is additive on
-  the wire; the work is in `ListQuery` (today's `eq: Vec<(String, String)>` would need a comparison
-  alongside the value) and in `build_condition`. Wait for a real need — an exact match plus `q` covers
+  The bracket grammar was chosen to nest, so this is additive in the URL; the work is in `ListQuery`
+  (today's `eq: Vec<(String, String)>` would need a comparison alongside the value), in
+  `build_condition`, and in `ViewState`'s parser. Wait for a real need — an exact match plus `q` covers
   what the console asks for so far.
 
 ## crud::ui / time
 
-- [ ] **Remember a table's sort the way its filter is remembered.** A shared filter survives a reload
-  (localStorage + URL fragment); the sort doesn't — reload and you're back to the configured
-  `Table::sort`, losing whatever was clicked. The asymmetry is defensible (a filter changes *which* rows
-  you're responsible for, an order doesn't) but it is an asymmetry, and the machinery already exists.
+- **Remembering a table's sort — moot.** This asked for the sort to survive a reload the way a
+  `localStorage`-backed filter did. Both now live in the query string, so *everything* survives a
+  reload, a bookmark and a link, and the asymmetry is gone along with the storage.
 - **Per-field widget overrides — shipped** (CRUD.md § Widget overrides), and they needed **no** new
   `MetaField`/`Column::Field` field after all: `display: Option<FieldDisplay>` already existed as the
   presentation override, so the widgets became variants of *that* — `Textarea { rows }`, `Radio`,
   `Range { min, max, step }`, `Email`, `Url` — and the `Accessor` seam is untouched. Worth remembering the
   next time something looks like it needs a new published field: an existing `Option<enum>` may already be
   the right home, and an enum variant is free where a struct field isn't.
-- **Timezone abbreviations — `GMT+1`/`GMT+2` is the wanted output.** Not a defect to fix: the offset is
-  unambiguous and locale-independent, where an abbreviation asks the reader to know which one means +2, and
-  the alternatives are worse (`timeZoneName: 'long'` varies by locale and can give "Central European
-  Standard Time"; our own table would be ours to keep correct forever). DST itself is `Intl` + the
-  browser's IANA database, verified across both transition instants — see
-  [docs/TIME.md §2a](docs/TIME.md).
+- **Timezone abbreviations — deliberately absent.** Rendering is now `YYYY-MM-DD HH:MM` plus the zone
+  *name* stated once ("Times are Europe/Prague."), rather than an abbreviation per cell: an
+  abbreviation asks the reader to know which of `CEST`/`CET` means +2, and a table of our own would be
+  ours to keep correct forever. DST itself comes from `jiff` and the host's IANA database, with both
+  transition instants covered by unit tests — see [docs/TIME.md §5](docs/TIME.md).
 
 ## Transformative — deferred until there is real demand
 

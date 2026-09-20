@@ -1,68 +1,25 @@
-<!-- Restore the shared filter selection *before* Alpine initialises, so each table's x-init can adopt
-     it on its first load rather than fetching an unfiltered page and then re-fetching. Runs during
-     parse; Alpine starts on DOMContentLoaded. The URL fragment wins over the remembered value, so a
-     link to a filtered admin means what it says.
-
-     The control itself lives in each table's toolbar, next to that table's search box, rather than in
-     the side-panel: it belongs with the data it narrows, and the panel is for navigation. Only one
-     table is visible at a time, so there is still just one control on screen. -->
-<script>
-  (function () {
-    var out = {};
-    try {
-      var hash = new URLSearchParams((location.hash || "").replace(/^#/, ""));
-      var names = {{ filter_names_json|safe }};
-      for (var i = 0; i < names.length; i++) {
-        var n = names[i];
-        var v = hash.get("filter." + n);
-        var label = null;
-        if (v === null) {
-          var raw = localStorage.getItem("rl.filter." + n);
-          if (raw) { try { var o = JSON.parse(raw); v = o.value; label = o.label; } catch (e) {} }
-        }
-        if (v !== null && v !== undefined && v !== "") out[n] = { value: String(v), label: label };
-      }
-    } catch (e) { /* no storage / bad hash: start unfiltered */ }
-    window.rlSharedFilters = out;
-  })();
-</script>
-<div class="d-flex align-items-start gap-4" x-data="ruAdmin('{{ first }}')">
-  <!-- Side panel: model list + group headings + separators + custom links. -->
-  <nav class="flex-shrink-0" style="width: 210px;">
-    {% if has_title %}
+{#- Side panel plus **one** rendered table: `?entity=post` renders that entity and no other, so the
+    page no longer carries every panel's markup to show one of them. Each nav link keeps the shared
+    filters (that is what `Admin::filter` is for) and drops the page and search term. -#}
+<div class="d-flex align-items-start gap-4 rl-admin">
+  <nav class="flex-shrink-0" style="width:210px">
+    {%- if !title.is_empty() %}
     <h6 class="text-uppercase text-muted fw-semibold px-2 mb-2">{{ title }}</h6>
-    {% endif %}
-
+    {%- endif %}
     <ul class="nav nav-pills flex-column">
-      {% for e in nav %}
-        {% if e.kind == "entity" %}
-        <li class="nav-item">
-          <a class="nav-link py-1" href="#"
-             :class="{ active: active === '{{ e.slug }}' }"
-             @click.prevent="active = '{{ e.slug }}'; $dispatch('ru-panel-show', '{{ e.slug }}')">{{ e.label }}</a>
-        </li>
-        {% else if e.kind == "group" %}
-        <li class="nav-item">
-          <span class="d-block px-2 mt-3 mb-1 small text-uppercase text-muted fw-semibold">{{ e.label }}</span>
-        </li>
-        {% else if e.kind == "separator" %}
-        <li><hr class="my-2"></li>
-        {% else if e.kind == "link" %}
-        <li class="nav-item"><a class="nav-link py-1" href="{{ e.href }}">{{ e.label }}</a></li>
-        {% endif %}
-      {% endfor %}
+      {%- for item in nav %}
+      {%- match item %}
+      {%- when NavV::Entity with { label, href, active } %}
+      <li class="nav-item"><a class="nav-link py-1{% if active %} active{% endif %}" href="{{ href }}">{{ label }}</a></li>
+      {%- when NavV::Group with (label) %}
+      <li class="nav-item"><span class="d-block px-2 mt-3 mb-1 small text-uppercase text-muted fw-semibold">{{ label }}</span></li>
+      {%- when NavV::Separator %}
+      <li><hr class="my-2"></li>
+      {%- when NavV::Link with { label, href } %}
+      <li class="nav-item"><a class="nav-link py-1" href="{{ href }}">{{ label }}</a></li>
+      {%- endmatch %}
+      {%- endfor %}
     </ul>
   </nav>
-
-  <!-- Content: every model's table is rendered; only the active one is shown. -->
-  <main class="flex-grow-1" style="min-width: 0;">
-    {% for p in panels %}
-    <div x-show="active === '{{ p.slug }}'" x-cloak>{{ p.html|safe }}</div>
-    {% endfor %}
-  </main>
-
-  <script>
-    function ruAdmin(first) { return { active: first }; }
-
-  </script>
+  <main class="flex-grow-1" style="min-width:0">{{ panel|safe }}</main>
 </div>

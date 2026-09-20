@@ -1,11 +1,9 @@
-//! **relativelylight** — a web back-office toolkit for Rust. Auto-generate a JSON CRUD + metadata
-//! API and an admin UI from your ORM entities with no per-model code, and (soon) gate them with
-//! built-in authentication + authorization. Composes *into* your app — you keep your router, page
-//! shell, and OpenAPI document.
+//! **relativelylight** — a web back-office toolkit for Rust. Auto-generate a **server-rendered** CRUD
+//! admin UI from your ORM entities with no per-model code, and gate it with built-in authentication +
+//! authorization. Composes *into* your app — you keep your router and your page shell.
 //!
 //! Feature-gated modules:
-//! - [`crud`] (default): the CRUD engine, SeaORM backend, admin UI, OpenAPI, CSV — see
-//!   `docs/CRUD.md`.
+//! - [`crud`] (default): the CRUD engine, the SeaORM backend, the admin UI, CSV — see `docs/CRUD.md`.
 //! - `auth`: sessions, login, and identity resolution — see `docs/AUTH.md`.
 //! - [`csrf`] (with `auth`): the double-submit CSRF token for cookie-authenticated writes.
 //! - [`authz`] (always on): the per-model authorization gate consulted by the engine.
@@ -15,9 +13,9 @@
 //! use relativelylight::authz::Open;
 //! let mut post = MetaModel::new(post::Entity);
 //! post.relate(&tag);                          // declare N:M
-//! let mut crud = Crud::new(db, "/api/v1");
+//! let mut crud = Crud::new(db);
 //! crud.register(post, Open);                  // each model takes a gate (Open = ungated)
-//! let app = crud.into_router();               // axum Router — merge into your app
+//! let engine = crud.into_engine();            // render tables/forms from it on your own routes
 //! ```
 
 /// The per-model authorization gate: the [`Authz`](authz::Authz) trait, [`Operation`](authz::Operation) /
@@ -47,15 +45,25 @@ pub mod crud;
 #[cfg(feature = "auth")]
 pub mod auth;
 
+/// `application/x-www-form-urlencoded` encode/decode, shared by `csrf` and `crud::ui`.
+mod urlform;
+
+/// A strict reader for a buffered `multipart/form-data` body — how a file reaches the server
+/// without JavaScript in the middle (see `crud::ui`'s CSV import).
+#[cfg(feature = "ui")]
+mod multipart;
+
 /// Double-submit CSRF protection for cookie-authenticated writes: [`Csrf`](csrf::Csrf) issues and
 /// verifies the token. Always on for `auth`'s own forms; opt-in for the `crud` API via `Crud::csrf`.
 /// Feature `csrf` (implied by `auth`). See [`docs/AUTH.md` §7](https://github.com/tmshlvck/relativelylight/blob/main/docs/AUTH.md).
 #[cfg(feature = "csrf")]
 pub mod csrf;
 
-/// Timezone-aware presentation of UTC timestamps: the [`JS`](time::JS) helpers and the
-/// [`TzPicker`](time::TzPicker) component. Storage/APIs stay integer-UTC; this is frontend only.
-/// Always compiled (dependency-free static assets). See [`docs/TIME.md`](https://github.com/tmshlvck/relativelylight/blob/main/docs/TIME.md).
+/// Timezone-aware presentation of UTC timestamps: [`Tz`](time::Tz) (the zone for one request, from a
+/// cookie) and the [`TzPicker`](time::TzPicker) form. Storage stays integer-UTC; formatting happens
+/// **server-side**, so a CSV export matches the screen. Feature `tz` (implied by `ui`). See
+/// [`docs/TIME.md`](https://github.com/tmshlvck/relativelylight/blob/main/docs/TIME.md).
+#[cfg(feature = "tz")]
 pub mod time;
 
 /// Reusable field validators + normalizers ([`ipv4`](validate::ipv4), [`int_range`](validate::int_range),

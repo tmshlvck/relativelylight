@@ -1,204 +1,208 @@
 # Time & timezones
 
-relativelylight's rule for time is one sentence: **the database and every API speak integer Unix
-seconds in UTC; timezones exist only for display, and only in the browser.** This keeps the backend
-unambiguous (no offsets, no DST folds, trivial comparisons and indexing) while letting the UI show
-times in UTC, the viewer's local zone, or a chosen zone.
+How relativelylight stores, renders and reads back timestamps — and where an app plugs in.
 
-This document covers the display/conversion functions you call from your pages, the timezone
-selection ("store") and how to choose a policy, the picker component, and the (optional) backend
-hooks — so you can support a single UTC app, a browser-local app, or a full multi-timezone app
-(e.g. civil aviation) without changing the data model.
+Feature **`tz`** (implied by `ui`). One dependency: [`jiff`](https://docs.rs/jiff), for the IANA
+timezone database.
 
----
-
-## 1. Storage model (unchanged)
-
-- Store timestamps as **integer columns holding Unix seconds, UTC** (`i64` — keep it 64-bit for
-  Y2038). Do **not** use zoned/`DateTime`-with-offset column types for wall-clock instants.
-- The CRUD JSON API and your own APIs send/receive these as **JSON integers**. No strings, no
-  server-side timezone handling.
-- Flag such a column for datetime rendering with
-  [`MetaField::datetime()`](CRUD.md#metafield) — it sets `display: "datetime"` in the column
-  metadata. Storage, validation, and the OpenAPI schema stay integer; only the UI changes.
-
-Everything below is **frontend**. The server stays UTC-only.
+- [1. Storage model](#1-storage-model)
+- [2. The zone for one request: `Tz`](#2-the-zone-for-one-request-tz)
+- [3. The picker, and its four-line handler](#3-the-picker-and-its-four-line-handler)
+- [4. What follows the zone](#4-what-follows-the-zone)
+- [5. DST, and why the server does this](#5-dst-and-why-the-server-does-this)
+- [6. Choosing a policy](#6-choosing-a-policy)
+- [7. Reference: the flow for one datetime column](#7-reference-the-flow-for-one-datetime-column)
 
 ---
 
-## 2. The JavaScript: `time::JS`
+## 1. Storage model
 
-`relativelylight::time::JS` is a self-contained script (`assets/rl-time.js`). Include it
-**once** in your page shell, as a plain (non-deferred) `<script>` **before** Alpine.js so its store
-registers in time:
+**The database column is an integer: Unix seconds, UTC.** Nothing else in the crate stores a local
+time, an offset, or a zone name beside a timestamp. A timezone is a *presentation* choice, and it is
+made per request.
 
-```html
-<script>window.RL_TZ = { mode: 'utc', persist: 'local', withUtc: true };</script>
-<script>{{ time_js|safe }}</script>   <!-- pass relativelylight::time::JS into your template -->
-<script defer src="…/alpinejs@3…"></script>
+Declare such a column with [`MetaField::datetime`](CRUD.md#widget-overrides--picking-the-form-input-per-field):
+
+```rust
+post_mm.field("published_at").datetime();   // an i64 column holding Unix seconds
 ```
 
-It exposes three things.
+That is the whole model-side configuration. The column then renders as a readable datetime in a table
+cell, as a `<input type="datetime-local">` in a form, and as a readable datetime in a CSV export — all
+three in the caller's zone, all three on the server.
 
-### 2a. `window.RLTime` — pure functions (usable on any page, Alpine or not)
+## 2. The zone for one request: `Tz`
 
-All take a timezone *selection* `sel = { mode, zone }` (see §3); `mode` is `'utc' | 'browser' |
-'zone'` and `zone` is an IANA id used when `mode === 'zone'`.
+The selected zone rides in a cookie (`rl_tz`, the constant [`time::COOKIE`]), so every render of every
+page in a session agrees about it. A handler reads it from the request:
 
-| Function | Purpose |
+```rust
+use relativelylight::time::Tz;
+
+let tz = Tz::from_headers(&headers);   // the cookie's zone, or UTC
+tz.name();                             // "Europe/Prague" | "UTC"
+tz.format(1_733_050_800);              // "2024-12-01 12:00"   (a table cell)
+tz.format_input(1_733_050_800);        // "2024-12-01T12:00"   (a datetime-local value)
+tz.parse("2024-12-01T12:00");          // Some(1_733_050_800)  (what the form posted)
+```
+
+`Tz::UTC` is the default and the fallback: an unset cookie, an unparseable one, or a zone the host's
+tz database doesn't have all render UTC. **A timestamp shown in the wrong zone is worse than one
+labelled UTC**, so there is no guessing and no partial failure.
+
+The `crud::ui` components do this for you — `render_for` takes the headers, so cells and inputs are
+already in the caller's zone. You need `Tz` directly only on your own pages.
+
+## 3. The picker, and its four-line handler
+
+[`TzPicker`] renders a `<select>` of zones in a plain form that posts `tz` and `back` to a route of
+yours. Setting a cookie needs a *response*, which a fragment renderer never gets to write — so this
+stays your route, like everything else in this crate:
+
+```rust
+// in your shell, e.g. the navbar:
+let picker = TzPicker::new().render(&Tz::from_headers(&headers), current_url);
+
+// the route it posts to:
+async fn set_tz(Form(fields): Form<HashMap<String, String>>) -> Response {
+    let tz = Tz::named(fields.get("tz").map(String::as_str).unwrap_or("UTC"));
+    let back = fields.get("back").cloned().unwrap_or_else(|| "/".into());
+    ([(header::SET_COOKIE, tz.cookie())], Redirect::to(&back)).into_response()
+}
+```
+
+`back` is the page the user was on, so setting a zone doesn't lose the table they were looking at, and
+`action(path)` changes where the form posts (default `/tz`).
+
+### Which zones are offered
+
+| | |
 |---|---|
-| `RLTime.fmt(sec, sel)` | `"YYYY-MM-DD HH:MM:SS <TZ>"` in the selected zone. Blank for `null`/`0`. |
-| `RLTime.fmtUtc(sec)` | **Always UTC**, regardless of the selection — for the "always show UTC" case. |
-| `RLTime.fmtWithUtc(sec, sel)` | Selected-zone time **with the UTC instant in parentheses**: `2026-07-21 23:00:00 GMT+2 (2026-07-21 21:00:00 UTC)`. Drops the parenthetical when the selection already is UTC. |
-| `RLTime.toInput(sec, sel)` | Unix seconds → naive `"YYYY-MM-DDTHH:MM:SS"` wall-clock in the zone, for `<input type="datetime-local">`. |
-| `RLTime.fromInput(str, sel)` | datetime-local string (a wall-clock in the zone) → Unix seconds UTC. **DST-correct** (two-pass offset resolution). Empty → `null`. |
-| `RLTime.resolveZone(sel)` | Selection → concrete IANA id (`'browser'` → `Intl…resolvedOptions().timeZone`, else `'UTC'`). |
-| `RLTime.offsetMinutes(zone, sec)` | Zone's UTC offset (minutes) at an instant. |
-| `RLTime.ZONES` | The curated zone list (see §4). |
+| `TzPicker::new()` | the default: **UTC, Europe, the United States** — [`zones_default`], 42 entries |
+| `.all_zones()` | **everything the host's database knows**, minus the exclusions below — [`zones_all`], ~450 entries |
+| `.zones(list)` | exactly what you pass, in your order — the usual case |
 
-Formatting hands the instant to `Intl.DateTimeFormat` with a named `timeZone`, so **nothing here computes
-an offset or a DST rule** — the browser's own IANA database does, which is why half-hour zones work, why
-historical rule changes are right, and why a government moving a transition date needs no release from us.
-For `Europe/Prague`, verified end to end:
+The third is what a deployment normally does: read a list of IANA names from YAML, JSON or a settings
+table at startup and hand it over.
 
-| UTC instant | Rendered |
+```rust
+// cfg.timezones: Vec<String>
+let picker = TzPicker::new().zones(cfg.timezones);
+if !picker.unknown_zones().is_empty() {                       // check once, at boot
+    tracing::warn!(ignored = ?picker.unknown_zones(), "unknown timezone names in config");
+}
+```
+
+A name the host's database doesn't know is **dropped rather than offered**, and kept in
+`unknown_zones()` — an `<option>` that silently means UTC is exactly the kind of control that looks
+like it works, and a typo in configuration should be a line in your startup log, not a zone an
+operator can't find. Everything else is yours: the order is the order you gave, and no name you list
+is second-guessed.
+
+Two things the picker guarantees whatever you configure: **UTC is always reachable**, and **the
+caller's current zone is always in the menu** (prepended if your list omits it). Without that second
+one, a `<select>` with no selected option displays its first entry — and the next submit would move
+the user to it.
+
+### The exclusions
+
+The crate's own lists — [`zones_default`] and [`zones_all`] — leave out the **Russian Federation and
+Belarus**: the 28 zones the IANA database's own country table (`zone1970.tab`) assigns to `RU` or
+`BY`, `Europe/Simferopol` among them (that table lists it as `RU,UA`). They are available as
+[`time::EXCLUDED`], and `is_excluded(zone)` tests one name.
+
+This governs what the crate *ships*, not what your app may offer: `zones(…)` takes your list as
+given. Apply the same policy to a configured list with one line if you want it:
+
+```rust
+cfg.timezones.retain(|z| !relativelylight::time::is_excluded(z));
+```
+
+[`zones_default`]: https://docs.rs/relativelylight/latest/relativelylight/time/fn.zones_default.html
+[`zones_all`]: https://docs.rs/relativelylight/latest/relativelylight/time/fn.zones_all.html
+[`time::EXCLUDED`]: https://docs.rs/relativelylight/latest/relativelylight/time/constant.EXCLUDED.html
+
+`Tz::cookie()` is a `Set-Cookie` value: path `/`, a year, `SameSite=Lax`, and deliberately neither
+`HttpOnly` nor `Secure`-only — it is a display preference, not a credential.
+
+## 4. What follows the zone
+
+Everything the crate renders from a `datetime` column:
+
+| Surface | In the caller's zone |
 |---|---|
-| `2026-01-01T12:00:00Z` | `2026-01-01 13:00:00 GMT+1` (winter, +60 min) |
-| `2026-06-01T12:00:00Z` | `2026-06-01 14:00:00 GMT+2` (summer, +120 min) |
-| `2026-03-29T00:59Z` → `01:00Z` | `01:59 GMT+1` → `03:00 GMT+2` — 02:00 local never exists, and is skipped |
-| `2026-10-25T00:59Z` → `01:00Z` | `02:59 GMT+2` → `02:00 GMT+1` — 02:00 local happens twice, and does |
+| a table cell | `2024-12-01 12:00` |
+| a form input (`datetime-local`) | pre-filled with the same wall-clock reading, and read back through the zone |
+| the form's help text | "Times are Europe/Prague." — so the reading is never ambiguous |
+| **a CSV export** | `2024-12-01 12:00`, and re-importing that file means what it says |
 
-The zone label is `Intl`'s `timeZoneName: 'short'`, which renders `GMT+1`/`GMT+2` rather than `CET`/`CEST`.
-That is **deliberate, not a limitation**: the offset is unambiguous and locale-independent, where an
-abbreviation asks the reader to know which one means +2 — and the alternatives are worse (`'long'` gives
-"Central European Standard Time" and varies by locale; a hand-maintained abbreviation table is ours to keep
-correct forever).
+The CSV row is the one worth pausing on. While the zone was known only to the browser, an export
+*could not* agree with the screen: the server had no idea what the user was looking at, so files came
+out in UTC and someone reconciled them by hand. That is the concrete reason this work moved to the
+server, and `docs/CRUD.md` § CSV describes the round-trip.
 
-Parse-back for a **named** zone does the standard two-pass offset computation, so the picker round-trips a
-datetime on either side of a transition; the `'utc'` and `'browser'` paths are exact and free.
+## 5. DST, and why the server does this
 
-Use these directly in your own templates, e.g. a detail page:
+A wall-clock reading is not always a unique instant:
 
-```html
-<span x-text="RLTime.fmtWithUtc(flight.etd, $store.tz.sel())"></span>
+- **A gap** (spring forward): `2024-03-31T02:30` does not exist in `Europe/Prague`. `Tz::parse`
+  resolves it *forward*, to 03:30 — `jiff`'s "compatible" strategy — rather than rejecting the input
+  or silently shifting it an hour back.
+- **A fold** (fall back): `2024-11-03T01:30` happens twice in `America/New_York`. The reading before
+  the fold is taken.
+
+Both are decided once, in one place, by a library with the IANA rules — not by whichever browser
+happened to submit the form. The cases are unit tests (`time.rs`), which is itself an argument for the
+move: the same behaviour in JavaScript could only be checked by driving a browser.
+
+Offsets are never stored, so a zone whose rules change (and they do, by political decision) reinterprets
+the stored integers correctly on the next render. That is the whole reason the column is UTC seconds.
+
+## 6. Choosing a policy
+
+The cookie is the mechanism; the policy is yours.
+
+- **Nothing at all.** Don't render a picker. Everything is UTC, labelled UTC. Correct, and right for an
+  operations console whose logs are UTC too.
+- **Let the user choose** (the usual). Render `TzPicker` and the four-line handler. The choice persists
+  for a year and costs no storage.
+- **Seed it from the browser once.** If you want a first-visit default without asking, three lines of
+  JavaScript can set the cookie from `Intl.DateTimeFormat().resolvedOptions().timeZone` and reload.
+  This crate ships no such script on purpose: it is three lines, it is the app's policy, and every app
+  wants a slightly different trigger.
+- **Store it per user.** Read your own `user.timezone` column in your page handler and pass
+  `Tz::named(&user.timezone)` where you would have passed `Tz::from_headers(&headers)`; set the cookie
+  at login so the library's components agree. The crate keeps no per-user state of its own.
+- **Follow the server's zone.** `Tz::named(&std::env::var("TZ")?)`, if matching syslog matters more than
+  matching the operator.
+
+Note what is *not* here any more: `window.RL_TZ`, `window.RLTime`, the Alpine `$store.tz` store, and
+the `time::JS` bundle. A policy that used to be four JavaScript options is now which `Tz` your handler
+passes.
+
+## 7. Reference: the flow for one datetime column
+
+```
+  database            i64 Unix seconds, UTC          1733050800
+      │
+      │  Engine::list / get                          (unchanged, untouched)
+      ▼
+  Tz::from_headers(&headers)   ──►  "Europe/Prague"  (the rl_tz cookie, else UTC)
+      │
+      ├─ table cell      Tz::format        ──►  "2024-12-01 12:00"
+      ├─ form input      Tz::format_input  ──►  "2024-12-01T12:00"
+      └─ CSV cell        Tz::format        ──►  "2024-12-01 12:00"
+                                                     │
+  browser posts the form                             │  "2024-12-01T12:00"
+      │                                              ▼
+      └─ ui::decode  ──►  Tz::parse  ──►  1733050800  ──►  the same i64 column
 ```
 
-### 2b. `$store.tz` — the current selection (Alpine store, reactive)
+Runnable: `cargo run -p crud-example`, then open **`/ui/event`** and pick a zone in the navbar. That
+table's rows sit either side of both 2026 DST transitions, so a zone that observes DST shows the
+January rows an hour off the June ones — from identical stored integers. Editing `Happens at` reads
+your typed wall-clock time back in that zone, and **Export CSV** produces a file that says what the
+screen says. `examples/adminpanel` wires the same picker into a login-gated app.
 
-| Member | Meaning |
-|---|---|
-| `$store.tz.mode` / `.zone` | Current selection (reactive — read them in bindings and the UI re-renders on change). |
-| `$store.tz.withUtc` | Whether cells should use `fmtWithUtc` (from `RL_TZ.withUtc`). |
-| `$store.tz.sel()` | `{ mode, zone }` snapshot to pass to `RLTime.*`. |
-| `$store.tz.effective()` | The resolved IANA id / `'UTC'`. |
-| `$store.tz.set(mode, zone)` | Change the selection; persists (per `RL_TZ.persist`) and fires `RL_TZ.onChange`. |
-
-`Table` datetime columns already read `$store.tz` internally, so cells and the form picker follow the
-selection automatically once `time::JS` is loaded. Without `time::JS`, `Table` falls back to plain UTC.
-
-### 2c. `window.rlTzPicker()` — the picker component (see §4)
-
----
-
-## 3. Choosing a timezone policy (`window.RL_TZ`)
-
-Set `window.RL_TZ` **before** `time::JS` runs. All fields optional:
-
-```js
-window.RL_TZ = {
-  mode: 'utc' | 'browser' | 'zone',   // initial selection (default 'utc')
-  zone: 'Europe/Prague',              // used when mode === 'zone'
-  persist: 'session' | 'local' | null,// remember the picker choice (default: don't)
-  withUtc: false,                     // table cells use fmtWithUtc ("local (UTC)") when true
-  zones: [ { id, label }, … ],        // override the curated zone list
-  onChange: function (sel) { … },     // called after every change (hook for a profile API, §5)
-};
-```
-
-relativelylight deliberately **does not** store a timezone on `auth_user` or model a user profile —
-the policy is yours. The five common shapes, all supported by the same store:
-
-- **(a) Hardcoded UTC.** Do nothing (or `mode:'utc'`), and don't include the picker. Cells/forms are
-  UTC. This is teleddns-server today.
-- **(b) Browser-local.** `RL_TZ = { mode: 'browser' }`. The platform resolves the viewer's zone and
-  handles its DST for free. Optionally still include the picker so users can switch.
-- **(c) User-configured, ephemeral per session.** Include the picker with `persist: 'session'` (or
-  `null` for per-page). Nothing is stored server-side.
-- **(d) User-configured, stored in your app.** Include the picker, and in `onChange` `PUT` the
-  selection to *your* endpoint (your model, your column). On page load, read it back and either set
-  `RL_TZ.mode/zone` from a server-rendered value or call `$store.tz.set(...)` after load.
-- **(e) Server-defined timezone.** Fetch your endpoint (e.g. `GET /api/settings/timezone`) and call
-  `$store.tz.set('zone', tz)` on load; optionally hide the picker to force it. Useful when the UI
-  should match the server's/syslog's zone.
-
-Policies compose: e.g. default to the server zone (e) but let users override and remember it (d).
-
----
-
-## 4. The picker component
-
-`relativelylight::time::TzPicker` (rendering `assets/rl-tz-picker.html`) is a Bootstrap dropdown
-bound to `$store.tz`: **UTC**, **Local (browser)**, then a curated list of IANA zones covering every
-UTC offset from −12 to +14 (one representative each — `Europe/Prague`, `Asia/Tokyo`, …). Drop it into
-your shell (needs `time::JS` loaded):
-
-```html
-{{ tz_picker|safe }}   <!-- pass relativelylight::time::TzPicker::new().render() into your template -->
-```
-
-Replace/extend the list with `RL_TZ.zones` (an array of `{ id, label }`). The component
-(`window.rlTzPicker()`) is just a thin wrapper over `$store.tz` — you can build your own dropdown/
-typeahead against the store instead.
-
----
-
-## 5. Backend hooks (optional — usually none needed)
-
-relativelylight provides **no** timezone endpoints, on purpose: most apps need none. When you want
-policy (d) or (e), you own the endpoints and wire them via `onChange` (write) and a load-time fetch +
-`$store.tz.set()` (read). Keep them tiny — a single string (`"UTC"`, `"browser"`, or an IANA id):
-
-```js
-// (d) persist to a profile API
-window.RL_TZ = {
-  mode: initialFromServer.mode, zone: initialFromServer.zone,
-  onChange: (sel) => fetch('/api/me/timezone', {
-    method: 'PUT', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(sel),
-  }),
-};
-// (e) adopt the server's zone on load
-fetch('/api/settings/timezone').then(r => r.json()).then(tz =>
-  Alpine.store('tz').set('zone', tz));
-```
-
-If a future need is common enough, a small opt-in helper (a settings endpoint + a nullable `timezone`
-column your app adds to its own user model) could live in the app layer — but it stays **out** of the
-`auth_user` table and the library core.
-
-The **`examples/time`** app is a runnable version of exactly this: a single-table page that on load
-adopts `GET /api/settings/timezone` (server zone) then a `GET /api/me/timezone` "stored preference",
-and `PUT`s every user change to the console (`onChange`). A `__rlApplying` flag suppresses the `PUT`
-during load-time adoption so the app doesn't echo its own values back.
-
----
-
-## 6. Reference: the flow for one datetime column
-
-1. Column is `i64` Unix-seconds UTC; marked `MetaField::datetime()`.
-2. API sends it as an integer (e.g. `1784668744`).
-3. `Table` cell: `RLTime.fmt`/`fmtWithUtc(sec, $store.tz.sel())` → readable string in the selected
-   zone (reactive to the picker).
-4. Edit form: `RLTime.toInput` fills a `datetime-local` with the zone's wall-clock; on save
-   `RLTime.fromInput` converts back to integer UTC seconds. The row's `created_at` etc. are never
-   affected by display zone.
-
-Examples:
-- **`examples/adminpanel`** — the picker in the navbar over a full admin: `RL_TZ` + `time::JS`,
-  read-only auth timestamps, and an editable `post.published_at`.
-- **`examples/time`** — the minimal version (its own `event` table: a name and one `happens_at`) plus the
-  optional backend hooks (server-TZ adoption + a fake per-user TZ endpoint, logging the round-trip to the
-  console), and the same datetime widget shown in both a `Table` modal and a standalone `Form`. Its rows
-  **straddle a DST transition on purpose**: in `Europe/Prague` the January rows read `GMT+1` and the June
-  ones `GMT+2` — verified end to end, including that the spring-forward skips 02:00 local and the
-  fall-back repeats it.
+[`time::COOKIE`]: https://docs.rs/relativelylight/latest/relativelylight/time/constant.COOKIE.html
+[`TzPicker`]: https://docs.rs/relativelylight/latest/relativelylight/time/struct.TzPicker.html

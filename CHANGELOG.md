@@ -11,13 +11,171 @@ is easy to miss in a diff.
 
 ## Unreleased
 
+The web UI is **re-homed in Rust**: `crud::ui` renders plain server-side HTML, and the JSON/metadata
+API it used to talk to is gone with it. See `MPA.md` for the reasoning; this entry is the upgrade path.
+
+Measured, rather than estimated: the crate's non-test source is **281 lines shorter**, and that
+understates the change — **1,446 lines of Alpine-bearing templates and JavaScript** and **477 lines of
+OpenAPI generation** were deleted outright, replaced by Rust and templates the compiler checks. The
+test suite grew by **516 lines** (escaping, form decoding and read-gating are this crate's problem
+now). One build dependency dropped (`utoipa`), two runtime dependencies dropped from every page
+(Alpine, Bootstrap's JS bundle), one optional dependency added (`jiff`, for the IANA timezone
+database). A rendered 9-entity admin page goes from **9,441 lines / 521 KB to ~500 lines / 25 KB**,
+because `?entity=post` renders one table instead of nine.
+
+### Breaking
+
+- **The JSON API, the metadata API and the OpenAPI document are removed.** `Crud::into_router`,
+  `Engine::router`, `Engine::meta_all`, `Engine::meta_one`, `Engine::entity_url`, `Engine::base_path`,
+  `Engine::csrf_cookie_name`, the whole `crud::openapi` module and the `openapi` feature no longer
+  exist. That wire existed to feed the JavaScript this release deletes; its shape (`{id, label}`
+  relation embedding, `?view=terse`, `_meta`'s column objects) was never a documented contract.
+
+  **Upgrade:** an app that only rendered the admin UI merges the two handlers in the new
+  [§ Web UI](docs/CRUD.md#web-ui-ui) instead of merging a router. An app that *published* those
+  endpoints to its own clients now owns them: build the handlers and call `Engine::list` / `get` /
+  `create` / `update` / `delete` / `columns`, which are typed and unchanged in meaning. That is a
+  deliberate transfer — an app's public API is a product decision this crate shouldn't be making.
+
+- **`Crud::new(db, base_path)` → `Crud::new(db)`.** There is no mount prefix any more: every link the
+  UI renders is query-only and relative (`?page=2`), so it works on whatever path the app serves it
+  from and the library never needs to know that path. Delete the second argument.
+
+- **`Table`/`Form`/`Admin`: `render()` and `render_for(&headers)` → `render_for(&headers, &state)`,
+  and they are now `async`.** Rendering reads rows, so it awaits; and the view (page, sort, filters,
+  search, which row is being edited) arrives as a `ViewState` parsed from the request URL.
+
+  ```rust
+  // before
+  let html = Admin::new(&engine).entity("post").render_for(&headers).await?;
+  // after
+  let state = ViewState::from_uri(&uri);                     // or ::default() for page 1, unsorted
+  let html = Admin::new(&engine).entity("post").render_for(&headers, &state).await?;
+  ```
+
+  The `render()` variant (no headers, no gating) is gone: with no API behind the UI, `render_for` is
+  the read enforcement point, and a render that couldn't consult the gate would be a way around it.
+
+- **Writes need a route.** Each component gains `submit(&headers, ip, &body, &state)` — where
+  `body` is the **raw request bytes** (`axum::body::Bytes`), since a CSV upload is a file — which the
+  app calls from a `post` handler on the *same* path as the `get`; it returns `Outcome::Done(relative_url)`
+  to redirect to, or `Outcome::Invalid(state)` to re-render with the validation messages and the typed
+  values in place. Worked shape in [docs/CRUD.md](docs/CRUD.md#web-ui-ui) and all three examples.
+
+- **`Table::format(column, js: &str)` → `Table::format(column, impl Fn(&Value, &Value) -> String)`.**
+  A Rust closure returning HTML, called during render:
+
+  ```rust
+  // before
+  .format("title", r#"(v, row) => `<a href="/post/${row.id}">${v}</a>`"#)
+  // after
+  .format("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))
+  ```
+
+  Escaping is now the library's job to make easy (`crud::ui::esc`) rather than the app's to remember —
+  the old line in `examples/adminpanel` interpolated database content into HTML unescaped, which this
+  change closes by construction.
+
+- **`Form::on_saved(js)` is removed.** It ran JS after a `fetch`; there is no `fetch`. `redirect()` and
+  `saved_message()` cover what it was used for.
+
+- **`time`: `time::JS` is removed and the module moves behind a new `tz` feature** (implied by `ui`).
+  The selected zone now rides in a cookie and **the server formats**: `Tz::from_headers(&headers)`,
+  `Tz::format`, `Tz::parse`, and `TzPicker::render(&tz, back)` posting to a four-line route of yours.
+  The consequence worth having: **a CSV export now matches what is on screen**, which it could not when
+  the zone was known only to the browser. `docs/TIME.md` is rewritten around this; `window.RL_TZ`, the
+  Alpine `$store.tz` and `window.RLTime` are gone.
+
+- **`time::ZONES` is replaced by configurable lists.** The offered zones are now
+  `TzPicker::new()` (the default: UTC + Europe + the United States, from `zones_default()`),
+  `.all_zones()` (everything the host's tz database knows, `zones_all()`), or `.zones(list)` — the
+  usual case, a `Vec<String>` read from YAML/JSON/a settings table at startup. Building blocks:
+  `ZONES_EUROPE`, `ZONES_US`, `EXCLUDED`, `is_excluded`, `Tz::known`.
+
+  **The crate's own lists exclude the Russian Federation and Belarus** — the 28 zones IANA's
+  `zone1970.tab` assigns to `RU` or `BY`, `Europe/Simferopol` included (that table lists it as
+  `RU,UA`). This governs what the crate ships; `zones(…)` still takes an app's list as given, and
+  `is_excluded` applies the same policy to it in one line.
+
+  A configured name the host's database doesn't know is **dropped rather than offered** and reported
+  by `TzPicker::unknown_zones()`, so a typo is a startup log line instead of an `<option>` that
+  quietly means UTC.
+
+- **`crud::csv_io::export` / `import` take `&[Column]` and a `&Tz`** instead of re-deriving columns from
+  metadata JSON. The `csv` feature now implies `tz`.
+
+- **`ui` implies the `axum` feature** (it parses request URLs and decodes posted bodies).
+
+- Smaller: `LogicalType`, `Cardinality` and `FieldDisplay` lost their `Serialize` impls and
+  `FieldDisplay::params` (all of it existed to cross the wire); `Column`, `Page` and `RowItem` gained
+  `Debug`/`Clone`; `Engine::list` returns `Page` rather than `Value`, and `Engine::delete_where`
+  returns `u64`; `Engine::new()` takes no arguments; `Accessor` is documented as a type-erasure seam
+  rather than a stability promise.
+
+### Added
+
+- **Two new documents.** [`MPA_MIGRATION.md`](MPA_MIGRATION.md) is the 0.2.x → 0.3.0 upgrade guide —
+  every changed symbol, a compile-error cheat sheet, a full before/after, and what to do if you were
+  publishing the JSON API. [`docs/APP.md`](docs/APP.md) is the cookbook the library was missing:
+  page shell and nav bar, the login page, the admin's two handlers, dashboards, hand-written forms,
+  multi-step workflows, and a pre-deployment checklist.
+- **A `/dashboard` page in `examples/crud`** — counts read straight off `Engine::list` and a
+  read-only `Table` embedded as a panel, demonstrating that a custom page and the admin read one
+  model.
+- **`crud::ui::ViewState`** — the URL *is* the view. `page`, `per_page`, `q`, `filter[name]`,
+  `sort=a,b:desc`, plus `entity`, `new`, `edit` and `format=csv`. Every filtered, sorted, paginated
+  table (and every open dialog) is therefore a linkable URL, where the previous design kept the same
+  state in Alpine fields, `localStorage` and a URL fragment at once.
+- **`TzPicker` always offers the caller's current zone and UTC**, prepending them if a configured
+  list omits them. Without that, a `<select>` with no selected option shows its first entry, and the
+  next submit would move the user to it.
+- **A native `<dialog open>` create/edit form**, rendered server-side in the same response as the list
+  — so a validation failure re-renders the dialog with the messages beside the fields and the
+  operator's input still in them, rather than mapping a `422` body onto inputs in JavaScript.
+- **`crud::ui::CSS`** — the ~40 lines Bootstrap 5 doesn't cover (mostly the dialog). Inline it once.
+- **`crud::ui::esc`** — escape a JSON scalar for HTML, for `format` closures.
+- **`Table::fields` / `Table::omit`**, which `Form` already had: the dialog's form can now show a
+  subset, in an order, with the same render-time refusal when a create couldn't be satisfied.
+- **CSV in a toolbar menu, with a real import dialog.** Export and Import sit in a `<details>`
+  dropdown (a disclosure, so no JavaScript is needed to open it), and "Import CSV…" opens
+  `?import=1` — a dialog with two independent actions: **upload a file** or **paste the rows**.
+  The upload is genuine `multipart/form-data` straight to the server: no script reads the file, so
+  encoding, size and odd bytes are handled where they can be handled. A UTF-8 BOM is stripped and a
+  file that isn't UTF-8 is refused by name rather than imported as mojibake. A refused import
+  reopens the dialog with its per-row report *and* the rows back in the box.
+- **A buffered `multipart/form-data` reader** (`multipart.rs`, `pub(crate)`, no new dependency): it
+  reads the shape browsers post and refuses anything else — no boundary, a nameless part, a
+  truncated body, an encoding it would have to decode. `submit` takes the `_csrf` token from a part,
+  so uploads are CSRF-checked like every other write. (The `csrf::enforce` **layer** still doesn't
+  parse multipart — don't put the UI's write route behind it if you allow uploads; see TODO.md.)
+- **`Outcome`-bearing writes report themselves once**, as a Bootstrap alert above the table: a
+  delete redirects with `?done=deleted:17`, an import with `?done=imported:120,3`, and the next
+  render turns that into "17 records deleted." / "120 records added and 3 updated from CSV." before
+  dropping it. `crud::ui::Done` is the type. A create or an update reports nothing — the redirect
+  already lands on the row it changed.
+- **A validation message naming a column the form doesn't render is promoted to the dialog's
+  banner** (`views: not allowed`) instead of vanishing. Field messages still render under their own
+  input; `validate_row`'s cross-field messages still head the dialog.
+- **Reads are gated.** `render_for` consults the model's gate for `List` (and `Read` when a dialog is
+  open) and answers `401`/`403` — previously the API was the read enforcement point and the UI only
+  hid buttons. `crud/gate_tests.rs` covers it.
+
 ### Changed
 
+- **`examples/time` is removed; its content moved into `examples/crud`.** With the timezone policy
+  reduced from ~120 lines of JavaScript to "which `Tz` your handler passes", the example's subject
+  was four lines `examples/adminpanel` already showed. What was worth keeping — the rows straddling
+  both 2026 DST transitions — is now the `event` table in `examples/model`, registered by
+  `crud-example` and reachable at **`/ui/event`**, with the picker in that example's navbar. Run
+  `cargo run -p crud-example` where you ran `cargo run -p time-example`.
 - **`WriteEvent::source` for the crud engine is now `"autocrud"`** (was `"crud"`). Cosmetic: the value
   is written into an app's audit table and read by people, and a bare `crud` names nothing in
   particular in an app that has CRUD screens of its own — `autocrud` is this crate's auto-generated
   one. A sink that just persists `ev.source` needs no change beyond expecting the new spelling
   alongside the old in rows already stored (nothing rewrites them).
+- The `«` / `»` pager controls are always rendered, stepping by a tenth of the table (so they are
+  plain previous/next on a short one) rather than appearing only past ten pages.
+- Multi-key sorting is an explicit `+` affordance on each header instead of shift-clicking it.
 
 ## [0.2.1] — 2026-08-06
 

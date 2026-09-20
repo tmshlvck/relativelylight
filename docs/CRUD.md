@@ -1,20 +1,30 @@
 # `relativelylight::crud`
 
-Turn SeaORM entities into a JSON CRUD + metadata HTTP API — and an optional auto-generated web
-admin — with **no per-model code**. The `crud` module introspects your entities at runtime: every
-column becomes a field, primary/foreign keys are detected, and FK-backed relations are discovered.
-The only thing you declare by hand is many-to-many (SeaORM can't enumerate it).
+Turn SeaORM entities into a **server-rendered CRUD admin** with **no per-model code**. The `crud`
+module introspects your entities at runtime: every column becomes a field, primary/foreign keys are
+detected, and FK-backed relations are discovered. The only thing you declare by hand is many-to-many
+(SeaORM can't enumerate it).
+
+There is **no JSON API and no JavaScript framework**. The columns the module computes go straight into
+rendered HTML — one Rust `match` per cell and per form input — and writes come back as posted forms.
+An app that wants to publish a JSON API writes those handlers itself over the same typed [`Engine`]
+(see [Reading and writing](#reading-and-writing)); its shape is a product decision this crate
+deliberately doesn't make. `MPA.md` records why that changed in 0.3.
+
+New here? **[APP.md](APP.md)** builds a whole app end to end (shell, nav bar, login, admin, your own
+pages); this document is the reference for the parts. Coming from 0.2.x?
+**[MPA_MIGRATION.md](../MPA_MIGRATION.md)**.
 
 - [Install & features](#install--features)
 - [Quick start](#quick-start)
 - [Configuring a model](#configuring-a-model) — `MetaModel`, `MetaField`, `MetaRelation`
-- [The HTTP API](#the-http-api) — routes, read/write formats, query params, errors
+- [Reading and writing](#reading-and-writing) — the engine API, the URL as state, errors, CSRF
 - [Validation & transforms](#validation--transforms)
-- [Metadata](#metadata) — for building UIs
+- [Columns](#columns) — what the UI renders from
 - [CSV import/export](#csv-importexport)
-- [Web UI](#web-ui-ui) — `ui::Form`, `ui::Table` and `ui::Admin`
-- [OpenAPI](#openapi)
+- [Web UI](#web-ui-ui) — `ui::Table`, `ui::Form` and `ui::Admin`
 - [Composing with your app](#composing-with-your-app) — you own the roots
+- [Write observer (audit)](#write-observer-audit)
 - [Architecture & extending](#architecture--extending)
 
 ---
@@ -23,18 +33,18 @@ The only thing you declare by hand is many-to-many (SeaORM can't enumerate it).
 
 ```toml
 [dependencies]
-relativelylight = { version = "*", features = ["ui", "openapi", "csv"] }
+relativelylight = { version = "0.3", features = ["ui", "csv"] }
 sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 ```
 
 | Feature | Default | Pulls | Gives you |
 |---|---|---|---|
 | `crud` | ✅ | `sea-orm` | the CRUD engine + SeaORM backend (this module) |
-| `axum` | ✅ | `axum` | the HTTP router (`Crud::into_router`, `Engine::router`) |
-| `ui` | | `askama` | the server-rendered UI components (`crud::ui::Form`, `::Table`, `::Admin`) |
-| `openapi` | | `utoipa` | runtime OpenAPI 3.1 generation (`crud::openapi::json`) |
-| `csv` | | `csv` | CSV import/export routes + `crud::csv_io` |
-| `csrf` | | `rand_core` | `Crud::csrf` — require a CSRF token on writes (implied by `auth`) |
+| `axum` | ✅ | `axum` | the request plumbing the UI needs, and the `middleware` module |
+| `ui` | | `askama` | the server-rendered components (`crud::ui::Table`, `::Form`, `::Admin`); implies `axum` + `tz` |
+| `csv` | | `csv` | CSV import/export for the UI + `crud::csv_io`; implies `tz` |
+| `tz` | | `jiff` | timezone-aware rendering of integer-UTC timestamps (`time`) |
+| `csrf` | | `rand_core` | `Crud::csrf` — require a token on writes (implied by `auth`) |
 
 Enable only what you use — an unused feature pulls no dependencies.
 
@@ -47,6 +57,7 @@ so their composite keys are fine.
 
 ```rust
 use relativelylight::crud::seaorm::{Crud, MetaModel};
+use relativelylight::crud::ui::{Admin, Outcome, ViewState};
 use relativelylight::authz::Open;                  // per-model auth gate; Open = ungated
 
 let db = /* sea_orm::DatabaseConnection */;
@@ -57,21 +68,51 @@ let tag    = MetaModel::new(tag::Entity);
 let mut post = MetaModel::new(post::Entity);
 post.relate(&tag);                                 // declare the N:M (FK relations are automatic)
 
-let mut crud = Crud::new(db, "/api/v1");           // base_path ("" for root)
+let mut crud = Crud::new(db);
 crud.register(author, Open);                       // pass an auth gate to restrict — see docs/AUTH.md
 crud.register(post, Open);
 crud.register(tag, Open);
 
-let app = crud.into_router();                       // axum::Router — merge/serve as usual
-// axum::serve(listener, app).await?;
+let engine = Arc::new(crud.into_engine());
 ```
 
-That serves full CRUD for `author`, `post`, `tag` under `/api/v1` (see [routes](#the-http-api)).
-`crud.engine()` / `crud.into_engine()` give the transport-agnostic `Engine` if you want to drive it
-without axum.
+Then **two handlers** on one route of your own — a `get` that renders, a `post` that writes:
 
-A runnable example lives in `examples/crud` (`cargo run -p crud-example`): five related
-entities, the admin UI, Swagger, and seed data.
+```rust
+fn panel(engine: &Engine) -> Admin<'_> {           // one definition, used by both
+    Admin::new(engine).title("Admin").entity("author").entity("post").entity("tag")
+}
+
+let app = Router::new().route("/admin", get(show).post(save)).with_state(engine);
+
+async fn show(headers: HeaderMap, uri: Uri, State(engine): State<Arc<Engine>>) -> Response {
+    let state = ViewState::from_uri(&uri);         // page, sort, filters, search, ?edit=…
+    match panel(&engine).render_for(&headers, &state).await {
+        Ok(fragment) => Html(my_shell(fragment)).into_response(),
+        Err(e) => e.into_response(),               // 401/403 from the model's gate, or a config error
+    }
+}
+
+async fn save(headers: HeaderMap, uri: Uri, RealIp(ip): RealIp,
+              State(engine): State<Arc<Engine>>, body: Bytes) -> Response {
+    let state = ViewState::from_uri(&uri);
+    match panel(&engine).submit(&headers, ip, &body, &state).await {
+        Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),          // 303 back to the list
+        Ok(Outcome::Invalid(state)) => {                                     // re-render with messages
+            let fragment = panel(&engine).render_for(&headers, &state).await.unwrap_or_default();
+            (StatusCode::UNPROCESSABLE_ENTITY, Html(my_shell(fragment))).into_response()
+        }
+        Err(e) => e.into_response(),
+    }
+}
+```
+
+That is the whole shape, and it is the same for `Table` and `Form`. `middleware::resolve_real_ip` is
+**mandatory** (the write path reads `RealIp` for the audit trail) — see
+[Composing with your app](#composing-with-your-app).
+
+Runnable: `cargo run -p crud-example` (five related entities, ungated) and
+`cargo run -p adminpanel-example` (the same thing login-gated, with 2FA and lockout panels).
 
 ## Configuring a model
 
@@ -100,7 +141,7 @@ let mut post = MetaModel::new(post::Entity);
 post.field("views").read_only = true;
 post.field("title").label = Some("Title".into());
 post.field("title").description = Some("The post headline.".into());
-post.slug = "articles".into();                     // /api/v1/articles
+post.slug = "articles".into();                     // ?entity=articles
 post.row_label = Box::new(|row| row["title"].as_str().unwrap_or_default().to_string());
 post.relate(&tag);
 ```
@@ -174,7 +215,7 @@ SSO / PassKey user).
 `Int`, so by default the UI renders it as a plain number. `MetaField::datetime()` flags it as a
 datetime *for presentation only*: the table cell shows a readable UTC timestamp
 (`YYYY-MM-DD HH:MM:SS UTC`) and the create/edit form uses a `datetime-local` picker (edited in UTC,
-stored back as integer seconds). Storage, validation, and the OpenAPI schema are unchanged.
+stored back as integer seconds). Storage and validation are unchanged — only the input and the cell.
 
 ```rust
 zone.field("created_at").datetime();   // read-only stamp → formatted cell (no input)
@@ -244,29 +285,33 @@ pub struct MetaRelation {
 }
 ```
 
-## The HTTP API
+## Reading and writing
 
-Mounted under `base_path`.
+Everything is **typed and in-process**: there is no wire format between the engine and the renderer,
+and none between your handlers and the engine either.
 
-| Method | Path | Action |
+| `Engine` method | Returns | Notes |
 |---|---|---|
-| `GET` | `/{entity}` | list — search + sort + paginate; `?view=terse`, `?all=true`, `?format=csv` |
-| `GET` | `/{entity}/{pk}` | one row (with relations) |
-| `POST` | `/{entity}` | create → `201`, returns the row |
-| `PATCH` | `/{entity}/{pk}` | partial update → `200`, returns the row |
-| `DELETE` | `/{entity}/{pk}` | delete → `200`, returns the deleted row |
-| `DELETE` | `/{entity}` | bulk delete matching rows → `{ "deleted": N }` |
-| `POST` | `/{entity}/_import` | CSV import (feature `csv`) |
+| `columns(slug)` | `Vec<Column>` | the ordered field/relation description — what the UI renders from |
+| `pk(slug)` | `String` | the primary-key field name |
+| `list(slug, &ListQuery, terse)` | `Page` | one page of `RowItem { id, label, row }`; `terse` omits `row` |
+| `get(slug, pk)` | `Value` | one finished row |
+| `create(slug, &Value)` / `update(slug, pk, &Value)` | `Value` | the written row |
+| `delete(slug, pk)` | `Value` | the deleted row |
+| `delete_where(slug, &ListQuery)` | `u64` | one set-based `DELETE … WHERE`, not a loop |
+| `write_batch(slug, rows)` | `BatchApplied` | many writes as one transaction (what CSV import uses) |
+| `decide(slug, op, &headers)` | `Decision` | the model's gate — `Allow` / `NeedsLogin` / `Denied` |
 
-### Read format
+These are also how you publish your own JSON API if you want one: a handler per route, your choice of
+shape, your versioning policy.
 
-A row is a **flat object keyed by column name**. Hidden fields, write-only fields, and raw FK
-columns are omitted. Relations embed `{id, label}` — just the identity and a display label, **no
-URLs**. (The admin UI shows relations as text/badges, not links; if you want a row to link
-somewhere, use a [custom formatter](#web-ui-ui).)
+### Row format
+
+A row is a **flat object keyed by column name**. Hidden fields, write-only fields, and raw FK columns
+are omitted. Relations embed `{id, label}` — the identity and a display label, resolved by the
+backend, so a rendered cell needs no second query:
 
 ```jsonc
-GET /api/v1/post/1
 {
   "id": 1, "title": "Rust intro", "body": "…", "views": 100,
   "author": { "id": 1, "label": "Ada Lovelace" },   // to-one → {id,label} | null
@@ -274,25 +319,13 @@ GET /api/v1/post/1
 }
 ```
 
-`GET`/`POST`/`PATCH`/`DELETE` of a single row return this record directly. **List** returns a page,
-each item an envelope:
-
-```jsonc
-GET /api/v1/post
-{ "total": 45, "page": 1, "per_page": 25,
-  "data": [ { "id": 1, "label": "Rust intro", "row": { /* record above */ } } ] }
-```
-
-`?view=terse` drops `row`, leaving `{id, label}` per item — ideal for relation pickers. A relation
-link, a terse item, and an envelope-minus-`row` are the same shape.
-
 ### Write format
 
-Flat object keyed by **writable column names**; relations by name. Absent keys → unchanged (PATCH) /
-defaulted (POST). Read-only/hidden fields, the PK on create, and unknown keys are ignored.
+Flat object keyed by **writable column names**; relations by name. Absent keys → unchanged (update) /
+defaulted (create). Read-only/hidden fields, the PK on create, and unknown keys are ignored. The UI's
+form decoder ([`ui::decode`](#web-ui-ui)) produces exactly this from a posted body.
 
 ```jsonc
-POST /api/v1/post
 { "title": "Async Rust", "views": 0, "author": 1, "tag": [1, 3] }
 ```
 
@@ -304,30 +337,30 @@ POST /api/v1/post
 
 Create/update is transactional. Deleting a row clears its N:M junction rows first.
 
-### Query params (list & bulk delete)
+### The URL is the view
 
-All map onto one `ListQuery`; the backend builds the SQL filter from it once (shared by list, terse
-pickers, CSV export, and bulk delete).
+A rendered table reads its state from the query string — and nowhere else. `ViewState::from_uri(&uri)`
+parses it; `ViewState::default()` is page 1, unsorted, unfiltered. Every link the UI emits is
+**query-only and relative** (`?page=2`), so a component works on whatever path you serve it from.
 
 | Param | Meaning |
 |---|---|
 | `q=<term>` | naive full-text: `LIKE '%term%'` across text columns |
 | `filter[<name>]=<val>` | **exact** match. `<name>` is a column *or* a to-one relation (`filter[author]=7` → `author_id = 7`); an empty value matches rows that have none (`IS NULL`) |
-| `search[<col>]=<term>` | substring match on one **text** column |
-| `<col>=<val>` | the legacy spelling of `search[<col>]` (text columns only) |
-| `sort=views:desc,title` | whitelisted sort (unknown key → 400). A **relation** sorts by the label its cells show |
-| `page` / `per_page` | pagination (default `per_page=25`) |
-| `all=true` | return every match unpaginated; also the guard that permits a whole-table bulk delete |
-| `ids=1,2,3` | restrict to these primary keys (`pk IN (…)`) — drives "delete selected" |
-| `view=terse` | list items omit `row` |
-| `format=csv` | CSV export instead of JSON |
+| `sort=views:desc,title` | whitelisted sort (unknown key → an error). A **relation** sorts by the label its cells show |
+| `page` / `per_page` | pagination (`per_page` defaults to the component's, else 25) |
+| `entity=<slug>` | which panel an [`Admin`](#admin--a-whole-admin-in-one-component) is showing |
+| `new=1` / `edit=<pk>` / `import=1` | render the create / edit / CSV-import dialog over the list |
+| `done=…` | what the write that redirected here did (`deleted:17`, `imported:120,3`) — rendered once as an alert, then dropped |
+| `format=csv` | your read handler exports instead of rendering (see [CSV](#csv-importexport)) |
+| `ids=…` (posted) | the rows a bulk delete ticked; `all=true` is the whole-table guard |
 
-**Why brackets.** The reserved words above (`page`, `sort`, `all`, `format`, …) are matched *before* a
-bare `<col>=`, so an entity with a column called `page` or `format` can't be searched on it — the
-parameter means pagination instead, silently. Brackets can't occur in a column or relation name (those
-come from Rust identifiers), so `filter[…]`/`search[…]` are collision-proof by construction whatever an
-app calls its columns, and OpenAPI can describe them natively as `deepObject` parameters, which a bare
-prefix like `f.col` can't be. Repeated keys all apply (`?search[a]=x&search[b]=y` is both conditions).
+Unknown parameters are **ignored**, so your own may share the URL.
+
+**Why brackets.** The reserved words above (`page`, `sort`, `entity`, …) would shadow a column of the
+same name if bare `?<col>=` were accepted. Brackets can't occur in a column or relation name (those
+come from Rust identifiers), so `filter[…]` is collision-proof by construction whatever an app calls
+its columns. Repeated keys all apply.
 
 **Sorting is total.** The primary key is appended as a final sort key, always. Without it an `ORDER BY`
 on a non-unique column leaves the order *within* a tie up to the database, which needn't pick the same
@@ -337,38 +370,40 @@ first on `ASC`, PostgreSQL last); text ordering follows the database's collation
 
 **Sorting by a relation** turns `?sort=author` into `ORDER BY author.name` through a left join, so the
 list is ordered by the label the cell *shows* rather than the foreign key behind it. It needs the
-target to know which column its label comes from — see
-[`label_column`](#metamodele) — and applies to a **to-one that owns its FK** only: a row has many tags,
-so there is no single label to order it by, and to-many/N:M report `sortable: false` and 400 an
-attempt. Each published column carries `sortable` in its metadata, so a UI knows which headers to make
-active without guessing.
+target to know which column its label comes from — see [`label_column`](#metamodele) — and applies to
+a **to-one that owns its FK** only: a row has many tags, so there is no single label to order it by,
+and to-many/N:M report `sortable: false` and refuse an attempt. Each column carries `sortable`, so the
+UI knows which headers to make links without guessing.
 
-**Bulk delete** (`DELETE /{entity}`) runs one set-based `DELETE … WHERE` in the backend (plus a
-subquery to clear N:M junctions) — not a per-row loop, so it scales to large tables. It refuses to
-wipe the whole unfiltered table unless you pass `?all=true`, and returns a count (not the rows). A
-`filter[…]` counts as narrowing it, so a filtered delete needs no `all=true`.
+**Bulk delete** runs one set-based `DELETE … WHERE` in the backend (plus a subquery to clear N:M
+junctions) — not a per-row loop, so it scales. It refuses to wipe the whole unfiltered table unless
+`ListQuery::all` is set, which is what the table's "Delete all N matching" button does and its "Delete
+selected" does not. A `filter[…]` counts as narrowing it.
 
 ### Errors
 
-`{ "error": … }` with status **400** (bad body / unknown column), **401** (the model's gate needs a
-login), **403** (the gate denied the caller, *or* a write failed the CSRF check — see below), **404**
-(unknown entity / missing row), **405** (read-only), **409** (a unique / foreign-key constraint rejected
-the write), **422** (validation, structured — see below), **500** (other DB error).
+[`crud::Error`](https://docs.rs/relativelylight/latest/relativelylight/crud/enum.Error.html) maps to
+**400** (bad body / unknown column), **401** (the model's gate needs a login), **403** (denied, *or* a
+failed CSRF check), **404** (unknown entity / missing row), **405** (read-only), **409** (a unique or
+foreign-key constraint rejected the write), **422** (validation), **500** (other DB error) — via
+`IntoResponse`, as plain text, because a page-level error belongs in your shell. A `Validation` error
+from a posted form is not an error at all to the UI: `submit` returns `Outcome::Invalid` so the dialog
+can re-render with the messages in place.
 
 ### CSRF on writes (feature `csrf`)
 
-A cookie-authenticated API is a CSRF target, so the engine can require a double-submit token on every
-write:
+Cookie-authenticated writes are a CSRF target, so the engine can require a double-submit token:
 
 ```rust
 crud.csrf(auth.csrf());   // share the auth module's token cookie
 ```
 
-Each `POST`/`PATCH`/`DELETE` must then echo the `rl_csrf` cookie in an **`X-CSRF-Token`** header, or it
-gets `403 {"error":"csrf token missing or invalid"}` — checked *before* the gate, so a forged write
-never reaches the database. Reads need no token, and requests carrying an `Authorization` header are
-exempt (a Bearer credential isn't ambient). `Table`/`Admin` add the header to their write `fetch` calls
-automatically. Off by default; full design in [AUTH.md §7](AUTH.md).
+Every form the UI renders then carries a hidden `_csrf` input, and `submit` refuses a body without a
+matching one — checked *before* the gate, so a forged write reaches neither the session lookup nor the
+database. Reads need no token, and requests carrying an `Authorization` header are exempt (a Bearer
+credential isn't ambient). The **cookie must already exist** when the page renders: `auth`'s login
+issues it; an app without `auth` calls `Csrf::ensure` in its page handler. Off by default only because
+a `crud` build without `auth` may have no cookies at all; full design in [AUTH.md §7](AUTH.md).
 
 ## Validation & transforms
 
@@ -403,7 +438,8 @@ Field errors render under the field; `errors[]` are cross-field/banner errors.
 ### Nullable columns: `""` vs `NULL`
 
 Nullability is read from the entity (`ColumnDef::is_null()`) into `MetaField::nullable`, reported in the
-metadata (`"nullable": true`) and in the OpenAPI schema (as a 3.1 type union, `"type": ["string","null"]`).
+column description (`Column::Field { nullable: true, .. }`), which is how the form knows an empty
+input means `null` here and `""` elsewhere.
 It also decides what an **empty** submitted string means:
 
 | Column | Submitted `""` | Stored |
@@ -429,14 +465,14 @@ absent.
 
 `MetaField::required` is introspected as **NOT NULL, no default declared on the entity, and not the
 primary key** — the three facts that make an omission a database error rather than a legitimate blank. It
-is published as `"required": true` in the metadata, listed in the OpenAPI **create** schema's `required`,
-marked with a red `*` in the admin form (unless the field has a `default`, which the form pre-fills — so
-`MetaField::password()`, whose blank means "no password", gets no marker), and **enforced by the engine**:
+is reported as `Column::Field { required: true, .. }`, marked with a red `*` in the form (a field with
+a `default` is pre-filled instead — so `MetaField::password()`, whose blank means "no password", gets no
+marker), and **enforced by the engine**:
 
 | Write | Field | Result |
 |---|---|---|
-| create | absent | `422 {"fields":{"title":"required"}}` |
-| create or update | explicit `null` | `422` — nulling a `NOT NULL` column can never succeed |
+| create | absent | a validation error on `title`, shown beside that field |
+| create or update | explicit `null` | refused — nulling a `NOT NULL` column can never succeed |
 | update | absent | fine: absent means "leave it alone", so partial updates still work |
 | either | `""` | fine — `required` means **present**, not non-empty |
 
@@ -470,8 +506,9 @@ One gap this deliberately doesn't cover: a `NOT NULL` column with no default tha
 *and has no hook* can't be created at all, and still fails at the database. `required` can't help, because a column filled by
 an `ActiveModelBehavior::before_save` hook looks identical to one nothing fills — so refusing the write
 would break the hook case. If creates on a model fail with a database `NOT NULL` error, look for a hidden or
-read-only column with nothing filling it (`examples/time` hides `body`, which is why that demo is
-read-only in practice).
+read-only column with nothing filling it. (This is why the timezone demo has its own `event` table in
+`examples/model` rather than reusing `post`: hiding `post`'s `NOT NULL` `body` and `author` to get a
+one-timestamp form made the form unable to create anything at all.)
 
 ### Enumerations: a closed set of values
 
@@ -482,7 +519,7 @@ read-only in practice).
 |---|---|
 | admin form | a `<select>` instead of a free-text input (with a blank choice where the column is nullable or not required) |
 | metadata | `"options": ["draft","review",…]`, emitted only for columns that have a set |
-| OpenAPI | a string schema with `enum`, so a generated client can refuse a bad value without a round trip |
+| CSV | an unknown value is rejected on import like any other invalid cell |
 | write path | membership checked before your own validator → `422 {"fields":{"status":"must be one of: …"}}` |
 
 Values match **exactly**; database enums are case-sensitive.
@@ -501,48 +538,73 @@ how you close a set that the database doesn't model as an enum at all. Both `exa
 Before this, an enum column fell through to a free-text input and **any** string was accepted: on a real
 enum column the database rejected it (a `500`), and on a text-backed one the typo was simply stored.
 
-## Metadata
+## Columns
 
-The structural description a UI needs is available **in-process** (there is no `_meta` HTTP route):
+`Engine::columns(slug) -> Vec<Column>` is the structural description the UI renders from — and the
+thing to read if you are writing your own screens or your own API.
 
-- `Engine::meta_one(slug) -> Value` — one entity's descriptor with ordered `columns`.
-- `Engine::meta_all() -> Value` — the entity catalog.
-
-```jsonc
-{
-  "entity": "post", "url": "/api/v1/post", "primary_key": ["id"],
-  "columns": [
-    { "kind": "field", "name": "id", "type": "Int", "read_only": true, "write_only": false,
-      "sortable": true },
-    { "kind": "field", "name": "title", "type": "Text", "read_only": false, "write_only": false,
-      "sortable": true, "label": "Title", "description": "The post headline." },
-    // sortable: the target declares a label column, so ?sort=author orders by author.name
-    { "kind": "relation", "name": "author", "target": "author", "cardinality": "ToOne",
-      "fk_column": "author_id", "read_only": false, "sortable": true,
-      "list_url": "/api/v1/author" },
-    // not sortable: a row has many tags, so there's no single label to order it by
-    { "kind": "relation", "name": "tag", "target": "tag", "cardinality": "ToMany", "read_only": false,
-      "sortable": false, "list_url": "/api/v1/tag" }
-  ]
+```rust
+pub enum Column {
+    Field {
+        name: String, logical_type: LogicalType, read_only: bool, write_only: bool,
+        nullable: bool, required: bool, options: Vec<String>,
+        label: Option<String>, description: Option<String>, default: Option<Value>,
+        display: Option<FieldDisplay>, sortable: bool,
+    },
+    Relation {
+        name: String, target: String, cardinality: Cardinality,
+        fk_column: Option<String>, read_only: bool,
+        label: Option<String>, description: Option<String>, sortable: bool,
+    },
 }
 ```
 
 Columns are **ordered**: a to-one relation appears in place of its FK column; inverse/N:M relations
-are appended; hidden columns are omitted. `list_url` is the target's list endpoint — the one URL a
-consumer needs, to fill relation pickers (`GET {list_url}?q=…&view=terse`).
+are appended; hidden columns are omitted. `sortable` says whether `?sort=<name>` is accepted (false
+for `Json`/`Other` fields, and for a relation whose target has no known label column).
+
+Each variant is one arm of the renderer's `match`, which is the point of doing this in Rust: adding a
+`LogicalType` or a `FieldDisplay` is a compile error in every place that must handle it, where the
+previous design dispatched on strings in JavaScript that no compiler read.
 
 ## CSV import/export
 
 Feature `csv`. A thin layer over the `Engine` — every imported row goes through the same
 coerce/validate pipeline as HTTP.
 
-- **Export:** `GET /{entity}?format=csv` → `text/csv`. Reuses the list route, so `q`/filters/`sort`
-  apply — you export exactly what you'd see, unpaginated.
-- **Import:** `POST /{entity}/_import` with a CSV body → `{ created, updated, failed, errors: [{row, message}] }`.
+- **Export:** `Table::csv(&headers, &state)`, which the toolbar's Export link asks for by putting
+  `?format=csv` on the page's own URL — so your read handler answers it (three lines; see the
+  examples). It applies the view's search, filters and sort, unpaginated: **you export exactly what is
+  on screen.**
+- **Import:** the same menu's "Import CSV…" opens a dialog (`?import=1`) with two independent
+  actions — **upload a file**, or **paste the rows** — each with its own button. Both post
+  `_op=import`, and `submit` applies them identically from there.
 
-Format (round-trippable): header = column names (write-only omitted); field → scalar; to-one → the
-target id (blank if none); N:M → ids joined with `|` (e.g. `1|3`). On import a row **with** a PK value
-updates that row, **without** creates one; read-only columns are ignored.
+**The file goes straight to the server** as `multipart/form-data`; no JavaScript reads it first.
+That matters for exactly the cases where an import is hard: an unusual encoding, a file too big to
+percent-encode into a text field, bytes the browser would mangle. The server has the bytes and can
+say precisely what is wrong with them. Three things follow:
+
+- **Encoding.** A UTF-8 BOM (what a spreadsheet writes) is stripped. Anything that isn't UTF-8 is
+  **refused by name** — "isn't valid UTF-8 (byte 41) — re-save it as UTF-8" — rather than guessed at,
+  because nobody sees the file before it applies and mojibake in the database is worse than a retry.
+- **Size.** The body reaches your handler through axum's `DefaultBodyLimit` (2 MB). Raise it on that
+  route with `DefaultBodyLimit::max(…)` if imports are larger.
+- **CSRF.** The token rides in a part of the multipart body, and `submit` reads it from there. Do
+  **not** put the UI's write route behind the `csrf::enforce` layer if you allow uploads: that layer
+  doesn't parse multipart, so it would reject them (loudly, with a `403` — it fails closed).
+  `submit` is already enforcing the same token.
+
+**A refused import reopens the dialog**, with the per-row report in its banner (`line 4: title:
+required`) and the rows back in the paste box however they arrived — so a bad cell is fixed in
+place rather than by re-picking a file. Since an import is all-or-nothing, redirecting to an
+unchanged list would look exactly like an import that had worked.
+
+Format (round-trippable): header = column names (write-only omitted); field → scalar; a `datetime`
+field → `YYYY-MM-DD HH:MM` **in the caller's timezone**, so the file agrees with the screen (see
+[TIME.md](TIME.md)); to-one → the target id (blank if none); N:M → ids joined with `|` (e.g. `1|3`).
+On import a row **with** a PK value updates that row, **without** creates one; read-only columns are
+ignored, and datetimes are read back through the same zone.
 
 **Import is all-or-nothing.** One backend transaction covers the whole file, so a file that fails on line
 40 leaves the first 39 rows unapplied — you fix the spreadsheet and re-upload it, rather than hunting for
@@ -563,276 +625,219 @@ and stops at the first failure — not atomic, and documented as such; the SeaOR
 
 ## Web UI (`ui`)
 
-Feature `ui`. **Two building blocks and one composition of them:**
+Feature `ui`. Three components, **one implementation**:
 
-| Component | Renders | For |
-|---|---|---|
-| [`Form`](#form--a-standalone-createedit-form) | one create/edit form | **your own pages** — a signup form, a "new ticket" screen |
-| `Table` | one entity: list + search + pager, with that same form in a modal | an entity's admin view |
-| `Admin` | many `Table`s behind a side-panel | a whole back-office |
+- [`Table`](#table) — one entity: search, sortable headers, filters, a pager, CSV, bulk delete, and a
+  create/edit dialog.
+- [`Form`](#form--a-standalone-createedit-form) — the same form standalone, for your own pages.
+- [`Admin`](#admin--a-whole-admin-in-one-component) — a side panel over many `Table`s.
 
-All three render Bootstrap-5 + Alpine.js **HTML fragments**; you own the shell. The *shape* (columns)
-is read from the `Engine` in-process and embedded; *data* is fetched client-side from the JSON API. You
-provide a shell page that loads Bootstrap 5.3 CSS/JS and Alpine 3 (both via CDN) and drops the fragment
-into a `<div>`.
-
-`Form` and `Table`'s modal are **one implementation** — the field widgets and the behaviour (payload
-shaping, `422` mapping, CSRF header, relation pickers, datetime conversion) live in shared partials both
-include, differing only in chrome and in what follows a save. So everything the next section says about
-the form applies to both, and `Admin` is what it was always meant to be: a free composition of the
-parts rather than a thing of its own.
+All three return **HTML fragments**: your app owns `<html>`, the Bootstrap 5 stylesheet and the
+layout. There is no JavaScript framework, no JSON in between, and no client-side state.
 
 ```rust
-let html: String = relativelylight::crud::ui::Table::new(&engine, "post")
-    .title("Post")          // heading + form header; default: the slug
-    .description("Blog posts — one row per article.")  // optional muted subtitle under the heading
-    .read_only(false)       // true → display only (no create/edit/delete, no form)
-    .search(true)           // search box → ?q=
-    .pagination(true)
-    .per_page(30)
-    .confirm(true)          // confirm before delete
-    .picker_threshold(20)   // relations with > N target rows use a search→select picker (default 20)
-    .sort("title")          // initial order; .sort_desc(col) for descending, repeat for secondary keys
-    .filter("author")       // a filter control in the toolbar — a column or a to-one relation
-    .fixed_filter("author", "7")  // …or pin it: no control, just the restriction
-    // custom cell renderer — turn the title into a link built from the row:
-    .format("title", r#"(v, row) => `<a href="/posts/${row.id}">${v}</a>`"#)
-    .render()?;
+let html = Table::new(&engine, "post")
+    .title("Posts")
+    .per_page(20)
+    .filter("author")
+    .sort("title")
+    .render_for(&headers, &state).await?;
 ```
 
-Gives you: search, **sortable headers**, an optional **filter control**, a `|< << N-3…N…N+3 >> >|`
-pager, a create/edit **modal form** (inline field + row validation errors), per-row and bulk delete
-(delete-selected / delete-all-matching), and CSV import/export (tucked into a `⋮` overflow menu). Field
-labels/help/defaults and validators come from the `MetaModel` you registered.
+**What to put in your shell:** Bootstrap 5's CSS, and `crud::ui::CSS` — about forty lines Bootstrap
+doesn't cover (mostly the `<dialog>`, whose own `.modal` assumes Bootstrap's JavaScript):
 
-**Sorting.** Every header the API will order by is clickable: asc → desc → unsorted, shift-click for a
-secondary key (numbered when there's more than one). Headers for columns the API refuses — a `Json`
-column, a to-many relation, a relation whose target has no label column — are inert rather than
-clickable-and-then-broken. `.sort(col)` on a column that can't be sorted is a **render-time error
-naming it**, not a header that 400s on first click.
-
-**Filtering.** `.filter(name)` puts a control in the toolbar, **left of the search box** — a `<select>`
-for a relation, an enum's options, or a Yes/No for a boolean, and a live search→select box once a
-relation's target outgrows `picker_threshold`, reusing the form picker's machinery. The choice reaches
-the listing, the **CSV export** and **"delete all matching"** alike, so no button can act on a wider set
-than the one on screen. Creating a row pre-selects the filtered value (it only pre-selects — the picker
-still offers everything).
-
-`.fixed_filter(name, value)` is the same restriction with no control, for a page that is *about* one
-value — `examples/crud`'s `/author/{id}/posts` is the worked case. Having nothing on screen to show it,
-a pinned filter renders as a chip above the table instead — a narrowed table that looks whole is how someone concludes their rows were
-deleted. Both narrow a **view, not access**: the API stays queryable for other values by anyone the
-model's gate admits, so per-row scoping remains [`authz`](AUTH.md)'s job.
-
-**Form inputs** are derived from the column type — numbers/text as typed inputs, **booleans as a toggle
-switch**, a closed `options` set as a dropdown — and can be overridden per field with
-[widget overrides](#widget-overrides--picking-the-form-input-per-field) (`textarea`, `radio`, `range`,
-`email`, `url`, `datetime`). **`write_only`
-string fields render as a masked password input** (secrets like a password: typed in, hashed by an `on_write`
-hook, never shown in reads). On **edit** a write-only field starts blank and is *omitted* from the
-save when left blank — "leave blank to keep current" — so a blank doesn't clobber the stored secret;
-on **create** it's sent as-is (an empty value is allowed, e.g. an account with no password).
-
-The modal is a real **`<form>`** submitted with `fetch` (`@submit.prevent`), so <kbd>Enter</kbd> in any
-field saves, and a browser's password manager gets the one form-submission signal it needs to offer to
-remember a credential *at the right moment*. Immediately after a successful save — and on Cancel/close —
-every `write_only` field is blanked and the form reset, so a secret never lingers in a hidden input.
-Without that, Chrome re-offers to save the **previously** created account's password on every
-subsequent row you save (it keeps re-detecting the stale value), and offers the wrong credential for
-this site. <kbd>Enter</kbd> inside a relation search box searches instead of submitting.
-
-Relations
-pick a widget by the target's size (from a `total` probe): **≤ `picker_threshold`** rows → a plain
-`<select>` (to-one) / multi-`<select>` (N:M) with all options preloaded; **more** → a live
-search→select combobox that queries the target (`GET {list_url}?q=…&view=terse`) with a
-`Search N items…` prompt — a single input for to-one, removable chips + an add-search for N:M. The
-current selection is seeded from the row, so it stays visible on edit even when it's not in the first
-page of results.
-
-**Cell rendering:**
-- Fields show their value; **booleans** render as green **Yes** / red **No** badges by default.
-- Relations show labels, not links into the API — a to-one as text, a to-many/N:M as a row of
-  badges.
-- **`.format(column, js)`** overrides a column's cell with your own renderer: a JS arrow function
-  `(value, row) => htmlString`, inserted as HTML. `value` is the raw cell value and `row` is the full
-  record, so you can build links or badges from any field (e.g. `row.id`). The returned string is
-  inserted verbatim — **escape untrusted content yourself**.
-
-### `Form` — a standalone create/edit form
-
-`ui::Form` is the form above without the table, for pages the admin's shape doesn't fit. It reads the
-same published metadata, so the widgets, required markers, enum dropdowns, relation pickers, datetime
-handling and inline `422` errors all come along, and stay in step with the model.
-
-```rust
-use relativelylight::crud::ui::Form;
-
-// Create, showing a chosen subset in a chosen order, then land on the new row's page:
-let html = Form::new(&engine, "ticket")
-    .title("New ticket")                  // card header; omit it and there's no header at all
-    .description("We usually reply within a day.")
-    .fields(["subject", "body", "priority", "assignee"])  // only these, in this order
-    .submit_label("Open ticket")
-    .cancel("/tickets")                   // Cancel link; omit for no Cancel button
-    .redirect("/tickets/{id}")            // `{id}` ← the saved row's id
-    .render_for(&headers).await?;          // gate-aware: Err(Unauthorized) / Err(Forbidden)
-
-// Edit an existing row — fetched on load, saved with PATCH:
-let html = Form::new(&engine, "ticket").edit(&id).omit(["assignee"]).render()?;
+```html
+<link href="…/bootstrap.min.css" rel="stylesheet">
+<style>{{ css|safe }}</style>   <!-- pass relativelylight::crud::ui::CSS -->
 ```
+
+### How it works
+
+Three rules, and the rest follows.
+
+**The URL is the state** ([above](#the-url-is-the-view)). Page, sort keys, filters, the search term,
+which entity is active and which row is being edited all live in the query string, so every view is a
+link you can bookmark, mail, or put in a runbook.
+
+**Modals are `<dialog open>`, rendered server-side.** `?edit=7` renders the list *and* the open dialog
+in one response; the browser supplies the backdrop, ESC-to-close and the top layer with no script. A
+rejected write re-renders the same dialog with the messages beside the fields and the operator's input
+still in them.
+
+**Writes are POST → 303 → GET.** `submit` returns a relative target (`?page=2#row-7`), so the browser
+lands back on the row that changed. One request per save, where the previous design took two (POST,
+then re-fetch the whole table).
+
+**What a write did is reported once, in the URL.** A delete or an import redirects with
+`?done=deleted:17` / `?done=imported:120,3`, which the next render turns into one Bootstrap alert
+above the table and then forgets — a refresh doesn't repeat it, and a second tab can't see it,
+because there is no server-side flash to get out of step. A create or an update reports nothing: the
+redirect already lands on the row it changed, and an alert on every save is noise.
+
+### The two handlers
+
+Reads stay your route, so you keep your own shell, your own login redirect and your own error pages.
+Writes post back to that same path:
+
+| | |
+|---|---|
+| `render_for(&headers, &state) -> Result<String>` | the fragment. Consults the model's gate: `401`/`403` rather than rows a caller may not read, and write controls only for a caller who may write |
+| `submit(&headers, ip, &body, &state) -> Result<Outcome>` | CSRF → gate → apply → audit. `Outcome::Done(url)` to redirect to, or `Outcome::Invalid(state)` to re-render. `body` is **raw bytes** (`axum::body::Bytes`), because a CSV upload is a file |
+| `csv(&headers, &state) -> Result<String>` | the view as CSV, when `state.csv` is set (feature `csv`) |
+
+Both are `async`, and both take the request's headers — which is how the timezone cookie, the session
+cookie and the CSRF token reach the render. The full worked shape is in [Quick start](#quick-start)
+and in all three examples.
+
+### `Table`
 
 | Builder | Effect |
 |---|---|
-| `edit(id)` | edit that row (`PATCH`) instead of creating (`POST`) |
-| `fields([…])` | render **only** these, in this order (default: every writable column) |
-| `omit([…])` | drop these, keep the rest |
-| `title` / `description` / `heading(bool)` | card header; shown only if titled, or forced either way |
-| `submit_label` / `saved_message` / `cancel(href)` | button text, success text, Cancel link |
-| `redirect(url)` | go here after saving; `{id}` is substituted (URL-encoded) |
-| `on_saved(js)` | run `(row) => {…}` instead of showing the message |
-| `picker_threshold(n)` | relation widget cutover (default 20) |
-| `dom_id(id)` | namespace the component so two forms for one entity can share a page |
+| `title` / `description` | heading and a muted subtitle |
+| `search(bool)` | the search box (default on) |
+| `pagination(bool)` / `per_page(n)` | the pager (default on, 30) |
+| `read_only(bool)` | no Create/Edit/Delete and no dialog, for anyone |
+| `confirm(bool)` | an `onclick` confirm on destructive buttons (default on) |
+| `fields([…])` / `omit([…])` | which columns the **dialog's form** shows, and in what order |
+| `sort(col)` / `sort_desc(col)` | the default sort, used until the URL says otherwise |
+| `filter(name)` | a filter `<select>` in the toolbar, for a column or a to-one relation |
+| `fixed_filter(name, value)` | a filter **pinned** to one value, with no control — a table *about* that value |
+| `format(col, closure)` | a custom cell renderer, `(value, row) -> HTML` |
+| `picker_threshold(n)` | how many target rows a relation may list as a `<select>` (default 20) |
+| `dom_id(id)` | namespaces the fragment's id, so two tables of one entity can share a page |
 
-**After a save**, in order: `redirect` wins, then `on_saved`, else a success message — and a *create*
-blanks itself so the next record can be entered, while an *edit* keeps what was saved. `write_only`
-fields are wiped either way, which matters more here than in the modal: a standalone form stays on
-screen.
+**Filters narrow everything at once.** Because the choice is in the URL, it applies to the listing, the
+CSV export and "delete all matching" alike — no button can act on a wider set than the one on screen —
+and it shows as a chip above the table, because a narrowed table that looked like a whole one is how
+an operator concludes their rows were deleted. A pinned or shared filter's chip has no ✕: it isn't
+that table's to clear.
 
-**It refuses to render a form that couldn't work.** Rendering errors — naming the column — if a field
-name is misspelled, if it's `read_only`, or if a *create* omits a column the engine requires. That last
-one has a wrinkle worth knowing: a column `default` **doesn't** excuse a required field from being
-rendered, because `MetaField::default` is a *create-form* default — it pre-fills the input (and drops
-the `*` marker), but the engine never applies it server-side, so an unrendered field simply isn't sent.
-An *edit* may omit anything: `PATCH` is partial and the stored row already has values.
+**`format` is a Rust closure** whose output is inserted verbatim, so wrap database values in
+`crud::ui::esc`:
 
-**Gating.** `render_for(&headers)` asks the model's gate about `Create`/`Update` as appropriate and
-returns `Err(Error::Unauthorized)` → `401` or `Err(Error::Forbidden)` → `403` rather than rendering a
-form the caller could never submit; a page handler can turn the first into a login redirect. (`render()`
-skips the check, for open or pre-rendered pages.) The underlying
-`Engine::decide(slug, op, &headers) -> Decision` is public if you want the same answer for your own
-page logic.
+```rust
+.format("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))
+```
 
-**It talks to the JSON API**, so the entity's routes must be mounted, and — when the engine enforces
-CSRF — the page must have issued the token cookie (`Csrf::ensure`, as `auth`'s own pages do); the form
-echoes it automatically. Worked example: `examples/crud`'s `/post/new` and `/post/{id}/edit`.
+That is the one place app-supplied HTML enters the page; everything else is escaped by the template
+engine, and the escaping is tested against `<script>`-bearing data in every cell, label, chip, option
+and input value (`crud/ui_tests.rs`).
+
+**Relations in the form.** A to-one whose target has at most `picker_threshold` rows renders as a
+`<select>` of labels; above that it renders an id input, because the alternative is shipping thousands
+of `<option>`s or a search box that needs a fetch endpoint this crate no longer has. A to-many renders
+as a multi-select.
+
+**Where a validation message lands.** A message keyed to a column appears **under that column's
+input**, with the input marked invalid; a cross-field message from `validate_row` appears as a
+**banner at the top of the dialog**. A field message naming a column the form *doesn't render* is
+promoted into that banner as `column: message` — otherwise it would be a refused form with nothing
+marked and no stated reason.
+
+**Refusals, not surprises.** Rendering fails — naming the column — for an unknown or read-only field in
+`fields`/`omit`, an unsortable `sort`, a `filter` on a column that doesn't exist, a widget that can't
+render its column, or a create form that omits a column the engine requires. A control that silently
+did nothing is the bug that gets found in production.
+
+### `Form` — a standalone create/edit form
+
+The same form, without the table: for a signup page, a "new ticket" screen, a settings page — anywhere
+`Admin` is the wrong shape. It reads the entity's columns, so the widgets, required markers, enum
+dropdowns, relation pickers, datetime handling and validation messages all come free and stay in step
+with the model.
+
+```rust
+// GET /ticket/new
+let html = Form::new(&engine, "ticket")
+    .title("New ticket")
+    .fields(["subject", "body", "priority"])   // subset *and* order; default is every writable column
+    .submit_label("Open ticket")
+    .cancel("/tickets")
+    .redirect("/tickets/{id}")                 // where submit points after a save; {id} = the new row
+    .render_for(&headers, &state).await?;
+```
+
+`edit(id)` turns it into an update form. Without `redirect`, `submit` returns `?saved=1` and the form
+renders `saved_message` when it sees that. `heading(bool)` forces the card header on or off (the
+default is on if there is a title or description), and `dom_id` namespaces it.
+
+Note a column `default` pre-fills the *input* — it is never applied server-side — so a required field
+still has to be rendered for its value to be sent. Omitting one is a render-time error saying exactly
+that.
 
 ### `Admin` — a whole admin in one component
 
-`ui::Admin` composes many `Table`s plus a **side-panel** into one fragment: pick a model to
-view/edit (switching is client-side, no reload). You choose the order and interleave **group
-headings**, **separators**, and **custom links**:
-
 ```rust
-let html = relativelylight::crud::ui::Admin::new(&engine)
+let html = Admin::new(&engine)
     .title("Admin")
+    .filter("zone")                            // one control, applied to every table that has the column
     .group("Content")
-    .entity_with("post", |t| t.per_page(10).format("title", "…"))  // configure the Table
-    .entity("tag")                                                 // or defaults
+    .entity_with("post", |t| t.per_page(10))
+    .entity("tag")
     .separator()
     .group("People")
     .entity_with("user", |t| t.read_only(true))
-    .link("API docs", "/docs")                                     // static link (navigates)
-    .render()?;
+    .link("Log out", "/logout")
+    .render_for(&headers, &state).await?;
 ```
 
-Each entity is a full `Table`, so per-row edit, bulk delete, CSV, pickers, and formatters all work
-per model. Switching happens in the browser (all tables render into the page; the side-panel toggles
-which is visible), so it's a single fragment you drop into your shell — no extra routes. See
-`examples/adminpanel`.
+`?entity=post` renders **that entity's table and no other** — the nav is links, not nine hidden
+panels. (The previous design rendered every panel into every response and showed one with
+`x-show`; a nine-entity page cost 9,441 lines of HTML, where this costs about 500.)
 
-**`Admin::filter(name)`** applies one filter to every listed table that has such a column; tables that
-don't are unaffected. The control appears in each of those tables' own toolbars — it belongs with the
-data it narrows, and only one table is visible at a time, so there is still just one control on screen.
-Changing it on any table updates the rest. This is the shape that matters once an admin lists many
-tables of the same kind — fifteen per-type DNS record tables, say, where an operator works inside one
-zone at a time and would otherwise re-pick it on every table they switch to:
+`entities()` appends every registered entity in registration order. `submit` writes to the entity a
+posted body names, **provided this panel lists it** — an entity it doesn't list is refused before any
+gate is consulted, so a panel's contents are part of what it permits and not merely of what it shows.
 
-```rust
-Admin::new(&engine).filter("zone").entity("rr_a").entity("rr_aaaa").entity("rr_mx") /* … */
-```
+**`filter(name)` is the shape that matters when an admin lists many tables of the same kind** —
+fifteen per-type DNS record tables, say. An operator works inside one zone at a time, so they pick it
+once and it follows them from table to table, because every nav link carries it. Tables without such a
+column are unaffected. Like `fixed_filter`, it narrows a **view**; scoping who may see what is
+[`authz`](AUTH.md)'s job.
 
-The choice is remembered in `localStorage` and mirrored into the URL fragment (`#filter.zone=7`), so a
-filtered admin can be bookmarked or sent to a colleague, and the tables adopt it on their first load
-rather than flashing an unfiltered page. The target list is fetched **once per page**, not once per
-table. A name **no** listed entity has is an error — a filter that every table drops would render no
-control at all, which reads as a broken feature rather than a typo.
+### The JavaScript that is left
 
-Builder methods:
+Three attributes and nothing else, all of them enhancement — the page works without them:
 
-| Method | Effect |
-|---|---|
-| `.title(name)` | heading above the side-panel |
-| `.entity(slug)` | add a model with default `Table` config |
-| `.entity_with(slug, \|t\| …)` | add a model, configuring its `Table` |
-| `.entities()` | append every registered model (default config) — quick "show everything" |
-| `.group(name)` | a group heading in the side-panel |
-| `.separator()` | an `<hr>` |
-| `.link(label, href)` | a custom static link (navigates normally) |
-| `.filter(name)` | one side-panel filter control applied to **every** listed table that has that column or to-one relation |
-| `.render()` | the HTML fragment (`Result<String>`) — all write controls shown |
-| `.render_for(&headers)` | async; per-request fragment that hides a model's write controls when its auth gate denies a write for the caller (see [docs/AUTH.md](AUTH.md)) |
+- `onchange="this.form.submit()"` on a filter `<select>` (there is an Apply button too);
+- `onclick="return confirm(…)"` on destructive buttons (`confirm(false)` removes it);
+- a one-line `onclick` on the select-all checkbox, and `oninput` on a range slider's read-out.
 
-Items appear in call order, so you control the layout by interleaving `entity*`, `group`,
-`separator`, and `link`.
-
-## OpenAPI
-
-Feature `openapi`. Routes are per-entity and known only at runtime, so the document is built at
-runtime from the `Engine`:
-
-```rust
-let spec: String = relativelylight::crud::openapi::json(&engine, "My API");   // serve at /openapi.json
-// or: relativelylight::crud::openapi::build(&engine, "My API") -> utoipa::openapi::OpenApi
-```
-
-Emits the CRUD + bulk-delete operations per entity (tagged by slug, with query/path params) **and
-component schemas derived from the column metadata**: a read record `{slug}` (typed fields; relations
-as `{id, label}`) and a write body `{slug}_write` (writable fields; relations by id). Operations
-`$ref` these — request bodies use `{slug}_write`, single-row responses use `{slug}`, and the list
-response is the page envelope wrapping `{slug}`. Point Swagger UI at the served JSON and the models
-render. Field types carry `format` where useful — `int64`/`double`, and `date` / `date-time` /
-`uuid` for those logical types; enum/other are plain `string`.
-
-Use [`merge_into`](#composing-with-your-app) to fold these paths + schemas into your app's own
-document instead of serving a standalone one.
+There is no script file, no framework, and nothing generated per entity.
 
 ## Composing with your app
 
-relativelylight is meant to be **part of** a larger app, not the whole thing. Your app owns the three roots;
-relativelylight contributes into them:
+relativelylight is meant to be **part of** a larger app, not the whole thing. Your app owns the roots;
+this module contributes into them.
 
-- **axum router** — `Crud::into_router()` (or `Engine::router()`) returns a `Router` with crud's
-  routes under `base_path`. Your app owns `/` and merges crud in:
+- **The router is yours.** This module adds no routes at all. You write `get(show).post(save)` on a
+  path of your choosing and call `render_for` / `submit` from them ([Quick start](#quick-start)), so
+  the login redirect, the error page and the shell stay yours. Every link the components render is
+  relative to that path, so they never need to know it.
+- **`middleware::resolve_real_ip` is mandatory**, as the outermost layer:
   ```rust
-  let app = Router::new()
-      .route("/", get(home))
-      .route("/ui/{slug}", get(ui_page))    // your own routes
-      .merge(crud.into_router());           // crud under /api/v1
+  let app = app.layer(axum::middleware::from_fn_with_state(
+      relativelylight::middleware::TrustProxy(cfg.trust_proxy),
+      relativelylight::middleware::resolve_real_ip,
+  ));
   ```
-  Keep a non-empty `base_path` (e.g. `/api/v1`) so crud's `/{entity}` routes stay under a prefix
-  and can't shadow yours.
-- **askama shell** — `ui::Table::render()` returns an **HTML fragment**, never a full page. Your
-  app owns the chrome (the `<html>`/navbar/footer, and the Bootstrap + Alpine `<script>`/`<link>`
-  tags) and drops the fragment into a `<div>`. the library ships no page and imposes no layout. Your
-  askama templates and the library's live in a separate crate, so they don't collide.
-- **utoipa document** — build your own `OpenApi` (your `info`, `servers`, `security`, and any of your
-  own non-crud paths), then merge the crud endpoints + schemas in. `merge` keeps *your*
-  `info`/`servers`; it only appends paths and component schemas:
-  ```rust
-  use utoipa::openapi::{InfoBuilder, OpenApiBuilder};
-  let app_doc = OpenApiBuilder::new()
-      .info(InfoBuilder::new().title("My App API").version("1.0.0").build())
-      // .paths(my_own_paths) …
-      .build();
-  let doc = relativelylight::crud::openapi::merge_into(app_doc, &engine);   // your root, the crud entities
-  ```
+  `submit` takes the address from the `RealIp` extension it inserts, so the audit events, the auth
+  lockout and your own request log can't disagree about who called.
+- **The page shell is yours.** `render_for` returns an **HTML fragment**, never a full page. Your app
+  owns the `<html>`, the navbar, the Bootstrap stylesheet and `crud::ui::CSS`. Your askama templates
+  and the library's live in separate crates, so they can't collide.
+- **The API, if you want one, is yours.** Publish whatever endpoints your clients need over
+  [`Engine`](#reading-and-writing). Nothing in this module assumes they exist.
 
-The example (`examples/crud`) does all three: it owns `/`, `/ui/{slug}`, `/openapi.json`, `/docs`
-and its Bootstrap/Alpine shell, and merges the crud router and OpenAPI into them.
+`examples/crud` does all of it ungated (including a `/dashboard` page built from the engine);
+`examples/adminpanel` does it behind `auth` with 2FA, lockout panels and a timezone cookie.
+[APP.md](APP.md) walks through the whole composition — shell, nav bar, login page, dashboards,
+hand-written forms and multi-step workflows.
 
 ## Write observer (audit)
 
-Register a [`WriteObserver`](../src/observe.rs) with `Crud::on_write` to be notified after every
+Register a [`WriteObserver`](../relativelylight/src/observe.rs) with `Crud::on_write` to be notified after every
 **committed** write (create / update / delete / bulk-delete) through the engine — the hook for audit
 logging. Each write handler fires a `WriteEvent` carrying the change *and* the request context:
 
@@ -848,7 +853,7 @@ pub struct WriteEvent<'a> {
     pub client_ip: IpAddr,        // the caller, already resolved by middleware::resolve_real_ip
 }
 
-let mut crud = Crud::new(db, "/api/v1");
+let mut crud = Crud::new(db);
 crud.register(post_mm, gate);
 crud.on_write(my_audit_sink.clone());   // Arc<dyn WriteObserver>
 ```
@@ -868,10 +873,15 @@ screens of its own; store it as it arrives rather than translating it. **Times a
 
 ## Architecture & extending
 
-The transport-agnostic **`Engine`** is a registry that owns URLs/metadata, does the JSON↔CSV
-transform, wires routes, and **forwards finished JSON**. Every backend implements the per-entity
-**`Accessor`** trait — `slug` / `pk` / `columns` + `list` / `get` / `create` / `update` / `delete` /
-`delete_many`, each data method returning ready-to-send JSON. The trait names no ORM types.
+The **`Engine`** is a registry: it holds the entities, consults each model's gate, and forwards data
+to and from accessors. Every backend implements the per-entity **`Accessor`** trait — `slug` / `pk` /
+`columns` + `list` / `get` / `create` / `update` / `delete` / `delete_many` / `write_batch`, each data
+method returning finished rows. The trait names no ORM types.
+
+Its real job is **type erasure**: `Arc<dyn Accessor>` lets one registry hold entities of different
+Rust types (`SeaAccessor<E>` is generic over the entity), which is why the seam exists even with a
+single backend. It is *not* a stability promise — expect `Accessor` and `Column` to gain members in
+any release.
 
 SeaORM is one backend (`relativelylight::crud::seaorm`); it does the heavy lifting (introspection, projection,
 validation, relation resolution, set-based bulk delete). A different backend (in-memory, another ORM)

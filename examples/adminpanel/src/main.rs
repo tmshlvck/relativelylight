@@ -1,34 +1,36 @@
 //! adminpanel example — the `relativelylight::crud::ui::Admin` component, **login-gated** with the
-//! `auth` module. Anonymous requests are redirected to `/login`; the JSON API is gated by an
-//! `Authz` gate (logged-in users may read; only the admin group may write) and the panel is rendered
-//! *per request* so write controls hide for users who can't write. Two demo logins:
-//! `admin` / `password` (read-write) and `editor` / `password` (read-only).
+//! `auth` module. Anonymous requests are redirected to `/login`; each model is gated by an `Authz`
+//! gate (logged-in users may read; only the admin group may write) and the panel is rendered *per
+//! request*, so a reader is offered no write controls and a write they forge is refused anyway. Two
+//! demo logins: `admin` / `password` (read-write) and `editor` / `password` (read-only).
 //!
-//! Shows the whole stack composed by the app: the axum router (`/` ours, crud under `/api/v1`,
-//! `auth` routes merged, the session middleware wrapping it all), the askama shell, the OpenAPI
-//! document, and the authn/authz gate. (The `crud-example` is the ungated counterpart.)
+//! The whole stack composed by the app: **two handlers** for the panel (`GET /` renders, `POST /`
+//! writes), the `auth` routes merged in, one address-resolving layer, an askama shell, a timezone
+//! cookie, and the authn/authz gates. (The `crud-example` is the ungated counterpart.)
 //!
-//! Try:  open http://127.0.0.1:3000/   ·   Swagger at /docs   ·   spec at /openapi.json
+//! Try:  open http://127.0.0.1:3000/
 //!
 //!   cargo run -p adminpanel-example -- --set-admin-pw s3cret   # break-glass admin recovery, then exit
 //!   TRUST_PROXY=1 cargo run -p adminpanel-example              # behind a proxy: trust X-Forwarded-For
 
 use askama::Template;
-use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::body::Bytes;
+use axum::extract::{Form, State};
+use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
-use std::net::SocketAddr;
 use model::{author, post, profile, tag, user};
-use relativelylight::auth::{self, GroupReadWrite, Auth, Identity, UserReadGroupWrite};
+use relativelylight::auth::{self, Auth, GroupReadWrite, Identity, UserReadGroupWrite};
 use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::Admin;
-use relativelylight::time::{TzPicker, JS as TIME_JS};
+use relativelylight::crud::ui::{esc, Admin, Outcome, ViewState, CSS};
+use relativelylight::middleware::RealIp;
+use relativelylight::time::{Tz, TzPicker};
 use relativelylight::validate;
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use utoipa::openapi::{InfoBuilder, OpenApiBuilder};
 
 // The superadmin group (configurable). Its members may write; other logged-in users may only read.
 // **One name, used everywhere**: the gates below, `Auth::admin_group`, the boot-time seeder, and
@@ -41,25 +43,41 @@ struct Shell {
     title: String,
     user: String, // signed-in username (empty when anonymous) → navbar link to /profile
     body: String,
-    time_js: &'static str, // relativelylight's timezone JS (RLTime + $store.tz + rlTzPicker)
-    tz_picker: String,     // the navbar timezone dropdown fragment (time::TzPicker)
+    css: &'static str, // the library's few CSS rules (crud::ui::CSS) — no JavaScript anywhere
+    tz_picker: String, // the navbar timezone form (time::TzPicker), posting to /tz
 }
 
 impl Shell {
-    fn page(title: impl Into<String>, user: impl Into<String>, body: String) -> Self {
+    /// `back` is where the timezone picker returns to — the page being rendered, so setting a zone
+    /// doesn't lose the table the operator was looking at.
+    fn page(title: impl Into<String>, user: impl Into<String>, body: String, headers: &HeaderMap, back: &str) -> Self {
         Self {
             title: title.into(),
             user: user.into(),
             body,
-            time_js: TIME_JS,
-            tz_picker: TzPicker::new().render(),
+            css: CSS,
+            tz_picker: timezones().render(&Tz::from_headers(headers), back),
         }
+    }
+}
+
+/// The timezone picker this app offers, configured the way a real deployment configures it: a list
+/// of IANA names read at startup — here from `RL_TIMEZONES`, in an app from YAML/JSON or a settings
+/// table — falling back to the library's default (UTC + Europe + the United States).
+///
+/// `RL_TIMEZONES=all` offers every zone the host knows; `RL_TIMEZONES=UTC,Europe/Prague,Asia/Tokyo`
+/// offers exactly those three. Names the host's database doesn't know are dropped and reported by
+/// `check_timezones()` at boot, rather than appearing as options that quietly mean UTC.
+fn timezones() -> TzPicker {
+    match std::env::var("RL_TIMEZONES").ok().as_deref() {
+        None | Some("") => TzPicker::new(),
+        Some("all") => TzPicker::new().all_zones(),
+        Some(list) => TzPicker::new().zones(list.split(',').map(str::trim).filter(|z| !z.is_empty())),
     }
 }
 
 struct App {
     engine: Arc<Engine>,
-    openapi: String,
     auth: Auth,
 }
 
@@ -77,10 +95,11 @@ fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
         .filter("author")
         .group("Content")
         .entity_with("post", |t| {
-            t.per_page(10).format(
-                "title",
-                r#"(v, row) => `<a href="/api/v1/post/${row.id}" target="_blank">${v}</a>`"#,
-            )
+            // A cell renderer is a Rust closure now, and escaping is what `esc` is for: this link
+            // opens the row's own edit dialog, which is just a URL.
+            t.per_page(10).format("title", |v, row| {
+                format!(r#"<a href="?entity=post&amp;edit={}">{}</a>"#, esc(&row["id"]), esc(v))
+            })
         })
         .entity("tag")
         .separator()
@@ -95,10 +114,9 @@ fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
             // Login accounts: create/edit inline (password is the write-only field above); the id
             // links to /profile/{id} for a dedicated password reset. Password never shows in reads.
             .entity_with("auth_user", |t| {
-                t.title("Login accounts").format(
-                    "id",
-                    r#"(v, row) => `<a href="/profile/${row.id}" title="Reset password">${v}</a>`"#,
-                )
+                t.title("Login accounts").format("id", |v, _row| {
+                    format!(r#"<a href="/profile/{}" title="Reset password">{}</a>"#, esc(v), esc(v))
+                })
             })
             .entity_with("auth_group", |t| t.title("Groups"))
             .entity_with("auth_username_lockout", |t| {
@@ -112,11 +130,7 @@ fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
                     .description("Source addresses with recent failed credential checks.")
             });
     }
-    admin
-        .separator()
-        .group("Reference")
-        .link("API docs (Swagger)", "/docs")
-        .link("Log out", "/logout")
+    admin.separator().group("Reference").link("Profile & 2FA", "/profile").link("Log out", "/logout")
 }
 
 #[tokio::main]
@@ -149,6 +163,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth::reset_admin_access(&db, ADMIN_GROUP, "admin", pw).await?;
         println!("admin password set, account enabled, 2FA cleared, added to '{ADMIN_GROUP}'");
         return Ok(());
+    }
+
+    // Configuration is checked at startup, not discovered by an operator whose zone is missing.
+    let picker = timezones();
+    if !picker.unknown_zones().is_empty() {
+        eprintln!("RL_TIMEZONES: ignoring unknown zone(s): {:?}", picker.unknown_zones());
     }
 
     auth::make_admin(&db, ADMIN_GROUP, "admin", "password").await?;
@@ -297,7 +317,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A shared `Arc` (it implements `Authz`) guards every model; each gate resolves the caller from
     // the request itself (via the `auth` handle it holds).
     let gate = Arc::new(UserReadGroupWrite::new(&auth, [ADMIN_GROUP]));
-    let mut crud = Crud::new(db.clone(), "/api/v1");
+    let mut crud = Crud::new(db.clone());
     crud.register(author_mm, gate.clone());
     crud.register(post_mm, gate.clone());
     crud.register(user_mm, gate.clone());
@@ -323,36 +343,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     crud.register(username_lockout_mm, admin_gate.clone());
     crud.register(ip_lockout_mm, admin_gate.clone());
-    // CSRF: this API is cookie-authenticated, so every write must echo the double-submit token.
-    // Sharing `auth.csrf()` puts the API and the login/profile forms on one token cookie; the panel's
-    // `fetch` calls pick it up automatically. See docs/AUTH.md §7.
+    // CSRF: these writes are cookie-authenticated, so every posted form must echo the double-submit
+    // token. Sharing `auth.csrf()` puts the panel's forms and the login/profile forms on one token
+    // cookie; the library renders the hidden `_csrf` input itself. See docs/AUTH.md §7.
     crud.csrf(auth.csrf());
 
-    // One shared engine: the router serves the API from it, and the page handler renders the admin
-    // fragment from it *per request* (so write controls hide for users who can't write).
+    // One shared engine, rendered from *per request*, so write controls hide for users who can't
+    // write — and a forged write is refused by the same gate regardless.
     let engine = Arc::new(crud.into_engine());
 
-    // The app owns the OpenAPI root; the crud entity endpoints + schemas are merged in.
-    let app_doc = OpenApiBuilder::new()
-        .info(InfoBuilder::new().title("relativelylight API").version("1.0.0").build())
-        .build();
-    let openapi = relativelylight::crud::openapi::merge_into(app_doc, &engine)
-        .to_pretty_json()
-        .unwrap_or_default();
-
-    let app = Arc::new(App { engine: engine.clone(), openapi, auth: auth.clone() });
+    let app = Arc::new(App { engine: engine.clone(), auth: auth.clone() });
 
     let ui = Router::new()
-        .route("/", get(home)) // login-gated (see `home`)
-        .route("/openapi.json", get(openapi_json))
-        .route("/docs", get(docs))
+        // The two handlers this example exists to show. Both are login-gated (see `home`).
+        .route("/", get(home).post(save))
+        .route("/tz", post(set_tz))
         .with_state(app);
 
-    // Merge our pages, the login routes, and the gated API. No middleware: each handler/gate does
-    // its own on-demand session lookup.
+    // Merge our pages and the login routes. No middleware: each handler/gate does its own on-demand
+    // session lookup.
     let app_router = ui
         .merge(auth.routes())
-        .merge(engine.router())
         // No request log: this crate ships none (it writes nothing anywhere). `examples/access_log`
         // is a dozen lines you can copy, in two variants.
         // The caller's address, resolved **once** at the outermost layer: the access log, `auth`'s
@@ -367,43 +378,91 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     println!("Admin panel on  http://127.0.0.1:3000/   (admin/password = read-write · editor/password = read-only)");
-    println!("Swagger UI on   http://127.0.0.1:3000/docs");
-    println!("JSON API under  http://127.0.0.1:3000/api/v1");
     // ConnectInfo gives the middleware the peer socket address for the access log.
     axum::serve(listener, app_router.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
 
 // Requires a logged-in user: resolve the session on demand, redirect anonymous visitors to the login
-// page, then render the admin *for this caller* — non-admins get a read-only panel (no Create/Edit/
-// Delete), while the API enforces the same rule. No middleware, no extractor.
-async fn home(headers: HeaderMap, State(app): State<Arc<App>>) -> Response {
+// page, then render the panel *for this caller* — a non-admin gets no Create/Edit/Delete, and the
+// gates refuse those operations anyway. No middleware, no extractor.
+//
+// The whole of the read side is: parse the URL, render the fragment, wrap it in our shell.
+async fn home(headers: HeaderMap, uri: Uri, State(app): State<Arc<App>>) -> Response {
     let Some(who) = app.auth.identify(&headers).await else {
         return Redirect::to(app.auth.login_path()).into_response();
     };
-    // Managers (members of the admin group) get the accounts section + user-id → reset links.
-    let is_manager = app.auth.can_manage_others(&who);
-    let body = match build_admin(&app.engine, is_manager).render_for(&headers).await {
-        Ok(html) => html,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    let state = ViewState::from_uri(&uri);
+    let panel = panel(&app, &who);
+
+    // The toolbar's Export link is `?format=csv` on this same page, so the export is this handler's
+    // other answer — and it exports the view on screen, filter, search, sort and timezone included.
+    if state.csv {
+        return match panel.csv(&headers, &state).await {
+            Ok(csv) => (
+                [
+                    (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+                    (header::CONTENT_DISPOSITION, "attachment; filename=\"export.csv\"".to_string()),
+                ],
+                csv,
+            )
+                .into_response(),
+            Err(e) => e.into_response(),
+        };
+    }
+
+    match panel.render_for(&headers, &state).await {
+        Ok(body) => page(body, &who, &headers, &uri),
+        // A gate refusing a read (an `editor` opening an accounts table, say) answers 401/403 here.
+        Err(e) => e.into_response(),
+    }
+}
+
+/// The write side: hand the posted body to the library, then redirect — or, if it was refused,
+/// re-render the same panel with the messages and the typed values back in the dialog.
+async fn save(
+    headers: HeaderMap,
+    uri: Uri,
+    RealIp(ip): RealIp,
+    State(app): State<Arc<App>>,
+    body: Bytes,
+) -> Response {
+    let Some(who) = app.auth.identify(&headers).await else {
+        return Redirect::to(app.auth.login_path()).into_response();
     };
-    let page = Shell::page("relativelylight", who.username, body).render().unwrap_or_default();
-    Html(page).into_response()
+    let state = ViewState::from_uri(&uri);
+    let panel = panel(&app, &who);
+    match panel.submit(&headers, ip, &body, &state).await {
+        Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
+        Ok(Outcome::Invalid(state)) => match panel.render_for(&headers, &state).await {
+            Ok(body) => (StatusCode::UNPROCESSABLE_ENTITY, page(body, &who, &headers, &uri)).into_response(),
+            Err(e) => e.into_response(),
+        },
+        Err(e) => e.into_response(),
+    }
 }
 
-async fn openapi_json(State(app): State<Arc<App>>) -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "application/json")], app.openapi.clone())
+/// The timezone picker's handler: set the cookie, come back to the page it was set from. Timestamps
+/// are then formatted server-side in that zone — cells, form inputs and CSV alike.
+async fn set_tz(Form(fields): Form<HashMap<String, String>>) -> Response {
+    let tz = Tz::named(fields.get("tz").map(String::as_str).unwrap_or("UTC"));
+    let back = fields.get("back").cloned().unwrap_or_else(|| "/".into());
+    ([(header::SET_COOKIE, tz.cookie())], Redirect::to(&back)).into_response()
 }
 
-async fn docs() -> Html<&'static str> {
-    Html(
-        r#"<!doctype html><html><head><meta charset="utf-8"><title>API docs</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css"></head>
-<body><div id="swagger-ui"></div>
-<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-<script>window.onload=()=>{SwaggerUIBundle({url:'/openapi.json',dom_id:'#swagger-ui'});};</script>
-</body></html>"#,
-    )
+/// The panel for this caller. Managers (members of the admin group) get the accounts section and the
+/// user-id → password-reset links; for anyone else those models would refuse a read, so the section
+/// isn't listed at all.
+fn panel<'a>(app: &'a App, who: &Identity) -> Admin<'a> {
+    build_admin(&app.engine, app.auth.can_manage_others(who))
+}
+
+fn page(body: String, who: &Identity, headers: &HeaderMap, uri: &Uri) -> Response {
+    let back = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let html = Shell::page("relativelylight", who.username.clone(), body, headers, back)
+        .render()
+        .unwrap_or_default();
+    Html(html).into_response()
 }
 
 // The app styles the library's login form: drop it into our shell as a centered card. Anonymous, so
@@ -415,7 +474,7 @@ fn login_shell(form: &str) -> String {
 <p class="text-muted small mt-2 mb-0">Demo: <code>admin</code> / <code>password</code></p>
 </div></div>"#
     );
-    Shell::page("Log in", "", body).render().unwrap_or_default()
+    Shell::page("Log in", "", body, &HeaderMap::new(), "/").render().unwrap_or_default()
 }
 
 // The app styles the library's profile/password page the same way. The library hands us the caller's
@@ -425,5 +484,7 @@ fn profile_shell(fragment: &str, who: &Identity) -> String {
         r#"<div class="card shadow-sm mx-auto" style="max-width:32rem"><div class="card-body">{fragment}
 <a class="d-inline-block mt-3" href="/">&larr; Back to admin</a></div></div>"#
     );
-    Shell::page("Profile", who.username.clone(), body).render().unwrap_or_default()
+    Shell::page("Profile", who.username.clone(), body, &HeaderMap::new(), "/profile")
+        .render()
+        .unwrap_or_default()
 }

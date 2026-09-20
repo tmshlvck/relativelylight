@@ -1,9 +1,12 @@
 # relativelylight
 
-A web back-office toolkit for Rust. **Auto-generate a JSON CRUD + metadata API and an admin UI from
-your ORM entities — with no per-model code**, gated by built-in authentication. It composes *into*
-your app: you keep your own router, page shell, and OpenAPI document; `relativelylight` plugs into
-them.
+A web back-office toolkit for Rust. **Auto-generate a server-rendered CRUD admin from your ORM
+entities — with no per-model code**, gated by built-in authentication. It composes *into* your app:
+you keep your own router and page shell; `relativelylight` contributes the HTML.
+
+No JavaScript framework, no JSON API in between: the columns it introspects go straight into rendered
+HTML, and writes come back as posted forms (`POST` → `303` → `GET`). Your page needs Bootstrap 5's
+stylesheet and nothing else.
 
 ## What it looks like
 
@@ -22,7 +25,7 @@ the entities, and the login / 2FA screens come with `auth`. Every shot is a runn
 <sub><b>Table</b> — sortable headers, a filter on the <code>author</code> <i>relation</i>, search, bulk
 actions, CSV, pager.</sub></td>
 <td width="50%"><a href="docs/img/form.png"><img src="docs/img/form.png" alt="Form: text, textarea, range, switch, datetime, relation picker, tag combobox"></a><br>
-<sub><b>Form</b> — the same form the table opens in a modal, standalone on your own page; widgets
+<sub><b>Form</b> — the same form the table opens in a dialog, standalone on your own page; widgets
 picked per column type (or overridden).</sub></td>
 </tr>
 <tr>
@@ -36,50 +39,52 @@ URL, verified (and re-authenticated) before it's on.</sub></td>
 </table>
 
 The crate is **`relativelylight`**, organized into feature-gated modules:
-- **`crud`** (default) — the CRUD engine, SeaORM backend, admin UI (`ui`), OpenAPI, CSV.
+- **`crud`** (default) — the CRUD engine, SeaORM backend, the server-rendered admin UI (`ui`), CSV.
 - **`auth`** — sessions, login, TOTP 2FA, OIDC SSO, and a per-model authorization gate (usable
   without `crud`); see [docs/AUTH.md](docs/AUTH.md).
-- **`observe`** / **`time`** — a write-observer audit hook, and timezone-aware display of UTC
-  timestamps; see [docs/TIME.md](docs/TIME.md).
+- **`observe`** / **`time`** — a write-observer audit hook, and server-side timezone rendering of
+  UTC timestamps; see [docs/TIME.md](docs/TIME.md).
 
-> Status: the `crud` API + `ui` web admin are implemented and used by the examples; `auth` covers
+> Status: the `crud` engine + `ui` web admin are implemented and used by the examples; `auth` covers
 > argon2 login/session, `Authz` gate presets, a self-service profile (password + TOTP 2FA), and OIDC
 > single sign-on (feature `sso`). File-handling is planned — see the roadmap in
 > [docs/PRD.md](docs/PRD.md).
 
 ## What you get
 
-- **Full CRUD JSON API** per entity — list/get/create/update/delete, relations written by name
-  (`"author": 1`, `"tag": [1,3]`).
-- **Search, filter, sort, pagination**, and **set-based bulk delete** (`DELETE …?q=…` / `?ids=…` /
-  `?all=true`). Relations count as columns here: `?filter[author]=7` matches the FK behind the name, and
-  `?sort=author` orders by the label the cell shows rather than the id behind it.
-- **Machine-readable metadata** (ordered fields + relations, logical types) that drives the UI and
-  OpenAPI — no per-model schema code.
+- **A web admin** (`ui`): tables with sortable headers, filter controls, search, a pager, bulk
+  actions, CSV, custom cell renderers in Rust, and a create/edit `<dialog>` rendered server-side —
+  plus an `Admin` side panel composing many models into one page, optionally under one filter shared
+  across all of them.
+- **Full CRUD per entity** behind a typed `Engine` — list/get/create/update/delete, relations written
+  by name (`"author": 1`, `"tag": [1,3]`). Publish your own JSON API over it if your clients need one;
+  its shape is yours to decide.
+- **Search, filter, sort, pagination**, and **set-based bulk delete**, all carried in the URL:
+  `?filter[author]=7` matches the FK behind the relation name, and `?sort=author` orders by the label
+  the cell shows rather than the id behind it. Every view is therefore a link.
+- **Typed columns** (ordered fields + relations, logical types) that the renderer matches on
+  exhaustively — no per-model schema code, and no untyped middle.
 - **Validation & transforms** — field + cross-field validators, `on_read`/`on_write` hooks (redact,
-  hash), typed coercion.
-- **CSV import/export** reusing the same validation pipeline.
-- **A web admin** (`ui`): tables with sortable headers, filter controls, a create/edit modal form,
-  relation pickers (dropdown or live search→select), boolean switches, bulk actions, CSV, custom cell
-  renderers — plus an `Admin` side-panel composing many models into one page, optionally under one
-  filter shared across all of them.
-- **Runtime OpenAPI 3.1** (`openapi`) with request/response schemas, mergeable into your own document.
+  hash), typed coercion. A rejected write re-renders the dialog with the messages beside the fields.
+- **CSV import/export** through the same validation pipeline, with timestamps in the operator's zone,
+  so a file matches the screen.
 - **One request-pipeline layer** (`middleware`): `resolve_real_ip`, which decides who the caller is once
   and is **required**. The crate logs nothing itself — `examples/access_log` is a request log you can copy.
 
-The core is backend- and transport-agnostic; SeaORM is one backend behind a small `Accessor` seam.
+The core is backend-agnostic; SeaORM is one backend behind a small `Accessor` seam.
 
 ## Quick start
 
 ```toml
 # Cargo.toml
 [dependencies]
-relativelylight = { version = "0.2", features = ["ui", "openapi", "csv"] }
+relativelylight = { version = "0.3", features = ["ui", "csv"] }
 sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 ```
 
 ```rust
 use relativelylight::crud::seaorm::{Crud, MetaModel};
+use relativelylight::crud::ui::{Admin, Outcome, ViewState};
 use relativelylight::authz::Open;           // gate per model; Open = ungated
 
 // Auto-build a model per entity; only N:M is declared by hand.
@@ -88,36 +93,63 @@ let tag    = MetaModel::new(tag::Entity);
 let mut post = MetaModel::new(post::Entity);
 post.relate(&tag);
 
-let mut crud = Crud::new(db, "/api/v1");    // base path ("" for root)
+let mut crud = Crud::new(db);
 crud.register(author, Open);                // pass an auth gate to restrict — see docs/AUTH.md
 crud.register(post, Open);
 crud.register(tag, Open);
+let engine = std::sync::Arc::new(crud.into_engine());
+```
 
-// Optional UI fragments (needs the `ui` feature). Build them before into_router().
-let admin_html = relativelylight::crud::ui::Admin::new(crud.engine()).entities().render()?;
-// …or drop a single create/edit form onto a page of your own — the block the admin is built from:
-let form_html = relativelylight::crud::ui::Form::new(crud.engine(), "post")
-    .fields(["title", "body"])
-    .render()?;
+Then **two handlers** on a route of your own — a `get` that renders into your shell, a `post` that
+hands the body back to the library:
 
-// The CRUD routes as an axum Router — merge into your own app.
+```rust
+fn panel(engine: &Engine) -> Admin<'_> {    // one definition, used by both handlers
+    Admin::new(engine).title("Admin").entities()
+}
+
 let app = axum::Router::new()
-    .route("/", axum::routing::get(|| async { /* serve admin_html in your shell */ }))
-    .merge(crud.into_router())
+    .route("/admin", get(show).post(save))
+    .with_state(engine)
     // REQUIRED, and outermost: resolves the caller's address once into a `RealIp` extension, which the
-    // write handlers, the auth lockout, your own handlers and whatever you log all read. Without it those
-    // routes answer 500 and say so. `TrustProxy(true)` believes your reverse proxy's forwarded hop.
+    // write path, the auth lockout, your own handlers and whatever you log all read. `TrustProxy(true)`
+    // believes your reverse proxy's forwarded hop.
     .layer(axum::middleware::from_fn_with_state(
         relativelylight::middleware::TrustProxy(false),
         relativelylight::middleware::resolve_real_ip,
     ));
 
-// …and serve with connection info, so the socket address is available:
-// axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
+async fn show(headers: HeaderMap, uri: Uri, State(engine): State<Arc<Engine>>) -> Response {
+    let state = ViewState::from_uri(&uri);                  // page, sort, filters, search, ?edit=…
+    match panel(&engine).render_for(&headers, &state).await {
+        Ok(fragment) => Html(my_shell(fragment)).into_response(),   // your <html>, your navbar
+        Err(e) => e.into_response(),                        // 401/403 from the model's gate
+    }
+}
+
+async fn save(headers: HeaderMap, uri: Uri, RealIp(ip): RealIp,
+              State(engine): State<Arc<Engine>>, body: Bytes) -> Response {
+    let state = ViewState::from_uri(&uri);
+    match panel(&engine).submit(&headers, ip, &body, &state).await {
+        Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
+        Ok(Outcome::Invalid(state)) => {                     // re-render, messages and input in place
+            let fragment = panel(&engine).render_for(&headers, &state).await.unwrap_or_default();
+            (StatusCode::UNPROCESSABLE_ENTITY, Html(my_shell(fragment))).into_response()
+        }
+        Err(e) => e.into_response(),
+    }
+}
 ```
 
-That serves `GET/POST /api/v1/{entity}`, `GET/PATCH/DELETE /api/v1/{entity}/{id}`, and
-`DELETE /api/v1/{entity}` (bulk). Tweak a model before registering:
+Or drop a single table or create/edit form onto a page of your own — the blocks the admin is built
+from:
+
+```rust
+let table = Table::new(&engine, "post").filter("author").render_for(&headers, &state).await?;
+let form  = Form::new(&engine, "post").fields(["title", "body"]).render_for(&headers, &state).await?;
+```
+
+Tweak a model before registering:
 
 ```rust
 post.field("title").label = Some("Title".into());
@@ -133,10 +165,10 @@ post.field("title").validate = Some(Box::new(|v| {
 | Feature | Default | Adds |
 |---|---|---|
 | `crud` | ✅ | the CRUD engine + SeaORM backend (the `crud` module) |
-| `axum` | ✅ | the HTTP router (`Crud::into_router`) |
-| `ui` | | the web UI components (`crud::ui::Form`, `Table`, `Admin`) |
-| `openapi` | | runtime OpenAPI 3.1 generation |
-| `csv` | | CSV import/export endpoints |
+| `axum` | ✅ | the request plumbing the UI needs, and the `middleware` module |
+| `ui` | | the server-rendered UI components (`crud::ui::Table`, `Form`, `Admin`); implies `axum` + `tz` |
+| `csv` | | CSV import/export for the UI (`crud::csv_io`); implies `tz` |
+| `tz` | | server-side timezone rendering of UTC timestamps (the `time` module) |
 | `auth` | | sessions, on-demand login resolution, TOTP 2FA, DB-backed login lockout, a per-model authorization gate |
 | `csrf` | | the double-submit CSRF token (`csrf` module); implied by `auth` |
 | `sso` | | OIDC single sign-on (Google / Okta / corporate) + group mapping (implies `auth`) |
@@ -145,19 +177,18 @@ Enable only what you use — an unused feature pulls no dependencies.
 
 ## Examples
 
-Five runnable examples; the first three share one seeded in-memory SQLite model (`examples/model`),
-while `time-example` and `access-log-example` carry their own:
+Four runnable examples; the first three share one seeded in-memory SQLite model (`examples/model`),
+while `access-log-example` carries its own:
 
 ```bash
-cargo run -p crud-example          # :3000  per-entity pages (MPA), a standalone Form at /post/new, sort + filter, CSV, Swagger UI — open (no auth)
-cargo run -p adminpanel-example    # :3000  the crud::ui::Admin side-panel with an admin-wide filter — login-gated (admin / password)
-cargo run -p auth-example          # :3000  auth alone: argon2 login/session gating a page (admin / password)
-cargo run -p time-example          # :3000  timezone picker + DST-straddling rows + server/user-TZ hooks (docs/TIME.md)
+cargo run -p crud-example          # :3000  compose the UI yourself: per-entity pages, a standalone Form at /post/new,
+                                   #         a /dashboard of your own, a pinned filter, CSV, timezones + DST — no auth
+cargo run -p adminpanel-example    # :3000  the same behind auth: crud::ui::Admin, 2FA, lockout panels (admin / password)
+cargo run -p auth-example          # :3000  auth alone, without crud: login, SSO, re-auth on your own route
 cargo run -p access-log-example    # :3000  the request log an app writes for itself: RealIp + naming the user
 ```
 
-**Run one at a time** — they all serve on port 3000. The first two put the JSON API under `/api/v1`
-with Swagger at `/docs`.
+**Run one at a time** — they all serve on port 3000.
 
 ## Requirements
 
@@ -167,14 +198,18 @@ with Swagger at `/docs`.
 
 ## Documentation
 
+- **[docs/APP.md](docs/APP.md)** — **start here to build something**: one page shell, a login page, a
+  top nav bar, the admin behind it, and your own pages beside it — dashboards, custom forms,
+  multi-step workflows. The cookbook the module guides below are the reference for.
+- **[MPA_MIGRATION.md](MPA_MIGRATION.md)** — upgrading an app from 0.2.x to 0.3.0: what moved, what
+  it becomes, and a compile-error cheat sheet.
 - **[docs/CRUD.md](docs/CRUD.md)** — the full `crud` guide: `MetaModel`/`MetaField`/`MetaRelation`,
-  the HTTP API and formats, query params, validation, metadata, CSV, the web admin, OpenAPI, and how
-  to compose with your app. (Examples: `crud`, `adminpanel`.)
+  the engine API, the URL as view state, validation, columns, CSV, the web admin, and how to compose
+  with your app. (Examples: `crud`, `adminpanel`.)
 - **[docs/AUTH.md](docs/AUTH.md)** — the `auth` guide: sessions, login, TOTP 2FA, OIDC SSO, the gate
   presets, and app-side wiring. (Examples: `auth`, `adminpanel`.)
-- **[docs/TIME.md](docs/TIME.md)** — time & timezones: UTC storage/API, the `RLTime` display/
-  conversion helpers, the `$store.tz` selection, and the timezone picker. (Examples: `time`,
-  `adminpanel`.)
+- **[docs/TIME.md](docs/TIME.md)** — time & timezones: integer-UTC storage, the `Tz` request zone
+  (a cookie, formatted server-side), the picker, and DST. (Examples: `time`, `adminpanel`.)
 - **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module: reusable field validators
   (IP/network, ranges, lengths, enums, hostname/FQDN, hex, email/URL, …) and normalizers as typed
   predicates, plus the `MetaField::validate_str/_int` sugar and the crud adapters.

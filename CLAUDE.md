@@ -1,30 +1,35 @@
 # relativelylight
 
-A web back-office toolkit for Rust. From your SeaORM entities it auto-generates a **JSON CRUD +
-metadata API**, an **admin UI**, and **authentication/authorization** (sessions, login, TOTP 2FA, a
-per-model gate) — **with no per-model code**. It's a library you compose *into* your app: you keep
-your own axum router, page shell, and OpenAPI document; `relativelylight` contributes routes, HTML
-fragments, and API schemas into them.
+A web back-office toolkit for Rust. From your SeaORM entities it auto-generates a **server-rendered
+CRUD admin** and **authentication/authorization** (sessions, login, TOTP 2FA, a per-model gate) —
+**with no per-model code**. It's a library you compose *into* your app: you keep your own axum router
+and page shell; `relativelylight` contributes HTML fragments and the write path behind them.
 
-This file is a using-it orientation. For the complete guides see **[docs/CRUD.md](docs/CRUD.md)**,
-**[docs/AUTH.md](docs/AUTH.md)**, and **[docs/TIME.md](docs/TIME.md)**; for the roadmap,
-**[docs/PRD.md](docs/PRD.md)**.
+There is **no JSON API and no JavaScript framework** (0.3 removed both — see `MPA.md` and
+`CHANGELOG.md`). Rendering is Rust matching on typed columns; writes are posted forms, `POST` → `303`
+→ `GET`. An app that needs a JSON API writes those handlers over the typed `Engine`.
+
+This file is a using-it orientation. To **build an app** with it, follow **[docs/APP.md](docs/APP.md)**
+(shell, nav, login, admin, your own pages). For the complete guides see
+**[docs/CRUD.md](docs/CRUD.md)**, **[docs/AUTH.md](docs/AUTH.md)**, and
+**[docs/TIME.md](docs/TIME.md)**; upgrading from 0.2.x is **[MPA_MIGRATION.md](MPA_MIGRATION.md)**;
+for the roadmap, **[docs/PRD.md](docs/PRD.md)**.
 
 ## Install & features
 
 ```toml
 [dependencies]
-relativelylight = { version = "0.2", features = ["ui", "openapi", "csv", "auth"] }
+relativelylight = { version = "0.3", features = ["ui", "csv", "auth"] }
 sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 ```
 
 | Feature | Default | Gives you |
 |---|---|---|
 | `crud` | ✅ | the CRUD engine + SeaORM backend (the `crud` module) |
-| `axum` | ✅ | the HTTP router (`Crud::into_router`, `Engine::router`) + the `middleware` module (`resolve_real_ip`, **required**) |
-| `ui` | | the web UI components (`crud::ui::Form`, `Table`, `Admin`) |
-| `openapi` | | runtime OpenAPI 3.1 (`crud::openapi`) |
-| `csv` | | CSV import/export endpoints |
+| `axum` | ✅ | the request plumbing + the `middleware` module (`resolve_real_ip`, **required**) |
+| `ui` | | the server-rendered UI components (`crud::ui::Table`, `Form`, `Admin`); implies `axum` + `tz` |
+| `csv` | | CSV import/export for the UI; implies `tz` |
+| `tz` | | server-side timezone rendering of integer-UTC timestamps (the `time` module) |
 | `auth` | | sessions, login, **TOTP 2FA**, profile/password pages, and the identity-resolving gate presets |
 | `csrf` | | the **double-submit CSRF token** (`csrf` module) — always on for `auth`'s forms, opt-in for the API; implied by `auth` |
 | `sso` | | **OIDC single sign-on** (Google / Okta / corporate) + group mapping (implies `auth`) |
@@ -48,16 +53,14 @@ let tag    = MetaModel::new(tag::Entity);
 let mut post = MetaModel::new(post::Entity);
 post.relate(&tag);                                // the only hand-declaration: N:M
 
-let mut crud = Crud::new(db, "/api/v1");          // base path ("" for root)
+let mut crud = Crud::new(db);
 crud.register(author, Open);
 crud.register(post, Open);
 crud.register(tag, Open);
 
-let app = crud.into_router();                     // axum::Router — merge into your app
+let engine = Arc::new(crud.into_engine());        // render from it; publish your own API from it
 ```
 
-That serves `GET/POST /api/v1/{entity}`, `GET/PATCH/DELETE /api/v1/{entity}/{id}`, and bulk
-`DELETE /api/v1/{entity}` (search/sort/paginate, relations by name, CSV, structured 422 validation).
 Tweak a model before registering — labels, visibility, defaults, validators, hooks:
 
 ```rust
@@ -67,38 +70,55 @@ post.field("title").validate = Some(Box::new(|v|
     if v.as_str().unwrap_or("").trim().is_empty() { Err("required".into()) } else { Ok(()) }));
 ```
 
-Admin UI (feature `ui`) — server-rendered Bootstrap 5 + Alpine fragments you drop into your shell:
+Admin UI (feature `ui`) — Bootstrap 5 HTML fragments you drop into your shell, with **two handlers per
+surface**: a `get` that renders, a `post` that writes back to the same path.
 
 ```rust
-let html = relativelylight::crud::ui::Admin::new(crud.engine())
-    .title("Admin")
-    .entity_with("post", |t| t.per_page(10))
-    .entity("tag")
-    .render()?;                                   // or .render_for(&headers) to gate write controls
+fn panel(engine: &Engine) -> Admin<'_> {          // one definition, both handlers
+    Admin::new(engine).title("Admin").entity_with("post", |t| t.per_page(10)).entity("tag")
+}
+
+// GET /admin
+let state = ViewState::from_uri(&uri);            // page, sort, filters, search, ?edit=…
+let html = panel(&engine).render_for(&headers, &state).await?;   // 401/403 straight from the gate
+
+// POST /admin  (body is axum::body::Bytes — the CSV import dialog uploads a file)
+match panel(&engine).submit(&headers, ip, &body, &state).await? {
+    Outcome::Done(to) => Redirect::to(&to).into_response(),      // relative: "?page=2#row-7"
+    Outcome::Invalid(state) => /* re-render: messages and typed values already in place */,
+}
 ```
 
-`Table` renders one entity (search, **sortable headers**, **filters**, pager, create/edit modal, relation
-pickers, bulk delete, CSV, custom cell renderers); `Admin` composes many `Table`s behind a side-panel.
+`Table` renders one entity (search, **sortable headers**, **filters**, pager, create/edit `<dialog>`,
+relation pickers, bulk delete, CSV export + a multipart **upload**/paste import dialog, one-shot
+"17 records deleted." alerts, Rust cell renderers); `Admin` composes many `Table`s behind a side
+panel and renders **one** of them per request (`?entity=post`). Include `crud::ui::CSS` once in the
+shell — about forty lines Bootstrap doesn't cover. `render_for` is the **read** enforcement point, not
+just a way to hide buttons: with no API behind the UI, a caller who may not list an entity gets
+`401`/`403` instead of its rows.
+
+**The URL is the state.** `ViewState` parses page, sort keys, filters, the search term, the active
+entity and the open dialog out of the query string — so every view is a link, and the library needs no
+route of its own (every href it renders is relative, `?page=2`).
 
 **Sorting and filtering** work on relations, not just columns. `?sort=author` orders by the label the
 cell *shows* (a join onto the target's label column — declare it with `MetaModel::label_column`, or keep
 your `row_label` closure, which is probed at registration); `?filter[author]=7` is an exact match on the
 FK behind the relation name. In the UI: `Table::sort` / `filter` / `fixed_filter`, and
 `Admin::filter("zone")` for one filter across *every* listed table that has that column — the shape that
-matters when an admin lists many tables of the same kind. Filter controls sit in the table toolbar, left
-of the search box, and a filter applies to the CSV export and "delete all matching" too, so no button
-acts on a wider set than the one on screen.
+matters when an admin lists many tables of the same kind. A filter applies to the listing, the CSV
+export and "delete all matching" alike, so no button acts on a wider set than the one on screen.
 
 **`Form` is the same form standalone**, for your app's *own* pages rather than the admin — the building
-block `Table` and `Admin` are assembled from (they share the widget + behaviour partials, so a fix lands
-in all three):
+block `Table` and `Admin` are assembled from (all three are one implementation, so a fix lands in all
+three by construction):
 
 ```rust
 let html = relativelylight::crud::ui::Form::new(engine, "ticket")
     .title("New ticket")
     .fields(["subject", "body", "priority"])   // subset *and* order; default is every writable column
-    .redirect("/tickets/{id}")                 // or .on_saved(js), else a success message
-    .render_for(&headers).await?;               // 401/403 instead of a form that can't submit
+    .redirect("/tickets/{id}")                 // where its own submit points, else a saved message
+    .render_for(&headers, &state).await?;      // 401/403 instead of a form that can't submit
 ```
 
 It refuses to render a form that couldn't work (unknown / read-only / required-but-unrendered column),
@@ -108,6 +128,8 @@ for its value to be sent.
 **Per-field widget overrides** pick the input where the column type can't: `field("body").textarea(8)`,
 `.radio()` (over `options`), `.range(min, max, step)`, `.email()`, `.url()`, `.datetime()`. Only the form
 input changes, not the cell; a widget that can't fit its column is a render-time error naming the field.
+`Table::format(col, closure)` is a Rust cell renderer — `(value, row) -> HTML`, the one place app HTML
+enters a page, so wrap values in `crud::ui::esc`.
 Full reference: [docs/CRUD.md → Web UI](docs/CRUD.md#web-ui-ui) and
 [§ Widget overrides](docs/CRUD.md#widget-overrides--picking-the-form-input-per-field).
 
@@ -192,8 +214,8 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
   the user's other sessions**, and `/profile` carries a "Sign out other sessions" button
   (`Auth::revoke_sessions` / `revoke_other_sessions` for your own code).
 - **CSRF**: every form `auth` renders carries a hidden `_csrf` token checked on POST; turn it on for the
-  JSON API with `crud.csrf(auth.csrf())` (the admin UI's `fetch` writes then send `X-CSRF-Token`
-  automatically). For **your own** unsafe routes use the layer —
+  admin UI's writes with `crud.csrf(auth.csrf())` (its forms then carry the same hidden input, and
+  `submit` checks it before the gate). For **your own** unsafe routes use the layer —
   `.layer(from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce))` — which takes the header or a
   `_csrf` field (URL-encoded bodies under 64 KiB; multipart isn't parsed) and hands the body on intact.
   `Auth::csrf_rejection(closure)` renders the 403 in your own shell, covering the library's forms and the
@@ -238,38 +260,43 @@ dependency here). Copy `examples/access_log`.
 
 `relativelylight` is always *part of* a larger app:
 
-- **Router** — merge `Crud::into_router()` / `Engine::router()` / `Auth::routes()` into your own
-  `Router`. Keep crud under a prefix (`/api/v1`) so its `/{entity}` routes can't shadow yours.
+- **Router** — `crud` adds **no routes**: you write `get(show).post(save)` on a path of your own and
+  call `render_for` / `submit` from them. Merge `Auth::routes()` (login/logout/profile) into your
+  `Router` as before.
 - **Page shell** — `ui::Form`/`Table`/`Admin` and the auth login/profile pages return **HTML fragments**,
-  never full pages. Your app owns the `<html>`, Bootstrap/Alpine `<script>`/`<link>` tags, and layout.
-- **OpenAPI** — build your own `OpenApi` (your `info`/`servers`) and fold crud's paths + schemas in
-  with `crud::openapi::merge_into(doc, &engine)`.
+  never full pages. Your app owns the `<html>`, the Bootstrap stylesheet + `crud::ui::CSS`, and layout.
+- **Your own JSON API, if you want one** — write the handlers over `Engine::list` / `get` / `create` /
+  `update` / `delete` / `columns`. The crate publishes none, so its shape and versioning are yours.
 
 ## Run the examples
 
 ```bash
-cargo run -p crud-example         # :3000  per-entity pages, standalone Form (/post/new), sort + filter, a pinned filter at /author/{id}/posts, CSV, Swagger — no auth
-cargo run -p adminpanel-example   # :3000  crud::ui::Admin, login-gated, inline accounts + 2FA (admin/password, editor/password)
+cargo run -p crud-example         # :3000  compose it yourself: per-entity pages, standalone Form (/post/new), /dashboard,
+                                  #         a pinned filter at /author/{id}/posts, CSV, the timezone cookie + DST rows (/ui/event) — no auth
+cargo run -p adminpanel-example   # :3000  crud::ui::Admin, login-gated, inline accounts + 2FA, timezone cookie (admin/password, editor/password)
 cargo run -p auth-example         # :3000  auth alone (no crud): login, /secret, /profile + 2FA, re-auth demo (admin/password)
-cargo run -p time-example         # :3000  timezone picker, DST-straddling rows, server/user-TZ hooks (see docs/TIME.md)
 cargo run -p access-log-example   # :3000  the request log an app writes for itself: RealIp + naming the user, two ways
 ```
 
 **Run one at a time — they all bind port 3000** (fresh seeded in-memory SQLite each start). Only
 `access-log-example` prints a line per request: the crate itself logs nothing, which is that example's
-subject. The first two put the JSON API under `/api/v1` with Swagger at `/docs`. `crud`, `adminpanel` and
-`auth` share `examples/model`; `time-example` has its own one-column-that-matters table.
+subject. `crud`, `adminpanel` and `auth` share `examples/model` — whose `event` table exists for the
+timezone demo, its rows straddling both 2026 DST transitions.
 
 ## Documentation
 
+- **[docs/APP.md](docs/APP.md)** — composing a whole app: the page shell + nav bar, the login page,
+  the admin's two handlers, your own pages (dashboards, hand-written forms, multi-step workflows),
+  and a pre-deployment checklist. The practical entry point; the guides below are the reference.
+- **[MPA_MIGRATION.md](MPA_MIGRATION.md)** — 0.2.x → 0.3.0 upgrade guide (the MPA rewrite).
 - **[docs/CRUD.md](docs/CRUD.md)** — the full `crud` guide: `MetaModel`/`MetaField`/`MetaRelation`,
-  the HTTP API and wire formats, query params, the validation pipeline, metadata, CSV, the web UI
-  (`Form`/`Table`/`Admin`), OpenAPI, the write-observer audit hook, and composing with your app.
+  the engine API, the URL as view state, the validation pipeline, columns, CSV, the web UI
+  (`Table`/`Form`/`Admin`), the write-observer audit hook, and composing with your app.
   (Examples: `crud`, `adminpanel`.)
 - **[docs/AUTH.md](docs/AUTH.md)** — the `auth` guide: sessions, login, TOTP 2FA, OIDC SSO, the gate
   presets, profile/password pages, and app-side wiring. (Examples: `auth`, `adminpanel`.)
-- **[docs/TIME.md](docs/TIME.md)** — time & timezones: UTC storage/API, the `RLTime` helpers, the
-  `$store.tz` selection, and `TzPicker`. (Examples: `time`, `adminpanel`.)
+- **[docs/TIME.md](docs/TIME.md)** — time & timezones: integer-UTC storage, the `Tz` request zone
+  (a cookie, formatted server-side), `TzPicker`, and DST. (Examples: `time`, `adminpanel`.)
 - **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module: typed field validators +
   normalizers (IP/network, ranges, lengths, enums, hostname/FQDN, hex, email/URL), the crud `field`
   adapters, and the `MetaField::validate_str/_int` sugar. Same predicate on CRUD + hand-written APIs.
@@ -282,8 +309,9 @@ subject. The first two put the JSON API under `/api/v1` with Swagger at `/docs`.
 
 ## Working *on* the library — keep the docs current
 
-It's a Cargo workspace: the crate lives in `relativelylight/` (`crud/`, `auth/`, `authz.rs`,
-`observe.rs`, `time.rs`, front-end assets in `assets/`) with runnable examples in `examples/`. Build
+It's a Cargo workspace: the crate lives in `relativelylight/` (`crud/` — with `ui/` as the renderer:
+`state.rs`, `render.rs`, `widgets.rs`, `decode.rs` — plus `auth/`, `authz.rs`, `observe.rs`, `time.rs`,
+Askama templates in `templates/`, one stylesheet in `assets/`) with runnable examples in `examples/`. Build
 with `cargo build --all-features`, test `cargo test --all-features`, lint `cargo clippy
 --all-features`.
 
@@ -292,16 +320,18 @@ forgets to enable what it uses (`auth` did exactly this with `axum`, and `exampl
 without anyone noticing). Before a release, also build the combinations that real apps ask for:
 
 ```bash
-for f in "" crud axum csrf auth auth,sso crud,ui,openapi,csv; do
+for f in "" crud axum csrf tz csv auth auth,sso crud,ui,csv; do
   cargo build -p relativelylight --no-default-features ${f:+--features $f} || break
 done
 cargo build --workspace      # and the examples, which pin their own narrow feature sets
-``` Deps: SeaORM 1.1, axum 0.8, askama 0.13, utoipa 5, totp-rs 5.7.
+``` Deps: SeaORM 1.1, axum 0.8, askama 0.13, jiff 0.2, totp-rs 5.7.
 
-**Security behavior is tested by rejection.** `auth/security_tests.rs` and `crud/gate_tests.rs` drive
-the real routers over in-memory SQLite and assert the *negative* cases — bad password, bogus/expired/
-half-authenticated session, wrong TOTP code, non-manager profile writes, each gate preset's decision,
-and that a denied request never reaches the backend. Touching login, sessions, 2FA, the profile pages,
+**Security behavior is tested by rejection.** `auth/security_tests.rs` and `crud/gate_tests.rs` assert
+the *negative* cases over in-memory SQLite — bad password, bogus/expired/half-authenticated session,
+wrong TOTP code, non-manager profile writes, each gate preset's decision, every UI write operation's
+`Operation`, that **reads** are refused (not merely undecorated), that a denied request never reaches
+the backend, and CSRF on every write. `crud/ui_tests.rs` adds escaping (every cell, label, chip, option
+and input value, with `<script>`-bearing data) and form decoding. Touching login, sessions, 2FA, the profile pages,
 or a gate means extending them (with a positive control, so the negatives can't pass vacuously); see
 [docs/AUTH.md §10a](docs/AUTH.md) for what they cover and what they deliberately don't.
 
