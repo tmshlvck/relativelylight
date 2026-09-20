@@ -390,7 +390,8 @@ Two habits worth keeping:
 
 - **`read_only(true)` + `pagination(false)` + `search(false)`** turns a `Table` into a plain panel of
   rows — the cheapest way to get consistent cells, badges, relation labels and timezone-correct
-  timestamps on a page that isn't an admin.
+  timestamps on a page that isn't an admin. Add `columns([…])` to show four of the model's twenty,
+  and `row_class(|row| …)` to colour the ones that need attention.
 - **For anything the engine can't express** — a `GROUP BY`, a window function, a join across three
   tables — use SeaORM (or raw SQL) against the same `DatabaseConnection` you handed to `Crud`. Mixing
   is expected: the engine is for CRUD-shaped questions and gets out of the way for the rest.

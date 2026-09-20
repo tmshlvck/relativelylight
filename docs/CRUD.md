@@ -346,7 +346,7 @@ parses it; `ViewState::default()` is page 1, unsorted, unfiltered. Every link th
 | Param | Meaning |
 |---|---|
 | `q=<term>` | naive full-text: `LIKE '%term%'` across text columns |
-| `filter[<name>]=<val>` | **exact** match. `<name>` is a column *or* a to-one relation (`filter[author]=7` → `author_id = 7`); an empty value matches rows that have none (`IS NULL`) |
+| `filter[<name>]=<val>` | **exact** match. `<name>` is a column *or* a to-one relation (`filter[author]=7` → `author_id = 7`); an empty value matches rows that have none (`IS NULL`), and `*` means **no filter** — the value the toolbar's "all" submits, since a `<select>` must submit something and the empty one is taken |
 | `sort=views:desc,title` | whitelisted sort (unknown key → an error). A **relation** sorts by the label its cells show |
 | `page` / `per_page` | pagination (`per_page` defaults to the component's, else 25) |
 | `entity=<slug>` | which panel an [`Admin`](#admin--a-whole-admin-in-one-component) is showing |
@@ -699,7 +699,9 @@ and in all three examples.
 | `pagination(bool)` / `per_page(n)` | the pager (default on, 30) |
 | `read_only(bool)` | no Create/Edit/Delete and no dialog, for anyone |
 | `confirm(bool)` | an `onclick` confirm on destructive buttons (default on) |
+| `columns([…])` | which columns the **table** shows, and in what order (default: all of them) |
 | `fields([…])` / `omit([…])` | which columns the **dialog's form** shows, and in what order |
+| `row_class(closure)` | a CSS class per row, from the row — `(row) -> class` |
 | `sort(col)` / `sort_desc(col)` | the default sort, used until the URL says otherwise |
 | `filter(name)` | a filter `<select>` in the toolbar, for a column or a to-one relation |
 | `fixed_filter(name, value)` | a filter **pinned** to one value, with no control — a table *about* that value |
@@ -712,6 +714,22 @@ CSV export and "delete all matching" alike — no button can act on a wider set 
 and it shows as a chip above the table, because a narrowed table that looked like a whole one is how
 an operator concludes their rows were deleted. A pinned or shared filter's chip has no ✕: it isn't
 that table's to clear.
+
+**`columns` and `row_class` are the table's own** — a column left out of `columns` is still edited
+in the dialog and still exported to CSV, and `row_class` puts a class on the `<tr>` so a table can
+say something no column says:
+
+```rust
+Table::new(&engine, "invoice")
+    .columns(["number", "customer", "due", "total"])       // not the other sixteen
+    .row_class(|row| match row["status"].as_str() {
+        Some("overdue") => "table-danger".into(),
+        _ => String::new(),
+    })
+```
+
+Both are checked: a name `columns` doesn't recognise is a render-time error naming it, and the class
+is escaped like any other attribute.
 
 **`format` is a Rust closure** whose output is inserted verbatim, so wrap database values in
 `crud::ui::esc`:
@@ -728,6 +746,13 @@ and input value (`crud/ui_tests.rs`).
 `<select>` of labels; above that it renders an id input, because the alternative is shipping thousands
 of `<option>`s or a search box that needs a fetch endpoint this crate no longer has. A to-many renders
 as a multi-select.
+
+**A filter control does the same, for the same reason and one more.** Under the threshold it is a
+`<select>`; above it, a text input that says how many values there are. A truncated menu would not
+just hide most of them — with the value in force missing from the list, no `<option>` would be
+selected and the browser would display the first one, so the control would confidently name a filter
+the table isn't using. A chip always shows the target's **label** (`Author: Ada Lovelace`), resolved
+by an exact id lookup, rather than the id the URL carries.
 
 **Where a validation message lands.** A message keyed to a column appears **under that column's
 input**, with the input marked invalid; a cross-field message from `validate_row` appears as a

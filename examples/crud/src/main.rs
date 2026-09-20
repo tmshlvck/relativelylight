@@ -268,6 +268,16 @@ async fn dashboard(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) ->
         .pagination(false)
         .per_page(5)
         .sort_desc("published_at")
+        // A dashboard wants five columns, not twenty — `columns` picks them and orders them, and
+        // is the table's own business: the admin's dialog still edits every writable field.
+        .columns(["title", "author", "status", "published_at"])
+        // …and a row can say something no column does. Both are Rust closures, so they are checked
+        // and testable, where the old design took a string of JavaScript.
+        .row_class(|row| match row["status"].as_str() {
+            Some("draft") => "table-warning".into(),
+            Some("archived") => "text-body-secondary".into(),
+            _ => String::new(),
+        })
         .format("title", |v, row| {
             format!(r#"<a href="/post/{}/edit">{}</a>"#, esc(&row["id"]), esc(v))
         })

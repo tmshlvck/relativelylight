@@ -139,18 +139,31 @@ impl Accessor for Mock {
     fn columns(&self) -> Vec<Column> {
         self.cols.clone()
     }
+    /// Honours `pk_in` and `per_page` — the two the UI leans on (an exact id lookup for a filter's
+    /// label, and the cap that decides whether a relation can be listed at all). Search, filters
+    /// and sort are a real backend's job and `list_tests` covers them there.
     async fn list(&self, q: &ListQuery, terse: bool) -> Result<Page> {
-        let data = self
+        let key = |r: &Value| match r.get("id") {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+            None => String::new(),
+        };
+        let matching: Vec<&Value> = self
             .rows
             .iter()
+            .filter(|r| q.pk_in.is_empty() || q.pk_in.contains(&key(r)))
+            .collect();
+        let per_page = if q.per_page == 0 { 30 } else { q.per_page };
+        let data = matching
+            .iter()
+            .take(per_page as usize)
             .map(|r| {
                 let id = r.get("id").cloned().unwrap_or(Value::Null);
                 let label = crate::crud::engine::default_label(r);
-                RowItem::new(id, label, (!terse).then(|| r.clone()))
+                RowItem::new(id, label, (!terse).then(|| (*r).clone()))
             })
             .collect::<Vec<_>>();
-        let per_page = if q.per_page == 0 { 30 } else { q.per_page };
-        Ok(Page::new(self.rows.len() as u64, q.page.max(1), per_page, data))
+        Ok(Page::new(matching.len() as u64, q.page.max(1), per_page, data))
     }
     async fn get(&self, pk: &str) -> Result<Option<Value>> {
         let key = |v: &Value| match v {
@@ -644,9 +657,64 @@ async fn the_pager_carries_the_view_and_disappears_when_there_is_one_page() {
 async fn a_filtered_view_says_so_and_offers_a_way_out() {
     let (e, _) = engine();
     let html = render(&Table::new(&e, "post").filter("status"), &ViewState::from_query("filter[status]=draft")).await;
+    assert!(html.contains(r#"<option value="*">status: all</option>"#), "a way back to everything");
     assert!(html.contains("<strong>draft</strong>"), "the chip that stops 'where did my rows go': {html}");
     assert!(html.contains("Clear status filter"), "and a way to remove it");
     assert!(html.contains(r#"value="draft" selected"#), "the control shows the active value");
+}
+
+#[tokio::test]
+async fn choosing_all_clears_the_filter_rather_than_asking_for_the_orphans() {
+    // `filter[author]=` means "rows with no author", so the toolbar's "all" cannot submit an empty
+    // value: it did, and choosing it filtered a table down to nothing.
+    let (e, _) = engine();
+    let html = render(&Table::new(&e, "post").filter("author"), &list()).await;
+    assert!(html.contains(r#"<option value="*">Author: all</option>"#), "{html}");
+
+    let all = ViewState::from_query("filter[author]=*");
+    assert!(all.filters.is_empty(), "`*` is no filter at all");
+    assert!(all.to_list_query(30).eq.is_empty(), "so nothing reaches the query");
+    assert!(!all.to_query().contains("filter"), "and it doesn't linger in the URL");
+
+    // The documented meaning of an empty value is untouched.
+    let orphans = ViewState::from_query("filter[author]=");
+    assert_eq!(orphans.to_list_query(30).eq, vec![("author".to_string(), String::new())]);
+}
+
+#[tokio::test]
+async fn a_filter_whose_target_is_too_large_says_so_instead_of_listing_a_fifth_of_it() {
+    // A `<select>` capped at `picker_threshold` hides most of the values *and* misreports the one
+    // in force: with nothing selected the browser shows the first option, so the control would
+    // claim a filter the table isn't using.
+    let rows: Vec<Value> = (1..=50).map(|i| json!({"id": i, "name": format!("author {i}")})).collect();
+    let mut e = Engine::new();
+    e.add(Arc::new(Mock::new("post", post_columns()).rows(post_rows())), Arc::new(Open));
+    e.add(
+        Arc::new(
+            Mock::new("author", vec![field("id", false, true, None), field("name", true, false, None)])
+                .rows(rows),
+        ),
+        Arc::new(Open),
+    );
+    e.add(Arc::new(Mock::new("tag", vec![field("id", false, true, None)]).rows(vec![])), Arc::new(Open));
+
+    let table = Table::new(&e, "post").filter("author").picker_threshold(20);
+    let html = table
+        .render_for(&no_headers(), &ViewState::from_query("filter[author]=42"))
+        .await
+        .unwrap();
+    assert!(!html.contains("<select"), "no truncated menu: {html}");
+    assert!(html.contains(r#"value="42""#), "the filter in force is what the control shows");
+    assert!(html.contains("any of 50"), "and it says how many there are: {html}");
+    assert!(html.contains("<strong>author 42</strong>"), "the chip resolves its label: {html}");
+
+    // Under the threshold it is a menu again, with the right option marked.
+    let small = Table::new(&e, "post").filter("author").picker_threshold(100);
+    let html = small
+        .render_for(&no_headers(), &ViewState::from_query("filter[author]=42"))
+        .await
+        .unwrap();
+    assert!(html.contains(r#"<option value="42" selected>author 42</option>"#), "{html}");
 }
 
 #[tokio::test]
@@ -687,7 +755,7 @@ async fn a_shared_filter_follows_the_operator_from_table_to_table() {
         link.contains("entity=tag") && link.contains("filter%5Bauthor%5D=3"),
         "the nav link carries it: {link}"
     );
-    assert!(html.contains("<strong>3</strong>"), "and the chip shows it");
+    assert!(html.contains("<strong>Ada</strong>"), "and the chip names it, not its id: {html}");
     assert!(!html.contains("Clear Author filter"), "a shared filter is cleared where it was set");
 }
 
@@ -994,6 +1062,65 @@ async fn a_standalone_form_redirects_where_it_was_told_to() {
     assert_eq!(to, "?saved=1");
     let html = plain.render_for(&no_headers(), &ViewState::from_query("saved=1")).await.unwrap();
     assert!(html.contains("Saved."), "{html}");
+}
+
+// ---------- choosing and marking what the table shows ----------
+
+#[tokio::test]
+async fn columns_narrows_and_orders_the_table_without_touching_the_form() {
+    let (e, _) = engine();
+    let table = Table::new(&e, "post").columns(["title", "author", "published"]);
+    let html = render(&table, &list()).await;
+
+    // Read the header row itself rather than guessing: `title` and `published` carry no label in
+    // this fixture, so they render as their names; `author` has one.
+    let head = html.split("<thead>").nth(1).unwrap().split("</thead>").next().unwrap();
+    let order: Vec<&str> = ["title", "Author", "published", "body", "views", "status"]
+        .into_iter()
+        .filter(|h| head.contains(&format!(">{h}")))
+        .collect();
+    assert_eq!(order, ["title", "Author", "published"], "only these, in the order given");
+    assert!(html.contains("First post"), "and their cells");
+    assert!(!html.contains("hello"), "not the body column's: {html}");
+
+    // The dialog still edits everything writable — `columns` is the table, `fields` is the form.
+    let dialog = render(&table, &ViewState::from_query("edit=7")).await;
+    assert!(dialog.contains(r#"id="f-body""#), "the form is unaffected: {dialog}");
+}
+
+#[tokio::test]
+async fn an_unknown_column_is_refused_by_name() {
+    let (e, _) = engine();
+    let err = Table::new(&e, "post")
+        .columns(["title", "ttile"])
+        .render_for(&no_headers(), &list())
+        .await
+        .expect_err("a typo must not silently drop a column");
+    let msg = err.to_string();
+    assert!(msg.contains("cannot show column 'ttile'") && msg.contains("known:"), "{msg}");
+}
+
+#[tokio::test]
+async fn a_row_can_be_marked_from_its_own_data() {
+    let (e, _) = engine();
+    let table = Table::new(&e, "post")
+        .row_class(|row| match row["status"].as_str() {
+            Some("draft") => "table-warning".into(),
+            _ => String::new(),
+        });
+    let html = render(&table, &list()).await;
+    assert!(html.contains(r#"<tr id="row-7" class="table-warning">"#), "{html}");
+
+    // No closure, no attribute — a table that wants none pays nothing.
+    let plain = render(&Table::new(&e, "post"), &list()).await;
+    assert!(plain.contains(r#"<tr id="row-7">"#), "{plain}");
+}
+
+#[tokio::test]
+async fn a_row_class_cannot_break_out_of_its_attribute() {
+    let (e, _) = engine();
+    let html = render(&Table::new(&e, "post").row_class(|_| NASTY.to_string()), &list()).await;
+    assert!(!html.contains("<script>"), "{html}");
 }
 
 // ---------- CSV: the menu, the dialog, the two ways in ----------

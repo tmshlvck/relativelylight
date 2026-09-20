@@ -16,13 +16,30 @@
       <form method="get" class="d-flex gap-2 align-items-center">
         {%- for h in keep %}<input type="hidden" name="{{ h.0 }}" value="{{ h.1 }}">{% endfor %}
         {%- for c in controls %}
+        {%- if c.too_many == 0 %}
+        {#- "all" submits `*`, not an empty value: an empty one already means "rows that have none".
+            (A `<select>` always submits something, so the choice needs a value of its own.) -#}
         <select class="form-select form-select-sm w-auto" name="filter[{{ c.name }}]"
                 aria-label="Filter by {{ c.label }}" onchange="this.form.submit()">
-          <option value="">{{ c.label }}: all</option>
+          <option value="*">{{ c.label }}: all</option>
           {%- for o in c.options %}
           <option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>
           {%- endfor %}
         </select>
+        {%- else %}
+        {#- Too many to list. A truncated menu would be worse than no menu: it would hide most of the
+            values *and* misreport the one in force, since the browser shows the first option when
+            none is selected. So: type the id, and say how many there are. -#}
+        <input type="text" class="form-control form-control-sm" style="width:11rem"
+               name="filter[{{ c.name }}]" value="{{ c.chosen }}"
+               aria-label="Filter by {{ c.label }}"
+               placeholder="{{ c.label }}: any of {{ c.too_many }}"
+               {%- if c.chosen_label.is_empty() %}
+               title="{{ c.too_many }} {{ c.name }} rows — too many to list; enter one id, or clear this to see all"
+               {%- else %}
+               title="{{ c.label }}: {{ c.chosen_label }} — clear this to see all {{ c.too_many }}"
+               {%- endif %}>
+        {%- endif %}
         {%- endfor %}
         {%- if search %}
         <input type="search" class="form-control form-control-sm w-auto" name="q" value="{{ q }}"
@@ -92,7 +109,7 @@
         </thead>
         <tbody>
           {%- for r in rows %}
-          <tr id="row-{{ r.id }}">
+          <tr id="row-{{ r.id }}"{% if !r.class.is_empty() %} class="{{ r.class }}"{% endif %}>
             {%- if editable %}
             <td><input type="checkbox" class="form-check-input" name="ids" value="{{ r.id }}"
                        aria-label="Select row {{ r.id }}"></td>

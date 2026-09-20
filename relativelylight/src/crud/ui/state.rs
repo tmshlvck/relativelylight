@@ -121,6 +121,12 @@ impl ViewState {
         let mut s = Self::default();
         for (key, value) in urlform::pairs(query.trim_start_matches('?')) {
             match bracketed(&key, "filter") {
+                // `*` is the toolbar's "all". A `<select>` always submits *something*, and the
+                // empty value is already taken: `filter[author]=` means "rows with no author"
+                // (`IS NULL`), so using it for "no filter" made choosing "all" return the orphans —
+                // usually nothing at all. Hence one reserved value that can't be a primary key
+                // anyone typed, dropped here so it never reaches a query or a later URL.
+                Some(_) if value == ANY => {}
                 Some(name) => s.filters.push((name.to_string(), value)),
                 None => match key.as_str() {
                     "entity" => s.entity = Some(value),
@@ -309,6 +315,10 @@ impl ViewState {
         self.posted.get(name).map(Vec::as_slice)
     }
 }
+
+/// The filter value meaning "don't filter by this at all" — what the toolbar's "all" submits.
+/// Reserved: a target whose primary key is literally `*` can't be chosen from a filter control.
+pub(crate) const ANY: &str = "*";
 
 /// `name[inner]` → `Some(inner)`. Brackets can't occur in a column name — those come from Rust
 /// identifiers — so `filter[…]` can never collide with one, however an app names its columns. That is

@@ -25,6 +25,8 @@ pub(crate) struct RowV {
     pub id: String,
     pub edit_href: String,
     pub cells: Vec<Cell>,
+    /// From [`Table::row_class`](super::Table::row_class); empty unless one is configured.
+    pub class: String,
 }
 
 pub(crate) struct HeadV {
@@ -121,7 +123,14 @@ pub(crate) fn sortable(col: &Column) -> bool {
 }
 
 /// Every row of the page, with its edit link.
-pub(crate) fn rows(page: &Page, cols: &[Column], fmts: &[(String, Fmt)], state: &ViewState, tz: &Tz) -> Vec<RowV> {
+pub(crate) fn rows(
+    page: &Page,
+    cols: &[Column],
+    fmts: &[(String, Fmt)],
+    row_class: Option<&super::RowClass>,
+    state: &ViewState,
+    tz: &Tz,
+) -> Vec<RowV> {
     page.data
         .iter()
         .map(|item| {
@@ -129,6 +138,7 @@ pub(crate) fn rows(page: &Page, cols: &[Column], fmts: &[(String, Fmt)], state: 
             let row = item.row.clone().unwrap_or(Value::Null);
             RowV {
                 edit_href: state.href_edit(&id),
+                class: row_class.map(|f| f(&row)).unwrap_or_default(),
                 cells: cols
                     .iter()
                     .map(|c| {

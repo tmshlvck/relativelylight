@@ -495,7 +495,8 @@ Net: one extra handler, one shared `panel()` function, a `ViewState`, and the ro
 
 **New**
 
-`crud::ui::{ViewState, Mode, Done, Outcome, esc, esc_str, CSS, Fmt}`, `Table::{fields, omit, dom_id, submit, csv}`,
+`crud::ui::{ViewState, Mode, Done, Outcome, esc, esc_str, CSS, Fmt, RowClass}`,
+`Table::{columns, row_class, fields, omit, dom_id, submit, csv}`,
 `Form::submit`, `Admin::{submit, csv}`, `Engine::pk`, `time::{Tz, COOKIE, ZONES_EUROPE, ZONES_US,
 EXCLUDED, zones_default, zones_all, is_excluded}`, `TzPicker::{action, all_zones, unknown_zones}`,
 `FieldDisplay::is_datetime`, feature `tz`.

@@ -151,7 +151,14 @@ struct TableTmpl {
 struct ControlV {
     name: String,
     label: String,
+    /// The `<select>`'s options — empty when the target has more rows than we will list, in which
+    /// case the control is a text input instead.
     options: Vec<Opt>,
+    /// The value in force (for the text input), and what it stands for.
+    chosen: String,
+    chosen_label: String,
+    /// How many rows the target has, when that is more than this control can list. `0` otherwise.
+    too_many: u64,
 }
 
 #[derive(Template)]
@@ -206,10 +213,15 @@ pub struct Table<'a> {
     picker_threshold: u64,
     fields: Vec<String>,
     omit: Vec<String>,
+    columns: Vec<String>,
     formatters: Vec<(String, Fmt)>,
+    row_class: Option<RowClass>,
     filters: Vec<FilterSpec>,
     sort: Vec<(String, bool)>,
 }
+
+/// A per-row CSS class: `(row) -> class`. See [`Table::row_class`].
+pub type RowClass = Arc<dyn Fn(&Value) -> String + Send + Sync>;
 
 impl<'a> Table<'a> {
     pub fn new(engine: &'a Engine, slug: impl Into<String>) -> Self {
@@ -227,7 +239,9 @@ impl<'a> Table<'a> {
             picker_threshold: 20,
             fields: Vec::new(),
             omit: Vec::new(),
+            columns: Vec::new(),
             formatters: Vec::new(),
+            row_class: None,
             filters: Vec::new(),
             sort: Vec::new(),
         }
@@ -273,6 +287,43 @@ impl<'a> Table<'a> {
         self.picker_threshold = n;
         self
     }
+    /// Show **only** these columns in the **table**, in this order. Default: every published
+    /// column, in the model's order.
+    ///
+    /// This is the table, not the form — a column left out here is still edited in the dialog (use
+    /// [`fields`](Table::fields) / [`omit`](Table::omit) for that) and still exported to CSV. It is
+    /// for the usual case where a model has twenty columns and a console needs five of them across
+    /// the screen. An unknown name is a render-time error naming it.
+    pub fn columns<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.columns = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// A CSS class for each row, from the row itself — how a table says something without a column
+    /// saying it:
+    ///
+    /// ```ignore
+    /// .row_class(|row| match row["status"].as_str() {
+    ///     Some("overdue") => "table-danger".into(),
+    ///     Some("draft") => "text-body-secondary".into(),
+    ///     _ => String::new(),
+    /// })
+    /// ```
+    ///
+    /// The value lands in the `<tr class>` attribute and is escaped like any other; Bootstrap's
+    /// `table-*` contextual classes are the obvious things to reach for.
+    pub fn row_class<F>(mut self, class: F) -> Self
+    where
+        F: Fn(&Value) -> String + Send + Sync + 'static,
+    {
+        self.row_class = Some(Arc::new(class));
+        self
+    }
+
     /// Show **only** these columns in the dialog's form, in this order. Default: every writable
     /// column. Rendering errors on an unknown or read-only name.
     pub fn fields<I, S>(mut self, names: I) -> Self
@@ -367,6 +418,8 @@ impl<'a> Table<'a> {
         let state = self.effective_state(state, &cols)?;
         let page = self.engine.list(&self.slug, &self.list_query(&state), false).await?;
         let csrf = csrf_token(self.engine, headers);
+        let shown = self.shown_columns(&cols)?;
+        let (controls, chips) = self.filter_views(&cols, &state).await?;
 
         let dialog = match (state.mode(), editable) {
             (Mode::List, _) | (_, false) => String::new(),
@@ -382,12 +435,12 @@ impl<'a> Table<'a> {
             confirm: self.confirm,
             csv: cfg!(feature = "csv"),
             q: state.q.clone(),
-            span: cols.len() + if editable { 2 } else { 0 },
+            span: shown.len() + if editable { 2 } else { 0 },
             keep: self.keep(&state),
-            controls: self.controls(&cols, &state).await?,
-            chips: self.chips(&cols, &state),
-            heads: render::heads(&cols, &state),
-            rows: render::rows(&page, &cols, &self.formatters, &state, &tz),
+            controls,
+            chips,
+            heads: render::heads(&shown, &state),
+            rows: render::rows(&page, &shown, &self.formatters, self.row_class.as_ref(), &state, &tz),
             pager: if self.pagination {
                 render::pager(&page, &state)
             } else {
@@ -490,82 +543,136 @@ impl<'a> Table<'a> {
         out
     }
 
-    /// The filter `<select>`s, each listing the values actually available in its target.
-    async fn controls(&self, cols: &[Column], state: &ViewState) -> Result<Vec<ControlV>> {
-        let mut out = Vec::new();
+    /// The columns this table puts on screen: [`columns`](Table::columns) if set, else all of them.
+    /// A name that isn't a column is an error rather than a silently missing one.
+    fn shown_columns(&self, cols: &[Column]) -> Result<Vec<Column>> {
+        if self.columns.is_empty() {
+            return Ok(cols.to_vec());
+        }
+        self.columns
+            .iter()
+            .map(|want| {
+                cols.iter()
+                    .find(|c| render::name_of(c) == want)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Error::BadRequest(format!(
+                            "crud::ui({}): cannot show column '{want}': no such column or relation \
+                             — known: {}",
+                            self.slug,
+                            cols.iter().map(render::name_of).collect::<Vec<_>>().join(", ")
+                        ))
+                    })
+            })
+            .collect()
+    }
+
+    /// The filter controls for the toolbar and the chips above the table, in one pass — they ask
+    /// the same questions ("what is this filter set to, and what does that value mean?") and the
+    /// answer costs a query.
+    async fn filter_views(
+        &self,
+        cols: &[Column],
+        state: &ViewState,
+    ) -> Result<(Vec<ControlV>, Vec<Chip>)> {
+        let mut controls = Vec::new();
+        let mut chips = Vec::new();
+
         for f in self.applicable_filters(cols)? {
-            if f.fixed.is_some() {
-                continue; // pinned: a chip, not a control
-            }
             let col = cols.iter().find(|c| render::name_of(c) == f.name);
-            let chosen = state.filters.iter().find(|(n, _)| *n == f.name).map(|(_, v)| v.clone());
-            let chosen = chosen.unwrap_or_default();
-            let options = match col {
+            let label = col.map(render::label_of).unwrap_or_else(|| f.name.clone());
+            let chosen = match &f.fixed {
+                Some(pinned) => pinned.clone(),
+                None => state
+                    .filters
+                    .iter()
+                    .find(|(n, _)| *n == f.name)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default(),
+            };
+
+            // What the value *means*, for the chip: a relation's cells show labels, so a chip
+            // reading "Author: 7" next to rows reading "Ada Lovelace" is the table talking about
+            // itself in two languages.
+            let chosen_label = match (col, chosen.is_empty()) {
+                (Some(Column::Relation { target, .. }), false) => {
+                    self.label_of(target, &chosen).await?
+                }
+                _ => chosen.clone(),
+            };
+
+            if !chosen.is_empty() {
+                let pinned = f.fixed.is_some() || f.shared;
+                chips.push(Chip {
+                    label: label.clone(),
+                    value: chosen_label.clone(),
+                    clear_href: (!pinned).then(|| state.href_filter(&f.name, "")),
+                });
+            }
+
+            if f.fixed.is_some() {
+                continue; // pinned: a chip, and no control to change it with
+            }
+
+            let (options, too_many) = match col {
                 Some(Column::Relation { target, .. }) => {
+                    // One page of the target, capped: `total` then says whether listing them all
+                    // would be a wall of options — or, worse, a list quietly missing the one in
+                    // force, which would leave the control showing a value that isn't the filter.
                     let q = ListQuery {
                         per_page: self.picker_threshold.max(1),
                         ..Default::default()
                     };
-                    self.engine
-                        .list(target, &q, true)
-                        .await?
-                        .data
-                        .iter()
-                        .map(|it| {
-                            let value = render::text(Some(&it.id));
-                            Opt { selected: value == chosen, label: it.label.clone(), value }
-                        })
-                        .collect()
+                    let page = self.engine.list(target, &q, true).await?;
+                    if page.total > self.picker_threshold {
+                        (Vec::new(), page.total)
+                    } else {
+                        let options = page
+                            .data
+                            .iter()
+                            .map(|it| {
+                                let value = render::text(Some(&it.id));
+                                Opt { selected: value == chosen, label: it.label.clone(), value }
+                            })
+                            .collect();
+                        (options, 0)
+                    }
                 }
-                Some(Column::Field { options, .. }) => options
-                    .iter()
-                    .map(|o| Opt {
-                        value: o.clone(),
-                        label: o.clone(),
-                        selected: *o == chosen,
-                    })
-                    .collect(),
-                _ => Vec::new(),
+                Some(Column::Field { options, .. }) => (
+                    options
+                        .iter()
+                        .map(|o| Opt {
+                            value: o.clone(),
+                            label: o.clone(),
+                            selected: *o == chosen,
+                        })
+                        .collect(),
+                    0,
+                ),
+                _ => (Vec::new(), 0),
             };
-            out.push(ControlV {
-                label: col.map(render::label_of).unwrap_or_else(|| f.name.clone()),
-                name: f.name,
-                options,
-            });
+
+            controls.push(ControlV { name: f.name, label, options, chosen, chosen_label, too_many });
         }
-        Ok(out)
+        Ok((controls, chips))
     }
 
-    fn chips(&self, cols: &[Column], state: &ViewState) -> Vec<Chip> {
-        let label_of = |name: &str| {
-            cols.iter()
-                .find(|c| render::name_of(c) == name)
-                .map(render::label_of)
-                .unwrap_or_else(|| name.to_string())
+    /// One target row's label, for a filter value. `ids=` is an exact primary-key lookup, so this
+    /// costs one row however large the target is.
+    async fn label_of(&self, target: &str, value: &str) -> Result<String> {
+        let q = ListQuery {
+            pk_in: vec![value.to_string()],
+            per_page: 1,
+            ..Default::default()
         };
-        let mut chips = Vec::new();
-        for (name, value) in &state.filters {
-            if value.is_empty() {
-                continue;
-            }
-            let pinned = self
-                .filters
-                .iter()
-                .any(|f| f.name == *name && (f.fixed.is_some() || f.shared));
-            chips.push(Chip {
-                label: label_of(name),
-                value: value.clone(),
-                clear_href: (!pinned).then(|| state.href_filter(name, "")),
-            });
-        }
-        if !state.q.is_empty() {
-            chips.push(Chip {
-                label: "Search".into(),
-                value: state.q.clone(),
-                clear_href: None,
-            });
-        }
-        chips
+        Ok(self
+            .engine
+            .list(target, &q, true)
+            .await?
+            .data
+            .first()
+            .map(|it| it.label.clone())
+            .unwrap_or_else(|| value.to_string()))
     }
 
     /// The create/edit dialog for the row the URL names.
@@ -901,6 +1008,9 @@ struct AdminTmpl {
     panel: String,
 }
 
+/// (`Entity` is much the largest variant, and that is fine: the enum is a per-request configuration
+/// list of a dozen items at most, so boxing it would trade a deref in every match for nothing.)
+#[allow(clippy::large_enum_variant)]
 enum AdminItem<'a> {
     Entity(Table<'a>),
     Group(String),

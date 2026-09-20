@@ -134,6 +134,11 @@ because `?entity=post` renders one table instead of nine.
   operator's input still in them, rather than mapping a `422` body onto inputs in JavaScript.
 - **`crud::ui::CSS`** — the ~40 lines Bootstrap 5 doesn't cover (mostly the dialog). Inline it once.
 - **`crud::ui::esc`** — escape a JSON scalar for HTML, for `format` closures.
+- **`Table::columns([…])`** — choose and order the columns the *table* shows, independently of the
+  dialog's form (`fields`/`omit`) and of CSV. The usual case: a model with twenty columns and a
+  console that needs five across the screen.
+- **`Table::row_class(closure)`** — a CSS class per row, from the row: `table-danger` for overdue,
+  muted for archived. Like `format`, a Rust closure rather than a string of another language.
 - **`Table::fields` / `Table::omit`**, which `Form` already had: the dialog's form can now show a
   subset, in an order, with the same render-time refusal when a create couldn't be satisfied.
 - **CSV in a toolbar menu, with a real import dialog.** Export and Import sit in a `<details>`
@@ -156,6 +161,12 @@ because `?entity=post` renders one table instead of nine.
 - **A validation message naming a column the form doesn't render is promoted to the dialog's
   banner** (`views: not allowed`) instead of vanishing. Field messages still render under their own
   input; `validate_row`'s cross-field messages still head the dialog.
+- **`filter[<name>]=*` means "no filter"** — the value the toolbar's "all" submits. A `<select>`
+  always submits something and the empty value was already taken (`filter[author]=` matches rows
+  with *no* author), so "all" had been asking for the orphans. `*` is reserved for this.
+- **A filter whose target is too large to list gets a text input, not a truncated menu**, and says
+  how many values exist; a chip resolves a relation filter to its **label** (`Author: Ada Lovelace`)
+  instead of showing the raw id.
 - **Reads are gated.** `render_for` consults the model's gate for `List` (and `Read` when a dialog is
   open) and answers `401`/`403` — previously the API was the read enforcement point and the UI only
   hid buttons. `crud/gate_tests.rs` covers it.
