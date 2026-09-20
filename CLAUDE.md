@@ -162,6 +162,14 @@ let who = auth.identify(&headers).await;   // Option<Identity>; None → redirec
   `PublicReadGroupWrite::new(&auth, ["editors"])` (public read, group write),
   `GroupReadWrite::new(&auth, ["admin"])` (group-only, read *and* write). Or implement `authz::Authz`
   yourself. The engine maps a gate's `Decision` to `200`/`401`/`403`.
+- **Where accounts come from — there is no registration page** (`docs/AUTH.md` §5j, deliberate). An
+  account is created by an operator (`auth::create_user`, or an **accounts panel**: `auth`'s own
+  tables registered as ordinary models — see `examples/auth`'s `/admin`, and note the
+  `user.relate(&group)` line, without which the panel can create accounts it can't give any
+  permissions to), by **SSO auto-registration** on first login, by the boot seeder
+  (`auth::make_admin`), or by break-glass (`auth::reset_admin_access` behind a CLI flag). Public
+  signup is an app decision — who may join and what is verified first — so an app that wants one
+  writes that page over the same calls.
 - **Profile / password**: `/profile` lets any user change their own password; a manager (a
   profile-manager group, default `[admin_group]`) resets others at `/profile/{id}`. Both screen the new
   password against a **`validate::PasswordPolicy`** — on by default at `recommended()` (≥ 12 chars,
@@ -254,9 +262,11 @@ axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).a
 `Router::layer` wraps, so the **last** layer added runs **first** — `resolve_real_ip` must be last.
 Behind a CDN, write your own middleware inserting a `RealIp` instead; there is no hook, on purpose.
 
-**Logging is the app's.** This crate writes nothing to stdout or stderr — no `access_log`, deliberately
-(a request log is a dozen lines, every app wants different ones, and one shape would have cost a logging
-dependency here). Copy `examples/access_log`.
+**Logging and auditing are the app's.** This crate writes nothing to stdout or stderr — no
+`access_log`, deliberately (a request log is a dozen lines, every app wants different ones, and one
+shape would have cost a logging dependency here) — and it persists no audit row, only firing a
+`WriteEvent` per committed write (`observe`) for a sink you register. Copy `examples/audit`, which is
+both, over the one `RealIp` that makes them agree about who was here.
 
 `relativelylight` is always *part of* a larger app:
 
@@ -274,13 +284,15 @@ dependency here). Copy `examples/access_log`.
 cargo run -p crud-example         # :3000  compose it yourself: per-entity pages, standalone Form (/post/new), /dashboard,
                                   #         a pinned filter at /author/{id}/posts, CSV, the timezone cookie + DST rows (/event) — no auth
 cargo run -p adminpanel-example   # :3000  crud::ui::Admin, login-gated, inline accounts + 2FA, timezone cookie (admin/password, editor/password)
-cargo run -p auth-example         # :3000  auth alone (no crud): login, /secret, /profile + 2FA, re-auth demo (admin/password)
-cargo run -p access-log-example   # :3000  the request log an app writes for itself: RealIp + naming the user, two ways
+cargo run -p auth-example         # :3000  auth up close: login, /secret, /profile + 2FA, re-auth demo, SSO wiring,
+                                  #         and /admin — the accounts panel users are provisioned from (admin/password)
+cargo run -p audit-example        # :3000  who called + what they changed: the request log (two ways) and the
+                                  #         write observer, one line per committed write, both over one RealIp
 ```
 
 **Run one at a time — they all bind port 3000** (fresh seeded in-memory SQLite each start). Only
-`access-log-example` prints a line per request: the crate itself logs nothing, which is that example's
-subject. `crud`, `adminpanel` and `auth` share `examples/model` — whose `event` table exists for the
+`audit-example` prints to stdout: the crate itself logs nothing and persists no audit row, which is
+that example's whole subject. All four share `examples/model` — whose `event` table exists for the
 timezone demo, its rows straddling both 2026 DST transitions.
 
 ## Documentation

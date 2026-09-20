@@ -132,7 +132,7 @@ All optional, all applied by the app; defaults chosen for "safe but works out of
   `tracing` event or a line on stderr, the query string or just the path, and above all a **level** you
   can turn down on a high-volume endpoint — the one thing a hardcoded `eprintln!` in a library could never
   give you. Shipping one shape would have meant a logging dependency here and an opinion about all of it,
-  so **[`examples/access_log`](../examples/access_log/src/main.rs)** carries the dozen lines instead,
+  so **[`examples/audit`](../examples/audit/src/main.rs)** carries the dozen lines instead,
   runnable and in two variants. (An `access_log` middleware existed briefly during 0.2.0 development and
   was removed before the tag.)
 
@@ -303,6 +303,37 @@ migration; when a later library version adds a column, add your own `ALTER TABLE
   (default `"admin"`). Both paths write **only the password hash** — see the helper contract below — and
   both **revoke sessions**: the self-service page replaces the caller's session and deletes their others,
   a manager's reset deletes all of the target's (§5f).
+
+**Extending the profile page — `Auth::profile_extra`.** The password/2FA fragment is rarely the whole
+of "my account": an app wants API tokens, notification preferences, a data export, a list of the
+user's own things. Register a hook and it renders **below** the library's fragment, on the caller's
+own `/profile` only (a manager's `/profile/{id}` doesn't get it — resetting someone's password is no
+licence to touch their tokens):
+
+```rust
+use relativelylight::auth::ProfileSection;
+use relativelylight::csrf::Csrf;
+
+let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
+    let rows = my_api_tokens(&s.who.id).await;                 // `s.who` is the caller
+    format!(r#"<hr><h2 class="h6">API tokens</h2>{rows}
+               <form method="post" action="/api-token/new">{}
+               <button class="btn btn-sm btn-outline-primary">Issue a token</button></form>"#,
+            Csrf::hidden_input(&s.csrf))                        // `s.csrf` is *this request's* token
+});
+```
+
+`s.csrf` is what makes the section able to hold a real form: the hook never sees the request, so it
+could not mint a token itself, and a form without one is refused like any other POST (§7). The
+section's *handler* is an ordinary route of yours — put
+[`reauthenticate`](#5h-re-authentication-before-sensitive-changes--implemented) at the top of it if
+the action is sensitive, which for an API token it is. `examples/auth` does exactly this: its
+`POST /api-token/rotate` is reached from a `profile_extra` section and re-authenticates before it
+does anything.
+
+Three things it is not: it is **not** a way to replace the password/2FA fragment (that's
+`profile_shell`, which wraps the whole page in your chrome), it is **not** rendered for managers
+looking at someone else, and it is **not** run on the login page.
 
 ### Admin helpers — who may re-open an account
 
@@ -521,13 +552,24 @@ share one `Arc` with `Crud::on_write` so a single audit sink covers both surface
 
 ```rust
 let audit = Arc::new(MyAuditSink::new(db.clone()));
-let auth = Auth::new(db.clone()).on_write(audit.clone()) /* …other builders… */;
-let mut crud = Crud::new(db, "/admin/api");
+let auth = Auth::new(db.clone(), lockout).on_write(audit.clone()) /* …other builders… */;
+let mut crud = Crud::new(db);
 crud.on_write(audit.clone());
 ```
 
 The app owns the audit table + retention; the library only emits the events. (Auditing login events and
 TOTP enable/disable can be layered on the same hook later; `last_login_at` already records logins.)
+
+**Runnable:** [`examples/audit`](../examples/audit/src/main.rs) registers one sink on both
+`Auth::on_write` and `Crud::on_write` and prints a line per committed write, next to the request log
+built on the same `RealIp`. Two things it makes visible that are easy to get wrong on paper:
+
+- resolving the actor means calling `Auth::identify` from inside the observer, and the observer is
+  built *before* `Auth` is — a `OnceLock` closes the loop;
+- a **self-service password change rotates the caller's session**, so by the time its event fires the
+  cookie on that request is already spent and `identify` finds nobody. The event's `key` still names
+  the row, and a manager's reset (`auth-admin`) names the manager normally. If you need the actor on
+  that one event, record it in the handler rather than in the sink.
 
 ## 5e. Lockout: the brute-force brake — implemented
 
@@ -886,6 +928,78 @@ login.
 a step for it. Don't register the entity in an admin panel: every row is a hash of a credential, and there
 is nothing an operator can usefully do to one that the "generate new codes" button doesn't do properly.
 
+## 5j. Where accounts come from — there is **no registration page**
+
+This module ships login, not sign-up, and that is a decision rather than a gap. Who may join, what is
+verified before they do (an email? an invite? a payment? a manager's approval?), and what an account is
+worth on arrival are product questions with no defensible default — a library that answered them would
+be wrong for most apps and, in the wrong deployment, wrong in the direction of letting strangers in.
+
+So an account comes into being in exactly four ways, all of them the app's own call:
+
+| Route | Call | Typical use |
+|---|---|---|
+| an operator creates it | the **accounts panel** (below), or `auth::create_user(db, user, pw)` | the normal one |
+| SSO creates it on first login | per-provider **auto-registration** (§5b) | a corporate IdP owns the roster |
+| the app's boot seeder | `auth::make_admin(db, group, user, pw)` — idempotent | the first admin |
+| break-glass, from a shell | `auth::reset_admin_access(db, group, user, pw)` behind a CLI flag | nobody can get in |
+
+The last two are deliberately exempt from the password policy (§5g), which governs *typed* input only —
+otherwise a deployment could be left with no way to set a first password at all.
+
+**Want public signup anyway?** Write the page: a `crud::ui::Form` over `auth_user` (or a hand-written
+form) posting to a route of yours that validates whatever you require and calls `create_user` +
+`add_to_group`. Doing it in the app is what lets you put an invite token, a rate limit or an email
+round trip in front of it — and it keeps that policy visible in your code rather than buried in a
+library default.
+
+### The accounts panel
+
+`auth`'s tables are ordinary SeaORM entities, so an operator's screen is the ordinary admin over them —
+no bespoke user-management UI, and no second permission model. [`examples/auth`](../examples/auth/src/main.rs)
+builds one in about sixty lines; the parts that matter:
+
+```rust
+let mut user  = MetaModel::new(auth::user::Entity);
+let mut group = MetaModel::new(auth::group::Entity);
+
+user.field("password_hash").password();          // write-only, argon2 on write, never read back
+user.field("password_hash")                       // the *same* policy Auth applies to /profile
+    .validate_str(validate::optional(Box::new(validate::password(policy))));
+for f in ["totp_secret", "totp_pending", "totp_last_step"] { user.field(f).hidden = true; }
+
+user.label_column("username");
+group.label_column("name");
+user.relate(&group);                              // ← the line that makes the panel *useful*
+group.relate(&user);
+
+crud.register(user,  Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP])));
+crud.register(group, Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP])));
+```
+
+Four things are load-bearing:
+
+1. **`user.relate(&group)`** — `auth_user_group` is an N:M junction and is never registered as a model
+   of its own, so without this declaration the panel can create an account and cannot put it in a
+   group. Since the gate checks *group membership*, that is a screen that can make users who can do
+   nothing. (It also gives you the reverse view: a group's Members picker.)
+2. **`GroupReadWrite`, not `UserReadGroupWrite`** — reads included. A list of accounts is not
+   something a logged-in stranger should be able to enumerate, and `render_for` is where that is
+   enforced: a non-admin gets `403`, not a page with the buttons greyed out.
+3. **`password_hash().password()` plus the policy** — wire the policy into `Auth` *and* this form, or
+   the form becomes the way around it (§5g).
+4. **Hide the TOTP columns.** The secret and the pending secret are credentials; `totp_last_step` is
+   the replay guard, and hand-editing it either lets a code be replayed or locks the user out of their
+   own authenticator. 2FA is managed from `/profile`, never from a CRUD form. **Never register
+   `auth::recovery::entity`** at all — every row of it is a credential hash.
+
+Register `lockout::username_entity` / `lockout::ip_entity` in the same panel (§5e) and the unlock
+becomes an ordinary gated, CSRF-checked, audited `DELETE` rather than a bespoke endpoint.
+
+What the panel deliberately cannot do: **enrol or reset someone's 2FA** (a manager can only *disable*
+it, from `/profile/{id}`, under re-auth — §5h), and **reset an SSO account's password** (there is none
+to reset — §5b).
+
 ## 6. authz — the gate
 
 The gate trait lives in **`relativelylight::authz`** — always compiled, independent of the `auth`
@@ -1145,7 +1259,7 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
 
 ## 10. Examples
 
-- **`examples/auth`** — uses **`auth` alone (no `crud`)** to prove it stands on its own: a login
+- **`examples/auth`** — `auth` up close: a login
   page, a session cookie, and a `/secret` page gated by an on-demand `auth.identify(&headers)` check
   (redirect to `login_path` when anonymous). The `/secret` page shows the signed-in user and links to
   the self-service **`/profile`** page — password change **and TOTP 2FA** enrolment/disable — wrapped
@@ -1162,7 +1276,12 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
   spraying `ghost1…ghostN` from one address trips the IP cap at its 15th failure. **SSO** is wired in
   (feature `sso`) and enabled by setting `SSO_GOOGLE_CLIENT_ID` / `SSO_GOOGLE_CLIENT_SECRET` in the
   env: a "Sign in with Google" button appears and `/sso/google/*` is served (username→group rule for
-  `@example.com`, auto-register on).
+  `@example.com`, auto-register on). Finally it carries the **accounts panel** (§5j) at `/admin`: the
+  `auth_user` / `auth_group` / lockout tables registered as ordinary models behind
+  `GroupReadWrite::new(&auth, ["superadmin"])` and rendered by `crud::ui::Admin`, including the
+  `user.relate(&group)` line that makes group membership editable — without it the panel can create
+  an account it cannot give any permissions to. (That `auth` compiles and runs **without** `crud` is
+  asserted by the feature matrix in CLAUDE.md, not by this example.)
 - **`examples/adminpanel`** — **login-gated** `crud::ui::Admin`: the page calls
   `auth.identify(&headers)` (→ redirect to `/login` when anonymous), the content models are registered
   with a shared `UserReadGroupWrite::new(&auth, ["admin"])` gate (any logged-in user reads; the admin
@@ -1190,7 +1309,7 @@ Usage: `relativelylight = { features = ["auth"] }` for auth-only (no CRUD deps);
 - **`examples/crud`** — the ungated counterpart (`Open`), so there's a no-login demo.
 
 None of them print a request log — this crate ships no `access_log` and writes nothing itself (§4).
-**`examples/access_log`** is the one that does: a dozen lines over `RealIp` +
+**`examples/audit`** is the one that does: a dozen lines over `RealIp` +
 `into_make_service_with_connect_info`, in two variants, including one that names the signed-in user.
 
 > **Note — UI vs API enforcement.** The adminpanel renders the panel *per request* via

@@ -486,6 +486,7 @@ Net: one extra handler, one shared `panel()` function, a `ViewState`, and the ro
 | `Engine::list` | `-> Value` | `-> Page` |
 | `Engine::delete_where` | `-> Value` | `-> u64` |
 | `Table::format` | `(col, js: &str)` | `(col, impl Fn(&Value, &Value) -> String)` |
+| `Auth::profile_extra` | `Fn(Identity) -> Fut` | `Fn(ProfileSection) -> Fut` — `s.who` + `s.csrf`, so the section can contain a form |
 | `submit` body | — (new in 0.3) | `&[u8]`: pass `axum::body::Bytes` |
 | `render_for` | `(&headers) -> Result<String>` | `async (&headers, &state) -> Result<String>` |
 | `csv_io::export`/`import` | `(engine, slug, …)` | `(engine, slug, &[Column], …, &Tz)` |
@@ -501,7 +502,7 @@ Net: one extra handler, one shared `panel()` function, a `ViewState`, and the ro
 `Csrf::max_upload`,
 `Form::submit`, `Admin::{submit, csv}`, `Engine::pk`, `time::{Tz, COOKIE, ZONES_EUROPE, ZONES_US,
 EXCLUDED, zones_default, zones_all, is_excluded}`, `TzPicker::{action, all_zones, unknown_zones}`,
-`FieldDisplay::is_datetime`, feature `tz`.
+`FieldDisplay::is_datetime`, `auth::ProfileSection`, feature `tz`.
 
 ---
 

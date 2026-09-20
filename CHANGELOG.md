@@ -38,6 +38,14 @@ because a request renders one table instead of nine.
   `create` / `update` / `delete` / `columns`, which are typed and unchanged in meaning. That is a
   deliberate transfer — an app's public API is a product decision this crate shouldn't be making.
 
+- **`Auth::profile_extra`'s hook takes a `ProfileSection`, not an `Identity`.** The section it renders
+  is normally a *form* — API tokens, preferences — and a form needs the request's CSRF token, which
+  the app can't mint because it never sees the request. So the hook is now handed both.
+
+  **Upgrade:** `|who| async move { … who.username … }` becomes `|s| async move { … s.who.username
+  … }`, and a form in the section gets `csrf::Csrf::hidden_input(&s.csrf)` — without which its POST
+  was being refused. `ProfileSection` is `#[non_exhaustive]`; read its fields, don't construct it.
+
 - **`Crud::new(db, base_path)` → `Crud::new(db)`.** There is no mount prefix any more: every link the
   UI renders is query-only and relative (`?page=2`), so it works on whatever path the app serves it
   from and the library never needs to know that path. Delete the second argument.
@@ -232,6 +240,30 @@ because a request renders one table instead of nine.
 - The `«` / `»` pager controls are always rendered, stepping by a tenth of the table (so they are
   plain previous/next on a short one) rather than appearing only past ten pages.
 - Multi-key sorting is an explicit `+` affordance on each header instead of shift-clicking it.
+- **`Auth::profile_extra` is demonstrated and documented** — it shipped in 0.2.1 and appeared in no
+  example and no guide, which for the one hook an app uses to put *its own* sections (API tokens,
+  preferences) on the profile page made it effectively undiscoverable. [AUTH.md §5](docs/AUTH.md) now
+  covers it, and `examples/auth` renders its API-token rotate form there instead of on `/secret`,
+  which is where a real app would keep it.
+- **`examples/access_log` is now `examples/audit`** (`cargo run -p audit-example`), and it covers the
+  *second* record an app keeps for itself. The request log is unchanged — the same two variants over
+  `RealIp` — and beside it is a `WriteObserver` registered on **both** `Crud::on_write` and
+  `Auth::on_write`, printing one line per committed write with the actor, the address and a per-field
+  diff of `before`/`after`. The `observe` module had no runnable example at all until now, which was
+  a gap in the one seam an app is most likely to need on day one. The example also makes two
+  practical facts visible: a sink is `async` and runs *inside* the request, and resolving the actor
+  means calling `Auth::identify` from a sink built before `Auth` was (a `OnceLock` closes the loop).
+- **`examples/auth` gains an accounts panel** at `/admin` — `auth`'s own `auth_user` / `auth_group` /
+  lockout tables registered as ordinary models behind `GroupReadWrite`, rendered by `crud::ui::Admin`.
+  The library ships no registration page on purpose, so *somebody* has to make the second account, and
+  nothing showed how. Includes the `user.relate(&group)` declaration that makes group membership
+  editable — without it a panel can create an account it cannot give any permissions to, which is
+  what `examples/adminpanel` did. The example now enables the `ui` feature; that `auth` builds and
+  runs without `crud` is asserted by CLAUDE.md's feature matrix rather than by an example.
+- **New: [AUTH.md §5j](docs/AUTH.md), "Where accounts come from".** The four routes an account can
+  come into being by (operator, SSO auto-registration, boot seeder, break-glass), why there is no
+  registration page, how to write one anyway, and the four load-bearing lines of an accounts panel.
+  The policy was implicit in the API before; now it is written down.
 - **The documents moved out of the project root.** `TODO.md` → [`docs/TODO.md`](docs/TODO.md),
   `SORTFILTER.md` → [`docs/SORTFILTER.md`](docs/SORTFILTER.md), and `MPA_MIGRATION.md` →
   [`docs/MIGRATION-0.3.md`](docs/MIGRATION-0.3.md), which absorbed the `MPA.md` plan as its appendix

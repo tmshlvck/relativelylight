@@ -31,9 +31,9 @@ pub mod authz;
 /// everywhere. Also carries the CIDR helpers.
 pub mod net;
 
-/// The request-pipeline layers: [`resolve_real_ip`](middleware::resolve_real_ip), which resolves the
+/// The request-pipeline layer: [`resolve_real_ip`](middleware::resolve_real_ip), which resolves the
 /// caller's address once into a [`RealIp`](middleware::RealIp) extension and is **required** by anything
-/// in this crate that needs to know who is calling, and [`access_log`](middleware::access_log).
+/// in this crate that needs to know who is calling. There is no request log here — see `examples/audit`.
 #[cfg(feature = "axum")]
 pub mod middleware;
 

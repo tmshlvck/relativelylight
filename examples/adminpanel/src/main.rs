@@ -370,7 +370,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // session lookup.
     let app_router = ui
         .merge(auth.routes())
-        // No request log: this crate ships none (it writes nothing anywhere). `examples/access_log`
+        // No request log: this crate ships none (it writes nothing anywhere). `examples/audit`
         // is a dozen lines you can copy, in two variants.
         // The caller's address, resolved **once** at the outermost layer: the access log, `auth`'s
         // lockout and the audit events all read that one value, so they can't disagree about who called.

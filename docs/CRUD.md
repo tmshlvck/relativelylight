@@ -964,6 +964,14 @@ auto-generated CRUD), not a bare `crud`, which names nothing in particular in an
 screens of its own; store it as it arrives rather than translating it. **Times are UTC**
 (`i64` Unix seconds) — see the timezone note in [PRD.md](PRD.md).
 
+**Runnable:** [`examples/audit`](../examples/audit/src/main.rs) is the whole thing in about sixty
+lines — one sink on `Crud::on_write` *and* `Auth::on_write`, printing `source op entity#key
+actor@address` plus a per-field diff of `before`/`after`, beside a request log built on the same
+`RealIp`. Two practical notes it makes concrete: the sink is `async` and runs **inside the request**
+(after the commit, before the response), so real work belongs on a channel rather than in it; and
+resolving the actor means calling `Auth::identify` from a sink that was constructed *before* `Auth`
+was — a `OnceLock` closes that loop.
+
 ## Architecture & extending
 
 The **`Engine`** is a registry: it holds the entities, consults each model's gate, and forwards data

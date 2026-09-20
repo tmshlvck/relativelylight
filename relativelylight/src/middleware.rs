@@ -28,7 +28,7 @@
 //! log is a dozen lines that read [`RealIp`], and every app wants different ones (a structured `tracing`
 //! event vs. a line on stderr; the query string or not; a level it can turn down on a high-volume
 //! endpoint). Shipping one shape would have forced a logging dependency on every user of this crate to
-//! decide none of that. **`examples/access_log`** is a runnable one, in two variants — including naming
+//! decide none of that. **`examples/audit`** is a runnable one, in two variants — including naming
 //! the signed-in user, which a library layer structurally cannot do (it would owe an `Auth::identify` on
 //! every request, and a token-authenticated caller isn't verified until it is already inside the
 //! handler).

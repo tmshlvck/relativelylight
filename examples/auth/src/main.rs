@@ -1,8 +1,16 @@
-//! examples/auth — the `auth` module used **without** `crud` (auth stands on its own). See
-//! `docs/AUTH.md`. A public page, a `/secret` page gated by login, `/login` + `/logout`, and a
-//! configurable admin group. Also demonstrates the `--set-admin-pw <pw>` break-glass startup path and
-//! an **app-owned credential check** (`/api/whoami`, HTTP Basic) braked with the *same* attempt
-//! counters as the login form via `Auth::username_lockout` / `Auth::ip_lockout` — see below.
+//! examples/auth — the `auth` module on its own terms. See `docs/AUTH.md`. A public page, a
+//! `/secret` page gated by login, `/login` + `/logout`, a configurable admin group, and the
+//! **accounts panel** (`/admin`) an operator provisions users from. Also demonstrates the
+//! `--set-admin-pw <pw>` break-glass startup path and an **app-owned credential check**
+//! (`/api/whoami`, HTTP Basic) braked with the *same* attempt counters as the login form via
+//! `Auth::username_lockout` / `Auth::ip_lockout` — see below.
+//!
+//! **There is no registration page, and that is deliberate** (`docs/AUTH.md` §5j). An account comes
+//! into being one of four ways: an operator creates it (the panel here, or `auth::create_user`), SSO
+//! auto-registration creates it on first login, the boot seeder creates it (`auth::make_admin`), or
+//! the break-glass CLI does. A public signup page is an application decision — who may join, what is
+//! verified, what they are worth on arrival — so an app that wants one writes it, over those same
+//! calls or a `crud::ui::Form`.
 //!
 //!   cargo run -p auth-example                            # serve; log in as admin / password
 //!   TRUST_PROXY=1 cargo run -p auth-example               # …behind a proxy: believe X-Forwarded-For
@@ -11,11 +19,12 @@
 //!   curl -u admin:nope -i     127.0.0.1:3000/api/whoami  # 5 of these → 429, and /login locks too
 //!
 //! It also shows the two housekeeping duties the library leaves to the app: it schedules
-//! `auth::prune` (expired sessions + expired lockout rows), and a real app would register the two
-//! lockout entities in its admin panel so an operator can see who is locked out and clear a row.
+//! `auth::prune` (expired sessions + expired lockout rows), and it registers the two lockout
+//! entities in the panel, so an operator sees who is locked out and clears a row by deleting it.
 
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::body::Bytes;
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Form, Router};
@@ -23,9 +32,14 @@ use axum_extra::extract::CookieJar;
 use relativelylight::auth::lockout::{IpLockout, Lockout, UsernameLockout};
 use relativelylight::middleware::RealIp;
 use relativelylight::auth::sso::{Sso, SsoButton, SsoProvider};
-use relativelylight::auth::{self, Auth, Identity};
+use relativelylight::auth::{self, Auth, GroupReadWrite, Identity};
+use relativelylight::crud::engine::Engine;
+use relativelylight::crud::seaorm::{Crud, MetaModel};
+use relativelylight::crud::ui::{Admin, Outcome, ViewState, CSS};
+use relativelylight::validate;
 use sea_orm::{ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait, QueryFilter};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 // The superadmin group name is the app's choice — a constant here, but it could come from config.
@@ -83,6 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a real app passes `relativelylight::net::parse_nets(&cfg.allow_list)` to `.whitelist(..)`.
     let lockout = Lockout::default().accounts(5, 300).addresses(15, 300);
     let auth_db = db.clone(); // the app's own endpoint checks passwords itself
+    let crud_db = db.clone(); // …and the accounts panel writes to the same tables
     let auth = Auth::new(db, lockout)
         .secure_cookies(false) // local http, so no `Secure` attribute
         .admin_group(ADMIN_GROUP)
@@ -106,16 +121,22 @@ from this site. Reload the page and try again.</div>
                 .into_response()
         })
         .login_shell(move |form| bootstrap_login(form, &sso_buttons))
-        .profile_shell(bootstrap_profile);
+        .profile_shell(bootstrap_profile)
+        // The app's own section on the library's profile page — see `api_token_section`.
+        .profile_extra(|s| async move { api_token_section(&s) });
 
     // auth is now fully configured — safe to clone it into the Sso.
     let sso = google.map(|(id, secret)| build_sso(&auth, id, secret));
+
+    // The accounts panel's engine: `auth`'s own tables, registered like anybody else's models.
+    let engine = accounts_engine(crud_db, &auth);
 
     // No middleware: `secret` resolves the session itself via `auth.identify`. The app router carries
     // its own state (the `Auth` handle, the DB, and the shared attempt counters) so handlers can reach
     // them; the login/logout routes bring their own.
     let state = AppState {
         auth: auth.clone(),
+        engine,
         db: auth_db,
         // The *same* counters the login form uses, so one account has one budget across both.
         usernames: auth.username_lockout(),
@@ -138,6 +159,10 @@ from this site. Reload the page and try again.</div>
         .route("/", get(public))
         .route("/secret", get(secret)) // gated on demand (see `secret`)
         .route("/api/whoami", get(whoami)) // the app's own credential check (see `whoami`)
+        // The accounts panel: two handlers on one path, the model named by the path segment. Its
+        // gate is `GroupReadWrite`, so a logged-in non-admin gets 403 rather than a list of accounts.
+        .route("/admin", get(|| async { Redirect::to("/admin/auth_user") }))
+        .route("/admin/{entity}", get(accounts_show).post(accounts_save))
         .with_state(state)
         .merge(guarded)
         .merge(auth.routes()); // /login, /logout, /profile (password + 2FA), /login/totp
@@ -148,7 +173,7 @@ from this site. Reload the page and try again.</div>
     // `auth`'s lockout, the audit events, this app's own `/api/whoami` and anything it logs — so they all
     // name the same client. This app used to resolve it in three places with two copies of the proxy
     // flag; the layer is what makes that impossible. Mandatory: `auth`'s login routes 500 without it.
-    // (No request log here — the crate ships none; `examples/access_log` shows the dozen lines.)
+    // (No request log here — the crate ships none; `examples/audit` shows the dozen lines.)
     let app = app
         .layer(axum::middleware::from_fn_with_state(
             relativelylight::middleware::TrustProxy(trust_proxy_from_env()),
@@ -175,6 +200,7 @@ from this site. Reload the page and try again.</div>
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     println!("auth playground on http://127.0.0.1:3000/   (log in as admin / password)");
+    println!("accounts panel   http://127.0.0.1:3000/admin  (admin group only — the library has no sign-up page)");
     if sso.is_some() {
         println!("SSO enabled: 'Sign in with Google' button on the login page");
     }
@@ -233,6 +259,8 @@ async fn public() -> Html<String> {
     Html(page(
         "Public page",
         r#"<p><a href="/secret">/secret</a> requires a login · <a href="/login">/login</a></p>
+<p><a href="/admin">/admin</a> is the accounts panel — admin group only, reads included. There is no
+sign-up page: an operator creates accounts there, or SSO does on first login.</p>
 <p class="small text-muted"><code>GET /api/whoami</code> takes HTTP Basic — the app checks it itself,
 braked with the same attempt counters as the login form.</p>"#,
     ))
@@ -248,27 +276,42 @@ async fn secret(State(app): State<AppState>, headers: HeaderMap, jar: CookieJar)
     };
     let name = auth.session_cookie_name();
     let cookie = jar.get(name).map(|c| c.value().to_string()).unwrap_or_default();
-    // This page renders a form that posts to a CSRF-guarded route, so it needs a token: `ensure` reuses
-    // the request's if it has one and mints one otherwise, handing back the cookie to set in that case.
-    let (csrf_token, csrf_cookie) = auth.csrf().ensure(&headers);
-    let jar = match csrf_cookie {
-        Some(c) => jar.add(c),
-        None => jar,
-    };
     let body = Html(page(
         "Protected page",
         &format!(
             r#"<p>Signed in as <b>{}</b> — groups: [{}].</p>
 <p class="small text-muted mb-1">session cookie</p>
 <pre class="bg-body-secondary p-2 rounded"><code>{name}={}</code></pre>
-<a class="btn btn-primary btn-sm" href="/profile">Change password</a>
+<a class="btn btn-primary btn-sm" href="/profile">Profile, 2FA &amp; API token</a>
+<a class="btn btn-outline-secondary btn-sm" href="/admin">Accounts</a>
 <a class="btn btn-outline-secondary btn-sm" href="/logout">Log out</a>
-<hr class="my-4">
-<h2 class="h6">An app-owned sensitive action</h2>
-<p class="small text-muted">Rotating this account's API token is the kind of thing a live session alone
+<p class="small text-muted mt-3 mb-0">The API-token section on <a href="/profile">/profile</a> is this
+app's own, rendered into the library's page by <code>Auth::profile_extra</code>.</p>"#,
+            who.username,
+            who.groups.join(", "),
+            cookie,
+        ),
+    ));
+    (jar, body).into_response()
+}
+
+/// **Extending the library's profile page** — `Auth::profile_extra` appends this below the
+/// password/2FA fragment on `/profile` (the caller's own page only; a manager's `/profile/{id}` does
+/// not get it). This is where an app puts the things that belong beside "change my password": API
+/// tokens, notification preferences, a data export.
+///
+/// The hook is handed the caller's identity *and this request's CSRF token*, which is what lets the
+/// section contain a real `<form>` rather than just text — the app never sees the request, so it
+/// could not mint one itself.
+fn api_token_section(s: &relativelylight::auth::ProfileSection) -> String {
+    format!(
+        r#"<hr class="my-4">
+<h2 class="h6">API token</h2>
+<p class="small text-muted">Rotating <b>{}</b>'s API token is the kind of thing a live session alone
 shouldn't be enough for — a stolen cookie <em>is</em> a live session. So the app asks the caller to prove
 they are present, with <code>Auth::reauthenticate</code>: the same factors the library's own sensitive
-pages take (your password, or a fresh 2FA code), and the same single-use rule for codes.</p>
+pages take (your password, or a fresh 2FA code), and the same single-use rule for codes. The CSRF token
+comes from the hook; the re-auth happens in the handler.</p>
 <form method="post" action="/api-token/rotate">
   {csrf_input}
   <div class="mb-2" style="max-width:22rem">
@@ -283,13 +326,9 @@ pages take (your password, or a fresh 2FA code), and the same single-use rule fo
   </div>
   <button class="btn btn-outline-danger btn-sm" type="submit">Rotate API token</button>
 </form>"#,
-            who.username,
-            who.groups.join(", "),
-            cookie,
-            csrf_input = relativelylight::csrf::Csrf::hidden_input(&csrf_token),
-        ),
-    ));
-    (jar, body).into_response()
+        s.who.username,
+        csrf_input = relativelylight::csrf::Csrf::hidden_input(&s.csrf),
+    )
 }
 
 /// What an app's own sensitive route submits: the caller's re-authentication. (A real one would carry a
@@ -352,11 +391,177 @@ async fn rotate_api_token(
     .into_response()
 }
 
+// ── The accounts panel ───────────────────────────────────────────────────────────────────────────
+//
+// The library has **no registration page** (see the module docs). Somebody has to make the second
+// account, and this is that somebody's screen: `auth`'s own tables — accounts, groups, and the two
+// lockout counters — registered as ordinary models and rendered by `crud::ui::Admin`. Nothing here
+// is special-cased for `auth`; it is the same five calls any other model gets.
+
+/// Register `auth`'s tables and hand back the engine the panel renders from.
+///
+/// The gate is `GroupReadWrite`: **reads included**, admin group only. An accounts list is not a
+/// thing a logged-in stranger should be able to enumerate, and `render_for` is where that is
+/// enforced — a non-admin gets 403, not a page with the buttons greyed out.
+fn accounts_engine(db: DatabaseConnection, auth: &Auth) -> Arc<Engine> {
+    let mut user = MetaModel::new(auth::user::Entity);
+    let mut group = MetaModel::new(auth::group::Entity);
+
+    // `.password()` makes `password_hash` a write-only, argon2-hashed "Password" field: plaintext in
+    // the form, a hash in the column, never returned in a read. Blank on create = an account with no
+    // password (login by password disabled — how you pre-create an SSO-only user); blank on edit =
+    // keep the current one, which is what `validate::optional` below preserves.
+    user.field("password_hash").password();
+    user.field("password_hash").description = Some(
+        "Blank on create = no password (SSO-only account). Blank on edit = keep the current one. \
+         At least 12 characters, and not a common one."
+            .into(),
+    );
+    // The *same* policy `Auth` applies to /profile, applied to this form too. Wire only one of the
+    // two and the other becomes the way around it. (`examples/adminpanel` drives both from a single
+    // configurable level; this one takes the recommended default.)
+    user.field("password_hash")
+        .validate_str(validate::optional(Box::new(validate::password(
+            validate::PasswordPolicy::recommended(),
+        ))));
+    // Secrets and machinery: the 2FA columns are managed from /profile, never from a form. Note
+    // `totp_last_step` is not a secret but is still hidden — it is the replay guard, and an operator
+    // editing it either lets a code be replayed or locks the user out of their own authenticator.
+    for f in ["totp_secret", "totp_pending", "totp_last_step"] {
+        user.field(f).hidden = true;
+    }
+    // Lifecycle stamps are the library's to write: show them, formatted in the caller's zone.
+    for f in ["created_at", "updated_at", "last_login_at"] {
+        user.field(f).read_only = true;
+        user.field(f).datetime();
+    }
+    user.field("is_active").default = Some(serde_json::json!(true));
+    for f in ["created_at", "updated_at"] {
+        group.field(f).read_only = true;
+        group.field(f).datetime();
+    }
+    // Labels for the relation pickers, and the N:M membership itself. **This is the line that makes
+    // the panel able to create a working account**: the gate checks group membership, so a screen
+    // that can create a user but not put them in a group can't finish the job. `auth_user_group` is
+    // a junction table and is never registered as a model of its own — declaring the relation is how
+    // it is reached.
+    user.label_column("username");
+    group.label_column("name");
+    user.relate(&group);
+    group.relate(&user);
+    user.relation("auth_group").label = Some("Groups".into());
+    group.relation("auth_user").label = Some("Members".into());
+    user.field("username").label = Some("Username".into());
+    user.field("is_active").label = Some("Active".into());
+    user.field("is_active").description =
+        Some("Unticked = refused at the door, password or SSO alike, session or not.".into());
+    user.field("last_login_at").label = Some("Last login".into());
+    group.field("name").label = Some("Group".into());
+
+    // The lockout counters. Everything about them is the library's to maintain, so they are
+    // read-only — and the unlock is *deleting the row*, which needs no button of its own: it is an
+    // ordinary gated, CSRF-checked, audited DELETE.
+    let mut locked_names = MetaModel::new(auth::lockout::username_entity::Entity);
+    let mut locked_ips = MetaModel::new(auth::lockout::ip_entity::Entity);
+    for f in [&mut locked_names.field("failures"), &mut locked_ips.field("failures")] {
+        f.read_only = true;
+    }
+    for f in [&mut locked_names.field("last_failure_at"), &mut locked_ips.field("last_failure_at")] {
+        f.read_only = true;
+        f.datetime();
+    }
+
+    let gate = Arc::new(GroupReadWrite::new(auth, [ADMIN_GROUP]));
+    let mut crud = Crud::new(db);
+    crud.register(user, gate.clone());
+    crud.register(group, gate.clone());
+    crud.register(locked_names, gate.clone());
+    crud.register(locked_ips, gate);
+    // These writes are cookie-authenticated, so they must carry the double-submit token — the same
+    // handle `auth`'s own forms and `csrf::enforce` use, so one cookie serves the whole app.
+    crud.csrf(auth.csrf());
+    Arc::new(crud.into_engine())
+}
+
+/// The panel's shape. Built per request (it borrows the engine), which is also what lets it be
+/// rendered *for a caller*.
+fn accounts(engine: &Engine) -> Admin<'_> {
+    Admin::new(engine)
+        .title("Accounts")
+        .base("/admin")
+        .group("People")
+        // `columns` trims the *table*; the dialog still edits every writable column — which is how
+        // the write-only password stays out of a list where its cell could only ever be blank.
+        .entity_with("auth_user", |t| {
+            t.title("Users").columns(["id", "username", "is_active", "auth_group", "last_login_at"])
+        })
+        .entity_with("auth_group", |t| t.title("Groups").columns(["id", "name", "auth_user"]))
+        .separator()
+        .group("Locked out")
+        .entity_with("auth_username_lockout", |t| t.title("By account"))
+        .entity_with("auth_ip_lockout", |t| t.title("By address"))
+        .separator()
+        .group("Reference")
+        .link("Profile & 2FA", "/profile")
+        .link("Protected page", "/secret")
+        .link("Log out", "/logout")
+}
+
+/// `GET /admin/{entity}` — parse the URL, render the fragment, wrap it in our shell. The path names
+/// the model; the query carries the view of it (page, sort, filters, the open dialog).
+async fn accounts_show(
+    State(app): State<AppState>,
+    Path(entity): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    if app.auth.identify(&headers).await.is_none() {
+        return Redirect::to(app.auth.login_path()).into_response();
+    }
+    let mut state = ViewState::from_uri(&uri);
+    state.entity = Some(entity);
+    match accounts(&app.engine).render_for(&headers, &state).await {
+        Ok(body) => Html(admin_page("Accounts", &body)).into_response(),
+        // A logged-in non-admin lands here: the gate refuses the *read*, so there is no page.
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `POST /admin/{entity}` — hand the body to the library and redirect, or re-render with the
+/// validation messages and the typed values back in the dialog.
+async fn accounts_save(
+    State(app): State<AppState>,
+    Path(entity): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    RealIp(ip): RealIp,
+    body: Bytes,
+) -> Response {
+    if app.auth.identify(&headers).await.is_none() {
+        return Redirect::to(app.auth.login_path()).into_response();
+    }
+    let mut state = ViewState::from_uri(&uri);
+    state.entity = Some(entity);
+    let panel = accounts(&app.engine);
+    match panel.submit(&headers, ip, &body, &state).await {
+        Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
+        Ok(Outcome::Invalid(state)) => match panel.render_for(&headers, &state).await {
+            Ok(body) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, Html(admin_page("Accounts", &body))).into_response()
+            }
+            Err(e) => e.into_response(),
+        },
+        Err(e) => e.into_response(),
+    }
+}
+
 /// What the app's own routes need: the `Auth` handle, a DB connection, and the shared attempt
 /// counters. `Attempts` is cheap to clone, so it lives in the state like any other handle.
 #[derive(Clone)]
 struct AppState {
     auth: Auth,
+    /// The accounts panel reads and writes through this — one `Engine`, built once at startup.
+    engine: Arc<Engine>,
     db: DatabaseConnection,
     usernames: UsernameLockout,
     ips: IpLockout,
@@ -445,11 +650,22 @@ fn unauthorized(why: &str) -> Response {
 
 /// Bootstrap page wrapper for the app's own pages.
 fn page(title: &str, body: &str) -> String {
+    shell(title, body, "max-width:40rem")
+}
+
+/// The same shell, full width and carrying `crud::ui::CSS` — the forty-odd rules the admin
+/// components need beyond Bootstrap (mostly the `<dialog>`). No JavaScript, here or there.
+fn admin_page(title: &str, body: &str) -> String {
+    shell(title, body, "")
+}
+
+fn shell(title: &str, body: &str, width: &str) -> String {
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"></head>
-<body class="bg-body-tertiary"><main class="container py-4" style="max-width:40rem">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>{CSS}</style></head>
+<body class="bg-body-tertiary"><main class="container py-4" style="{width}">
 <h1 class="h4 mb-3">{title}</h1>{body}</main></body></html>"#
     )
 }

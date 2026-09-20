@@ -69,7 +69,7 @@ The crate is **`relativelylight`**, organized into feature-gated modules:
 - **CSV import/export** through the same validation pipeline, with timestamps in the operator's zone,
   so a file matches the screen.
 - **One request-pipeline layer** (`middleware`): `resolve_real_ip`, which decides who the caller is once
-  and is **required**. The crate logs nothing itself — `examples/access_log` is a request log you can copy.
+  and is **required**. The crate logs nothing itself — `examples/audit` is a request log you can copy.
 
 The core is backend-agnostic; SeaORM is one backend behind a small `Accessor` seam.
 
@@ -177,15 +177,16 @@ Enable only what you use — an unused feature pulls no dependencies.
 
 ## Examples
 
-Four runnable examples; the first three share one seeded in-memory SQLite model (`examples/model`),
-while `access-log-example` carries its own:
+Four runnable examples, all over one seeded in-memory SQLite model (`examples/model`):
 
 ```bash
 cargo run -p crud-example          # :3000  compose the UI yourself: per-entity pages, a standalone Form at /post/new,
                                    #         a /dashboard of your own, a pinned filter, CSV, timezones + DST — no auth
 cargo run -p adminpanel-example    # :3000  the same behind auth: crud::ui::Admin, 2FA, lockout panels (admin / password)
-cargo run -p auth-example          # :3000  auth alone, without crud: login, SSO, re-auth on your own route
-cargo run -p access-log-example    # :3000  the request log an app writes for itself: RealIp + naming the user
+cargo run -p auth-example          # :3000  auth up close: login, SSO, 2FA, re-auth on your own route, and the
+                                   #         accounts panel an operator provisions users from (admin / password)
+cargo run -p audit-example         # :3000  who called and what they changed: the request log and the write
+                                   #         observer an app writes for itself, both over one resolved address
 ```
 
 **Run one at a time** — they all serve on port 3000.
@@ -207,7 +208,9 @@ cargo run -p access-log-example    # :3000  the request log an app writes for it
   the engine API, the URL as view state, validation, columns, CSV, the web admin, and how to compose
   with your app. (Examples: `crud`, `adminpanel`.)
 - **[docs/AUTH.md](docs/AUTH.md)** — the `auth` guide: sessions, login, TOTP 2FA, OIDC SSO, the gate
-  presets, and app-side wiring. (Examples: `auth`, `adminpanel`.)
+  presets, app-side wiring, and **where accounts come from** — there is no registration page on
+  purpose (§5j): an operator's accounts panel, SSO auto-registration, a seeder, or break-glass.
+  (Examples: `auth`, `adminpanel`.)
 - **[docs/TIME.md](docs/TIME.md)** — time & timezones: integer-UTC storage, the `Tz` request zone
   (a cookie, formatted server-side), the picker, and DST. (Examples: `crud`'s `/event`, `adminpanel`.)
 - **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module: reusable field validators

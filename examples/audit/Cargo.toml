@@ -1,0 +1,19 @@
+[package]
+name = "audit-example"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# **Who called, and what they changed** — the two records an app keeps for itself, and the one value
+# that makes them agree. relativelylight ships neither: it resolves the caller's address once
+# (`middleware::resolve_real_ip` → `RealIp`) and fires a `WriteEvent` per committed write
+# (`observe::WriteObserver`), and what you print or persist is yours. This example is both, in about
+# sixty lines: a request log (in its two shapes) and an audit trail over `auth` **and** `crud` writes.
+[dependencies]
+relativelylight = { path = "../../relativelylight", default-features = false, features = ["auth", "ui"] }
+model = { path = "../model" }        # something ordinary to edit, so there are CRUD writes to audit
+sea-orm = { workspace = true, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+axum = "0.8"
+tokio = { workspace = true, features = ["net"] }
+serde_json = "1"                     # diffing a WriteEvent's before/after
+async-trait = { workspace = true }   # the WriteObserver trait

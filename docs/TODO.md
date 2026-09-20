@@ -94,7 +94,7 @@ Highest priority first.
   calls defence-in-depth, and the case for it — a cross-origin client — is better served by that client
   sending an app-issued token, which needs no cookie at all.
 - **Request logging — decided: not ours at all.** `access_log` was removed before the 0.2.0 tag and lives
-  in `examples/access_log`. The crate now writes **nothing** to stdout or stderr, which is a better thing
+  in `examples/audit`. The crate now writes **nothing** to stdout or stderr, which is a better thing
   for a back-office library to be than "ships an opinionated log line", and it retires the
   `tracing`-vs-`log`-dependency question before it is asked. The middleware was a dozen lines every app
   wants slightly differently — structured event or stderr line, path or path+query, and a **level**, which
@@ -117,6 +117,15 @@ Highest priority first.
 
 ## Auth features
 
+- [ ] **An audit event for a self-service password change can't name its actor.** `POST /profile`
+  rotates the caller's session id and *then* fires the `WriteEvent`, so a sink calling
+  `Auth::identify(ev.headers)` finds nobody — the cookie on that request is already spent. Visible in
+  `examples/audit` as `-@127.0.0.1` on exactly one event kind (a manager's reset, `auth-admin`, names
+  the manager fine). Two ways out: emit before the rotation, or give `WriteEvent` an
+  `actor: Option<String>` the emitter fills when it already knows (it does, on every `auth` path) and
+  leaves `None` for `crud`, where the engine never resolves an identity. The second is additive —
+  `WriteEvent` is `#[non_exhaustive]` — and is the one to take if an app asks for it; the first is
+  smaller but reorders a security-sensitive handler.
 - **App-issued API tokens — decided: the app's, not ours.** Dropped rather than deferred. An API-first
   service (`teleddns-server`: the API is the product, the admin panel a convenience this crate throws in)
   needs tokens shaped its own way — per-machine or per-person, scoped or not, its own table or not, its own

@@ -74,6 +74,25 @@ async fn set_tz(Form(fields): Form<HashMap<String, String>>) -> Response {
 `back` is the page the user was on, so setting a zone doesn't lose the table they were looking at, and
 `action(path)` changes where the form posts (default `/tz`).
 
+**Where you put it is entirely yours**, because it is a fragment and nothing about it is positional:
+
+- **In the navbar** (what the examples do) — one `TzPicker` rendered by the shell on every page, with
+  `back` set to the current URL, so a zone can be changed from wherever the operator noticed the
+  problem. This is the right default for a console whose whole job is reading timestamps.
+- **On the profile page** — either in your own `/settings` page, or appended to the library's profile
+  page with [`Auth::profile_extra`](AUTH.md) (the hook hands you the caller's identity and the
+  request's CSRF token, and the picker's own form is plain HTML). Better when the zone is a rarely
+  changed personal preference rather than a working control.
+- **Both**, or neither: nothing in the library reads the picker. It only reads the **cookie**, via
+  `Tz::from_headers` in your handler. A page with no picker anywhere still renders in whatever zone
+  the cookie says, and an app that gets the zone from somewhere else entirely — a column on its own
+  user table, a query parameter, an org-wide setting — just passes a different `Tz` and never calls
+  `TzPicker` at all.
+
+One thing to keep consistent: the cookie is set by *your* route, so if you render the picker in two
+places, point both at the same `action` — otherwise you maintain two handlers that must agree about
+the cookie's attributes.
+
 ### Which zones are offered
 
 | | |

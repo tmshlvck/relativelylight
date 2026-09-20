@@ -4,13 +4,17 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
-# Playground for relativelylight's `auth` module — deliberately WITHOUT `crud` to show it stands on
-# its own (default-features off + only the `auth` feature). See docs/AUTH.md.
+# Playground for relativelylight's `auth` module: login, 2FA, recovery, re-auth, lockout, SSO — plus the
+# **accounts panel** an operator provisions users from, because the library ships no registration page.
+# `ui` is on for that panel only (it pulls in `crud` + `axum` + `tz`); everything else here is `auth`.
+# That auth compiles and runs *without* `crud` is proven by the feature matrix in CLAUDE.md, not by an
+# example. See docs/AUTH.md.
 [dependencies]
-relativelylight = { path = "../../relativelylight", default-features = false, features = ["auth", "sso"] }
+relativelylight = { path = "../../relativelylight", default-features = false, features = ["auth", "sso", "ui"] }
 sea-orm = { workspace = true, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 axum = "0.8"
 axum-extra = { version = "0.10", features = ["cookie"] }
 tokio = { workspace = true, features = ["net"] }
 base64 = "0.22"   # decode the HTTP Basic header on the app's own /api/whoami endpoint
 serde = { version = "1", features = ["derive"] } # the app's own form body (POST /api-token/rotate)
+serde_json = "1"  # one column default (is_active) on the accounts panel

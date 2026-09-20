@@ -553,11 +553,24 @@ async fn groups_of(db: &DatabaseConnection, user_id: i32) -> Vec<String> {
 type LoginShell = Arc<dyn Fn(&str) -> String + Send + Sync>;
 /// Wraps the profile/password fragment into a full page. Also handed the resolved [`Identity`] so the
 /// app can render its chrome (e.g. the signed-in username in the navbar).
+/// What [`Auth::profile_extra`] hands an app's own profile section.
+///
+/// `#[non_exhaustive]`: the crate constructs it and apps read it, so a field added later (the
+/// caller's address, say) costs nobody a break.
+#[non_exhaustive]
+pub struct ProfileSection {
+    /// Whose profile page this is — always the caller's own (the hook is not run on `/profile/{id}`).
+    pub who: Identity,
+    /// The double-submit CSRF token for **this request**. A form in your section must carry it —
+    /// `csrf::Csrf::hidden_input(&s.csrf)` — or its POST is refused like any other.
+    pub csrf: String,
+}
+
 type ProfileShell = Arc<dyn Fn(&str, &Identity) -> String + Send + Sync>;
 /// Renders an extra app-owned section appended below the password/2FA fragment on the *self* profile
-/// page (e.g. API-token management). Handed the caller's [`Identity`]; returns an HTML fragment.
+/// page (e.g. API-token management). Handed a [`ProfileSection`]; returns an HTML fragment.
 type ProfileExtra = Arc<
-    dyn Fn(Identity) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
+    dyn Fn(ProfileSection) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
         + Send
         + Sync,
 >;
@@ -729,9 +742,12 @@ impl Inner {
     }
 
     /// Append the app's profile-extra section (if configured) to a self-profile fragment.
-    async fn with_profile_extra(&self, frag: String, who: &Identity) -> String {
+    async fn with_profile_extra(&self, frag: String, who: &Identity, csrf: &str) -> String {
         match &self.profile_extra {
-            Some(hook) => format!("{frag}{}", hook(who.clone()).await),
+            Some(hook) => {
+                let ctx = ProfileSection { who: who.clone(), csrf: csrf.to_string() };
+                format!("{frag}{}", hook(ctx).await)
+            }
             None => frag,
         }
     }
@@ -849,15 +865,35 @@ impl Auth {
     }
 
     /// Append an app-rendered section below the password/2FA fragment on the **self** profile page
-    /// (`GET /profile` and after a profile POST) — e.g. API-token management. The hook is handed the
-    /// caller's [`Identity`] (owned, so the returned future can be `'static`) and returns an HTML
-    /// fragment. The manager `/profile/{id}` pages do not include it.
+    /// (`GET /profile` and after a profile POST) — API tokens, notification preferences, a
+    /// "download my data" button: the things that belong beside "change my password" and are the
+    /// app's, not this crate's.
+    ///
+    /// The hook is handed a [`ProfileSection`] — the caller's identity **and the CSRF token this
+    /// request's forms must carry** — and returns an HTML fragment. Everything is owned, so the
+    /// returned future can be `'static`.
+    ///
+    /// ```ignore
+    /// let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
+    ///     let tokens = list_api_tokens(&s.who.id).await;
+    ///     format!(r#"<hr><h2 class="h6">API tokens</h2>{tokens}
+    ///                <form method="post" action="/api-token/new">{}
+    ///                <button class="btn btn-sm btn-outline-primary">Issue a token</button></form>"#,
+    ///             relativelylight::csrf::Csrf::hidden_input(&s.csrf))
+    /// });
+    /// ```
+    ///
+    /// The section is **self-profile only**: the manager `/profile/{id}` pages don't include it, since
+    /// a manager resetting someone's password has no business with that person's API tokens. For a
+    /// sensitive action inside your section, gate the *handler* with
+    /// [`reauthenticate`](Auth::reauthenticate) — the token in the form proves the request came from
+    /// your page, not that its owner is present.
     pub fn profile_extra<F, Fut>(mut self, hook: F) -> Self
     where
-        F: Fn(Identity) -> Fut + Send + Sync + 'static,
+        F: Fn(ProfileSection) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = String> + Send + 'static,
     {
-        let h: ProfileExtra = Arc::new(move |who: Identity| Box::pin(hook(who)));
+        let h: ProfileExtra = Arc::new(move |s: ProfileSection| Box::pin(hook(s)));
         Arc::get_mut(&mut self.inner).unwrap().profile_extra = Some(h);
         self
     }
@@ -1561,7 +1597,9 @@ async fn profile_form(
     };
     let (token, jar) = csrf_token(&inner, &headers, jar);
     let frag = match user.sso_key() {
-        Some(provider) => inner.with_profile_extra(sso_profile_html(&who, provider), &who).await,
+        Some(provider) => {
+            inner.with_profile_extra(sso_profile_html(&who, provider), &who, &token).await
+        }
         None => profile_fragment(&inner, &who, &user, None, None, &token).await,
     };
     (jar, Html((inner.profile_shell)(&frag, &who))).into_response()
@@ -2110,7 +2148,7 @@ async fn profile_fragment(
         false => None,
     };
     let frag = change_form_html(who, totp_on, left, error, success, csrf);
-    inner.with_profile_extra(frag, who).await
+    inner.with_profile_extra(frag, who, csrf).await
 }
 
 /// The caller's own user row.
