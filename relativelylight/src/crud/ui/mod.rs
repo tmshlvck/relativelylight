@@ -586,6 +586,11 @@ impl<'a> Table<'a> {
         if out.sort.is_empty() {
             out.sort = self.sort.clone();
         }
+        // Only filters this entity *has* a column for. An `Admin` shared filter travels in the URL
+        // from table to table — that is the point of it — so most tables meet one naming a column
+        // they don't have, and passing it to the backend would refuse the whole listing. Dropping
+        // it here is the other half of `applicable_filters` dropping the control.
+        out.filters.retain(|(name, _)| is_filterable(cols, name));
         for f in self.applicable_filters(cols)? {
             if let Some(value) = f.fixed {
                 out.filters.retain(|(n, _)| *n != f.name);
@@ -690,6 +695,28 @@ impl<'a> Table<'a> {
     ) -> Result<(Vec<ControlV>, Vec<Chip>)> {
         let mut controls = Vec::new();
         let mut chips = Vec::new();
+
+        // A filter can reach a table without the table declaring a control for it — an `Admin`
+        // shared one, or a hand-written URL. It still narrows what is on screen, so it still needs
+        // a chip: a filtered table that looked unfiltered is how someone concludes their rows are
+        // gone. (`effective_state` has already dropped the ones this entity can't honour.)
+        let declared: Vec<&str> = self.filters.iter().map(|f| f.name.as_str()).collect();
+        let undeclared = state.filters.iter().filter(|(n, _)| !declared.contains(&n.as_str()));
+        for (name, value) in undeclared {
+            if value.is_empty() {
+                continue;
+            }
+            let col = cols.iter().find(|c| render::name_of(c) == name);
+            let shown = match col {
+                Some(Column::Relation { target, .. }) => self.label_of(target, value).await?,
+                _ => value.clone(),
+            };
+            chips.push(Chip {
+                label: col.map(render::label_of).unwrap_or_else(|| name.clone()),
+                value: shown,
+                clear_href: Some(state.href_filter(name, "")),
+            });
+        }
 
         for f in self.applicable_filters(cols)? {
             let col = cols.iter().find(|c| render::name_of(c) == f.name);
@@ -1332,7 +1359,18 @@ impl<'a> Admin<'a> {
             .map(|item| match item {
                 AdminItem::Entity(t) => NavV::Entity {
                     label: t.title.clone().unwrap_or_else(|| t.slug.clone()),
-                    href: state.href_entity(&t.slug),
+                    // A nav link carries a filter only if this panel *shares* it and the entity it
+                    // points at has a column for it. Everything else — a table's own filter, a
+                    // shared one the target knows nothing about — stays behind: a link that
+                    // silently narrows the page it lands on (or names a column that isn't there)
+                    // is not navigation.
+                    href: state.href_entity(&t.slug, |name| {
+                        self.filters.iter().any(|shared| shared == name)
+                            && self
+                                .engine
+                                .columns(&t.slug)
+                                .is_ok_and(|cols| is_filterable(&cols, name))
+                    }),
                     active: t.slug == active,
                 },
                 AdminItem::Group(name) => NavV::Group(name.clone()),

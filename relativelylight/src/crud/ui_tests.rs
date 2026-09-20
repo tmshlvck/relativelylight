@@ -327,6 +327,30 @@ fn engine_with(gate: Arc<dyn Authz>) -> (Engine, Arc<Log>) {
         ),
         Arc::new(Open),
     );
+    // A second entity with an `author` relation, so a shared filter has somewhere to follow *to*.
+    e.add(
+        Arc::new(
+            Mock::new(
+                "note",
+                vec![
+                    field("id", false, true, None),
+                    field("body", true, false, None),
+                    Column::Relation {
+                        name: "author".into(),
+                        target: "author".into(),
+                        cardinality: Cardinality::ToOne,
+                        fk_column: Some("author_id".into()),
+                        read_only: false,
+                        label: Some("Author".into()),
+                        description: None,
+                        sortable: true,
+                    },
+                ],
+            )
+            .rows(vec![json!({"id": 1, "body": "a note", "author": {"id": 3, "label": "Ada"}})]),
+        ),
+        Arc::new(Open),
+    );
     (e, log)
 }
 
@@ -743,22 +767,36 @@ async fn an_admin_renders_exactly_one_panel() {
 }
 
 #[tokio::test]
-async fn a_shared_filter_follows_the_operator_from_table_to_table() {
+async fn a_shared_filter_follows_the_operator_only_where_it_means_something() {
     let (e, _) = engine();
-    let html = Admin::new(&e)
-        .filter("author")
-        .entity("post")
-        .entity("tag")
+    let admin = Admin::new(&e).filter("author").entity("post").entity("note").entity("tag");
+    let html = admin
         .render_for(&no_headers(), &ViewState::from_query("entity=post&filter[author]=3"))
         .await
         .unwrap();
-    let link = html.split(">tag</a>").next().unwrap().rsplit("href=\"").next().unwrap();
-    assert!(
-        link.contains("entity=tag") && link.contains("filter%5Bauthor%5D=3"),
-        "the nav link carries it: {link}"
-    );
+    let link_to = |slug: &str, html: &str| {
+        html.split(&format!(">{slug}</a>")).next().unwrap().rsplit("href=\"").next().unwrap().to_string()
+    };
+
+    // `note` has an author, so the operator keeps their zone when they go there.
+    let note = link_to("note", &html);
+    assert!(note.contains("entity=note") && note.contains("filter%5Bauthor%5D=3"), "{note}");
+
+    // `tag` has none. A link that carried it would narrow nothing and name a column that isn't
+    // there — which is what made the other tables' endpoints fail.
+    let tag = link_to("tag", &html);
+    assert!(tag.contains("entity=tag") && !tag.contains("author"), "{tag}");
+
     assert!(html.contains("<strong>Ada</strong>"), "and the chip names it, not its id: {html}");
     assert!(!html.contains("Clear Author filter"), "a shared filter is cleared where it was set");
+
+    // …and landing on `tag` *with* the filter still in the URL is harmless: it is ignored, not
+    // passed to a backend that would refuse the whole listing.
+    let on_tag = admin
+        .render_for(&no_headers(), &ViewState::from_query("entity=tag&filter[author]=3"))
+        .await
+        .expect("a filter this entity can't honour must not break its panel");
+    assert!(on_tag.contains("rust"), "the rows are there: {on_tag}");
 }
 
 // ---------- gating ----------

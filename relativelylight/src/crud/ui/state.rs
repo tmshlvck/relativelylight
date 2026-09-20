@@ -210,13 +210,17 @@ impl ViewState {
     pub(crate) fn href_per_page(&self, per_page: u64) -> String {
         self.href(&[("per_page", &per_page.to_string()), ("page", "")])
     }
-    pub(crate) fn href_entity(&self, slug: &str) -> String {
-        // A different entity keeps the shared filters (that is the point of `Admin::filter`) but not
-        // the page or the search term, which meant something about the table being left behind.
+    /// The link to another entity's panel. `keep` decides which filters travel: an
+    /// [`Admin`](super::Admin) passes the ones it declared as shared **and** the target actually
+    /// has a column for, so a zone follows the operator between the tables it means something in
+    /// and appears in no link where it would mean nothing. The page, the search term and the sort
+    /// are always left behind — they were about the table being navigated away from.
+    pub(crate) fn href_entity(&self, slug: &str, keep: impl Fn(&str) -> bool) -> String {
         let mut s = self.clone();
         s.page = 0;
         s.q = String::new();
         s.sort.clear();
+        s.filters.retain(|(name, _)| keep(name));
         s.href(&[("entity", slug)])
     }
     pub(crate) fn href_new(&self) -> String {
@@ -452,11 +456,17 @@ mod tests {
     }
 
     #[test]
-    fn switching_entity_keeps_the_shared_filter_and_drops_the_rest() {
-        let s = ViewState::from_query("entity=post&filter[author]=7&q=x&page=4&sort=title");
-        let href = s.href_entity("tag");
+    fn switching_entity_keeps_only_the_filters_that_travel() {
+        let s = ViewState::from_query("entity=post&filter[author]=7&filter[status]=draft&q=x&page=4&sort=title");
+
+        // The caller decides which filters mean anything where the link points.
+        let href = s.href_entity("tag", |name| name == "author");
         assert!(href.contains("entity=tag") && href.contains("filter%5Bauthor%5D=7"), "{href}");
+        assert!(!href.contains("status"), "the ones that don't travel are left behind: {href}");
+
+        // The page, the search and the sort were about the table being navigated away from.
         assert!(!href.contains("q=") && !href.contains("page") && !href.contains("sort"), "{href}");
+        assert!(!s.href_entity("tag", |_| false).contains("filter"), "none is a valid answer");
     }
 
     #[test]

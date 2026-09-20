@@ -47,11 +47,18 @@
         {#- Enter submits at once; otherwise the form goes two seconds after the typing stops. A
             submit is a page load, so it waits for a pause rather than chasing every keystroke —
             and `autofocus` puts the caret back where it was, since the reload it just caused would
-            otherwise drop it. -#}
+            otherwise drop it.
+
+            `onsearch` is the clear (✕) button: Chrome and Safari fire `search` when it is pressed,
+            and clearing is a finished thought rather than a pause in one, so it goes at once.
+            Firefox has no `search` event but does fire `input`, so there the ✕ takes the two
+            seconds — which is why the debounce, not the immediate path, is the one that has to
+            work everywhere. -#}
         <input type="search" class="form-control form-control-sm w-auto" name="q" value="{{ q }}"
                placeholder="Search…" aria-label="Search"{% if !q.is_empty() %} autofocus{% endif %}
                onfocus="this.setSelectionRange(this.value.length, this.value.length)"
                oninput="clearTimeout(this.t); this.t = setTimeout(() => this.form.submit(), 2000)"
+               onsearch="clearTimeout(this.t); this.form.submit()"
                onkeydown="if (event.key === 'Enter') { clearTimeout(this.t); this.form.submit(); }">
         {%- endif %}
         {#- The one control the form still needs without scripting: with no submit button, a browser

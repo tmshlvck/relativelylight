@@ -713,6 +713,10 @@ and in all three examples.
 | `picker_threshold(n)` | how many target rows a relation may list as a `<select>` (default 20) |
 | `dom_id(id)` | namespaces the fragment's id, so two tables of one entity can share a page |
 
+**Every filter in force is chipped**, whether the table declared a control for it or not — one
+arriving from an `Admin`'s shared control, or typed into the URL, is still narrowing what is on
+screen and still says so.
+
 **Filters narrow everything at once.** Because the choice is in the URL, it applies to the listing, the
 CSV export and "delete all matching" alike — no button can act on a wider set than the one on screen —
 and it shows as a chip above the table, because a narrowed table that looked like a whole one is how
@@ -840,8 +844,10 @@ gate is consulted, so a panel's contents are part of what it permits and not mer
 
 **`filter(name)` is the shape that matters when an admin lists many tables of the same kind** —
 fifteen per-type DNS record tables, say. An operator works inside one zone at a time, so they pick it
-once and it follows them from table to table, because every nav link carries it. Tables without such a
-column are unaffected. Like `fixed_filter`, it narrows a **view**; scoping who may see what is
+once and it follows them from table to table, because each nav link carries it — **to the tables
+that have the column**. A link to one that doesn't stays clean, and a filter that reaches a table
+whose entity can't honour it is ignored rather than passed to a backend that would refuse the whole
+listing. So a shared filter narrows every table it means something in, and nothing else. Like `fixed_filter`, it narrows a **view**; scoping who may see what is
 [`authz`](AUTH.md)'s job.
 
 ### The JavaScript that is left

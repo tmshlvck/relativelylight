@@ -145,6 +145,11 @@ because `?entity=post` renders one table instead of nine.
   asks for, defaulting to `Table::DEFAULT_PER_PAGE_MAX` (**10,000**). `?per_page=100000000` was
   otherwise a cheap way to make a server read a whole table into memory and render it. The clamp
   normalises the view state, so links carry the clamped number instead of propagating the greedy one.
+- **An `Admin`'s shared filter now travels only where it applies.** A nav link carries it to a table
+  that has the column and not to one that doesn't, and a filter that reaches a table whose entity
+  can't honour it is ignored rather than passed to the backend — which previously refused the whole
+  listing, so switching tables under a shared filter broke the panel. Every filter actually in
+  force is chipped, declared by the table or not.
 - **The search box submits itself**: two seconds after typing stops, or at once on Enter, taking
   focus back with the caret at the end so the reload it caused doesn't interrupt typing. The
   **Apply** button now exists only inside `<noscript>`, where it is the only way to submit a form
