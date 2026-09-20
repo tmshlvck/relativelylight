@@ -60,7 +60,7 @@ use crate::time::Tz;
 use askama::Template;
 use decode::Posted;
 use http::HeaderMap;
-use render::{Cell, Chip, HeadV, Pager, RowV};
+use render::{Cell, Chip, HeadV, PageLink, Pager, RowV};
 use serde_json::Value;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -125,6 +125,7 @@ struct TableTmpl {
     title: String,
     description: String,
     search: bool,
+    pagination: bool,
     editable: bool,
     confirm: bool,
     /// Whether rows offer a View action (and therefore whether the actions column exists for a
@@ -135,7 +136,7 @@ struct TableTmpl {
     csrf: String,
     span: usize,
     keep: Vec<(String, String)>,
-    per_page_options: Vec<Opt>,
+    per_page_options: Vec<PageLink>,
     controls: Vec<ControlV>,
     chips: Vec<Chip>,
     heads: Vec<HeadV>,
@@ -497,12 +498,13 @@ impl<'a> Table<'a> {
             title: self.title.clone().unwrap_or_else(|| self.slug.clone()),
             description: self.description.clone().unwrap_or_default(),
             search: self.search,
+            pagination: self.pagination,
             editable,
             confirm: self.confirm,
             csv: cfg!(feature = "csv"),
             q: state.q.clone(),
             span: shown.len() + usize::from(editable) + usize::from(editable || self.detail),
-            keep: self.keep(&state, !per_page_options.is_empty()),
+            keep: self.keep(&state),
             per_page_options,
             controls,
             chips,
@@ -599,9 +601,10 @@ impl<'a> Table<'a> {
         q
     }
 
-    /// The page sizes the toolbar offers, with the one in force marked. Empty when the table was
+    /// The page sizes offered beside the pager, as links — no form, no script, and the one in
+    /// force is text rather than a link to where you already are. Empty when the table was
     /// configured with no choices, or when pagination is off.
-    fn per_page_options(&self, state: &ViewState) -> Vec<Opt> {
+    fn per_page_options(&self, state: &ViewState) -> Vec<PageLink> {
         if !self.pagination || self.per_page_choices.is_empty() {
             return Vec::new();
         }
@@ -617,17 +620,18 @@ impl<'a> Table<'a> {
         sizes.dedup();
         sizes
             .into_iter()
-            .map(|n| Opt {
-                value: n.to_string(),
-                label: format!("{n} / page"),
-                selected: n == in_force,
+            .map(|n| PageLink {
+                label: n.to_string(),
+                href: state.href_per_page(n),
+                active: n == in_force,
+                disabled: false,
             })
             .collect()
     }
 
     /// Hidden inputs that carry the rest of the view through the toolbar's GET form. Not the page
     /// (a new search starts at the first one) and not the filters it renders itself.
-    fn keep(&self, state: &ViewState, has_per_page_control: bool) -> Vec<(String, String)> {
+    fn keep(&self, state: &ViewState) -> Vec<(String, String)> {
         let rendered: Vec<&str> = self.filters.iter().map(|f| f.name.as_str()).collect();
         let mut out = Vec::new();
         if let Some(e) = &state.entity {
@@ -646,9 +650,7 @@ impl<'a> Table<'a> {
                 .collect();
             out.push(("sort".to_string(), keys.join(",")));
         }
-        // …and not the page size when the toolbar has a control for it: two inputs of one name
-        // would send two values, and the loser would be whichever the browser ordered second.
-        if state.per_page > 0 && !has_per_page_control {
+        if state.per_page > 0 {
             out.push(("per_page".to_string(), state.per_page.to_string()));
         }
         out

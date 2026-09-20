@@ -18,7 +18,7 @@ For the concrete backlog see **[../TODO.md](../TODO.md)**.
 | **`observe`** (§4) | write-observer hook for audit logging (change + request context) | ✅ implemented | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
 | **`time`** (§5) | timezone-aware display of UTC timestamps (helpers + `$store.tz` + picker) | ✅ implemented | [TIME.md](TIME.md) |
 | **`validate`** | reusable typed field validators + normalizers, shared by CRUD and hand-written APIs | ✅ implemented | [DATAINPUT.md](DATAINPUT.md) |
-| **Files** (§6) | multi-file upload / display / download / camera capture | ⛔ planned | — |
+| **`blob`** (§6) | content-addressed file storage, viewer, thumbnailer, admin panel | 🟡 draft spec | [BLOBSTORE.md](BLOBSTORE.md) |
 
 > ✅ implemented & verified · 🟡 partial (core done, hardening/extras ahead) · ⛔ future.
 
@@ -172,10 +172,14 @@ and folds resolve by the IANA rules and are covered by unit tests.
 **Roadmap / deferred:** nicer zone abbreviations (`CEST` rather than `GMT+2`); seeding the cookie from
 the browser's own zone on a first visit (three lines of app-side JavaScript, deliberately not shipped).
 
-## 6. Files — file handling ⛔ (planned)
+## 6. `blob` — content-addressed file storage 🟡
 
-Upload multiple documents (PDF, MS Office / LibreOffice, images), display and download them, and
-capture a photo from the device camera and upload it. Not specified yet.
+Digest-verified storage behind a backend trait (filesystem shipped; object storage a future
+implementation of the same trait), a server-rendered viewer/upload/thumbnail/admin layer with no
+JavaScript beyond `ui`'s existing budget, and backup/purge mechanisms an app supplies its own policy
+to. Deliberately stops short of versioning or ownership — those are an app's own typed layer on top
+(CLIMB's `attachments.md` is the reference case this scope line was drawn against). Full design:
+[BLOBSTORE.md](BLOBSTORE.md).
 
 ## 7. Open questions
 

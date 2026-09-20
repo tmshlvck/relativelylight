@@ -766,7 +766,12 @@ cells, so relations show labels, datetimes are in the caller's zone, and a `form
 Write-only columns are left out — the backend never returns one, so the row would be blank beside
 "Password". `detail(false)` removes it.
 
-**Choosing a page size.** The toolbar offers `per_page_choices` and the URL carries the answer.
+**Searching.** Typing submits the view two seconds after you stop; Enter submits at once. A submit
+is a page load, so it waits for a pause rather than chasing keystrokes — and the input takes focus
+back with the caret at the end, since the reload it just caused would otherwise drop it.
+
+**Choosing a page size.** The sizes sit beside the pager as **links** (no form, no script), and the
+URL carries the answer; `per_page_choices` sets them.
 `?per_page=` is user input, so it is **clamped** to `per_page_max` (default 10,000) — unclamped, it
 is a cheap way to make a server read a whole table into memory and render it. The clamp normalises
 the view state itself, so every link the page renders carries the clamped number rather than
@@ -841,13 +846,23 @@ column are unaffected. Like `fixed_filter`, it narrows a **view**; scoping who m
 
 ### The JavaScript that is left
 
-Three attributes and nothing else, all of them enhancement — the page works without them:
+Eleven inline attributes across the templates, about fifteen lines in total, **all of them
+enhancement** — every one has a working path without it:
 
-- `onchange="this.form.submit()"` on a filter `<select>` (there is an Apply button too);
-- `onclick="return confirm(…)"` on destructive buttons (`confirm(false)` removes it);
-- a one-line `onclick` on the select-all checkbox, and `oninput` on a range slider's read-out.
+| | Without it |
+|---|---|
+| search: `oninput` debounce (2s), `onkeydown` Enter, `onfocus` caret-to-end | the `<noscript>` **Apply** button submits the form |
+| the same pair on a large-target filter input | as above |
+| `onchange="this.form.submit()"` on a filter `<select>` | as above |
+| `onclick="return confirm(…)"` on destructive buttons | the POST still goes, and the server still asks the gate (`confirm(false)` removes it) |
+| `onclick` on the select-all checkbox | tick the rows individually |
+| `oninput` on a range slider's read-out | the slider still posts its value |
 
-There is no script file, no framework, and nothing generated per entity.
+There is no script file, no framework, and nothing generated per entity. The **Apply** button exists
+only inside `<noscript>`, because with scripting the search submits itself and an always-visible
+Apply is a button nobody presses; without it, a form whose only other controls are text inputs has
+no way to submit (a browser submits on Enter only when there is exactly one text field, and a
+large-target filter makes two).
 
 ## Composing with your app
 

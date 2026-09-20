@@ -205,6 +205,11 @@ impl ViewState {
     pub(crate) fn href_page(&self, page: u64) -> String {
         self.href(&[("page", &page.to_string())])
     }
+    /// A different page size starts at the first page: the row you were looking at is on a
+    /// different page now, and page 9 of a 250-row listing usually doesn't exist.
+    pub(crate) fn href_per_page(&self, per_page: u64) -> String {
+        self.href(&[("per_page", &per_page.to_string()), ("page", "")])
+    }
     pub(crate) fn href_entity(&self, slug: &str) -> String {
         // A different entity keeps the shared filters (that is the point of `Admin::filter`) but not
         // the page or the search term, which meant something about the table being left behind.

@@ -15,24 +15,34 @@
       </div>
       {%- endif %}
 
-      <form method="post" enctype="multipart/form-data" class="d-flex gap-2 align-items-start">
+      {#- Two forms, either of which finishes the job — which is why each carries its own button,
+          and why the divider says "or" rather than being a plain rule. -#}
+      <form method="post" enctype="multipart/form-data">
         <input type="hidden" name="_op" value="import">
         {%- if !csrf.is_empty() %}<input type="hidden" name="_csrf" value="{{ csrf }}">{% endif %}
-        <input class="form-control" type="file" name="file" accept=".csv,text/csv" required
-               aria-label="CSV file">
-        <button class="btn btn-primary text-nowrap" type="submit">Upload</button>
+        <h6 class="text-uppercase text-body-secondary small fw-semibold mb-2">File import</h6>
+        <div class="d-flex gap-2 align-items-start">
+          <input class="form-control" type="file" name="file" accept=".csv,text/csv" required
+                 aria-label="CSV file">
+          <button class="btn btn-primary text-nowrap" type="submit">Upload file</button>
+        </div>
       </form>
 
-      <hr class="my-3">
+      <div class="d-flex align-items-center gap-2 my-3" aria-hidden="true">
+        <hr class="flex-grow-1 my-0">
+        <span class="text-body-secondary small text-uppercase">or</span>
+        <hr class="flex-grow-1 my-0">
+      </div>
 
       <form method="post">
         <input type="hidden" name="_op" value="import">
         {%- if !csrf.is_empty() %}<input type="hidden" name="_csrf" value="{{ csrf }}">{% endif %}
+        <h6 class="text-uppercase text-body-secondary small fw-semibold mb-2">Direct text import</h6>
         <textarea class="form-control font-monospace" name="csv" rows="8" spellcheck="false"
                   aria-label="Paste CSV rows" placeholder="{{ header }}">{{ csv }}</textarea>
         <div class="d-flex justify-content-between align-items-center mt-2">
-          <small class="text-muted">A header row, then one per record; a row with an id updates it.</small>
-          <button class="btn btn-primary" type="submit">Import</button>
+          <small class="text-body-secondary">A header row, then one per record; a row with an id updates it.</small>
+          <button class="btn btn-primary text-nowrap" type="submit">Import text</button>
         </div>
       </form>
     </div>

@@ -360,6 +360,7 @@ none is needed — `Engine` is a normal typed API:
 ```rust
 async fn dashboard(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
     let who = match require_login(&app, &headers).await { Ok(w) => w, Err(r) => return r };
+    let state = ViewState::from_uri(&uri);      // see the note below — not `::default()`
 
     // Counts: ask for one row and read `total` — the backend still runs a COUNT, not a fetch.
     let count = |slug: &'static str, q: ListQuery| {
@@ -377,7 +378,7 @@ async fn dashboard(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) ->
         .pagination(false)
         .per_page(5)
         .sort_desc("updated_at")
-        .render_for(&headers, &ViewState::default())
+        .render_for(&headers, &state)
         .await
         .unwrap_or_default();
 
@@ -386,7 +387,14 @@ async fn dashboard(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) ->
 }
 ```
 
-Two habits worth keeping:
+**Give an embedded table the page's real `ViewState`, not `::default()`.** Even a read-only panel
+renders links — the View action, the sortable headers — and they are relative, so they come back to
+*your* page with `?show=7` or `?sort=title` on them. A handler that ignores the URL leaves them
+dead: the browser navigates, the address bar changes, nothing on the page moves. If you genuinely
+want a panel with no interactions, turn them off (`detail(false)`, and a `columns` list of
+non-sortable columns) rather than ignoring the state.
+
+Two more habits worth keeping:
 
 - **`read_only(true)` + `pagination(false)` + `search(false)`** turns a `Table` into a plain panel of
   rows — the cheapest way to get consistent cells, badges, relation labels and timezone-correct

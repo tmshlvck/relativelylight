@@ -650,7 +650,8 @@ async fn the_pager_carries_the_view_and_disappears_when_there_is_one_page() {
     assert!(jump.contains("page=4"), "» steps by a tenth of the table: {jump}");
 
     let one_page = Table::new(&e, "thing").per_page(100).render_for(&no_headers(), &list()).await.unwrap();
-    assert!(!one_page.contains("pagination"), "nothing to page through");
+    assert!(!one_page.contains("<ul class=\"pagination"), "nothing to page through");
+    assert!(one_page.contains("Total: 95"), "but the count is still worth having");
 }
 
 #[tokio::test]
@@ -1124,25 +1125,30 @@ async fn the_toolbar_offers_page_sizes_and_marks_the_one_in_force() {
     let mut e = Engine::new();
     e.add(Arc::new(Mock::new("thing", cols).rows(rows)), Arc::new(Open));
 
+    // Links beside the pager, where a page size belongs — no form, no script, and the size in
+    // force is text rather than a link to where you already are.
     let table = Table::new(&e, "thing").per_page(30);
     let html = table.render_for(&no_headers(), &ViewState::from_query("per_page=100")).await.unwrap();
-    assert!(html.contains(r#"<option value="100" selected>100 / page</option>"#), "{html}");
-    assert!(html.contains(r#"<option value="30">30 / page</option>"#), "the others are offered");
+    assert!(html.contains("<strong>100</strong>"), "the size in force is marked: {html}");
+    assert!(html.contains("per_page=30"), "the others are links: {html}");
     assert!(html.contains("Page 1 / 5"), "and it is the size actually used: {html}");
+    assert!(html.contains("Total: 500"), "the count shows even on one page");
 
-    // The control carries the size, so the form must not also hide one — two inputs of one name
-    // would send two values.
-    assert_eq!(html.matches(r#"name="per_page""#).count(), 1, "{html}");
+    // Changing the size starts at the first page — page 9 of a 250-row listing may not exist.
+    let deep = table.render_for(&no_headers(), &ViewState::from_query("per_page=10&page=9")).await.unwrap();
+    let link = deep.split(">250</a>").next().unwrap().rsplit("href=\"").next().unwrap();
+    assert!(link.contains("per_page=250") && !link.contains("page=9"), "{link}");
 
-    // A configured size that isn't among the choices is still offered, so the control can show it.
+    // A configured size that isn't among the choices is still offered, so the size in force can
+    // always be seen.
     let odd = Table::new(&e, "thing").per_page(42);
     let html = odd.render_for(&no_headers(), &list()).await.unwrap();
-    assert!(html.contains(r#"<option value="42" selected>42 / page</option>"#), "{html}");
+    assert!(html.contains("<strong>42</strong>"), "{html}");
 
-    // …and a table can decline the control entirely.
+    // …and a table can decline them entirely.
     let none = Table::new(&e, "thing").per_page_choices([]);
     let html = none.render_for(&no_headers(), &list()).await.unwrap();
-    assert!(!html.contains(r#"name="per_page""#), "no control: {html}");
+    assert!(!html.contains("per_page="), "no sizes offered: {html}");
 }
 
 #[tokio::test]
@@ -1159,6 +1165,7 @@ async fn a_page_size_from_the_url_is_clamped() {
     let html = table.render_for(&no_headers(), &greedy).await.unwrap();
     assert!(html.contains("Page 1 / 10"), "500 rows at the capped 50: {html}");
     assert!(!html.contains("100000000"), "and the greedy size is not offered back: {html}");
+    assert!(html.contains("<strong>50</strong>"), "the cap is what's marked in force: {html}");
 
     // The default cap is 10,000 — high enough never to be met by an honest console.
     assert_eq!(Table::DEFAULT_PER_PAGE_MAX, 10_000);
@@ -1267,6 +1274,10 @@ async fn the_import_dialog_offers_a_file_and_a_paste_box() {
     // …and a paste, for the quick case.
     assert!(html.contains(r#"name="csv""#), "{html}");
     assert_eq!(html.matches(r#"name="_op" value="import""#).count(), 2, "one per form");
+    // Each way in is headed and buttoned, and the divider says they are alternatives.
+    assert!(html.contains("File import") && html.contains("Direct text import"), "{html}");
+    assert!(html.contains(">Upload file</button>") && html.contains(">Import text</button>"), "{html}");
+    assert!(html.contains(">or</span>"), "{html}");
     assert!(html.contains("id,title"), "the placeholder shows the columns an import reads");
     // No dialog for someone who may not write.
     let (e, _) = engine_with(Arc::new(ReadOnlyGate));

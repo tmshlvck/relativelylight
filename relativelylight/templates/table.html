@@ -34,6 +34,8 @@
                name="filter[{{ c.name }}]" value="{{ c.chosen }}"
                aria-label="Filter by {{ c.label }}"
                placeholder="{{ c.label }}: any of {{ c.too_many }}"
+               oninput="clearTimeout(this.t); this.t = setTimeout(() => this.form.submit(), 2000)"
+               onkeydown="if (event.key === 'Enter') { clearTimeout(this.t); this.form.submit(); }"
                {%- if c.chosen_label.is_empty() %}
                title="{{ c.too_many }} {{ c.name }} rows — too many to list; enter one id, or clear this to see all"
                {%- else %}
@@ -42,18 +44,20 @@
         {%- endif %}
         {%- endfor %}
         {%- if search %}
+        {#- Enter submits at once; otherwise the form goes two seconds after the typing stops. A
+            submit is a page load, so it waits for a pause rather than chasing every keystroke —
+            and `autofocus` puts the caret back where it was, since the reload it just caused would
+            otherwise drop it. -#}
         <input type="search" class="form-control form-control-sm w-auto" name="q" value="{{ q }}"
-               placeholder="Search…" aria-label="Search">
+               placeholder="Search…" aria-label="Search"{% if !q.is_empty() %} autofocus{% endif %}
+               onfocus="this.setSelectionRange(this.value.length, this.value.length)"
+               oninput="clearTimeout(this.t); this.t = setTimeout(() => this.form.submit(), 2000)"
+               onkeydown="if (event.key === 'Enter') { clearTimeout(this.t); this.form.submit(); }">
         {%- endif %}
-        {%- if !per_page_options.is_empty() %}
-        <select class="form-select form-select-sm w-auto" name="per_page" aria-label="Rows per page"
-                onchange="this.form.submit()">
-          {%- for o in per_page_options %}
-          <option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>
-          {%- endfor %}
-        </select>
-        {%- endif %}
-        <button class="btn btn-outline-secondary btn-sm" type="submit">Apply</button>
+        {#- The one control the form still needs without scripting: with no submit button, a browser
+            only submits on Enter when there is exactly one text field, and a large-target filter
+            makes two. -#}
+        <noscript><button class="btn btn-outline-secondary btn-sm" type="submit">Apply</button></noscript>
       </form>
       {%- endif %}
       {#- CSV lives in a disclosure rather than two more buttons. `<details>` is the dropdown: it
@@ -164,9 +168,18 @@
     {%- endif %}
   </form>
 
-  {%- if !pager.links.is_empty() %}
-  <div class="d-flex justify-content-between align-items-center">
-    <small class="text-muted">Total: {{ pager.total }} · Page {{ pager.page }} / {{ pager.pages }}</small>
+  {%- if pagination %}
+  <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <small class="text-muted">
+      Total: {{ pager.total }}
+      {%- if pager.pages > 1 %} · Page {{ pager.page }} / {{ pager.pages }}{% endif %}
+      {%- if !per_page_options.is_empty() %} · Rows:
+        {%- for o in per_page_options %}
+        {% if o.active %}<strong>{{ o.label }}</strong>{% else %}<a href="{{ o.href }}">{{ o.label }}</a>{% endif %}
+        {%- endfor %}
+      {%- endif %}
+    </small>
+    {%- if !pager.links.is_empty() %}
     <nav aria-label="Pagination">
       <ul class="pagination pagination-sm mb-0">
         {%- for l in pager.links %}
@@ -176,6 +189,7 @@
         {%- endfor %}
       </ul>
     </nav>
+    {%- endif %}
   </div>
   {%- endif %}
   {{ dialog|safe }}

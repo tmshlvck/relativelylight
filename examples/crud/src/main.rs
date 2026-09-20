@@ -253,6 +253,12 @@ struct Dashboard {
 }
 
 async fn dashboard(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
+    // The panel below renders links — View, and the sortable headers — and they are relative, so
+    // they come back *here*. A page that embedded a table and then rendered it from
+    // `ViewState::default()` would drop them on the floor: the link would navigate, the URL would
+    // change, and nothing on the page would move.
+    let state = ViewState::from_uri(&uri);
+
     let count = |slug: &'static str, query: &str| {
         let engine = app.engine.clone();
         let q = ViewState::from_query(query).to_list_query(1);
@@ -281,7 +287,7 @@ async fn dashboard(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) ->
         .format("title", |v, row| {
             format!(r#"<a href="/post/{}/edit">{}</a>"#, esc(&row["id"]), esc(v))
         })
-        .render_for(&headers, &ViewState::default())
+        .render_for(&headers, &state)
         .await;
 
     let body = Dashboard {

@@ -139,11 +139,18 @@ because `?entity=post` renders one table instead of nine.
   `created_at`, the whole of a long text column). It renders through the same code as the cells, so
   labels, badges, timezones and `format` closures all apply; write-only columns are left out. It is
   also the only row view a caller who may not write gets at all. `Table::detail(false)` removes it.
-- **A page-size control**, `Table::per_page_choices([…])` (default `[10, 30, 100, 250]`), and
+- **Page sizes beside the pager**, as links — `Table::per_page_choices([…])` (default
+  `[10, 30, 100, 250]`; empty hides them), and
   **`Table::per_page_max(n)`** — the largest page a table will fetch however large a `?per_page=`
   asks for, defaulting to `Table::DEFAULT_PER_PAGE_MAX` (**10,000**). `?per_page=100000000` was
   otherwise a cheap way to make a server read a whole table into memory and render it. The clamp
   normalises the view state, so links carry the clamped number instead of propagating the greedy one.
+- **The search box submits itself**: two seconds after typing stops, or at once on Enter, taking
+  focus back with the caret at the end so the reload it caused doesn't interrupt typing. The
+  **Apply** button now exists only inside `<noscript>`, where it is the only way to submit a form
+  whose other controls are text inputs.
+- **The CSV import dialog names its two ways in** — "File import" and "Direct text import", each
+  with its own button, separated by an "or" rule — so it reads as the either/or it is.
 - **`csrf::enforce` reads the token out of a `multipart/form-data` body**, so a route that accepts
   an upload can sit behind the layer like any other — previously it rejected them, which made
   guarding a route with file uploads impossible. The body is held only up to **`Csrf::max_upload`**

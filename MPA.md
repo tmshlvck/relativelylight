@@ -516,7 +516,7 @@ combination in CLAUDE.md's matrix builds — which caught one real bug: `csv` us
 | new renderer | ≈ 1,480 | `ui/` 2,273 (incl. 1,387 in `mod.rs`), templates 220, `rl.css` 36, `urlform.rs` 100 |
 | test suite | "extended" | **+516** lines |
 | rendered adminpanel page | ≈ 700 lines | **498 lines / 25 KB** (from 9,441 / 521 KB) |
-| JavaScript | < 30 lines | **3 inline attributes, no file** |
+| JavaScript | < 30 lines | **~15 lines of inline attributes, no file** (3 at first; a debounced search and a few affordances since) |
 
 The net deletion is smaller than estimated because the new code carries the doc comments and the
 render-time refusals the JS never had, and because `ui/mod.rs` absorbed the three components' builders
