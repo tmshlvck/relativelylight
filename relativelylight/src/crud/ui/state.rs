@@ -213,8 +213,10 @@ impl ViewState {
     /// The link to another entity's panel. `keep` decides which filters travel: an
     /// [`Admin`](super::Admin) passes the ones it declared as shared **and** the target actually
     /// has a column for, so a zone follows the operator between the tables it means something in
-    /// and appears in no link where it would mean nothing. The page, the search term and the sort
-    /// are always left behind — they were about the table being navigated away from.
+    /// and appears in no link where it would mean nothing. The page, the search term, the sort and
+    /// the page size are always left behind — they were about the table being navigated away from,
+    /// which also keeps a greedy `?per_page=` out of every nav link on the page (the table that
+    /// received it clamps it for itself; the panel doesn't know the next table's ceiling).
     pub(crate) fn href_entity(
         &self,
         base: Option<&str>,
@@ -223,6 +225,7 @@ impl ViewState {
     ) -> String {
         let mut s = self.clone();
         s.page = 0;
+        s.per_page = 0;
         s.q = String::new();
         s.sort.clear();
         s.filters.retain(|(name, _)| keep(name));
@@ -487,6 +490,11 @@ mod tests {
         let path = s.href_entity(Some("/admin"), "tag", |name| name == "author");
         assert_eq!(path, "/admin/tag?filter%5Bauthor%5D=7");
         assert_eq!(s.href_entity(Some("/admin/"), "tag", |_| false), "/admin/tag", "no query, no ?");
+
+        // A page size belongs to the table it was chosen on — and the next table's ceiling is not
+        // this one's, so propagating a greedy number would put it in every link on the page.
+        let greedy = ViewState::from_query("per_page=100000000&page=4&q=x");
+        assert_eq!(greedy.href_entity(Some("/admin"), "tag", |_| false), "/admin/tag");
     }
 
     #[test]

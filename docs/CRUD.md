@@ -9,11 +9,11 @@ There is **no JSON API and no JavaScript framework**. The columns the module com
 rendered HTML — one Rust `match` per cell and per form input — and writes come back as posted forms.
 An app that wants to publish a JSON API writes those handlers itself over the same typed [`Engine`]
 (see [Reading and writing](#reading-and-writing)); its shape is a product decision this crate
-deliberately doesn't make. `MPA.md` records why that changed in 0.3.
+deliberately doesn't make. [MIGRATION-0.3.md](MIGRATION-0.3.md) records why that changed in 0.3.
 
 New here? **[APP.md](APP.md)** builds a whole app end to end (shell, nav bar, login, admin, your own
 pages); this document is the reference for the parts. Coming from 0.2.x?
-**[MPA_MIGRATION.md](../MPA_MIGRATION.md)**.
+**[MIGRATION-0.3.md](MIGRATION-0.3.md)**.
 
 - [Install & features](#install--features)
 - [Quick start](#quick-start)

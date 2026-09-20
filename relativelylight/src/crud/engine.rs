@@ -9,7 +9,7 @@
 //!
 //! Everything here is **typed and in-process**: there is no JSON/metadata API any more, so
 //! `Vec<Column>` + [`Page`] go straight from the accessor to the renderer without a wire format in
-//! between (see `MPA.md`). An app that wants to publish its own JSON API writes the handlers and calls
+//! between (see `docs/MIGRATION-0.3.md`). An app that wants to publish its own JSON API writes the handlers and calls
 //! these same methods.
 
 use async_trait::async_trait;

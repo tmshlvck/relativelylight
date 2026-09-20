@@ -2,7 +2,7 @@
 
 0.3.0 re-homes the web UI in Rust. `crud::ui` renders plain server-side HTML, and **the JSON API, the
 metadata API and the OpenAPI document are removed** — that wire existed to feed the JavaScript this
-release deletes. `MPA.md` is the reasoning; this document is the upgrade.
+release deletes. The appendix at the end is the reasoning; everything before it is the upgrade.
 
 ```toml
 relativelylight = { version = "0.3", features = ["ui", "csv", "auth"] }   # note: no "openapi"
@@ -28,6 +28,7 @@ library gives you the same typed calls they were built on.
 - [13. Compile-error cheat sheet](#13-compile-error-cheat-sheet)
 - [14. Full before/after](#14-full-beforeafter)
 - [15. Symbol reference](#15-symbol-reference)
+- [Appendix: why the rewrite happened](#appendix-why-the-rewrite-happened)
 
 ---
 
@@ -215,7 +216,7 @@ async fn set_tz(Form(f): Form<HashMap<String, String>>) -> Response {
 
 Configure which zones it offers — `TzPicker::new()` (UTC + Europe + US), `.all_zones()`, or
 `.zones(cfg.timezones)` from your own configuration. The crate's own lists exclude the Russian
-Federation and Belarus. Full guide: [docs/TIME.md](docs/TIME.md).
+Federation and Belarus. Full guide: [TIME.md](TIME.md).
 
 If you never showed a picker, you have nothing to do: everything renders UTC, as it did.
 
@@ -458,7 +459,7 @@ async fn save(
 
 Net: one extra handler, one shared `panel()` function, a `ViewState`, and the router merge deleted.
 `examples/adminpanel` is this with 2FA, lockout panels, CSV and a timezone cookie;
-[docs/APP.md](docs/APP.md) builds the rest of a real app around it.
+[APP.md](APP.md) builds the rest of a real app around it.
 
 ## 15. Symbol reference
 
@@ -494,7 +495,7 @@ Net: one extra handler, one shared `panel()` function, a `ViewState`, and the ro
 
 **New**
 
-`crud::ui::{ViewState, Mode, Done, Outcome, esc, esc_str, CSS, Fmt, RowClass}`,
+`crud::ui::{ViewState, Mode, Done, Outcome, esc, esc_str, CSS}`,
 `Table::{columns, row_class, detail, per_page_choices, per_page_max, fields, omit, dom_id, submit, csv}`,
 `Admin::base` (a path per model, `/admin/post`, instead of `?entity=post`),
 `Csrf::max_upload`,
@@ -504,6 +505,142 @@ EXCLUDED, zones_default, zones_all, is_excluded}`, `TzPicker::{action, all_zones
 
 ---
 
-Questions this document doesn't answer are probably in [docs/CRUD.md](docs/CRUD.md) (the components
-and the engine), [docs/APP.md](docs/APP.md) (composing a whole app), or `MPA.md` (why any of this
+Questions this document doesn't answer are probably in [CRUD.md](CRUD.md) (the components
+and the engine), [APP.md](APP.md) (composing a whole app), or the appendix below (why any of this
 happened). If something here is wrong or missing, that's a bug in the guide — please say so.
+
+---
+
+# Appendix: why the rewrite happened
+
+This is the design record for 0.3, folded in from the plan it was built from (`MPA.md`, deleted at
+the end of the branch — the full text with its phase plan and risk table is in git history). It
+answers "why" rather than "how to upgrade", and nothing below is needed to migrate an app.
+
+## A1. The four measurements
+
+Taken on 0.2.1, before anything moved.
+
+**The page was the same thing many times.** A rendered `Admin` panel was `table.html` (615 lines) +
+`_form_core.html` (263) + `_form_fields.html` (171) = **1,049 lines per entity**, repeated per
+registered model. `examples/adminpanel` registers nine, so its admin page was **9,441 lines /
+521 KB** — 136 KB gzipped, because gzip's 32 KB window can't dedupe copies 58 KB apart. `admin.html`
+rendered every panel and showed one (`x-show="active === '{{ p.slug }}'"`).
+
+**Type information was computed in Rust and then thrown away.** `Table::render_inner` called
+`engine.columns(&slug)` and held a fully typed `Vec<Column>` — then re-derived it as `columns_json`
+from `meta_one` so that untyped JavaScript could dispatch on it. Every `c.kind === "relation"`,
+`c.display === "datetime"`, `c.type === "Bool"` in the Alpine code was a `match` that Rust would have
+checked exhaustively, deliberately deferred to a language that cannot check it.
+
+**The extension points were strings of another language.** The whole customization surface of `Table`
+beyond layout flags was `format(column, js: String)` and `on_saved(js: String)`: JavaScript source
+passed as a Rust `String`, checked by neither compiler and covered by no test.
+
+**And the JSON API was that JavaScript's backend, not a product.** `openapi.rs` (477 lines) described
+it, `engine.rs`'s `mod http` (295) served it, `meta_all`/`meta_one`/`column_json` (~115) assembled the
+metadata it published, and `csv_io.rs` (230) read that metadata back out of untyped JSON it had just
+produced — inside one process, from typed values it already had. Its shape (`{id, label}` relation
+embedding, `?view=terse`, `_meta`'s column objects, the `422` field map) was a set of internal
+conventions of the table component, published by accident.
+
+Against that stood the counter-example inside the same crate: **`auth` was already a pure MPA.**
+Login, TOTP, recovery codes, profile, password change and manager reset all rendered server-side and
+answered writes with `Redirect::to(…)`, with zero JavaScript, behind 3,000 lines of
+`security_tests.rs`. 0.3 was not an experiment — it made `crud::ui` work the way half the library
+already worked.
+
+## A2. Why the API could go
+
+An application that needs a JSON API for its own consumers should write one. It has the database, it
+has SeaORM, and the questions its API must answer — versioning, field selection, bearer tokens, rate
+limits, pagination style — are product decisions this library has no business making. What the
+library owes such an app is the **backend**: `MetaModel` configuration, the coerce → validate → hook
+write pipeline, the `authz` gate, the write observer, and a *typed* `Engine` to call. Not a URL space.
+§9 above is that argument turned into code.
+
+The API between the backend and the crate's own table/form/admin components was never a contract,
+never documented as stable, and stopped existing on the client side with the JavaScript. Keeping it
+would have meant maintaining a published wire format, its OpenAPI description and its CSV adapter for
+zero consumers.
+
+## A3. What was explicitly not attempted
+
+- **No business-process modelling.** No "Action" verb, no workflow engine. Apps that need multi-stage
+  processes hand-write those pages and embed `Form`/`Table` where a step is a plain table or form —
+  making that embedding cheap was a goal, and is what [APP.md](APP.md) §6 documents.
+- **No change to the write pipeline.** Coercion, validation, transforms, hooks, N:M resolution and the
+  SeaORM introspection are untouched; 0.3 changed what calls them and what renders their output.
+- **No Bootstrap replacement.** The markup is still Bootstrap 5 classes and the app still loads the
+  CSS. Bootstrap's *JavaScript* bundle stopped being required, as did Alpine.
+- **No rewrite of `auth`'s hand-rolled HTML.** `auth` builds strings with `format!` + `esc`;
+  `crud::ui` uses Askama. Unifying them is a later, separable cleanup.
+
+## A4. Recorded decisions
+
+- **`Accessor` stays public but is not a stability promise.** It has one implementor and exists for
+  type erasure. Saying so in its docs lets `Column` gain fields without `#[non_exhaustive]` ceremony.
+- **`Engine` and `Crud` stay two types.** Merging them would break `register`/`engine()` and delete
+  nothing.
+- **No `Html`/`Cell` newtype for `format`.** A `String` plus a public `esc` matches what `auth`
+  already does and keeps the closure trivially writable; a type would move the footgun, not remove it.
+- **No JavaScript relation picker**, which is why `picker_threshold` survives with a new mechanism
+  rather than being deleted. See A6.4.
+- **CSRF stayed opt-in** (`Crud::csrf`) rather than becoming mandatory: requiring it would add a
+  builder argument every app must satisfy and delete no code. The examples enable it, and
+  `gate_tests` covers both states.
+
+## A5. The result, measured the same way
+
+| | Planned | Actual |
+|---|---|---|
+| net crate source (non-test) | ≈ −800 | **−281** |
+| deleted outright | — | `openapi.rs` 477, `ui.rs` 890, Alpine templates + JS **1,446** |
+| new renderer | ≈ 1,480 | `ui/` 3,018 across ten modules, templates 220, `rl.css` 36, `urlform.rs` 100 |
+| test suite | "extended" | **+516** lines |
+| rendered adminpanel page | ≈ 700 lines | **498 lines / 25 KB** (from 9,441 / 521 KB) |
+| JavaScript | < 30 lines | **~15 lines of inline attributes, no file** |
+
+The net deletion is smaller than estimated because the new code carries doc comments and render-time
+refusals the JavaScript never had, and because `ui/` absorbed the three components' builders rather
+than replacing them. The claim that mattered held: **the per-request payload fell by ~20×**, and the
+parts a compiler now checks are the parts that used to be strings.
+
+## A6. Where the result differs from the plan
+
+1. **The library contributes no routes at all.** The plan proposed one `POST` route per surface plus a
+   `shell` closure. Instead `submit(&headers, ip, &body, &state) -> Outcome` is a method the app calls
+   from its own `post` handler, and `Outcome::Invalid(state)` hands the state back for the app to
+   re-render in *its own* shell. That deleted the shell closure, the router plumbing, the
+   `Arc<Engine>`-vs-`&Engine` mismatch a `Router` would have forced, and the mount path: every link is
+   relative, so the library never learns where it lives. Cost: ~8 lines of app code per surface (§4).
+2. **No timezone `_op=tz` in `submit`.** Setting a cookie needs a response, which a fragment renderer
+   never writes, so `TzPicker` posts to a four-line route of the app's own (`Tz::cookie()` returns the
+   `Set-Cookie` value). Keeping it out of `submit` kept `Outcome` to two variants.
+3. **`search[col]=term` was dropped from the URL vocabulary.** No control ever rendered it, so it was
+   surface with no user; `ListQuery::search` still carries it for app code calling the engine.
+4. **The large-relation picker is an id input**, not the zero-JS search sub-dialog the plan sketched:
+   carrying the operator's in-progress form values through a search round trip means putting them all
+   in the URL, which is real work for a rare case. `picker_threshold` still decides;
+   [TODO.md](TODO.md) records both ways forward.
+5. **CSV import posts the file itself.** The plan's fallback was a pasted `<textarea>` because
+   `csrf::enforce` couldn't read a multipart body; the parser was written instead (`multipart.rs`, no
+   new dependency), so the modal offers both a file upload and a paste box and neither involves
+   JavaScript.
+6. **`jiff`, not `chrono-tz`** — one crate instead of two, reading the host's IANA database, with UTC
+   as the documented fallback when a host has none. The plan left this open.
+7. **`examples/time` is gone**, folded into `examples/crud` (its `event` table now lives in
+   `examples/model`, DST rows and comments intact, at `/event`). Once the timezone policy stopped
+   being ~120 lines of JavaScript and became "which `Tz` your handler passes", the example's whole
+   subject was four lines `examples/adminpanel` already showed. The DST-straddling dataset was worth
+   keeping — as a table in an existing example, and as a unit test, which is better coverage than a
+   page someone has to look at.
+
+## A7. The one thing the plan missed
+
+**Reads had to become gated.** With the API as the enforcement point, `Table::render_for` only decided
+which *buttons* to draw; delete the API and that function becomes the only thing standing between a
+caller and the rows. It now consults the gate for `List` (and `Read` when a dialog is open) and
+answers `401`/`403`, and `crud/gate_tests.rs` asserts both that and that the backend is never reached.
+Nothing in the plan anticipated it — it fell out of the first gate test written against the new
+surface, which is the argument for having written the tests first.

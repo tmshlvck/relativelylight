@@ -521,4 +521,4 @@ Before a deployment goes out:
 - [AUTH.md](AUTH.md) — sessions, 2FA, SSO, the gate presets, CSRF, lockout.
 - [TIME.md](TIME.md) — the timezone cookie, the picker, configuring the offered zones.
 - [DATAINPUT.md](DATAINPUT.md) — validators you can call from a hand-written form.
-- [MPA_MIGRATION.md](../MPA_MIGRATION.md) — upgrading an app from 0.2.x.
+- [MIGRATION-0.3.md](MIGRATION-0.3.md) — upgrading an app from 0.2.x.

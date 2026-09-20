@@ -12,7 +12,8 @@ is easy to miss in a diff.
 ## Unreleased
 
 The web UI is **re-homed in Rust**: `crud::ui` renders plain server-side HTML, and the JSON/metadata
-API it used to talk to is gone with it. See `MPA.md` for the reasoning; this entry is the upgrade path.
+API it used to talk to is gone with it. See [docs/MIGRATION-0.3.md](docs/MIGRATION-0.3.md) for the
+upgrade path and, in its appendix, the reasoning.
 
 Measured, rather than estimated: the crate's non-test source is **281 lines shorter**, and that
 understates the change — **1,446 lines of Alpine-bearing templates and JavaScript** and **477 lines of
@@ -21,7 +22,7 @@ test suite grew by **516 lines** (escaping, form decoding and read-gating are th
 now). One build dependency dropped (`utoipa`), two runtime dependencies dropped from every page
 (Alpine, Bootstrap's JS bundle), one optional dependency added (`jiff`, for the IANA timezone
 database). A rendered 9-entity admin page goes from **9,441 lines / 521 KB to ~500 lines / 25 KB**,
-because `?entity=post` renders one table instead of nine.
+because a request renders one table instead of nine.
 
 ### Breaking
 
@@ -114,7 +115,7 @@ because `?entity=post` renders one table instead of nine.
 
 ### Added
 
-- **Two new documents.** [`MPA_MIGRATION.md`](MPA_MIGRATION.md) is the 0.2.x → 0.3.0 upgrade guide —
+- **Two new documents.** [`docs/MIGRATION-0.3.md`](docs/MIGRATION-0.3.md) is the 0.2.x → 0.3.0 upgrade guide —
   every changed symbol, a compile-error cheat sheet, a full before/after, and what to do if you were
   publishing the JSON API. [`docs/APP.md`](docs/APP.md) is the cookbook the library was missing:
   page shell and nav bar, the login page, the admin's two handlers, dashboards, hand-written forms,
@@ -142,9 +143,14 @@ because `?entity=post` renders one table instead of nine.
 - **Page sizes beside the pager**, as links — `Table::per_page_choices([…])` (default
   `[10, 30, 100, 250]`; empty hides them), and
   **`Table::per_page_max(n)`** — the largest page a table will fetch however large a `?per_page=`
-  asks for, defaulting to `Table::DEFAULT_PER_PAGE_MAX` (**10,000**). `?per_page=100000000` was
-  otherwise a cheap way to make a server read a whole table into memory and render it. The clamp
-  normalises the view state, so links carry the clamped number instead of propagating the greedy one.
+  asks for, defaulting to `Table::DEFAULT_PER_PAGE_MAX` (**500**). `?per_page=100000000` was
+  otherwise a cheap way to make a server read a whole table into memory and render it — and a page
+  of `N` rows with `R` relation columns costs on the order of `N × R` queries, so the honest ceiling
+  is far below what memory alone would allow. The clamp normalises the view state, so links carry
+  the clamped number instead of propagating the greedy one, and an `Admin`'s nav links drop the page
+  size the way they already drop the page, the search and the sort — it belonged to the table it was
+  chosen on, whose ceiling isn't the next table's. Raise the cap per table with `per_page_max(n)`
+  where the rows have no relations.
 - **Narrow feature builds are warning-free.** Helpers shared between features (`urlform`,
   `multipart`, `Engine::csrf_ok`/`observe`) are gated to the features that actually call them, so a
   build with only `auth` — or only `crud` — no longer emits `never used` warnings from a library the
@@ -172,7 +178,7 @@ because `?entity=post` renders one table instead of nine.
   guarding a route with file uploads impossible. The body is held only up to **`Csrf::max_upload`**
   (16 MiB by default, configurable): the token lives in the body, so finding it means holding the
   body, and an unbounded read would let a request choose how much memory the process uses. Closes
-  the one deliberate gap `TODO.md` had carried since the feature shipped.
+  the one deliberate gap `docs/TODO.md` had carried since the feature shipped.
 - **`Table::columns([…])`** — choose and order the columns the *table* shows, independently of the
   dialog's form (`fields`/`omit`) and of CSV. The usual case: a model with twenty columns and a
   console that needs five across the screen.
@@ -191,7 +197,7 @@ because `?entity=post` renders one table instead of nine.
   reads the shape browsers post and refuses anything else — no boundary, a nameless part, a
   truncated body, an encoding it would have to decode. `submit` takes the `_csrf` token from a part,
   so uploads are CSRF-checked like every other write. (The `csrf::enforce` **layer** still doesn't
-  parse multipart — don't put the UI's write route behind it if you allow uploads; see TODO.md.)
+  parse multipart — don't put the UI's write route behind it if you allow uploads; see docs/TODO.md.)
 - **`Outcome`-bearing writes report themselves once**, as a Bootstrap alert above the table: a
   delete redirects with `?done=deleted:17`, an import with `?done=imported:120,3`, and the next
   render turns that into "17 records deleted." / "120 records added and 3 updated from CSV." before
@@ -226,6 +232,20 @@ because `?entity=post` renders one table instead of nine.
 - The `«` / `»` pager controls are always rendered, stepping by a tenth of the table (so they are
   plain previous/next on a short one) rather than appearing only past ten pages.
 - Multi-key sorting is an explicit `+` affordance on each header instead of shift-clicking it.
+- **The documents moved out of the project root.** `TODO.md` → [`docs/TODO.md`](docs/TODO.md),
+  `SORTFILTER.md` → [`docs/SORTFILTER.md`](docs/SORTFILTER.md), and `MPA_MIGRATION.md` →
+  [`docs/MIGRATION-0.3.md`](docs/MIGRATION-0.3.md), which absorbed the `MPA.md` plan as its appendix
+  — the reasoning for the rewrite, the recorded decisions, and the seven places the result differs
+  from what was planned. The root now holds `README.md`, `CHANGELOG.md`, `CLAUDE.md`/`AGENTS.md` and
+  the licence. Nothing in the crate's API is affected; external links to the old paths are not.
+- **`crud::ui` is ten modules instead of one 1,800-line file** — `table.rs`, `form.rs`, `admin.rs`,
+  the shared write path (`write.rs`), the render-time refusals (`checks.rs`) beside the existing
+  `state`/`render`/`widgets`/`decode`. Pure code motion: no behaviour, no public item, and no test
+  changed.
+- **`crud::ui::Fmt` and `crud::ui::RowClass` are no longer public.** Both are internal aliases for
+  the boxed closure shapes `Table::format` and `Table::row_class` store; the builders take
+  `impl Fn(…)`, so no public signature ever named them. If you had written one out by hand, drop the
+  annotation and pass the closure.
 
 ## [0.2.1] — 2026-08-06
 
@@ -726,7 +746,7 @@ sessions bounded on two clocks, TOTP recovery codes and a replay guard, a passwo
   credential surfaces shares these counters rather than running a second limiter, so an account can't be
   given two budgets. Durable lockouts also make griefing durable (a restart no longer clears one), which
   is why the lock is short and the admin panel can delete the row.
-- Still open (see [TODO.md](TODO.md)): re-authentication before disabling 2FA or changing a password,
+- Still open (see [docs/TODO.md](docs/TODO.md)): re-authentication before disabling 2FA or changing a password,
   TOTP recovery codes and a replay guard, session-id rotation on privilege change, and invalidating a
   user's other sessions after a password change.
 

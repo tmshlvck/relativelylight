@@ -6,7 +6,7 @@
 //! is checked the way the rest of the suite checks them — **no session cookie, no session row** — so a
 //! handler that answered "no" while quietly signing someone in would fail.
 //!
-//! **Why a fake IdP and not a live one.** `TODO.md` asked for the callback to be verified against a real
+//! **Why a fake IdP and not a live one.** `docs/TODO.md` asked for the callback to be verified against a real
 //! provider. A real one can't be driven in CI, can't be asked for an expired token or one signed by the
 //! wrong key, and would make the suite depend on someone else's uptime — so the negative cases, which are
 //! the whole point, would go untested. Instead a small axum app plays the provider on a loopback port,

@@ -1594,7 +1594,7 @@ async fn profile_submit(
     }
     // Not lockout-limited: the caller is *authenticated*, so this isn't brute force from outside —
     // it's someone with a live session, which is a session-theft problem (short TTLs, re-auth before
-    // sensitive changes — TODO.md), not a guessing one. Counting it here would also let a stolen
+    // sensitive changes — docs/TODO.md), not a guessing one. Counting it here would also let a stolen
     // session lock the real user out of logging in.
     let error: Option<String> = if !verify_password(&user.password_hash, &form.current_password) {
         Some("Current password is incorrect.".into())

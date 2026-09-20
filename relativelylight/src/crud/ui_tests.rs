@@ -1236,8 +1236,9 @@ async fn a_page_size_from_the_url_is_clamped() {
     assert!(!html.contains("100000000"), "and the greedy size is not offered back: {html}");
     assert!(html.contains("<strong>50</strong>"), "the cap is what's marked in force: {html}");
 
-    // The default cap is 10,000 — high enough never to be met by an honest console.
-    assert_eq!(Table::DEFAULT_PER_PAGE_MAX, 10_000);
+    // The default cap is 500 — a page no honest console asks past, and one whose relation columns
+    // don't turn into thousands of queries (see `DEFAULT_PER_PAGE_MAX`).
+    assert_eq!(Table::DEFAULT_PER_PAGE_MAX, 500);
     let defaulted = Table::new(&e, "thing").render_for(&no_headers(), &greedy).await.unwrap();
     assert!(!defaulted.contains("100000000"), "the URL's number is not echoed back: {defaulted}");
 

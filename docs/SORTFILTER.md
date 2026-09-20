@@ -4,13 +4,13 @@
 > unchanged — `?sort=`, `filter[…]`, the relation join, the total ordering. What *has* changed is
 > where it is read from: the parameters are parsed by `crud::ui::ViewState` out of the page's own URL
 > rather than by a JSON API, and the OpenAPI arguments below (`deepObject`, schema descriptions) are
-> historical — that document generator was removed with the API in 0.3. See `MPA.md` and
-> `MPA_MIGRATION.md`.
+> historical — that document generator was removed with the API in 0.3. See
+> [MIGRATION-0.3.md](MIGRATION-0.3.md).
 
 > **Status: implemented and shipped for 0.2.1.** This file is kept as the design record — the analysis
 > of *why* the shape is what it is (the bracket namespace, the label probe, the primary-key tiebreaker)
 > is the part worth having later. See `CHANGELOG.md` § Unreleased for what landed and
-> [docs/CRUD.md](docs/CRUD.md) for how to use it. Decisions taken against §5: bracket spelling
+> [CRUD.md](CRUD.md) for how to use it. Decisions taken against §5: bracket spelling
 > `filter[…]` / `search[…]` spelled out rather than `f[…]`; bare `?<col>=` on a non-text column **(b)
 > rejected** with a plain 400; label column **auto-detected** by probing `row_label`, with
 > `label_column` as the explicit form; the ordering fix taken; `teleddns-server` wired in the same pass.

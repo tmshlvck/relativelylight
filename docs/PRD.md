@@ -1,24 +1,24 @@
 # relativelylight — Product Requirements Document
 
-**relativelylight** turns Rust ORM entities into a full back-office stack — a JSON CRUD + metadata
-API, an auto-generated web admin, authentication/authorization, and file handling — with **no
+**relativelylight** turns Rust ORM entities into a full back-office stack — a typed CRUD engine, an
+auto-generated server-rendered web admin, authentication/authorization, and file handling — with **no
 per-model code**. It's one crate of composable, feature-gated modules; take the pieces you need.
 
 This document is the **product overview and roadmap**: what each module is *for*, its status, and
 what's still ahead. It intentionally does **not** teach usage — for a lead-in see
 **[../README.md](../README.md)**, and for the full API/design see the per-module guides linked below.
-For the concrete backlog see **[../TODO.md](../TODO.md)**.
+For the concrete backlog see **[TODO.md](TODO.md)**.
 
 | Module | What it's for | Status | Guide |
 |---|---|---|---|
-| **`crud`** (§1) | SeaORM entities → JSON CRUD + machine-readable metadata API | ✅ implemented | [CRUD.md](CRUD.md) |
+| **`crud`** (§1) | SeaORM entities → a typed CRUD engine (list/read/write/validate/gate) | ✅ implemented | [CRUD.md](CRUD.md) |
 | **`crud::ui`** (§2) | auto-generated web UI: standalone form, table, side-panel, bulk + CSV | ✅ implemented | [CRUD.md → Web UI](CRUD.md#web-ui-ui) |
 | **`auth`** (§3) | user/group model, sessions, login, TOTP 2FA, OIDC SSO, per-model `Authz` gate | 🟡 major slice done | [AUTH.md](AUTH.md) |
 | **`middleware`** | `resolve_real_ip` (required — the caller's address, resolved once into a `RealIp` extension). No logging: the crate writes nothing, see `examples/access_log` | ✅ | [AUTH.md §4](AUTH.md) |
 | **`observe`** (§4) | write-observer hook for audit logging (change + request context) | ✅ implemented | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
 | **`time`** (§5) | timezone-aware display of UTC timestamps (helpers + `$store.tz` + picker) | ✅ implemented | [TIME.md](TIME.md) |
 | **`validate`** | reusable typed field validators + normalizers, shared by CRUD and hand-written APIs | ✅ implemented | [DATAINPUT.md](DATAINPUT.md) |
-| **`blob`** (§6) | content-addressed file storage, viewer, thumbnailer, admin panel | 🟡 draft spec | [BLOBSTORE.md](BLOBSTORE.md) |
+| **`blob`** (§6) | content-addressed file storage, viewer, thumbnailer, admin panel | ⛔ specified, unimplemented | [BLOBSTORE.md](BLOBSTORE.md) |
 
 > ✅ implemented & verified · 🟡 partial (core done, hardening/extras ahead) · ⛔ future.
 
@@ -29,7 +29,7 @@ engine can serve (§1); a *frontend flavor* renders them (§2). The contract in 
 **`Vec<Column>` + `Page`** — typed Rust, in-process — so backends and frontends vary independently.
 Today there is one backend (SeaORM) and one frontend (`crud::ui`).
 
-That contract used to be a JSON + metadata HTTP API. **0.3 removed it** (see `MPA.md`): its only
+That contract used to be a JSON + metadata HTTP API. **0.3 removed it** (see [MIGRATION-0.3.md](MIGRATION-0.3.md)): its only
 consumer was this crate's own JavaScript, and publishing a wire format for an in-process seam cost an
 untyped middle, a 477-line OpenAPI generator, and ~1,450 lines of client code no compiler read. An app
 that wants a JSON API for its *own* clients writes those handlers over the same `Engine` — where the
@@ -130,7 +130,7 @@ paths (bad credentials, unusable sessions, wrong TOTP codes, replayed codes, idl
 non-manager profile writes, each gate preset) are covered by an automated negative-path suite —
 [AUTH.md §10a](AUTH.md).
 
-**Roadmap / deferred (see [../TODO.md](../TODO.md) for the ordered backlog):**
+**Roadmap / deferred (see [TODO.md](TODO.md) for the ordered backlog):**
 re-auth through the IdP for SSO accounts, breached-password screening, and CSRF on multipart bodies.
 (Client-IP resolution shipped as `middleware`; request logging is the app's — the crate writes nothing,
 see `examples/access_log`. CORS is documented rather than wrapped,
@@ -180,6 +180,10 @@ JavaScript beyond `ui`'s existing budget, and backup/purge mechanisms an app sup
 to. Deliberately stops short of versioning or ownership — those are an app's own typed layer on top
 (CLIMB's `attachments.md` is the reference case this scope line was drawn against). Full design:
 [BLOBSTORE.md](BLOBSTORE.md).
+
+**Status: the specification is written; none of it is built.** It came from the downstream CLIMB app,
+which runs this design against a real workload, and it is the next module to start — on its own
+branch, after 0.3.0 is out.
 
 ## 7. Open questions
 

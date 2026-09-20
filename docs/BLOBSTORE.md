@@ -315,7 +315,7 @@ one unified trail, or registers it with none of them and pays nothing.
 
 ## 5. Frontend components (feature `blob-ui`, needs `ui`)
 
-Same discipline as the rest of `crud::ui` post-MPA (`MPA.md`): server-rendered Askama fragments, the
+Same discipline as the rest of `crud::ui` post-MPA ([MIGRATION-0.3.md](MIGRATION-0.3.md)): server-rendered Askama fragments, the
 page works with JavaScript disabled, and the one place raw bytes could become an XSS hole is closed
 by construction rather than by convention (§10).
 
@@ -531,7 +531,7 @@ retire in favor of this crate (a follow-up migration, not part of this spec).
 - **`Operation::Read` on `WriteEvent`.** §4.7 wants blob reads to be audit-observable (this crate's
   own `blob-store.md` §6.5 already requires "every download emits an audit event"), but
   `observe::WriteEvent::op` is currently `Create`/`Update`/`Delete` only — reads were never a `crud`
-  concern because `crud`'s API was removed with the JSON layer (`MPA.md`). Adding a `Read` variant is
+  concern because `crud`'s API was removed with the JSON layer ([MIGRATION-0.3.md](MIGRATION-0.3.md)). Adding a `Read` variant is
   a small, additive change to `observe.rs`, but it's a change to a type `crud`/`auth` also use, so it
   wants a decision, not an assumption made inside this spec.
 - **S3/Ceph backend: in this crate, or a companion crate?** A `relativelylight-blob-s3` crate keeps

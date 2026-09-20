@@ -707,7 +707,7 @@ operator hit a force-logout). Note that `is_active = false` already denies every
 so revoking there is tidiness rather than enforcement.
 
 **Not yet.** Re-authentication before sensitive changes (a fresh password or code before disabling 2FA)
-is still open — see `TODO.md`. Until it lands, a stolen *live* session can still turn 2FA off, which is
+is still open — see [TODO.md](TODO.md). Until it lands, a stolen *live* session can still turn 2FA off, which is
 why the idle window matters.
 
 **Durable and shared, on purpose.** The rows survive a restart (a deploy must not hand every attacker a
@@ -1097,7 +1097,7 @@ if !auth.csrf().verify(&headers, form.csrf.as_deref()) { return StatusCode::FORB
 > request headers.
 
 **Limits.** There is no `Csrf` tower layer yet, and the 403 page isn't themeable — both in
-[TODO.md](../TODO.md). Note also that a **co-hosted** app sharing the host must use a distinct
+[TODO.md](TODO.md). Note also that a **co-hosted** app sharing the host must use a distinct
 `csrf_cookie_name` (cookies aren't port-scoped), exactly as with the session cookie.
 
 ## 8. Future-proofing (not in v1, but designed for)
@@ -1350,7 +1350,7 @@ suite (`cargo test --all-features`) that runs the shipped routers against a fres
 Each group carries a positive control (a correct login, a correct TOTP code, an allowing gate) so a
 mistake that breaks *everything* can't make the negatives pass vacuously.
 
-**Not covered by tests** (and open in [TODO.md](../TODO.md)): re-authentication *through an identity
+**Not covered by tests** (and open in [TODO.md](TODO.md)): re-authentication *through an identity
 provider* for SSO accounts (§5h's documented limit), and breached-password screening (§5g). What the
 SSO suite deliberately doesn't reach: the *provider's* own behaviour (consent screens, refresh tokens,
 userinfo),
@@ -1389,7 +1389,7 @@ don't follow.
 ## 12. Open (later)
 
 - Row-level authorization (per-row read checks / list filters — the gate seeing the row/query). Filed
-  under *Transformative* in `TODO.md`: it reshapes the one trait apps implement by hand, so it needs
+  under *Transformative* in [TODO.md](TODO.md): it reshapes the one trait apps implement by hand, so it needs
   **additional** `Authz` methods with defaults rather than a changed `authorize` signature, `Decision`
   must stay fieldless, and the list-filter half reaches into `ListQuery`/`Accessor` too. Deferred until a
   requirement arrives that an app can't meet in its own handler.

@@ -201,7 +201,7 @@ cargo run -p access-log-example    # :3000  the request log an app writes for it
 - **[docs/APP.md](docs/APP.md)** — **start here to build something**: one page shell, a login page, a
   top nav bar, the admin behind it, and your own pages beside it — dashboards, custom forms,
   multi-step workflows. The cookbook the module guides below are the reference for.
-- **[MPA_MIGRATION.md](MPA_MIGRATION.md)** — upgrading an app from 0.2.x to 0.3.0: what moved, what
+- **[docs/MIGRATION-0.3.md](docs/MIGRATION-0.3.md)** — upgrading an app from 0.2.x to 0.3.0: what moved, what
   it becomes, and a compile-error cheat sheet.
 - **[docs/CRUD.md](docs/CRUD.md)** — the full `crud` guide: `MetaModel`/`MetaField`/`MetaRelation`,
   the engine API, the URL as view state, validation, columns, CSV, the web admin, and how to compose
@@ -209,11 +209,15 @@ cargo run -p access-log-example    # :3000  the request log an app writes for it
 - **[docs/AUTH.md](docs/AUTH.md)** — the `auth` guide: sessions, login, TOTP 2FA, OIDC SSO, the gate
   presets, and app-side wiring. (Examples: `auth`, `adminpanel`.)
 - **[docs/TIME.md](docs/TIME.md)** — time & timezones: integer-UTC storage, the `Tz` request zone
-  (a cookie, formatted server-side), the picker, and DST. (Examples: `time`, `adminpanel`.)
+  (a cookie, formatted server-side), the picker, and DST. (Examples: `crud`'s `/event`, `adminpanel`.)
 - **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module: reusable field validators
   (IP/network, ranges, lengths, enums, hostname/FQDN, hex, email/URL, …) and normalizers as typed
   predicates, plus the `MetaField::validate_str/_int` sugar and the crud adapters.
-- **[docs/PRD.md](docs/PRD.md)** — product overview, module status, and roadmap.
+- **[docs/PRD.md](docs/PRD.md)** — product overview, module status, and roadmap;
+  **[docs/TODO.md](docs/TODO.md)** is the ordered backlog behind it.
+- **[docs/BLOBSTORE.md](docs/BLOBSTORE.md)** — the `blob` module's specification: content-addressed
+  file storage, viewer, thumbnailer and admin panel. **Specified, not implemented** — planned for
+  after 0.3.0.
 - **[CHANGELOG.md](CHANGELOG.md)** — what changed per release, with the breaking changes and upgrade
   steps for each.
 - **[AGENTS.md](AGENTS.md)** — orientation for working *on* the library (workspace layout, build/test,

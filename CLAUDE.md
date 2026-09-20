@@ -5,14 +5,14 @@ CRUD admin** and **authentication/authorization** (sessions, login, TOTP 2FA, a 
 **with no per-model code**. It's a library you compose *into* your app: you keep your own axum router
 and page shell; `relativelylight` contributes HTML fragments and the write path behind them.
 
-There is **no JSON API and no JavaScript framework** (0.3 removed both — see `MPA.md` and
+There is **no JSON API and no JavaScript framework** (0.3 removed both — see [docs/MIGRATION-0.3.md](docs/MIGRATION-0.3.md) and
 `CHANGELOG.md`). Rendering is Rust matching on typed columns; writes are posted forms, `POST` → `303`
 → `GET`. An app that needs a JSON API writes those handlers over the typed `Engine`.
 
 This file is a using-it orientation. To **build an app** with it, follow **[docs/APP.md](docs/APP.md)**
 (shell, nav, login, admin, your own pages). For the complete guides see
 **[docs/CRUD.md](docs/CRUD.md)**, **[docs/AUTH.md](docs/AUTH.md)**, and
-**[docs/TIME.md](docs/TIME.md)**; upgrading from 0.2.x is **[MPA_MIGRATION.md](MPA_MIGRATION.md)**;
+**[docs/TIME.md](docs/TIME.md)**; upgrading from 0.2.x is **[docs/MIGRATION-0.3.md](docs/MIGRATION-0.3.md)**;
 for the roadmap, **[docs/PRD.md](docs/PRD.md)**.
 
 ## Install & features
@@ -288,7 +288,8 @@ timezone demo, its rows straddling both 2026 DST transitions.
 - **[docs/APP.md](docs/APP.md)** — composing a whole app: the page shell + nav bar, the login page,
   the admin's two handlers, your own pages (dashboards, hand-written forms, multi-step workflows),
   and a pre-deployment checklist. The practical entry point; the guides below are the reference.
-- **[MPA_MIGRATION.md](MPA_MIGRATION.md)** — 0.2.x → 0.3.0 upgrade guide (the MPA rewrite).
+- **[docs/MIGRATION-0.3.md](docs/MIGRATION-0.3.md)** — 0.2.x → 0.3.0 upgrade guide, with the design
+  record for the MPA rewrite as its appendix.
 - **[docs/CRUD.md](docs/CRUD.md)** — the full `crud` guide: `MetaModel`/`MetaField`/`MetaRelation`,
   the engine API, the URL as view state, the validation pipeline, columns, CSV, the web UI
   (`Table`/`Form`/`Admin`), the write-observer audit hook, and composing with your app.
@@ -296,12 +297,17 @@ timezone demo, its rows straddling both 2026 DST transitions.
 - **[docs/AUTH.md](docs/AUTH.md)** — the `auth` guide: sessions, login, TOTP 2FA, OIDC SSO, the gate
   presets, profile/password pages, and app-side wiring. (Examples: `auth`, `adminpanel`.)
 - **[docs/TIME.md](docs/TIME.md)** — time & timezones: integer-UTC storage, the `Tz` request zone
-  (a cookie, formatted server-side), `TzPicker`, and DST. (Examples: `time`, `adminpanel`.)
+  (a cookie, formatted server-side), `TzPicker`, and DST. (Examples: `crud`'s `/event`, `adminpanel`.)
 - **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module: typed field validators +
   normalizers (IP/network, ranges, lengths, enums, hostname/FQDN, hex, email/URL), the crud `field`
   adapters, and the `MetaField::validate_str/_int` sugar. Same predicate on CRUD + hand-written APIs.
 - **[docs/PRD.md](docs/PRD.md)** — product overview, module status, roadmap.
-- **[TODO.md](TODO.md)** — the ordered backlog.
+- **[docs/TODO.md](docs/TODO.md)** — the ordered backlog.
+- **[docs/BLOBSTORE.md](docs/BLOBSTORE.md)** — the `blob` module's **specification, not yet
+  implemented**: content-addressed storage, viewer, thumbnailer, admin panel. Migrated from the
+  downstream CLIMB app; it gets its own branch after 0.3.0 ships.
+- **[docs/SORTFILTER.md](docs/SORTFILTER.md)** — a design record: why relation sorting and
+  `filter[…]` have the shape they do (kept for the reasoning; the behaviour is documented in CRUD.md).
 - **[CHANGELOG.md](CHANGELOG.md)** — per-release notes; land user-visible changes under `## Unreleased`
   as you make them (breaking changes first, with the upgrade step), so a release is a rename + a tag.
 
@@ -350,7 +356,7 @@ add or change functionality:
   example lists). Every user-facing feature should be demonstrated somewhere runnable.
 - Adding or promoting a **module/feature**? Update the module table + status in `docs/PRD.md`, add a
   pointer in `README.md` and this file's Documentation list, and move any now-shipped item out of
-  `TODO.md` (add new follow-ups there with a one-line rationale).
+  `docs/TODO.md` (add new follow-ups there with a one-line rationale).
 - Anything a **user would notice** (new API, changed default, fixed bug, breaking behaviour) gets an
   entry in `CHANGELOG.md` under `## Unreleased` **in the same change** — breaking items first, each with
   the concrete upgrade step. Releasing is then: rename that heading to `## [x.y.z] — YYYY-MM-DD`, add its

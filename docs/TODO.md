@@ -1,19 +1,25 @@
 # TODO
 
-Backlog for `relativelylight`, highest-impact first. See [docs/PRD.md](docs/PRD.md) for the product
-roadmap and [docs/AUTH.md](docs/AUTH.md) for the auth design these expand on. Keep this list current:
+Backlog for `relativelylight`, highest-impact first. See [PRD.md](PRD.md) for the product
+roadmap and [AUTH.md](AUTH.md) for the auth design these expand on. Keep this list current:
 tick/remove items as they ship, and add new ones with a one-line rationale.
 
 > **Convention:** `- [ ]` is work still to do. A plain `-` bullet is a **recorded decision** — considered
 > and rejected, or bounded on purpose — kept so the reasoning isn't re-derived when the idea resurfaces.
-> An item whose only content is "this shipped" belongs in [CHANGELOG.md](CHANGELOG.md), not here.
+> An item whose only content is "this shipped" belongs in [CHANGELOG.md](../CHANGELOG.md), not here.
 
 ## Next
 
-0.2.0 (security defaults) and 0.2.1 (sorting + filtering) are tagged. **The MPA rewrite is on `main`
-unreleased** (see `CHANGELOG.md` → Unreleased and `MPA.md`): the UI renders server-side and the JSON +
-metadata API and OpenAPI generation are gone. Nothing below blocks a release; all of it is follow-on
-work.
+0.2.0 (security defaults) and 0.2.1 (sorting + filtering) are tagged. **The MPA rewrite is
+unreleased, due as 0.3.0** (see `CHANGELOG.md` → Unreleased and
+[MIGRATION-0.3.md](MIGRATION-0.3.md)): the UI renders server-side and the JSON + metadata API and
+OpenAPI generation are gone. Nothing below blocks that release; all of it is follow-on work.
+
+**After 0.3.0 ships, the next module is `blob`** — [BLOBSTORE.md](BLOBSTORE.md) is its full
+specification, written against the downstream CLIMB app that already runs the design, and none of it
+is built. It gets its own branch rather than items in this list; what belongs here is anything the
+spec turns out to need from `crud`/`ui` first (it names one: CSRF on multipart bodies, which
+[shipped](../CHANGELOG.md) with 0.3).
 
 ## Web UI follow-ups (post-MPA)
 
@@ -143,7 +149,10 @@ Highest priority first.
 
 - [ ] Batch relation reads (avoid N+1 on relation resolution). Keep it inside the SeaORM backend — the
   resolution already happens behind `Accessor::list`, so this can be **purely internal**; a new
-  `Accessor` method would be a break for anyone implementing the seam.
+  `Accessor` method would be a break for anyone implementing the seam. This is what holds
+  `Table::DEFAULT_PER_PAGE_MAX` down at 500: a page of `N` rows with `R` relation columns costs on
+  the order of `N × R` queries, so the honest page ceiling is set by the query count, not by memory.
+  Batching would let that default rise.
 - [ ] Filter **operators** — `filter[ttl][gt]=300`, `filter[name][in]=a,b`, `filter[zone][is_null]=true`.
   The bracket grammar was chosen to nest, so this is additive in the URL; the work is in `ListQuery`
   (today's `eq: Vec<(String, String)>` would need a comparison alongside the value), in
