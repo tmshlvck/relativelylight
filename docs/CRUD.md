@@ -351,6 +351,7 @@ parses it; `ViewState::default()` is page 1, unsorted, unfiltered. Every link th
 | `page` / `per_page` | pagination (`per_page` defaults to the component's, else 25) |
 | `entity=<slug>` | which panel an [`Admin`](#admin--a-whole-admin-in-one-component) is showing |
 | `new=1` / `edit=<pk>` / `import=1` | render the create / edit / CSV-import dialog over the list |
+| `show=<pk>` | render the read-only detail dialog over the list |
 | `done=…` | what the write that redirected here did (`deleted:17`, `imported:120,3`) — rendered once as an alert, then dropped |
 | `format=csv` | your read handler exports instead of rendering (see [CSV](#csv-importexport)) |
 | `ids=…` (posted) | the rows a bulk delete ticked; `all=true` is the whole-table guard |
@@ -590,10 +591,10 @@ say precisely what is wrong with them. Three things follow:
   because nobody sees the file before it applies and mojibake in the database is worse than a retry.
 - **Size.** The body reaches your handler through axum's `DefaultBodyLimit` (2 MB). Raise it on that
   route with `DefaultBodyLimit::max(…)` if imports are larger.
-- **CSRF.** The token rides in a part of the multipart body, and `submit` reads it from there. Do
-  **not** put the UI's write route behind the `csrf::enforce` layer if you allow uploads: that layer
-  doesn't parse multipart, so it would reject them (loudly, with a `403` — it fails closed).
-  `submit` is already enforcing the same token.
+- **CSRF.** The token rides in a part of the multipart body. `submit` reads it from there, and so
+  does the [`csrf::enforce`](AUTH.md) layer, so a route that accepts uploads can sit behind the
+  layer like any other. The layer holds the body to find the token, bounded by
+  `Csrf::max_upload` (16 MiB by default) — set that a little above the largest upload you accept.
 
 **A refused import reopens the dialog**, with the per-row report in its banner (`line 4: title:
 required`) and the rows back in the paste box however they arrived — so a bad cell is fixed in
@@ -697,6 +698,9 @@ and in all three examples.
 | `title` / `description` | heading and a muted subtitle |
 | `search(bool)` | the search box (default on) |
 | `pagination(bool)` / `per_page(n)` | the pager (default on, 30) |
+| `per_page_choices([…])` | the sizes the toolbar offers (default `[10, 30, 100, 250]`; empty hides the control) |
+| `per_page_max(n)` | the largest page this table will fetch, however large a `?per_page=` asks for (default **10,000**) |
+| `detail(bool)` | the per-row **View** action and its read-only dialog (default on) |
 | `read_only(bool)` | no Create/Edit/Delete and no dialog, for anyone |
 | `confirm(bool)` | an `onclick` confirm on destructive buttons (default on) |
 | `columns([…])` | which columns the **table** shows, and in what order (default: all of them) |
@@ -753,6 +757,20 @@ just hide most of them — with the value in force missing from the list, no `<o
 selected and the browser would display the first one, so the control would confidently name a filter
 the table isn't using. A chip always shows the target's **label** (`Author: Ada Lovelace`), resolved
 by an exact id lookup, rather than the id the URL carries.
+
+**The read-only row.** Every table offers a **View** action per row, opening `?show=<pk>` — a dialog
+listing *every* published column, not just the writable ones. It is the only way to see a generated
+id, a hook-stamped `created_at`, or the whole of a long text column the table shows a corner of, and
+the only row view a caller who may not write gets at all. Values come from the same renderer as the
+cells, so relations show labels, datetimes are in the caller's zone, and a `format` closure applies.
+Write-only columns are left out — the backend never returns one, so the row would be blank beside
+"Password". `detail(false)` removes it.
+
+**Choosing a page size.** The toolbar offers `per_page_choices` and the URL carries the answer.
+`?per_page=` is user input, so it is **clamped** to `per_page_max` (default 10,000) — unclamped, it
+is a cheap way to make a server read a whole table into memory and render it. The clamp normalises
+the view state itself, so every link the page renders carries the clamped number rather than
+propagating the greedy one. CSV export is unaffected: it is explicitly unpaginated.
 
 **Where a validation message lands.** A message keyed to a column appears **under that column's
 input**, with the input marked invalid; a cross-field message from `validate_row` appears as a

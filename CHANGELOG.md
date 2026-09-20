@@ -134,6 +134,22 @@ because `?entity=post` renders one table instead of nine.
   operator's input still in them, rather than mapping a `422` body onto inputs in JavaScript.
 - **`crud::ui::CSS`** — the ~40 lines Bootstrap 5 doesn't cover (mostly the dialog). Inline it once.
 - **`crud::ui::esc`** — escape a JSON scalar for HTML, for `format` closures.
+- **A read-only row view.** Every table offers a **View** action opening `?show=<pk>` — a dialog
+  listing every published column, including the ones no form shows (a generated id, a hook-stamped
+  `created_at`, the whole of a long text column). It renders through the same code as the cells, so
+  labels, badges, timezones and `format` closures all apply; write-only columns are left out. It is
+  also the only row view a caller who may not write gets at all. `Table::detail(false)` removes it.
+- **A page-size control**, `Table::per_page_choices([…])` (default `[10, 30, 100, 250]`), and
+  **`Table::per_page_max(n)`** — the largest page a table will fetch however large a `?per_page=`
+  asks for, defaulting to `Table::DEFAULT_PER_PAGE_MAX` (**10,000**). `?per_page=100000000` was
+  otherwise a cheap way to make a server read a whole table into memory and render it. The clamp
+  normalises the view state, so links carry the clamped number instead of propagating the greedy one.
+- **`csrf::enforce` reads the token out of a `multipart/form-data` body**, so a route that accepts
+  an upload can sit behind the layer like any other — previously it rejected them, which made
+  guarding a route with file uploads impossible. The body is held only up to **`Csrf::max_upload`**
+  (16 MiB by default, configurable): the token lives in the body, so finding it means holding the
+  body, and an unbounded read would let a request choose how much memory the process uses. Closes
+  the one deliberate gap `TODO.md` had carried since the feature shipped.
 - **`Table::columns([…])`** — choose and order the columns the *table* shows, independently of the
   dialog's form (`fields`/`omit`) and of CSV. The usual case: a model with twenty columns and a
   console that needs five across the screen.

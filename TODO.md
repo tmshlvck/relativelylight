@@ -61,16 +61,6 @@ Highest priority first.
   are app-level calls, which is why `Auth::password_check(closure)` exists; the open question is only
   whether a *helper* for the HIBP form earns a feature flag, given it needs an HTTP client and a caching
   story.
-- [ ] **CSRF on a multipart body, in the `csrf::enforce` layer.** The UI's own write path handles
-  multipart now (`multipart.rs` reads the buffered body; `submit` takes the token from a part), so
-  CSV upload works. What is still missing is the **layer**: `csrf::enforce` reads the
-  `X-CSRF-Token` header and, for URL-encoded bodies under 64 KiB, the `_csrf` field, and refuses
-  anything else — so an app that puts the UI's POST route behind it breaks uploads. It fails closed
-  and `docs/CRUD.md` says not to do it, but that is a footgun that wants removing.
-  The fix is now small: `enforce` can reuse `multipart::parse` on a **bounded prefix** of the body
-  (browsers post parts in document order, and the hidden `_csrf` is first), rejecting if the token
-  isn't in that prefix — which keeps the "don't buffer an upload to find a token" property that made
-  this a gap in the first place. The `files` module (PRD §6) will want the same thing.
 - **No *username* whitelist for lockout.** Addresses can be exempted (`Lockout::ip_whitelist`); accounts
   can't, on purpose. An account that can never be locked out is an account whose password can be guessed
   at forever. If one is ever wanted it needs a better story than "skip the counter" — a raised limit, say.

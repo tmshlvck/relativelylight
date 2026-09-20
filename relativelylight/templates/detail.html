@@ -1,0 +1,33 @@
+{#- One row, read-only (`?show=7`): every published column, including the ones a form never shows —
+    a generated id, a hook-stamped `created_at`, a long body the table truncates to a cell. The
+    values come from the same renderer as the table's cells, so a datetime is in the caller's zone,
+    a relation shows its label, a bool shows its badge, and a `Table::format` closure applies. -#}
+<dialog open class="rl-dialog">
+  <div class="card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="mb-0">{{ title }}</h5>
+      <a class="btn-close" href="{{ cancel_href }}" aria-label="Close"></a>
+    </div>
+    <div class="card-body">
+      <dl class="row mb-0">
+        {%- for f in fields %}
+        <dt class="col-sm-4 text-body-secondary fw-normal">{{ f.label }}</dt>
+        <dd class="col-sm-8">
+          {%- match f.value %}
+          {%- when Cell::Text with (s) %}{% if s.is_empty() %}<span class="text-body-tertiary">—</span>{% else %}{{ s }}{% endif %}
+          {%- when Cell::Bool with (Some(true)) %}<span class="badge text-bg-success">Yes</span>
+          {%- when Cell::Bool with (Some(false)) %}<span class="badge text-bg-danger">No</span>
+          {%- when Cell::Bool with (None) %}<span class="text-body-tertiary">—</span>
+          {%- when Cell::Badges with (labels) %}{% for l in labels %}<span class="badge text-bg-secondary">{{ l }}</span> {% endfor %}
+          {%- when Cell::Raw with (html) %}{{ html|safe }}
+          {%- endmatch -%}
+        </dd>
+        {%- endfor %}
+      </dl>
+    </div>
+    <div class="card-footer text-end">
+      {%- if !edit_href.is_empty() %}<a class="btn btn-primary" href="{{ edit_href }}">Edit</a>{% endif %}
+      <a class="btn btn-secondary" href="{{ cancel_href }}">Close</a>
+    </div>
+  </div>
+</dialog>

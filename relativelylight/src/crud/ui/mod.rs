@@ -127,11 +127,15 @@ struct TableTmpl {
     search: bool,
     editable: bool,
     confirm: bool,
+    /// Whether rows offer a View action (and therefore whether the actions column exists for a
+    /// caller who can't write).
+    detail: bool,
     csv: bool,
     q: String,
     csrf: String,
     span: usize,
     keep: Vec<(String, String)>,
+    per_page_options: Vec<Opt>,
     controls: Vec<ControlV>,
     chips: Vec<Chip>,
     heads: Vec<HeadV>,
@@ -174,6 +178,22 @@ struct DialogTmpl {
     fields: Vec<FieldV>,
 }
 
+/// One labelled value in the detail view.
+struct DetailV {
+    label: String,
+    value: Cell,
+}
+
+#[derive(Template)]
+#[template(path = "detail.html")]
+struct DetailTmpl {
+    title: String,
+    cancel_href: String,
+    /// Empty when this caller may not write, so a reader is offered no button they'd be refused.
+    edit_href: String,
+    fields: Vec<DetailV>,
+}
+
 #[derive(Template)]
 #[template(path = "import.html")]
 struct ImportTmpl {
@@ -208,6 +228,8 @@ pub struct Table<'a> {
     search: bool,
     pagination: bool,
     per_page: u64,
+    per_page_choices: Vec<u64>,
+    per_page_max: u64,
     read_only: bool,
     confirm: bool,
     picker_threshold: u64,
@@ -216,6 +238,7 @@ pub struct Table<'a> {
     columns: Vec<String>,
     formatters: Vec<(String, Fmt)>,
     row_class: Option<RowClass>,
+    detail: bool,
     filters: Vec<FilterSpec>,
     sort: Vec<(String, bool)>,
 }
@@ -224,6 +247,10 @@ pub struct Table<'a> {
 pub type RowClass = Arc<dyn Fn(&Value) -> String + Send + Sync>;
 
 impl<'a> Table<'a> {
+    /// The default [`per_page_max`](Table::per_page_max): the largest page a table will fetch
+    /// however large a `?per_page=` asks for.
+    pub const DEFAULT_PER_PAGE_MAX: u64 = 10_000;
+
     pub fn new(engine: &'a Engine, slug: impl Into<String>) -> Self {
         Self {
             engine,
@@ -234,6 +261,8 @@ impl<'a> Table<'a> {
             search: true,
             pagination: true,
             per_page: 30,
+            per_page_choices: vec![10, 30, 100, 250],
+            per_page_max: Self::DEFAULT_PER_PAGE_MAX,
             read_only: false,
             confirm: true,
             picker_threshold: 20,
@@ -242,6 +271,7 @@ impl<'a> Table<'a> {
             columns: Vec::new(),
             formatters: Vec::new(),
             row_class: None,
+            detail: true,
             filters: Vec::new(),
             sort: Vec::new(),
         }
@@ -265,8 +295,29 @@ impl<'a> Table<'a> {
         self.pagination = on;
         self
     }
+    /// Rows per page, until the URL says otherwise. Default 30.
     pub fn per_page(mut self, n: u64) -> Self {
         self.per_page = n;
+        self
+    }
+
+    /// The sizes the toolbar offers. Default `[10, 30, 100, 250]`; the configured
+    /// [`per_page`](Table::per_page) is added if it isn't among them, so the control can always
+    /// show the size in force. **Empty hides the control** — the URL still works.
+    pub fn per_page_choices<I: IntoIterator<Item = u64>>(mut self, sizes: I) -> Self {
+        self.per_page_choices = sizes.into_iter().filter(|n| *n > 0).collect();
+        self
+    }
+
+    /// The largest page this table will fetch, however large a `?per_page=` asks for. Default
+    /// **10,000**.
+    ///
+    /// The URL is user input: `?per_page=100000000` is a cheap way to make a server read a whole
+    /// table into memory and render it, so the number is clamped rather than trusted. Raise it for
+    /// a console that really does page in thousands; lower it in front of a big table. It does not
+    /// touch CSV export, which is explicitly unpaginated. See [`DEFAULT_PER_PAGE_MAX`](Table::DEFAULT_PER_PAGE_MAX).
+    pub fn per_page_max(mut self, n: u64) -> Self {
+        self.per_page_max = n.max(1);
         self
     }
     /// Read-only table: no Create/Edit/Delete and no dialog. Default: false.
@@ -274,6 +325,17 @@ impl<'a> Table<'a> {
         self.read_only = on;
         self
     }
+    /// Offer a **View** action per row, opening a read-only dialog (`?show=<id>`) with every
+    /// published column. Default: on.
+    ///
+    /// It is the only way to see what a form doesn't: a generated id, a hook-stamped `created_at`,
+    /// a long text column the table shows a corner of — and the only row view a caller who may not
+    /// write gets at all. Turn it off for a table that already shows everything it has.
+    pub fn detail(mut self, on: bool) -> Self {
+        self.detail = on;
+        self
+    }
+
     /// Ask for confirmation before a delete (an `onsubmit` confirm — the one bit of inline script,
     /// and harmless without it: the POST still asks the server). Default: true.
     pub fn confirm(mut self, on: bool) -> Self {
@@ -419,10 +481,14 @@ impl<'a> Table<'a> {
         let page = self.engine.list(&self.slug, &self.list_query(&state), false).await?;
         let csrf = csrf_token(self.engine, headers);
         let shown = self.shown_columns(&cols)?;
+        let per_page_options = self.per_page_options(&state);
         let (controls, chips) = self.filter_views(&cols, &state).await?;
 
         let dialog = match (state.mode(), editable) {
-            (Mode::List, _) | (_, false) => String::new(),
+            (Mode::List, _) => String::new(),
+            // A read-only row is a *read*: a caller who may not write still gets it.
+            (Mode::Show(id), _) => self.detail_dialog(&cols, id, &state, &tz, editable).await?,
+            (_, false) => String::new(),
             (Mode::Import, true) => self.import_dialog(&cols, &state, &csrf)?,
             (mode, true) => self.dialog(&cols, mode, &state, &tz, &csrf).await?,
         };
@@ -435,12 +501,22 @@ impl<'a> Table<'a> {
             confirm: self.confirm,
             csv: cfg!(feature = "csv"),
             q: state.q.clone(),
-            span: shown.len() + if editable { 2 } else { 0 },
-            keep: self.keep(&state),
+            span: shown.len() + usize::from(editable) + usize::from(editable || self.detail),
+            keep: self.keep(&state, !per_page_options.is_empty()),
+            per_page_options,
             controls,
             chips,
             heads: render::heads(&shown, &state),
-            rows: render::rows(&page, &shown, &self.formatters, self.row_class.as_ref(), &state, &tz),
+            rows: render::rows(
+                &page,
+                &shown,
+                &self.formatters,
+                self.row_class.as_ref(),
+                &state,
+                &tz,
+                self.detail,
+            ),
+            detail: self.detail,
             pager: if self.pagination {
                 render::pager(&page, &state)
             } else {
@@ -496,10 +572,15 @@ impl<'a> Table<'a> {
         .await
     }
 
-    /// The URL state with this table's pinned filters forced on, and its default sort applied when
-    /// the URL asks for none.
+    /// The URL state as this table will actually act on it: pinned filters forced on, the default
+    /// sort applied when the URL asks for none, and the page size clamped.
+    ///
+    /// Clamping *here* rather than only where the query is built matters, because every link the
+    /// page renders is built from this state: otherwise a `?per_page=100000000` would be refused by
+    /// the query and then faithfully copied into every pager link, sort header and redirect.
     fn effective_state(&self, state: &ViewState, cols: &[Column]) -> Result<ViewState> {
         let mut out = state.clone();
+        out.per_page = out.per_page.min(self.per_page_max);
         if out.sort.is_empty() {
             out.sort = self.sort.clone();
         }
@@ -513,12 +594,40 @@ impl<'a> Table<'a> {
     }
 
     fn list_query(&self, state: &ViewState) -> ListQuery {
-        state.to_list_query(self.per_page)
+        let mut q = state.to_list_query(self.per_page);
+        q.per_page = q.per_page.min(self.per_page_max);
+        q
+    }
+
+    /// The page sizes the toolbar offers, with the one in force marked. Empty when the table was
+    /// configured with no choices, or when pagination is off.
+    fn per_page_options(&self, state: &ViewState) -> Vec<Opt> {
+        if !self.pagination || self.per_page_choices.is_empty() {
+            return Vec::new();
+        }
+        let in_force = self.list_query(state).per_page;
+        let mut sizes = self.per_page_choices.clone();
+        for extra in [self.per_page, in_force] {
+            if !sizes.contains(&extra) {
+                sizes.push(extra);
+            }
+        }
+        sizes.retain(|n| *n <= self.per_page_max);
+        sizes.sort_unstable();
+        sizes.dedup();
+        sizes
+            .into_iter()
+            .map(|n| Opt {
+                value: n.to_string(),
+                label: format!("{n} / page"),
+                selected: n == in_force,
+            })
+            .collect()
     }
 
     /// Hidden inputs that carry the rest of the view through the toolbar's GET form. Not the page
     /// (a new search starts at the first one) and not the filters it renders itself.
-    fn keep(&self, state: &ViewState) -> Vec<(String, String)> {
+    fn keep(&self, state: &ViewState, has_per_page_control: bool) -> Vec<(String, String)> {
         let rendered: Vec<&str> = self.filters.iter().map(|f| f.name.as_str()).collect();
         let mut out = Vec::new();
         if let Some(e) = &state.entity {
@@ -537,7 +646,9 @@ impl<'a> Table<'a> {
                 .collect();
             out.push(("sort".to_string(), keys.join(",")));
         }
-        if state.per_page > 0 {
+        // …and not the page size when the toolbar has a control for it: two inputs of one name
+        // would send two values, and the loser would be whichever the browser ordered second.
+        if state.per_page > 0 && !has_per_page_control {
             out.push(("per_page".to_string(), state.per_page.to_string()));
         }
         out
@@ -713,6 +824,43 @@ impl<'a> Table<'a> {
             submit_label: "Save".into(),
             cancel_href: state.href_list(),
             errors,
+            fields,
+        }
+        .render()
+        .map_err(render_err)
+    }
+
+    /// One row, read-only: every published column, rendered by the same code as the table's cells.
+    async fn detail_dialog(
+        &self,
+        cols: &[Column],
+        id: &str,
+        state: &ViewState,
+        tz: &Tz,
+        editable: bool,
+    ) -> Result<String> {
+        // `render_for` has already authorized `Read` for this caller (every non-list mode does),
+        // with their real headers — there is nothing left to check here.
+        let row = self.engine.get(&self.slug, id).await?;
+        let fields = cols
+            .iter()
+            // A write-only column has nothing to show — the backend never returns one — so it
+            // would be a row of blank beside "Password", inviting the reader to wonder.
+            .filter(|c| !matches!(c, Column::Field { write_only: true, .. }))
+            .map(|c| DetailV {
+                label: render::label_of(c),
+                value: render::cell(
+                    c,
+                    &row,
+                    self.formatters.iter().find(|(n, _)| n == render::name_of(c)).map(|(_, f)| f),
+                    tz,
+                ),
+            })
+            .collect();
+        DetailTmpl {
+            title: format!("{} #{id}", self.title.clone().unwrap_or_else(|| self.slug.clone())),
+            cancel_href: state.href_list(),
+            edit_href: if editable { state.href_edit(id) } else { String::new() },
             fields,
         }
         .render()

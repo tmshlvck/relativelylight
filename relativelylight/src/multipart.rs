@@ -45,10 +45,34 @@ pub(crate) fn boundary(content_type: &str) -> Option<String> {
     None
 }
 
+/// One part, borrowed from the body — what [`scan`] yields, so finding a small field in a body
+/// carrying a large file copies neither.
+struct Raw<'a> {
+    name: String,
+    filename: Option<String>,
+    body: &'a [u8],
+}
+
 /// Split a buffered body into its parts.
 pub(crate) fn parse(body: &[u8], boundary: &str) -> Result<Vec<Part>, String> {
+    Ok(scan(body, boundary)?
+        .into_iter()
+        .map(|p| Part { name: p.name, filename: p.filename, body: p.body.to_vec() })
+        .collect())
+}
+
+/// The value of the first **text** field named `name`, without copying any file part. This is what
+/// [`csrf::enforce`](crate::csrf::enforce) looks for in an upload.
+pub(crate) fn field(body: &[u8], boundary: &str, name: &str) -> Result<Option<String>, String> {
+    Ok(scan(body, boundary)?
+        .into_iter()
+        .find(|p| p.filename.is_none() && p.name == name)
+        .map(|p| String::from_utf8_lossy(p.body).into_owned()))
+}
+
+fn scan<'a>(body: &'a [u8], boundary: &str) -> Result<Vec<Raw<'a>>, String> {
     let delim = format!("--{boundary}").into_bytes();
-    let mut out = Vec::new();
+    let mut out: Vec<Raw<'a>> = Vec::new();
 
     // Skip the preamble: everything up to the first delimiter is ignorable by the spec.
     let mut at = find(body, &delim).ok_or("multipart body has no boundary")? + delim.len();
@@ -80,7 +104,7 @@ pub(crate) fn parse(body: &[u8], boundary: &str) -> Result<Vec<Part>, String> {
         let mut next = format!("\r\n--{boundary}").into_bytes();
         let content = body.get(content_at..).ok_or("truncated multipart part")?;
         let end = find(content, &next).ok_or("a multipart part is not terminated")?;
-        out.push(Part { name, filename, body: content[..end].to_vec() });
+        out.push(Raw { name, filename, body: &content[..end] });
 
         next.clear();
         at = content_at + end + 2 + delim.len();

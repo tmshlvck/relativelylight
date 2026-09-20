@@ -75,6 +75,8 @@ pub enum Mode {
     List,
     New,
     Edit(String),
+    /// One row, read-only (`?show=7`) — every published column, including the ones no form shows.
+    Show(String),
     /// The CSV import dialog (`?import=1`). Like the others, it is a URL — so it survives a
     /// refresh, and a rejected import can re-render it with the report in place.
     Import,
@@ -136,6 +138,7 @@ impl ViewState {
                     "sort" => s.sort = parse_sort(&value),
                     "new" => s.mode = Mode::New,
                     "edit" => s.mode = Mode::Edit(value),
+                    "show" => s.mode = Mode::Show(value),
                     "import" => s.mode = Mode::Import,
                     "format" => s.csv = value == "csv",
                     "saved" => s.saved = true,
@@ -223,6 +226,9 @@ impl ViewState {
     }
     pub(crate) fn href_edit(&self, id: &str) -> String {
         self.href(&[("edit", id)])
+    }
+    pub(crate) fn href_show(&self, id: &str) -> String {
+        self.href(&[("show", id)])
     }
     pub(crate) fn href_csv(&self) -> String {
         self.href(&[("format", "csv")])
@@ -402,13 +408,15 @@ mod tests {
     fn the_dialog_is_not_carried_back_into_the_list_url() {
         for (url, mode) in [
             ("page=2&edit=7", Mode::Edit("7".into())),
+            ("page=2&show=7", Mode::Show("7".into())),
             ("page=2&new=1", Mode::New),
             ("page=2&import=1", Mode::Import),
         ] {
             let s = ViewState::from_query(url);
             assert_eq!(s.mode, mode);
             let back = s.to_query();
-            assert!(!back.contains("edit") && !back.contains("new") && !back.contains("import"),
+            assert!(!back.contains("edit") && !back.contains("new") && !back.contains("import")
+                        && !back.contains("show"),
                     "a finished write returns to the list: {back}");
             assert!(back.contains("page=2"), "but keeps where you were");
         }

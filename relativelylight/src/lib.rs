@@ -49,8 +49,9 @@ pub mod auth;
 mod urlform;
 
 /// A strict reader for a buffered `multipart/form-data` body — how a file reaches the server
-/// without JavaScript in the middle (see `crud::ui`'s CSV import).
-#[cfg(feature = "ui")]
+/// without JavaScript in the middle (see `crud::ui`'s CSV import), and how [`csrf`] finds the token
+/// in one.
+#[cfg(any(feature = "ui", feature = "csrf"))]
 mod multipart;
 
 /// Double-submit CSRF protection for cookie-authenticated writes: [`Csrf`](csrf::Csrf) issues and

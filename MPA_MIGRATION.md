@@ -314,9 +314,8 @@ The endpoints are gone; the capability moved into the UI.
 
 Import is now a dialog in the table's CSV menu (`?import=1`), offering a **file upload** or a paste;
 both post `_op=import` and are handled by `submit` like any other write. The upload is real
-`multipart/form-data` — `submit` reads the `_csrf` token out of a part — so do **not** put the UI's
-write route behind the `csrf::enforce` layer, which doesn't parse multipart and would reject the
-upload with a `403`.
+`multipart/form-data`, and the `_csrf` token rides in a part of it — which both `submit` and the
+`csrf::enforce` layer now read, so a guarded route can accept uploads.
 
 `csv_io::export`/`import` changed signature: they take `&[Column]` and a `&Tz` instead of re-deriving
 columns from metadata JSON. Exported datetimes are in the caller's zone.
@@ -496,7 +495,8 @@ Net: one extra handler, one shared `panel()` function, a `ViewState`, and the ro
 **New**
 
 `crud::ui::{ViewState, Mode, Done, Outcome, esc, esc_str, CSS, Fmt, RowClass}`,
-`Table::{columns, row_class, fields, omit, dom_id, submit, csv}`,
+`Table::{columns, row_class, detail, per_page_choices, per_page_max, fields, omit, dom_id, submit, csv}`,
+`Csrf::max_upload`,
 `Form::submit`, `Admin::{submit, csv}`, `Engine::pk`, `time::{Tz, COOKIE, ZONES_EUROPE, ZONES_US,
 EXCLUDED, zones_default, zones_all, is_excluded}`, `TzPicker::{action, all_zones, unknown_zones}`,
 `FieldDisplay::is_datetime`, feature `tz`.

@@ -45,6 +45,14 @@
         <input type="search" class="form-control form-control-sm w-auto" name="q" value="{{ q }}"
                placeholder="Search…" aria-label="Search">
         {%- endif %}
+        {%- if !per_page_options.is_empty() %}
+        <select class="form-select form-select-sm w-auto" name="per_page" aria-label="Rows per page"
+                onchange="this.form.submit()">
+          {%- for o in per_page_options %}
+          <option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>
+          {%- endfor %}
+        </select>
+        {%- endif %}
         <button class="btn btn-outline-secondary btn-sm" type="submit">Apply</button>
       </form>
       {%- endif %}
@@ -104,7 +112,7 @@
               {%- match h.add_href %}{% when Some with (href) %} <a href="{{ href }}" class="rl-add text-muted text-decoration-none" title="Add as a secondary sort key">+</a>{% when None %}{% endmatch %}
             </th>
             {%- endfor %}
-            {%- if editable %}<th class="text-end">Actions</th>{% endif %}
+            {%- if editable || detail %}<th class="text-end">Actions</th>{% endif %}
           </tr>
         </thead>
         <tbody>
@@ -126,11 +134,16 @@
               {%- endmatch %}
             </td>
             {%- endfor %}
-            {%- if editable %}
+            {%- if editable || detail %}
             <td class="text-end text-nowrap">
+              {%- if !r.show_href.is_empty() %}
+              <a class="btn btn-outline-secondary btn-sm" href="{{ r.show_href }}">View</a>
+              {%- endif %}
+              {%- if editable %}
               <a class="btn btn-outline-secondary btn-sm" href="{{ r.edit_href }}">Edit</a>
               <button class="btn btn-outline-danger btn-sm" type="submit" name="_del" value="{{ r.id }}"
                       {% if confirm %}onclick="return confirm('Delete this row?')"{% endif %}>Delete</button>
+              {%- endif %}
             </td>
             {%- endif %}
           </tr>

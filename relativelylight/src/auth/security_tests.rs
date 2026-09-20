@@ -1002,6 +1002,87 @@ async fn enrol_with_codes(fx: &Fx, username: &str, cookie: &str) -> (String, Vec
 }
 
 #[tokio::test]
+async fn the_csrf_layer_finds_the_token_in_an_upload() {
+    // The token lives *in* a multipart body, so the layer has to look inside one — otherwise adding
+    // `csrf::enforce` to a route that accepts a file silently breaks every upload.
+    use axum::routing::post;
+    let csrf = crate::csrf::Csrf::new().secure(false);
+    let (token, _) = csrf.issue();
+    let cookie = format!("{}={token}", csrf.cookie());
+
+    let app = axum::Router::new()
+        .route("/upload", post(|body: axum::body::Bytes| async move { format!("got:{}", body.len()) }))
+        .layer(axum::middleware::from_fn_with_state(csrf.clone(), crate::csrf::enforce));
+
+    // A body shaped the way a browser posts a form with a hidden token and a file.
+    let upload = |token: &str, file: &[u8]| {
+        let mut body = Vec::new();
+        body.extend(format!("------B\r\nContent-Disposition: form-data; name=\"_csrf\"\r\n\r\n{token}\r\n").as_bytes());
+        body.extend(
+            b"------B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"rows.csv\"\r\n\r\n",
+        );
+        body.extend(file);
+        body.extend(b"\r\n------B--\r\n");
+        body
+    };
+    let send = |body: Vec<u8>, jar: bool| {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            let mut b = Request::builder()
+                .method("POST")
+                .uri("/upload")
+                .header(header::CONTENT_TYPE, "multipart/form-data; boundary=----B");
+            if jar {
+                b = b.header(header::COOKIE, cookie);
+            }
+            let res = app.oneshot(b.body(Body::from(body)).unwrap()).await.expect("response");
+            let status = res.status();
+            let out = axum::body::to_bytes(res.into_body(), 1 << 20).await.expect("body");
+            (status, String::from_utf8_lossy(&out).into_owned())
+        }
+    };
+
+    let file = b"title,slug\nalpha,a\n";
+    let good = upload(&token, file);
+    let length = good.len();
+    let (status, body) = send(good, true).await;
+    assert_eq!(status, StatusCode::OK, "a matching token in a part must pass");
+    assert_eq!(body, format!("got:{length}"), "and the whole upload reaches the handler");
+
+    // The refusals: a wrong token, no cookie to match it against, and a body we can't read.
+    for (what, body, jar) in [
+        ("a forged token", upload(&"d".repeat(64), file), true),
+        ("no cookie", upload(&token, file), false),
+        ("a malformed body", b"not multipart at all".to_vec(), true),
+        ("no token part", {
+            let mut b = Vec::new();
+            b.extend(b"------B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"x\"\r\n\r\nz\r\n------B--\r\n");
+            b
+        }, true),
+    ] {
+        let (status, _) = send(body, jar).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{what} must be refused");
+    }
+
+    // And a body larger than the configured cap is refused rather than read into memory.
+    let small = crate::csrf::Csrf::new().secure(false).max_upload(256);
+    let (token2, _) = small.issue();
+    let tight = axum::Router::new()
+        .route("/upload", post(|| async { "ok" }))
+        .layer(axum::middleware::from_fn_with_state(small.clone(), crate::csrf::enforce));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/upload")
+        .header(header::CONTENT_TYPE, "multipart/form-data; boundary=----B")
+        .header(header::COOKIE, format!("{}={token2}", small.cookie()))
+        .body(Body::from(upload(&token2, &vec![b'x'; 4096])))
+        .unwrap();
+    let res = tight.oneshot(req).await.expect("response");
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "over the cap: refused, not buffered");
+}
+
+#[tokio::test]
 async fn the_csrf_layer_guards_an_apps_own_routes() {
     // `csrf::enforce` is how an app stops writing `Csrf::verify` in every handler. Driven here over a
     // router that isn't ours, because that's the whole point of it.

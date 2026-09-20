@@ -24,6 +24,8 @@ pub(crate) enum Cell {
 pub(crate) struct RowV {
     pub id: String,
     pub edit_href: String,
+    /// Empty when the table offers no detail view.
+    pub show_href: String,
     pub cells: Vec<Cell>,
     /// From [`Table::row_class`](super::Table::row_class); empty unless one is configured.
     pub class: String,
@@ -130,6 +132,7 @@ pub(crate) fn rows(
     row_class: Option<&super::RowClass>,
     state: &ViewState,
     tz: &Tz,
+    detail: bool,
 ) -> Vec<RowV> {
     page.data
         .iter()
@@ -138,6 +141,7 @@ pub(crate) fn rows(
             let row = item.row.clone().unwrap_or(Value::Null);
             RowV {
                 edit_href: state.href_edit(&id),
+                show_href: if detail { state.href_show(&id) } else { String::new() },
                 class: row_class.map(|f| f(&row)).unwrap_or_default(),
                 cells: cols
                     .iter()

@@ -703,7 +703,8 @@ async fn a_filter_whose_target_is_too_large_says_so_instead_of_listing_a_fifth_o
         .render_for(&no_headers(), &ViewState::from_query("filter[author]=42"))
         .await
         .unwrap();
-    assert!(!html.contains("<select"), "no truncated menu: {html}");
+    assert!(!html.contains(r#"<select class="form-select form-select-sm w-auto" name="filter[author]""#),
+            "no truncated menu for the filter: {html}");
     assert!(html.contains(r#"value="42""#), "the filter in force is what the control shows");
     assert!(html.contains("any of 50"), "and it says how many there are: {html}");
     assert!(html.contains("<strong>author 42</strong>"), "the chip resolves its label: {html}");
@@ -1064,6 +1065,116 @@ async fn a_standalone_form_redirects_where_it_was_told_to() {
     assert!(html.contains("Saved."), "{html}");
 }
 
+// ---------- the read-only row ----------
+
+#[tokio::test]
+async fn a_row_can_be_read_whole_including_what_no_form_shows() {
+    let (e, _) = engine();
+    let table = Table::new(&e, "post");
+    let html = render(&table, &ViewState::from_query("show=7")).await;
+
+    let dialog = html.split("<dialog").nth(1).expect("the dialog").split("</dialog>").next().unwrap();
+    assert!(dialog.contains("<dl class=\"row mb-0\">"), "a definition list, not a form: {dialog}");
+    assert!(!dialog.contains("<input") && !dialog.contains("<form"), "nothing editable: {dialog}");
+
+    // Columns a form never renders: the generated id, and a read-only hook-stamped column.
+    assert!(dialog.contains(">id</dt>") && dialog.contains("7</dd>"), "{dialog}");
+    assert!(dialog.contains("created_at") && dialog.contains("yesterday"), "{dialog}");
+    // …rendered by the same code as the cells: labels, badges and the caller's timezone.
+    assert!(dialog.contains("Ada"), "a relation shows its label");
+    assert!(dialog.contains(r#"<span class="badge text-bg-secondary">rust</span>"#), "to-many badges");
+    assert!(dialog.contains("badge text-bg-success"), "a bool shows its badge");
+    assert!(dialog.contains("2024-12-01 11:00"), "a datetime is formatted");
+}
+
+#[tokio::test]
+async fn the_detail_view_is_a_read_so_a_reader_gets_it_without_the_edit_button() {
+    let (e, _) = engine_with(Arc::new(ReadOnlyGate));
+    let table = Table::new(&e, "post");
+
+    let list = render(&table, &list()).await;
+    assert!(list.contains(">View</a>"), "a reader is offered the one action they may take: {list}");
+    assert!(!list.contains(">Edit</a>"), "{list}");
+
+    let shown = render(&table, &ViewState::from_query("show=7")).await;
+    assert!(shown.contains("<dialog open"), "and the dialog opens for them: {shown}");
+    assert!(!shown.contains(">Edit</a>"), "with no button they would be refused: {shown}");
+
+    // A writer gets the button, pointing at the same row's editor.
+    let (e, _) = engine();
+    let html = render(&Table::new(&e, "post"), &ViewState::from_query("show=7")).await;
+    assert!(html.contains("edit=7"), "{html}");
+}
+
+#[tokio::test]
+async fn a_table_can_decline_the_detail_view() {
+    let (e, _) = engine();
+    let html = render(&Table::new(&e, "post").detail(false).read_only(true), &list()).await;
+    assert!(!html.contains(">View</a>"), "{html}");
+    assert!(!html.contains("<th class=\"text-end\">Actions</th>"), "and loses the column: {html}");
+    assert!(html.contains("First post"), "but still shows its rows");
+}
+
+// ---------- how many rows a page shows ----------
+
+#[tokio::test]
+async fn the_toolbar_offers_page_sizes_and_marks_the_one_in_force() {
+    let rows: Vec<Value> = (1..=500).map(|i| json!({"id": i, "title": format!("row {i}")})).collect();
+    let cols = vec![field("id", false, true, None), field("title", true, false, None)];
+    let mut e = Engine::new();
+    e.add(Arc::new(Mock::new("thing", cols).rows(rows)), Arc::new(Open));
+
+    let table = Table::new(&e, "thing").per_page(30);
+    let html = table.render_for(&no_headers(), &ViewState::from_query("per_page=100")).await.unwrap();
+    assert!(html.contains(r#"<option value="100" selected>100 / page</option>"#), "{html}");
+    assert!(html.contains(r#"<option value="30">30 / page</option>"#), "the others are offered");
+    assert!(html.contains("Page 1 / 5"), "and it is the size actually used: {html}");
+
+    // The control carries the size, so the form must not also hide one — two inputs of one name
+    // would send two values.
+    assert_eq!(html.matches(r#"name="per_page""#).count(), 1, "{html}");
+
+    // A configured size that isn't among the choices is still offered, so the control can show it.
+    let odd = Table::new(&e, "thing").per_page(42);
+    let html = odd.render_for(&no_headers(), &list()).await.unwrap();
+    assert!(html.contains(r#"<option value="42" selected>42 / page</option>"#), "{html}");
+
+    // …and a table can decline the control entirely.
+    let none = Table::new(&e, "thing").per_page_choices([]);
+    let html = none.render_for(&no_headers(), &list()).await.unwrap();
+    assert!(!html.contains(r#"name="per_page""#), "no control: {html}");
+}
+
+#[tokio::test]
+async fn a_page_size_from_the_url_is_clamped() {
+    // `?per_page=` is user input: unclamped it is a cheap way to make the server read a whole table
+    // into memory and render it.
+    let rows: Vec<Value> = (1..=500).map(|i| json!({"id": i, "title": format!("row {i}")})).collect();
+    let cols = vec![field("id", false, true, None), field("title", true, false, None)];
+    let mut e = Engine::new();
+    e.add(Arc::new(Mock::new("thing", cols).rows(rows)), Arc::new(Open));
+
+    let greedy = ViewState::from_query("per_page=100000000");
+    let table = Table::new(&e, "thing").per_page_max(50);
+    let html = table.render_for(&no_headers(), &greedy).await.unwrap();
+    assert!(html.contains("Page 1 / 10"), "500 rows at the capped 50: {html}");
+    assert!(!html.contains("100000000"), "and the greedy size is not offered back: {html}");
+
+    // The default cap is 10,000 — high enough never to be met by an honest console.
+    assert_eq!(Table::DEFAULT_PER_PAGE_MAX, 10_000);
+    let defaulted = Table::new(&e, "thing").render_for(&no_headers(), &greedy).await.unwrap();
+    assert!(!defaulted.contains("100000000"), "the URL's number is not echoed back: {defaulted}");
+
+    // A bulk delete acts on the view, so it is bounded by the same clamp rather than the URL.
+    let (e2, log) = engine();
+    Table::new(&e2, "post")
+        .per_page_max(5)
+        .submit(&no_headers(), IP, b"_op=delete_all", &greedy)
+        .await
+        .unwrap();
+    assert_eq!(log.last().1["all"], json!(true));
+}
+
 // ---------- choosing and marking what the table shows ----------
 
 #[tokio::test]
@@ -1152,7 +1263,7 @@ async fn the_import_dialog_offers_a_file_and_a_paste_box() {
     // straight to the server…
     assert!(html.contains(r#"enctype="multipart/form-data""#), "{html}");
     assert!(html.contains(r#"type="file" name="file""#), "{html}");
-    assert!(!html.contains("this.form"), "and no JavaScript reading it first: {html}");
+    assert!(!html.contains("this.form.csv.value"), "and no JavaScript reading it first: {html}");
     // …and a paste, for the quick case.
     assert!(html.contains(r#"name="csv""#), "{html}");
     assert_eq!(html.matches(r#"name="_op" value="import""#).count(), 2, "one per form");

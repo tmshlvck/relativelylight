@@ -65,6 +65,8 @@ pub(crate) type RejectFn =
 /// `Crud::csrf` keeps both surfaces on the same cookie).
 #[derive(Clone)]
 pub struct Csrf {
+    /// See [`Csrf::max_upload`].
+    max_upload: usize,
     cookie: String,
     secure: bool,
     ttl_secs: i64,
@@ -98,6 +100,7 @@ impl Csrf {
             cookie: DEFAULT_COOKIE.into(),
             secure: true,
             ttl_secs: 7 * 24 * 3600,
+            max_upload: MAX_BUFFERED_UPLOAD,
             #[cfg(feature = "axum")]
             reject: None,
         }
@@ -118,6 +121,17 @@ impl Csrf {
 
     /// Token cookie lifetime in seconds (default 7 days). Match your session TTL so a live session
     /// always has a usable token.
+    /// How large a **multipart** body [`enforce`] will buffer to find the token in. Default 16 MiB
+    /// ([`MAX_BUFFERED_UPLOAD`]); a request over it is rejected rather than read.
+    ///
+    /// The token lives *in* the body of an upload, so the layer has to hold the body to find it —
+    /// which is why this is a number you choose rather than an unbounded read. Set it a little above
+    /// the largest upload the guarded routes accept.
+    pub fn max_upload(mut self, bytes: usize) -> Self {
+        self.max_upload = bytes;
+        self
+    }
+
     pub fn ttl_secs(mut self, secs: i64) -> Self {
         self.ttl_secs = secs;
         self
@@ -244,6 +258,11 @@ impl Csrf {
 #[cfg(feature = "axum")]
 const MAX_BUFFERED_FORM: usize = 64 * 1024;
 
+/// How much of a **multipart** body [`enforce`] will hold to find the token in. 16 MiB: enough for
+/// the uploads a back-office does (a CSV, a scanned document), bounded so a request can't be used
+/// to make the process hold an arbitrary amount of memory. [`Csrf::max_upload`] changes it.
+const MAX_BUFFERED_UPLOAD: usize = 16 * 1024 * 1024;
+
 /// Middleware that enforces the double-submit token on **your own** unsafe routes, so each handler
 /// doesn't have to call [`Csrf::verify`] itself. Wire it with axum's `from_fn_with_state`:
 ///
@@ -266,12 +285,18 @@ const MAX_BUFFERED_FORM: usize = 64 * 1024;
 /// - **`Authorization`-bearing requests pass**: an API credential isn't ambient, so a cross-site request
 ///   can't borrow it (the same exemption [`Csrf::verify`] makes).
 /// - the [`X-CSRF-Token`](HEADER) header, for `fetch`/XHR clients;
-/// - failing that, and **only** for `application/x-www-form-urlencoded` bodies under
-///   [`MAX_BUFFERED_FORM`], the [`_csrf`](FIELD) field — the body is buffered, checked, and handed on
-///   intact, so a plain MPA `<form>` post works without the handler doing anything.
+/// - failing that, the [`_csrf`](FIELD) **field of the body** — in an
+///   `application/x-www-form-urlencoded` form under [`MAX_BUFFERED_FORM`], or in a
+///   `multipart/form-data` upload under [`Csrf::max_upload`]. The body is buffered, checked, and
+///   handed on intact, so a plain `<form>` post — with or without a file — works without the
+///   handler doing anything.
 ///
-/// A multipart form is *not* parsed: give those the header, or check them in the handler. Everything else
-/// gets [`Csrf::reject`], so your [`on_reject`](Csrf::on_reject) page applies here too.
+/// Anything else gets [`Csrf::reject`], so your [`on_reject`](Csrf::on_reject) page applies here too.
+///
+/// **Why the caps.** The token lives in the body, so finding it means holding the body; an
+/// unbounded read would let any request decide how much memory this process uses. A request over
+/// the cap is refused rather than read, which is also why the multipart limit is a knob: set it
+/// just above the largest upload the guarded routes accept.
 #[cfg(feature = "axum")]
 pub async fn enforce(
     axum::extract::State(csrf): axum::extract::State<Csrf>,
@@ -286,15 +311,30 @@ pub async fn enforce(
     if csrf.verify(req.headers(), None) {
         return next.run(req).await;
     }
-    if !is_urlencoded_form(req.headers()) {
-        return csrf.reject();
-    }
-    // A form post: buffer, read `_csrf`, then rebuild the request so the handler still sees its body.
+    // How big a body we are willing to hold to find the token in, and how to find it there.
+    let content_type =
+        req.headers().get(http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let boundary = crate::multipart::boundary(content_type);
+    let cap = match (&boundary, is_urlencoded_form(req.headers())) {
+        (Some(_), _) => csrf.max_upload,
+        (None, true) => MAX_BUFFERED_FORM,
+        (None, false) => return csrf.reject(), // nothing we know how to look inside
+    };
+
+    // Buffer, read `_csrf`, then rebuild the request so the handler still sees its body.
     let (parts, body) = req.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, MAX_BUFFERED_FORM).await else {
+    let Ok(bytes) = axum::body::to_bytes(body, cap).await else {
         return csrf.reject(); // unreadable or over the cap — either way we can't find a token
     };
-    let token = form_field(&bytes, FIELD);
+    let token = match &boundary {
+        // A malformed multipart body is refused here rather than handed on: the handler would only
+        // fail to parse it too, and this way the token check can't be bypassed by breaking the body.
+        Some(boundary) => match crate::multipart::field(&bytes, boundary, FIELD) {
+            Ok(token) => token,
+            Err(_) => return csrf.reject(),
+        },
+        None => form_field(&bytes, FIELD),
+    };
     if !csrf.verify(&parts.headers, token.as_deref()) {
         return csrf.reject();
     }

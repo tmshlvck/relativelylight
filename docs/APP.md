@@ -489,8 +489,8 @@ Before a deployment goes out:
 - [ ] `resolve_real_ip` is the **outermost** layer, and `serve` uses
       `into_make_service_with_connect_info::<SocketAddr>()`.
 - [ ] `crud.csrf(auth.csrf())` is set, and any hand-written POST route is behind `csrf::enforce` or
-      checks the token itself. (Don't put the **UI's** write route behind that layer: it doesn't
-      parse multipart, so it would reject CSV uploads. `submit` checks the token itself.)
+      checks the token itself. If a guarded route accepts uploads, `Csrf::max_upload` is set above
+      the largest one.
 - [ ] `secure_cookies(true)` in production; the app is behind TLS.
 - [ ] Every model is registered with a real gate — `Open` is public, including writes.
 - [ ] `auth.prune()` runs on a schedule (the crate spawns nothing).
