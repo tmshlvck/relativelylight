@@ -8,14 +8,14 @@
 //! writes), the `auth` routes merged in, one address-resolving layer, an askama shell, a timezone
 //! cookie, and the authn/authz gates. (The `crud-example` is the ungated counterpart.)
 //!
-//! Try:  open http://127.0.0.1:3000/
+//! Try:  open http://127.0.0.1:3000/   ·   each model has its own path (/admin/post, /admin/tag)
 //!
 //!   cargo run -p adminpanel-example -- --set-admin-pw s3cret   # break-glass admin recovery, then exit
 //!   TRUST_PROXY=1 cargo run -p adminpanel-example              # behind a proxy: trust X-Forwarded-For
 
 use askama::Template;
 use axum::body::Bytes;
-use axum::extract::{Form, State};
+use axum::extract::{Form, Path, State};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -88,6 +88,10 @@ struct App {
 fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
     let mut admin = Admin::new(engine)
         .title("relativelylight")
+        // Each model gets a path of its own: /admin/post, /admin/auth_user. Only the side panel's
+        // links change — everything inside a table is relative, so it resolves against whichever
+        // path it is being served from.
+        .base("/admin")
         // One control in the side-panel, applied to every listed table that has an `author` column —
         // here just `post`, but this is the shape that pays off when an admin lists many tables of the
         // same kind (fifteen per-type DNS record tables, say) and an operator works inside one of them
@@ -355,8 +359,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Arc::new(App { engine: engine.clone(), auth: auth.clone() });
 
     let ui = Router::new()
-        // The two handlers this example exists to show. Both are login-gated (see `home`).
-        .route("/", get(home).post(save))
+        // One pair of handlers for every model: the path says which one. Both are login-gated
+        // (see `home`). `/` sends you to the first panel.
+        .route("/", get(|| async { Redirect::to("/admin/post") }))
+        .route("/admin/{entity}", get(home).post(save))
         .route("/tz", post(set_tz))
         .with_state(app);
 
@@ -377,7 +383,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
-    println!("Admin panel on  http://127.0.0.1:3000/   (admin/password = read-write · editor/password = read-only)");
+    println!("Admin panel on  http://127.0.0.1:3000/admin/post   (admin/password = read-write · editor/password = read-only)");
     // ConnectInfo gives the middleware the peer socket address for the access log.
     axum::serve(listener, app_router.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
@@ -388,11 +394,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // gates refuse those operations anyway. No middleware, no extractor.
 //
 // The whole of the read side is: parse the URL, render the fragment, wrap it in our shell.
-async fn home(headers: HeaderMap, uri: Uri, State(app): State<Arc<App>>) -> Response {
+async fn home(
+    headers: HeaderMap,
+    uri: Uri,
+    Path(entity): Path<String>,
+    State(app): State<Arc<App>>,
+) -> Response {
     let Some(who) = app.auth.identify(&headers).await else {
         return Redirect::to(app.auth.login_path()).into_response();
     };
-    let state = ViewState::from_uri(&uri);
+    // The path names the model; the query carries the view of it (page, sort, filters, dialog).
+    let mut state = ViewState::from_uri(&uri);
+    state.entity = Some(entity);
     let panel = panel(&app, &who);
 
     // The toolbar's Export link is `?format=csv` on this same page, so the export is this handler's
@@ -423,6 +436,7 @@ async fn home(headers: HeaderMap, uri: Uri, State(app): State<Arc<App>>) -> Resp
 async fn save(
     headers: HeaderMap,
     uri: Uri,
+    Path(entity): Path<String>,
     RealIp(ip): RealIp,
     State(app): State<Arc<App>>,
     body: Bytes,
@@ -430,7 +444,8 @@ async fn save(
     let Some(who) = app.auth.identify(&headers).await else {
         return Redirect::to(app.auth.login_path()).into_response();
     };
-    let state = ViewState::from_uri(&uri);
+    let mut state = ViewState::from_uri(&uri);
+    state.entity = Some(entity);
     let panel = panel(&app, &who);
     match panel.submit(&headers, ip, &body, &state).await {
         Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),

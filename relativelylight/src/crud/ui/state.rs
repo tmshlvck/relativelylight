@@ -215,13 +215,28 @@ impl ViewState {
     /// has a column for, so a zone follows the operator between the tables it means something in
     /// and appears in no link where it would mean nothing. The page, the search term and the sort
     /// are always left behind — they were about the table being navigated away from.
-    pub(crate) fn href_entity(&self, slug: &str, keep: impl Fn(&str) -> bool) -> String {
+    pub(crate) fn href_entity(
+        &self,
+        base: Option<&str>,
+        slug: &str,
+        keep: impl Fn(&str) -> bool,
+    ) -> String {
         let mut s = self.clone();
         s.page = 0;
         s.q = String::new();
         s.sort.clear();
         s.filters.retain(|(name, _)| keep(name));
-        s.href(&[("entity", slug)])
+        let Some(base) = base else {
+            return s.href(&[("entity", slug)]);
+        };
+        // A path per entity: `/admin/post`, with whatever still travels as its query.
+        s.entity = None;
+        let query = s.to_query();
+        let base = base.trim_end_matches('/');
+        match query.is_empty() {
+            true => format!("{base}/{slug}"),
+            false => format!("{base}/{slug}?{query}"),
+        }
     }
     pub(crate) fn href_new(&self) -> String {
         self.href(&[("new", "1")])
@@ -460,13 +475,18 @@ mod tests {
         let s = ViewState::from_query("entity=post&filter[author]=7&filter[status]=draft&q=x&page=4&sort=title");
 
         // The caller decides which filters mean anything where the link points.
-        let href = s.href_entity("tag", |name| name == "author");
+        let href = s.href_entity(None, "tag", |name| name == "author");
         assert!(href.contains("entity=tag") && href.contains("filter%5Bauthor%5D=7"), "{href}");
         assert!(!href.contains("status"), "the ones that don't travel are left behind: {href}");
 
         // The page, the search and the sort were about the table being navigated away from.
         assert!(!href.contains("q=") && !href.contains("page") && !href.contains("sort"), "{href}");
-        assert!(!s.href_entity("tag", |_| false).contains("filter"), "none is a valid answer");
+        assert!(!s.href_entity(None, "tag", |_| false).contains("filter"), "none is a valid answer");
+
+        // Addressed by path instead: the slug is a segment, and only what travels is a query.
+        let path = s.href_entity(Some("/admin"), "tag", |name| name == "author");
+        assert_eq!(path, "/admin/tag?filter%5Bauthor%5D=7");
+        assert_eq!(s.href_entity(Some("/admin/"), "tag", |_| false), "/admin/tag", "no query, no ?");
     }
 
     #[test]

@@ -1210,6 +1210,7 @@ enum AdminItem<'a> {
 /// ```
 pub struct Admin<'a> {
     engine: &'a Engine,
+    base: Option<String>,
     title: Option<String>,
     items: Vec<AdminItem<'a>>,
     filters: Vec<String>,
@@ -1217,7 +1218,29 @@ pub struct Admin<'a> {
 
 impl<'a> Admin<'a> {
     pub fn new(engine: &'a Engine) -> Self {
-        Self { engine, title: None, items: Vec::new(), filters: Vec::new() }
+        Self { engine, base: None, title: None, items: Vec::new(), filters: Vec::new() }
+    }
+
+    /// Address each entity by **path** — `/admin/post`, `/admin/tag` — instead of by the default
+    /// `?entity=post` on one page.
+    ///
+    /// ```ignore
+    /// // .route("/admin/{entity}", get(show).post(save))
+    /// let mut state = ViewState::from_uri(&uri);
+    /// state.entity = Some(entity);                    // the path decides, not the query
+    /// Admin::new(&engine).base("/admin").entity("post")./* … */render_for(&headers, &state).await
+    /// ```
+    ///
+    /// Only the side panel's links change: everything inside a table is relative (`?page=2`,
+    /// `?edit=7`) and so resolves against whichever path the panel is being served from, and a
+    /// write still redirects to the list it came from. Filters that travel ride along as the
+    /// query, so a nav link reads `/admin/tag?filter[zone]=3`.
+    ///
+    /// Worth it for deep links: `/admin/post?edit=7` says what it is where `?entity=post&edit=7`
+    /// needs reading twice. It costs one path parameter in your route, and no extra handler.
+    pub fn base(mut self, path: impl Into<String>) -> Self {
+        self.base = Some(path.into());
+        self
     }
 
     /// Heading above the side panel.
@@ -1364,7 +1387,7 @@ impl<'a> Admin<'a> {
                     // shared one the target knows nothing about — stays behind: a link that
                     // silently narrows the page it lands on (or names a column that isn't there)
                     // is not navigation.
-                    href: state.href_entity(&t.slug, |name| {
+                    href: state.href_entity(self.base.as_deref(), &t.slug, |name| {
                         self.filters.iter().any(|shared| shared == name)
                             && self
                                 .engine

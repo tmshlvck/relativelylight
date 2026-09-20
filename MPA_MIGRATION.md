@@ -496,6 +496,7 @@ Net: one extra handler, one shared `panel()` function, a `ViewState`, and the ro
 
 `crud::ui::{ViewState, Mode, Done, Outcome, esc, esc_str, CSS, Fmt, RowClass}`,
 `Table::{columns, row_class, detail, per_page_choices, per_page_max, fields, omit, dom_id, submit, csv}`,
+`Admin::base` (a path per model, `/admin/post`, instead of `?entity=post`),
 `Csrf::max_upload`,
 `Form::submit`, `Admin::{submit, csv}`, `Engine::pk`, `time::{Tz, COOKIE, ZONES_EUROPE, ZONES_US,
 EXCLUDED, zones_default, zones_all, is_excluded}`, `TzPicker::{action, all_zones, unknown_zones}`,

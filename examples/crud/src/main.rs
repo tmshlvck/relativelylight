@@ -1,6 +1,6 @@
 //! crud example — the server-rendered UI, ungated.
 //!
-//! One page per entity (`/ui/{slug}`), the **standalone `Form`** on the app's own pages
+//! One page per entity (`/{slug}`), the **standalone `Form`** on the app's own pages
 //! (`/post/new`, `/post/{id}/edit`), a table *about one value* at `/author/{id}/posts`, CSV export,
 //! and a create/edit `<dialog>` that opens from the URL. No JavaScript framework, no JSON API: the
 //! only script on the page is Bootstrap's CSS-free `confirm()` on a delete button, which the library
@@ -178,7 +178,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/", get(home))
         .route("/dashboard", get(dashboard))
         // Two handlers per surface: render on GET, hand the body to the library on POST.
-        .route("/ui/{slug}", get(entity_page).post(entity_write))
+        // The collection is the entity's own path: /post, /tag, /author. The app's other pages
+        // (/dashboard, /post/new, /tz) are static and win over the parameter, so they still route.
+        .route("/{slug}", get(entity_page).post(entity_write))
         .route("/post/new", get(new_post).post(save_new_post))
         .route("/post/{id}/edit", get(edit_post).post(save_post))
         .route("/author/{id}/posts", get(author_posts).post(author_posts_write))
@@ -197,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("relativelylight on  http://127.0.0.1:3000/");
     println!("Standalone form     http://127.0.0.1:3000/post/new");
     println!("Pinned filter       http://127.0.0.1:3000/author/1/posts");
-    println!("Timezones + DST     http://127.0.0.1:3000/ui/event   (pick a zone in the navbar)");
+    println!("Timezones + DST     http://127.0.0.1:3000/event   (pick a zone in the navbar)");
     axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
@@ -228,7 +230,7 @@ fn table<'a>(engine: &'a Engine, slug: &str) -> Table<'a> {
 }
 
 async fn home() -> Redirect {
-    Redirect::to("/ui/post")
+    Redirect::to("/post")
 }
 
 /// Set the zone cookie and come back to the page it was set from.
@@ -422,7 +424,7 @@ fn new_form(engine: &Engine) -> Form<'_> {
         .description("The same form the admin table opens in a dialog — on a page of your own.")
         .fields(["title", "body", "status", "views", "published", "published_at", "author", "tag"])
         .submit_label("Create post")
-        .cancel("/ui/post")
+        .cancel("/post")
         .redirect("/post/{id}/edit")
 }
 
@@ -456,7 +458,7 @@ fn edit_form<'a>(engine: &'a Engine, id: &str) -> Form<'a> {
     Form::new(engine, "post")
         .edit(id)
         .title(format!("Edit post #{id}"))
-        .cancel("/ui/post")
+        .cancel("/post")
         .saved_message("Saved.")
 }
 

@@ -272,7 +272,7 @@ dependency here). Copy `examples/access_log`.
 
 ```bash
 cargo run -p crud-example         # :3000  compose it yourself: per-entity pages, standalone Form (/post/new), /dashboard,
-                                  #         a pinned filter at /author/{id}/posts, CSV, the timezone cookie + DST rows (/ui/event) — no auth
+                                  #         a pinned filter at /author/{id}/posts, CSV, the timezone cookie + DST rows (/event) — no auth
 cargo run -p adminpanel-example   # :3000  crud::ui::Admin, login-gated, inline accounts + 2FA, timezone cookie (admin/password, editor/password)
 cargo run -p auth-example         # :3000  auth alone (no crud): login, /secret, /profile + 2FA, re-auth demo (admin/password)
 cargo run -p access-log-example   # :3000  the request log an app writes for itself: RealIp + naming the user, two ways

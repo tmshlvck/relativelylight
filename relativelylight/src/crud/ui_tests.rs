@@ -755,6 +755,37 @@ async fn a_pinned_filter_is_shown_but_not_offered_and_cannot_be_cleared() {
 // ---------- Admin ----------
 
 #[tokio::test]
+async fn an_admin_can_address_its_entities_by_path() {
+    let (e, _) = engine();
+    let admin = Admin::new(&e).base("/admin").filter("author").entity("post").entity("note").entity("tag");
+
+    // The app routes `/admin/{entity}` and tells the panel which one from the path.
+    let mut state = ViewState::from_query("filter[author]=3&page=2");
+    state.entity = Some("post".into());
+    let html = admin.render_for(&no_headers(), &state).await.unwrap();
+
+    assert!(html.contains(r#"href="/admin/tag""#), "a path, not a query: {html}");
+    assert!(
+        html.contains(r#"href="/admin/note?filter%5Bauthor%5D=3""#),
+        "and what travels still travels: {html}"
+    );
+    assert!(html.contains(r#"class="nav-link py-1 active" href="/admin/post"#), "{html}");
+    assert!(!html.contains("entity=tag"), "no query-addressed links left: {html}");
+
+    // Everything *inside* the table stays relative, so it resolves against /admin/post — the panel
+    // never needs to know where it is mounted.
+    let panel = html.split("<main").nth(1).expect("the panel");
+    assert!(!panel.contains("/admin/"), "the table knows nothing about the mount: {panel}");
+    assert!(panel.contains(r#"href="?"#) || panel.contains(r#"href="?filter"#), "{panel}");
+    assert!(panel.contains("edit=7"), "and its row links still work: {panel}");
+
+    // Without `base` it is one page addressed by query, as before.
+    let one_page = Admin::new(&e).entity("post").entity("tag");
+    let html = one_page.render_for(&no_headers(), &ViewState::default()).await.unwrap();
+    assert!(html.contains(r#"href="?entity=tag""#), "{html}");
+}
+
+#[tokio::test]
 async fn an_admin_renders_exactly_one_panel() {
     let (e, _) = engine();
     let admin = Admin::new(&e).title("Admin").group("Content").entity("post").entity("tag").separator().link("Out", "/logout");

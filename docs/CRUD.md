@@ -823,6 +823,7 @@ that.
 ```rust
 let html = Admin::new(&engine)
     .title("Admin")
+    .base("/admin")                            // a path per model — see below; omit for `?entity=`
     .filter("zone")                            // one control, applied to every table that has the column
     .group("Content")
     .entity_with("post", |t| t.per_page(10))
@@ -834,8 +835,36 @@ let html = Admin::new(&engine)
     .render_for(&headers, &state).await?;
 ```
 
-`?entity=post` renders **that entity's table and no other** — the nav is links, not nine hidden
-panels. (The previous design rendered every panel into every response and showed one with
+### Addressing a model
+
+Two shapes, and the only difference is what the side panel's links look like.
+
+**One page, `?entity=post`** (the default). One route, one pair of handlers:
+
+```rust
+.route("/admin", get(show).post(save))
+```
+
+**A path per model, `/admin/post`** — `Admin::base("/admin")`. Still one route and one pair of
+handlers; the path parameter says which model, and your handler passes it on:
+
+```rust
+.route("/admin/{entity}", get(show).post(save))
+
+let mut state = ViewState::from_uri(&uri);
+state.entity = Some(entity);                   // the path decides, not the query
+```
+
+Everything *inside* a table is relative — `?page=2`, `?edit=7`, `?format=csv` — so it resolves
+against whichever path the panel is served from, and a write still redirects to the list it came
+from. Filters that travel ride along as the query, so a nav link reads `/admin/tag?filter[zone]=3`.
+
+The path form is worth the one parameter for deep links: `/admin/post?edit=7` says what it is where
+`?entity=post&edit=7` has to be read twice. `examples/adminpanel` uses it; `examples/crud` shows the
+same idea without an `Admin` at all, one entity per page at `/post`, `/tag`, `/event`.
+
+`?entity=post` (or `/admin/post`) renders **that entity's table and no other** — the nav is links,
+not nine hidden panels. (The previous design rendered every panel into every response and showed one with
 `x-show`; a nine-entity page cost 9,441 lines of HTML, where this costs about 500.)
 
 `entities()` appends every registered entity in registration order. `submit` writes to the entity a

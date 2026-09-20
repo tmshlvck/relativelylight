@@ -20,7 +20,7 @@
         </li>
         {% for e in entities %}
         <li class="nav-item">
-          <a class="nav-link {% if e.as_str() == current.as_str() %}active{% endif %}" href="/ui/{{ e }}">{{ e }}</a>
+          <a class="nav-link {% if e.as_str() == current.as_str() %}active{% endif %}" href="/{{ e }}">{{ e }}</a>
         </li>
         {% endfor %}
       </ul>

@@ -198,7 +198,7 @@ passes.
       └─ ui::decode  ──►  Tz::parse  ──►  1733050800  ──►  the same i64 column
 ```
 
-Runnable: `cargo run -p crud-example`, then open **`/ui/event`** and pick a zone in the navbar. That
+Runnable: `cargo run -p crud-example`, then open **`/event`** and pick a zone in the navbar. That
 table's rows sit either side of both 2026 DST transitions, so a zone that observes DST shows the
 January rows an hour off the June ones — from identical stored integers. Editing `Happens at` reads
 your typed wall-clock time back in that zone, and **Export CSV** produces a file that says what the

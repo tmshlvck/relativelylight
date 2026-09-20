@@ -555,7 +555,7 @@ strings.
 ### One example fewer
 
 `examples/time` is **gone**, folded into `examples/crud` (its `event` table now lives in
-`examples/model`, rows and DST comments intact, reachable at `/ui/event`). The plan assumed it would
+`examples/model`, rows and DST comments intact, reachable at `/event`). The plan assumed it would
 be updated (§11 phase 6), and it was — but once the timezone policy stopped being ~120 lines of
 JavaScript (`window.RL_TZ`, an `onChange` hook posting to a fake profile endpoint, a server-zone
 endpoint, load-time adoption) and became "which `Tz` your handler passes", the example's whole

@@ -145,6 +145,13 @@ because `?entity=post` renders one table instead of nine.
   asks for, defaulting to `Table::DEFAULT_PER_PAGE_MAX` (**10,000**). `?per_page=100000000` was
   otherwise a cheap way to make a server read a whole table into memory and render it. The clamp
   normalises the view state, so links carry the clamped number instead of propagating the greedy one.
+- **`Admin::base("/admin")`** — address each model by **path** (`/admin/post`, `/admin/tag`) rather
+  than by `?entity=post` on one page. Only the side panel's links change: everything inside a table
+  is relative, so it resolves against whichever path the panel is served from, and a write still
+  redirects to the list it came from. Still one route and one pair of handlers — the path parameter
+  says which model. `examples/adminpanel` uses it, and `examples/crud`'s per-entity pages moved from
+  `/ui/{slug}` to `/{slug}` (the `/ui` prefix was there to stay clear of the JSON API, which is
+  gone).
 - **An `Admin`'s shared filter now travels only where it applies.** A nav link carries it to a table
   that has the column and not to one that doesn't, and a filter that reaches a table whose entity
   can't honour it is ignored rather than passed to the backend — which previously refused the whole
@@ -205,7 +212,7 @@ because `?entity=post` renders one table instead of nine.
   reduced from ~120 lines of JavaScript to "which `Tz` your handler passes", the example's subject
   was four lines `examples/adminpanel` already showed. What was worth keeping — the rows straddling
   both 2026 DST transitions — is now the `event` table in `examples/model`, registered by
-  `crud-example` and reachable at **`/ui/event`**, with the picker in that example's navbar. Run
+  `crud-example` and reachable at **`/event`**, with the picker in that example's navbar. Run
   `cargo run -p crud-example` where you ran `cargo run -p time-example`.
 - **`WriteEvent::source` for the crud engine is now `"autocrud"`** (was `"crud"`). Cosmetic: the value
   is written into an app's audit table and read by people, and a bare `crud` names nothing in

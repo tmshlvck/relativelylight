@@ -245,6 +245,7 @@ Two handlers, one panel definition. This is the whole of it:
 fn panel<'a>(app: &'a App, who: &Identity) -> Admin<'a> {
     let mut admin = Admin::new(&app.engine)
         .title("Admin")
+        .base("/admin")                                  // /admin/post, /admin/tag — see CRUD.md
         .filter("zone")                                  // one control across every table that has it
         .group("Content")
         .entity_with("post", |t| t.per_page(25).format("title", |v, row| {
@@ -259,9 +260,13 @@ fn panel<'a>(app: &'a App, who: &Identity) -> Admin<'a> {
     admin
 }
 
-async fn admin_show(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
+// .route("/admin/{entity}", get(admin_show).post(admin_save))
+async fn admin_show(
+    State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri, Path(entity): Path<String>,
+) -> Response {
     let who = match require_login(&app, &headers).await { Ok(w) => w, Err(r) => return r };
-    let state = ViewState::from_uri(&uri);
+    let mut state = ViewState::from_uri(&uri);
+    state.entity = Some(entity);                         // the path names the model
     if state.csv {                                       // the toolbar's Export link
         return match panel(&app, &who).csv(&headers, &state).await {
             Ok(csv) => ([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], csv).into_response(),
