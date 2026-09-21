@@ -117,6 +117,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth = Auth::new(db.clone(), Lockout::default())
         .secure_cookies(false)
         .admin_group("admin")
+        // The library renders login/profile as *fragments*; without these two the app gets the bare
+        // default document and `auth`'s Bootstrap-classed validation errors show up as unstyled text.
+        .login_shell(|form| page("Log in", form))
+        .profile_shell(|frag, _who| page("Profile", frag))
         .on_write(audit.clone());
     audit.attach(auth.clone());
 
@@ -305,7 +309,7 @@ async fn panel_show(
     let mut state = ViewState::from_uri(&uri);
     state.entity = Some(entity);
     let mut res = match panel(&app.engine).render_for(&headers, &state).await {
-        Ok(body) => Html(shell(&body)).into_response(),
+        Ok(body) => Html(page("Data", &body)).into_response(),
         Err(e) => e.into_response(),
     };
     res.extensions_mut().insert(Actor(who.username));
@@ -330,7 +334,7 @@ async fn panel_save(
     let mut res = match ui.submit(&headers, ip, &body, &state).await {
         Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
         Ok(Outcome::Invalid(state)) => match ui.render_for(&headers, &state).await {
-            Ok(body) => (StatusCode::UNPROCESSABLE_ENTITY, Html(shell(&body))).into_response(),
+            Ok(body) => (StatusCode::UNPROCESSABLE_ENTITY, Html(page("Data", &body))).into_response(),
             Err(e) => e.into_response(),
         },
         Err(e) => e.into_response(),
@@ -351,12 +355,23 @@ fn panel(engine: &Engine) -> Admin<'_> {
         .link("Profile", "/profile")
 }
 
-fn shell(body: &str) -> String {
+/// **One page wrapper for every page in this example**, the library's own included — see
+/// `login_shell` / `profile_shell` at the call site.
+///
+/// Bootstrap is loaded here, by the app, because that is the only place it can be: the library
+/// contributes *fragments* and never a document. Its fragments carry Bootstrap class names, so
+/// without this `<link>` they still render and still work — as unstyled HTML, which is the trap this
+/// example fell into: `auth`'s validation errors are `<div class="alert alert-danger">`, and with no
+/// stylesheet a wrong-password message is plain black text in the middle of the form, easy to
+/// mistake for body copy. Style the shell, or your users won't see the errors.
+fn page(title: &str, body: &str) -> String {
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Data</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-<style>{CSS}</style></head><body class="bg-body-tertiary"><main class="container py-4">{body}</main>
+<style>{CSS}</style></head><body class="bg-body-tertiary">
+<main class="container py-4" style="max-width:52rem"><h1 class="h4 mb-3">{title}</h1>{body}
+<p class="mt-4 mb-0"><a class="link-secondary small" href="/">&larr; home</a></p></main>
 </body></html>"#
     )
 }
@@ -447,11 +462,15 @@ struct AppState {
 /// name to the log rather than letting the log go and find it again.
 async fn public(State(app): State<AppState>, req: Request) -> Response {
     let who = app.auth.identify(req.headers()).await;
-    let body = Html(format!(
-        r#"<h1>access-log demo</h1>
-<p>{}</p>
-<p>Watch the terminal:</p>
+    let body = Html(page(
+        "audit demo",
+        &format!(
+            r#"<p>{}</p>
+<p>Watch the terminal — two records, one address:</p>
 <ul>
+  <li>a <b>request log</b> line per request, and an <b>audit</b> line per committed write. Edit
+      something at <a href="/data/post">/data/post</a> or change your password at
+      <a href="/profile">/profile</a> to produce one.</li>
   <li><b>this page</b> and <a href="/private">/private</a> are <i>ours</i> — their log lines name you
       once you are logged in, at no extra cost: the handler already knew.</li>
   <li><a href="/profile">/profile</a>, <a href="/login">/login</a> and <a href="/logout">/logout</a>
@@ -459,11 +478,18 @@ async fn public(State(app): State<AppState>, req: Request) -> Response {
       <code>-</code>. Restart with <code>NAME_EVERY_REQUEST=1</code> to name those too, at one
       session lookup per request.</li>
 </ul>
-<p><a href="/login">log in</a> · <a href="/profile">profile</a> · <a href="/logout">log out</a></p>"#,
-        match &who {
-            Some(id) => format!("Signed in as <b>{}</b> — this request's log line says so.", id.username),
-            None => "Not signed in, so this request's log line names nobody.".to_string(),
-        }
+<p><a class="btn btn-primary btn-sm" href="/data/post">Data</a>
+<a class="btn btn-outline-secondary btn-sm" href="/private">/private</a>
+<a class="btn btn-outline-secondary btn-sm" href="/profile">Profile</a>
+<a class="btn btn-outline-secondary btn-sm" href="/login">Log in</a>
+<a class="btn btn-outline-secondary btn-sm" href="/logout">Log out</a></p>"#,
+            match &who {
+                Some(id) => {
+                    format!("Signed in as <b>{}</b> — this request's log line says so.", id.username)
+                }
+                None => "Not signed in, so this request's log line names nobody.".to_string(),
+            }
+        ),
     ));
     let mut res = (StatusCode::OK, body).into_response();
     if let Some(id) = who {
@@ -479,9 +505,10 @@ async fn private(State(app): State<AppState>, req: Request) -> Response {
     let Some(who) = app.auth.identify(req.headers()).await else {
         return Redirect::to("/login").into_response();
     };
-    let body = Html(format!(
-        "<h1>hello {}</h1><p>The log line for this request names you.</p><p><a href=\"/\">back</a></p>",
-        who.username
+    let body = Html(page(
+        &format!("hello {}", who.username),
+        "<p>The log line for this request names you, because this handler resolved an identity \
+         anyway and handed it to the log on the way out.</p>",
     ));
     // The whole mechanism: attach the name, and the layer outside picks it up on the way out.
     let mut res = (StatusCode::OK, body).into_response();

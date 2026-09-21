@@ -253,6 +253,12 @@ because a request renders one table instead of nine.
   a gap in the one seam an app is most likely to need on day one. The example also makes two
   practical facts visible: a sink is `async` and runs *inside* the request, and resolving the actor
   means calling `Auth::identify` from a sink built before `Auth` was (a `OnceLock` closes the loop).
+  Every page in it — its own, and the library's login and profile pages via `login_shell` /
+  `profile_shell` — now goes through one Bootstrap-loading wrapper. Its predecessor styled nothing,
+  which was harmless while the example's only output was the terminal and actively misleading once
+  there were forms to use: `auth` renders a rejected password change as
+  `<div class="alert alert-danger">`, and with no stylesheet loaded that is plain black text in the
+  middle of the form. The message was always there; nobody could see it.
 - **`examples/auth` gains an accounts panel** at `/admin` — `auth`'s own `auth_user` / `auth_group` /
   lockout tables registered as ordinary models behind `GroupReadWrite`, rendered by `crud::ui::Admin`.
   The library ships no registration page on purpose, so *somebody* has to make the second account, and
