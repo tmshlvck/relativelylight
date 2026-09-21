@@ -3,10 +3,10 @@
 //! can be registered with a gate in any build (`Open` when nothing needs gating).
 //!
 //! A gate is attached **per model** (so it takes no model argument), is handed the request headers,
-//! and returns a [`Decision`]. The engine maps `Allow`/`NeedsLogin`/`Denied` → `200`/`401`/`403`; a
+//! and returns a [`Decision`](crate::authz::Decision). The engine maps `Allow`/`NeedsLogin`/`Denied` → `200`/`401`/`403`; a
 //! page handler serves `NeedsLogin` as a redirect to the login page. The gate resolves the caller
 //! itself — the identity-resolving presets (`UserReadWrite`, `UserReadGroupWrite`) live in
-//! [`crate::auth`] because they need an `Auth` handle; `Open` (allow everything) lives here.
+//! [`crate::auth`](crate::auth) because they need an `Auth` handle; `Open` (allow everything) lives here.
 
 use async_trait::async_trait;
 use http::HeaderMap;

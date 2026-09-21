@@ -30,10 +30,10 @@ struct FormTmpl {
     submit_label: String,
 }
 
-/// A standalone create/edit form for one registered entity — the same form [`Table`] shows in its
+/// A standalone create/edit form for one registered entity — the same form [`Table`](super::Table) shows in its
 /// dialog, without the table.
 ///
-/// This is the building block for an app's **own** pages, where [`Admin`] is the wrong shape: a signup
+/// This is the building block for an app's **own** pages, where [`Admin`](super::Admin) is the wrong shape: a signup
 /// form, a "new ticket" page, a settings screen. It reads the entity's columns, so the widgets, the
 /// required markers, the enum dropdowns, the relation pickers, the datetime handling and the
 /// validation messages all come for free and stay in step with the model.
@@ -147,7 +147,7 @@ impl<'a> Form<'a> {
         self.redirect = Some(url.into());
         self
     }
-    /// See [`Table::picker_threshold`].
+    /// See [`Table::picker_threshold`](super::Table::picker_threshold).
     pub fn picker_threshold(mut self, n: u64) -> Self {
         self.picker_threshold = n;
         self

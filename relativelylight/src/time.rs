@@ -5,11 +5,11 @@
 //! CSV export match what is on screen and a `<datetime-local>` input round-trip through the zone the
 //! operator is actually working in.
 //!
-//! The selection rides in a cookie ([`COOKIE`]), so every render of every page agrees about it:
+//! The selection rides in a cookie ([`COOKIE`](crate::time::COOKIE)), so every render of every page agrees about it:
 //!
-//! - [`Tz`] — the zone for one request, read from the caller's headers ([`Tz::from_headers`]), used to
-//!   [`format`](Tz::format) an epoch for a cell and to [`parse`](Tz::parse) a form input back.
-//! - [`TzPicker`] — a plain `<form>` of zones; posting it sets the cookie. No JavaScript, no store.
+//! - [`Tz`](crate::time::Tz) — the zone for one request, read from the caller's headers ([`Tz::from_headers`](crate::time::Tz::from_headers)), used to
+//!   [`format`](crate::time::Tz::format) an epoch for a cell and to [`parse`](crate::time::Tz::parse) a form input back.
+//! - [`TzPicker`](crate::time::TzPicker) — a plain `<form>` of zones; posting it sets the cookie. No JavaScript, no store.
 //!
 //! An unknown or unset zone is **UTC**, and so is a zone the host's tz database doesn't have: a
 //! timestamp shown in the wrong zone is worse than one labelled UTC.

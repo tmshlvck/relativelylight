@@ -10,16 +10,16 @@ tick/remove items as they ship, and add new ones with a one-line rationale.
 
 ## Next
 
-0.2.0 (security defaults) and 0.2.1 (sorting + filtering) are tagged. **The MPA rewrite is
-unreleased, due as 0.3.0** (see `CHANGELOG.md` → Unreleased and
-[MIGRATION-0.3.md](MIGRATION-0.3.md)): the UI renders server-side and the JSON + metadata API and
-OpenAPI generation are gone. Nothing below blocks that release; all of it is follow-on work.
+**0.3.0 — the MPA rewrite — is tagged** (2026-09-21): the UI renders server-side, and the JSON +
+metadata API and the OpenAPI generator are gone. See [MIGRATION-0.3.md](MIGRATION-0.3.md) for the
+upgrade and, in its appendix, why. 0.2.0 (security defaults) and 0.2.1 (sorting + filtering) precede
+it. Everything below is follow-on work; nothing here blocked that release.
 
-**After 0.3.0 ships, the next module is `blob`** — [BLOBSTORE.md](BLOBSTORE.md) is its full
-specification, written against the downstream CLIMB app that already runs the design, and none of it
-is built. It gets its own branch rather than items in this list; what belongs here is anything the
-spec turns out to need from `crud`/`ui` first (it names one: CSRF on multipart bodies, which
-[shipped](../CHANGELOG.md) with 0.3).
+**The next module is `blob`** — [BLOBSTORE.md](BLOBSTORE.md) is its full specification, written
+against the downstream CLIMB app that already runs the design, and none of it is built. It gets its
+own branch rather than items in this list; what belongs here is anything the spec turns out to need
+from `crud`/`ui` first (it named one: CSRF on multipart bodies, which
+[shipped](../CHANGELOG.md) in 0.3.0).
 
 ## Web UI follow-ups (post-MPA)
 

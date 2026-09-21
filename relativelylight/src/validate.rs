@@ -4,7 +4,7 @@
 //! or a factory returning `impl Fn(i64) -> Result<(), String>`), not `serde_json::Value` closures.
 //! That makes the *same* check callable from a hand-written endpoint (which already holds a `&str` /
 //! `i64`) and from the auto-CRUD write path: the latter goes through the thin adapters in
-//! [`field`], which lift a typed predicate into a [`crud::Validator`](crate::crud::seaorm::Validator).
+//! [`field`](crate::validate::field), which lift a typed predicate into a [`crud::Validator`](crate::crud::seaorm::Validator).
 //!
 //! The core (addresses, ranges, lengths, enums, hostnames, hex, uuid, url, email) is **std-only** and
 //! always compiled. `regex_match` needs the `validate-regex` feature; `base64`/`base64_url` need

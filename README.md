@@ -219,8 +219,8 @@ cargo run -p audit-example         # :3000  who called and what they changed: th
 - **[docs/PRD.md](docs/PRD.md)** — product overview, module status, and roadmap;
   **[docs/TODO.md](docs/TODO.md)** is the ordered backlog behind it.
 - **[docs/BLOBSTORE.md](docs/BLOBSTORE.md)** — the `blob` module's specification: content-addressed
-  file storage, viewer, thumbnailer and admin panel. **Specified, not implemented** — planned for
-  after 0.3.0.
+  file storage, viewer, thumbnailer and admin panel. **Specified, not implemented** — the next
+  module to be built.
 - **[CHANGELOG.md](CHANGELOG.md)** — what changed per release, with the breaking changes and upgrade
   steps for each.
 - **[AGENTS.md](AGENTS.md)** — orientation for working *on* the library (workspace layout, build/test,

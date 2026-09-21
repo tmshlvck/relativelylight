@@ -2,15 +2,15 @@
 //! /login`, the still-pending second factor at `POST /login/totp`, and whatever the app checks itself
 //! (HTTP Basic on a machine endpoint, an API token). See `docs/AUTH.md` §5e.
 //!
-//! Two counters, two tables, two deliberately separate types: [`UsernameLockout`] keyed by account
-//! name and [`IpLockout`] keyed by source address. They do the same arithmetic today and are expected
+//! Two counters, two tables, two deliberately separate types: [`UsernameLockout`](crate::auth::lockout::UsernameLockout) keyed by account
+//! name and [`IpLockout`](crate::auth::lockout::IpLockout) keyed by source address. They do the same arithmetic today and are expected
 //! to diverge (a username whitelist wants regexes, an address whitelist wants CIDRs), so they don't
 //! share an implementation.
 //!
 //! **The rule.** A failure upserts the row (`failures += 1`, `last_failure_at = now`) *unless* the key
 //! is already at the limit — a locked key records nothing, so an attacker can't push the expiry out.
 //! A key is locked while `failures >= after` and `last_failure_at + duration > now`; once that passes,
-//! the row reads as absent again and [`prune`](UsernameLockout::prune) deletes it. So the effective
+//! the row reads as absent again and [`prune`](crate::auth::lockout::UsernameLockout::prune) deletes it. So the effective
 //! semantics are **"`after` failures, each within `duration` of the previous, lock the key for
 //! `duration` after the last one"** — a decaying window, not a strict sliding one. A successful check
 //! clears the row.
@@ -23,7 +23,7 @@
 //! writes here about never.
 //!
 //! **Nothing here is scheduled.** Expired rows are harmless (they read as absent and reset themselves
-//! on the next failure), so pruning is the app's housekeeping call — see [`crate::auth::prune`].
+//! on the next failure), so pruning is the app's housekeeping call — see [`crate::auth::prune`](crate::auth::prune).
 
 use ipnet::IpNet;
 use sea_orm::sea_query::OnConflict;

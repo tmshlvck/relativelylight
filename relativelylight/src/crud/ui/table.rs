@@ -343,7 +343,7 @@ impl<'a> Table<'a> {
         self
     }
     /// Custom cell renderer for a column: `(value, row) -> HTML`, called during render. The output is
-    /// inserted verbatim, so wrap database values in [`esc`]:
+    /// inserted verbatim, so wrap database values in [`esc`](super::esc):
     ///
     /// ```ignore
     /// .format("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))

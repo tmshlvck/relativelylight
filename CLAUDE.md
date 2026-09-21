@@ -317,7 +317,7 @@ timezone demo, its rows straddling both 2026 DST transitions.
 - **[docs/TODO.md](docs/TODO.md)** — the ordered backlog.
 - **[docs/BLOBSTORE.md](docs/BLOBSTORE.md)** — the `blob` module's **specification, not yet
   implemented**: content-addressed storage, viewer, thumbnailer, admin panel. Migrated from the
-  downstream CLIMB app; it gets its own branch after 0.3.0 ships.
+  downstream CLIMB app; it gets its own branch, and is the next module to be built.
 - **[docs/SORTFILTER.md](docs/SORTFILTER.md)** — a design record: why relation sorting and
   `filter[…]` have the shape they do (kept for the reasoning; the behaviour is documented in CRUD.md).
 - **[CHANGELOG.md](CHANGELOG.md)** — per-release notes; land user-visible changes under `## Unreleased`

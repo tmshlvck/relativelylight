@@ -9,7 +9,7 @@ Work that has landed on `main` but isn't tagged yet lives under **Unreleased**; 
 heading to the version + date and adds a compare link. Per-entry commit hashes are given where a change
 is easy to miss in a diff.
 
-## Unreleased
+## [0.3.0] — 2026-09-21
 
 The web UI is **re-homed in Rust**: `crud::ui` renders plain server-side HTML, and the JSON/metadata
 API it used to talk to is gone with it. See [docs/MIGRATION-0.3.md](docs/MIGRATION-0.3.md) for the
@@ -280,10 +280,10 @@ because a request renders one table instead of nine.
   the shared write path (`write.rs`), the render-time refusals (`checks.rs`) beside the existing
   `state`/`render`/`widgets`/`decode`. Pure code motion: no behaviour, no public item, and no test
   changed.
-- **`crud::ui::Fmt` and `crud::ui::RowClass` are no longer public.** Both are internal aliases for
-  the boxed closure shapes `Table::format` and `Table::row_class` store; the builders take
-  `impl Fn(…)`, so no public signature ever named them. If you had written one out by hand, drop the
-  annotation and pass the closure.
+- **`crud::ui::Fmt` and `crud::ui::RowClass` are `pub(crate)`.** Both are internal aliases for the
+  boxed closure shapes `Table::format` and `Table::row_class` store; the builders take `impl Fn(…)`,
+  so no public signature ever named them. (Neither existed in 0.2.1 — they arrived with the rewrite
+  in this release and are being kept private from the start rather than exported by accident.)
 
 ## [0.2.1] — 2026-08-06
 
@@ -822,6 +822,7 @@ Renames the authorization presets to a consistent `<ReadAudience>Read<WriteAudie
 First published release: the `crud` engine + SeaORM backend, the Bootstrap/Alpine admin UI, OpenAPI and
 CSV adapters, and the `auth` module (sessions, login, TOTP 2FA, OIDC SSO, per-model gates).
 
+[0.3.0]: https://github.com/tmshlvck/relativelylight/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/tmshlvck/relativelylight/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/tmshlvck/relativelylight/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/tmshlvck/relativelylight/compare/v0.1.1...v0.1.2

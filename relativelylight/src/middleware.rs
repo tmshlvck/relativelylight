@@ -1,8 +1,8 @@
-//! `relativelylight::middleware` — one request-pipeline layer: [`resolve_real_ip`], which decides who
+//! `relativelylight::middleware` — one request-pipeline layer: [`resolve_real_ip`](crate::middleware::resolve_real_ip), which decides who
 //! the caller is. Feature `axum`.
 //!
 //! **It is mandatory for any app using this crate.** It resolves the caller's address **once**, at the
-//! edge, and puts it in a request extension as [`RealIp`]; everything downstream — the `auth` lockout,
+//! edge, and puts it in a request extension as [`RealIp`](crate::middleware::RealIp); everything downstream — the `auth` lockout,
 //! your own handlers, the audit events, your request log — reads that one value. Before it existed, each
 //! of those resolved the address itself, and they disagreed: the lockout counted the forwarded hop while
 //! the request log printed the socket peer, so a log line and the thing it described named different
@@ -25,7 +25,7 @@
 //!
 //! **This crate does not log.** It writes nothing to stdout or stderr — it returns responses and errors,
 //! and what happens to them is the app's business. There is deliberately no `access_log` here: a request
-//! log is a dozen lines that read [`RealIp`], and every app wants different ones (a structured `tracing`
+//! log is a dozen lines that read [`RealIp`](crate::middleware::RealIp), and every app wants different ones (a structured `tracing`
 //! event vs. a line on stderr; the query string or not; a level it can turn down on a high-volume
 //! endpoint). Shipping one shape would have forced a logging dependency on every user of this crate to
 //! decide none of that. **`examples/audit`** is a runnable one, in two variants — including naming

@@ -9,7 +9,7 @@
 
 > **Status: implemented and shipped for 0.2.1.** This file is kept as the design record — the analysis
 > of *why* the shape is what it is (the bracket namespace, the label probe, the primary-key tiebreaker)
-> is the part worth having later. See `CHANGELOG.md` § Unreleased for what landed and
+> is the part worth having later. See `CHANGELOG.md` § 0.2.1 for what landed and
 > [CRUD.md](CRUD.md) for how to use it. Decisions taken against §5: bracket spelling
 > `filter[…]` / `search[…]` spelled out rather than `f[…]`; bare `?<col>=` on a non-text column **(b)
 > rejected** with a plain 400; label column **auto-detected** by probing `row_label`, with

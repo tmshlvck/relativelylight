@@ -7,12 +7,12 @@
 //! user → groups in one query and returns an [`Identity`] (or `None` for anonymous). The
 //! authorization gate itself lives in [`crate::authz`]; the presets here ([`UserReadWrite`],
 //! [`UserReadGroupWrite`]) implement it by resolving the identity with an `Auth` handle and
-//! returning a [`Decision`](crate::authz::Decision) the caller renders.
+//! returning a [`Decision`] the caller renders.
 //!
 //! Implemented: the `user`/`session`/`group`/`user_group` SeaORM models, argon2id hashing, a
 //! login/logout flow with an opaque server-side session cookie (via `axum-extra`'s `CookieJar`),
 //! **TOTP two-factor authentication** (a second-factor step at login, plus self-service enrolment /
-//! disable on the profile page and a manager disable for other users), on-demand [`Auth::identify`],
+//! disable on the profile page and a manager disable for other users), on-demand [`Auth::identify`](crate::auth::Auth::identify),
 //! the gate presets ([`UserReadWrite`], [`UserReadGroupWrite`], [`GroupReadWrite`]), a self-service
 //! **profile / password-change** page plus a manager reset (`GET/POST /profile`,
 //! `GET/POST /profile/{id}` — see [`Auth::routes`]), admin helpers ([`make_admin`] to seed one,
@@ -1045,7 +1045,7 @@ impl Auth {
 
     /// The source-address lockout counter — the only brake on credentials that carry no account name
     /// (a bearer token). Pass the caller's address; in a handler that is
-    /// [`RealIp`](crate::middleware::RealIp), which is the same value this module's own login routes
+    /// [`RealIp`], which is the same value this module's own login routes
     /// count against, so one client has one budget across both.
     pub fn ip_lockout(&self) -> lockout::IpLockout {
         self.inner.ips.clone()

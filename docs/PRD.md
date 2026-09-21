@@ -183,8 +183,8 @@ to. Deliberately stops short of versioning or ownership — those are an app's o
 [BLOBSTORE.md](BLOBSTORE.md).
 
 **Status: the specification is written; none of it is built.** It came from the downstream CLIMB app,
-which runs this design against a real workload, and it is the next module to start — on its own
-branch, after 0.3.0 is out.
+which runs this design against a real workload, and with 0.3.0 out it is the next module to start —
+on a branch of its own.
 
 ## 7. Open questions
 

@@ -4,21 +4,21 @@
 //!
 //! A random token lives in a cookie that JavaScript *can* read (deliberately **not** `HttpOnly` — it
 //! is not a credential), and an unsafe request must echo it back, either in the
-//! [`X-CSRF-Token`](HEADER) header or in a [`_csrf`](FIELD) form field. The server only checks that
-//! the two match ([`Csrf::verify`]) — no server-side state, nothing to expire, and any first-party
+//! [`X-CSRF-Token`](crate::csrf::HEADER) header or in a [`_csrf`](crate::csrf::FIELD) form field. The server only checks that
+//! the two match ([`Csrf::verify`](crate::csrf::Csrf::verify)) — no server-side state, nothing to expire, and any first-party
 //! client can satisfy it (read your own cookie, echo it). A cross-site attacker cannot: the same-origin
 //! policy stops them reading the cookie, and they cannot set one for your host — which is the whole
 //! point. This is defense-in-depth *on top of* the session cookie's `SameSite=Strict`.
 //!
 //! Where it's enforced:
 //! - **`auth`'s own routes** — always on. Every form fragment the module renders carries the hidden
-//!   [`_csrf`](FIELD) field, and each `POST` verifies it before anything else (before the password
+//!   [`_csrf`](crate::csrf::FIELD) field, and each `POST` verifies it before anything else (before the password
 //!   check, before any DB work). The token cookie is issued/refreshed when a form page is rendered and
 //!   rotated at login.
 //! - **the `crud` JSON API** — opt-in per engine: `Crud::csrf(auth.csrf())` (or
 //!   `Engine::set_csrf`). Once set, every write handler requires the header; the `crud::ui` tables
 //!   add it to their `fetch` calls automatically (they read the cookie name off the engine).
-//! - **your own handlers** — call [`Csrf::verify`] yourself, and [`Csrf::ensure`] to hand a token to a
+//! - **your own handlers** — call [`Csrf::verify`](crate::csrf::Csrf::verify) yourself, and [`Csrf::ensure`](crate::csrf::Csrf::ensure) to hand a token to a
 //!   page you render.
 //!
 //! **Requests carrying an `Authorization` header are exempt**: a Bearer/API credential is not ambient,
@@ -122,7 +122,7 @@ impl Csrf {
     /// Token cookie lifetime in seconds (default 7 days). Match your session TTL so a live session
     /// always has a usable token.
     /// How large a **multipart** body [`enforce`] will buffer to find the token in. Default 16 MiB
-    /// ([`MAX_BUFFERED_UPLOAD`]); a request over it is rejected rather than read.
+    /// (`MAX_BUFFERED_UPLOAD`); a request over it is rejected rather than read.
     ///
     /// The token lives *in* the body of an upload, so the layer has to hold the body to find it —
     /// which is why this is a number you choose rather than an unbounded read. Set it a little above
@@ -286,7 +286,7 @@ const MAX_BUFFERED_UPLOAD: usize = 16 * 1024 * 1024;
 ///   can't borrow it (the same exemption [`Csrf::verify`] makes).
 /// - the [`X-CSRF-Token`](HEADER) header, for `fetch`/XHR clients;
 /// - failing that, the [`_csrf`](FIELD) **field of the body** — in an
-///   `application/x-www-form-urlencoded` form under [`MAX_BUFFERED_FORM`], or in a
+///   `application/x-www-form-urlencoded` form under `MAX_BUFFERED_FORM` (64 KiB), or in a
 ///   `multipart/form-data` upload under [`Csrf::max_upload`]. The body is buffered, checked, and
 ///   handed on intact, so a plain `<form>` post — with or without a file — works without the
 ///   handler doing anything.
