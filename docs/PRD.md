@@ -18,7 +18,7 @@ For the concrete backlog see **[TODO.md](TODO.md)**.
 | **`observe`** (§4) | write-observer hook for audit logging (change + request context) | ✅ implemented | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
 | **`time`** (§5) | timezone-aware display of UTC timestamps (helpers + `$store.tz` + picker) | ✅ implemented | [TIME.md](TIME.md) |
 | **`validate`** | reusable typed field validators + normalizers, shared by CRUD and hand-written APIs | ✅ implemented | [DATAINPUT.md](DATAINPUT.md) |
-| **`blob`** (§6) | content-addressed file storage + version chain, viewer, thumbnailer, admin panel | ⛔ specified, unimplemented | [BLOBSTORE.md](BLOBSTORE.md) |
+| **`blob`** (§6) | content-addressed file storage + version chain, viewer, thumbnailer, admin panel | 🟡 core shipped; UI + thumbnails pending | [BLOBSTORE.md](BLOBSTORE.md) |
 
 > ✅ implemented & verified · 🟡 partial (core done, hardening/extras ahead) · ⛔ future.
 
@@ -189,9 +189,11 @@ any dependency on `auth` while giving ownership a *better* foreign key than an i
 (BLOBSTORE.md §9; CLIMB's `attachments.md` is the reference case the scope line was drawn against).
 Full design: [BLOBSTORE.md](BLOBSTORE.md).
 
-**Status: the specification is written; none of it is built.** It came from the downstream CLIMB app,
-which runs this design against a real workload, and with 0.3.0 out it is the next module to start —
-on a branch of its own.
+**Status: the core is built** (feature `blob`) — storage, the handle + version chain, dedup, erasure,
+`verify`/`fsck`/`purge`/`backup_to`, and the audit hook including reads, pinned by `blob/tests.rs`.
+**`blob-ui` (viewer, upload form, admin actions) and `blob-thumbnail` are not**, and neither is an
+example. It came from the downstream CLIMB app, which runs an earlier form of this design against a
+real workload.
 
 ## 7. Open questions
 

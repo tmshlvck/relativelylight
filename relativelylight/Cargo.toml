@@ -30,6 +30,12 @@ openidconnect = { version = "4", optional = true } # OIDC relying-party (SSO); d
 regex = { version = "1", optional = true }         # SSO username → group mapping rules
 base64 = { version = "0.22", optional = true }     # decode the verified ID-token payload; txn cookie
 ipnet = "2"                      # CIDR allow-lists (net::parse_nets / in_nets, the lockout's ip_allow)
+# --- blob ---------------------------------------------------------------------------------------
+tokio = { workspace = true, features = ["fs", "io-util"], optional = true }  # FsBackend: streaming + atomic rename
+uuid = { version = "1", features = ["v7", "serde"], optional = true }        # HandleId — time-ordered (RFC 9562)
+tokio-util = { version = "0.7", features = ["io"], optional = true }         # io::StreamReader — an axum body as AsyncRead
+bytes = { version = "1", optional = true }                                   # StreamReader's items must be `Buf`
+futures-core = { version = "0.3", optional = true }                          # the `Stream` in BlobBackend::list
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -40,6 +46,7 @@ axum = "0.8"
 # per test process, and the timestamps an ID token's claims are built from.
 rsa = { version = "0.9", features = ["std"] }
 chrono = "0.4"
+tempfile = "3"   # a scratch root for the FsBackend tests
 
 [features]
 default = ["crud", "axum"]
@@ -59,5 +66,9 @@ tz = ["dep:jiff"]             # timezone-aware rendering of integer-UTC timestam
 auth = ["csrf", "axum", "dep:sea-orm", "dep:axum-extra", "dep:argon2", "dep:totp-rs", "dep:sha2"] # sessions/login + TOTP 2FA + Authz gate
 csrf = ["axum", "dep:rand_core", "dep:axum-extra", "dep:time"] # the double-submit CSRF token (the `csrf` module); implied by `auth`
 sso = ["auth", "dep:openidconnect", "dep:regex", "dep:base64"] # OIDC single sign-on (Google / Okta / corporate) + group mapping
+# Content-addressed file storage: a stable handle + an immutable version chain over digest-addressed
+# content (docs/BLOBSTORE.md). Depends on neither `crud` nor `auth` — ownership and per-document access
+# live in the app's own link table (BLOBSTORE.md §9), which is what keeps this list short.
+blob = ["dep:sea-orm", "dep:tokio", "dep:sha2", "dep:uuid", "dep:tokio-util", "dep:bytes", "dep:futures-core"]
 validate-regex = ["dep:regex"]   # validate::regex_match (reuses the regex dep)
 validate-base64 = ["dep:base64"] # validate::base64 / base64_url (reuses the base64 dep)

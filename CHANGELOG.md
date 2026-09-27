@@ -11,6 +11,34 @@ is easy to miss in a diff.
 
 ## Unreleased
 
+### Added
+
+- **`blob` — content-addressed file storage with a stable handle and an immutable version chain**
+  (feature `blob`, off by default; `docs/BLOBSTORE.md`). Three identities rather than one:
+  `BlobId` addresses bytes, `VersionId` records one upload of them, and **`HandleId` is the stable id
+  your own tables hold a foreign key to** — unchanged for the life of a document however many
+  versions it takes. Uploading the same file twice stores the bytes once and still keeps each
+  upload's own filename and attribution, which is the defect a single digest-keyed table cannot
+  avoid.
+
+  `BlobStore` is the type an app holds: `create` / `put_version` / `amend` / `head` / `versions` /
+  `read` / `delete_handle`, plus `erase` (destroy content, keep the record — GDPR Article 17 against
+  an audit trail that must not go discontinuous), `verify`, `fsck`, `purge` and `backup_to`.
+  `BlobBackend` is the storage seam, with `FsBackend` shipped; it is dyn-compatible, so
+  `BlobStore<Box<dyn BlobBackend>>` lets an app pick its backend from configuration.
+
+  **Depends on neither `crud` nor `auth`** — ownership and per-document access live in the app's own
+  link table (BLOBSTORE.md §9), where they get a real foreign key and the per-model gates that
+  already exist. Reads are digest-verified on the way out and fire an audit event, so a download is
+  observable, not just a write.
+
+  Not yet built: `blob-ui` (viewer, upload form, admin actions) and `blob-thumbnail`.
+
+- **`observe::WriteEvent` gains `version: Option<i64>`** — which version row an event concerns, for
+  an entity that keeps a chain. `None` from `crud` and `auth`. Additive: the struct is
+  `#[non_exhaustive]`, so no sink needs changing.
+
+
 ### Fixed
 
 - **Deleting a user now works, and takes their sessions, recovery codes and group memberships with

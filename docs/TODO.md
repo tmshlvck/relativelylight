@@ -34,12 +34,19 @@ own branch rather than items in this list; what belongs here is anything the spe
 from `crud`/`ui` first (it named one: CSRF on multipart bodies, which
 [shipped](../CHANGELOG.md) in 0.3.0). The rewritten spec names two more, both in `observe`:
 
-- **`WriteEvent` gains `version: Option<VersionId>`** (BLOBSTORE.md §4.7). A blob read or write names
-  a row in a version chain, and `entity` + `key` alone can't say which. The type is
-  `#[non_exhaustive]`, so it's additive — land it with `blob`, not before.
-- **`WriteEvent::op`'s doc comment says "Create / Update / Delete"**, but the field is
-  `authz::Operation`, which has always carried `Read` and `List` too. A one-line correction; `blob`
-  is the first emitter that will fire `Read`, which is how it surfaced.
+Both `observe` changes it needed have landed with the core: `WriteEvent::version`, and the correction
+to `WriteEvent::op`'s doc comment (the field was always `authz::Operation`, which has always carried
+`Read` and `List`; `blob` is the first emitter to fire `Read`).
+
+**Remaining on the `blob` branch**, in order:
+
+- **`blob-ui`** — `Viewer`, `UploadForm`, `Actions`, `to_response`, `decode_upload` (BLOBSTORE.md §5).
+  Note §5.1: the viewer and upload form take **no** gate, and the reason is written down.
+- **`blob-thumbnail`** — `Thumbnailer` over the `image` crate, raster only (§6).
+- **An example.** Every user-facing feature should be demonstrated somewhere runnable, and §9's
+  ownership pattern is the part an app most needs to see working rather than described.
+- **Two-phase `stage`/`commit` on `BlobBackend`** (§12), if a deployment hits the in-memory staging
+  limit that `max_bytes` currently bounds.
 
 ## Web UI follow-ups (post-MPA)
 

@@ -33,6 +33,7 @@ sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 | `auth` | | sessions, login, **TOTP 2FA**, profile/password pages, and the identity-resolving gate presets |
 | `csrf` | | the **double-submit CSRF token** (`csrf` module) — always on for `auth`'s forms, opt-in for the API; implied by `auth` |
 | `sso` | | **OIDC single sign-on** (Google / Okta / corporate) + group mapping (implies `auth`) |
+| `blob` | | content-addressed **file storage** + a stable handle and version chain (`blob` module); needs neither `crud` nor `auth` |
 
 Enable only what you use — an unused feature pulls no dependencies. `auth` works **without** `crud`
 (gate any axum app on its own). The always-on `authz` module (the gate trait + `Open`) is compiled in
@@ -315,11 +316,10 @@ timezone demo, its rows straddling both 2026 DST transitions.
   adapters, and the `MetaField::validate_str/_int` sugar. Same predicate on CRUD + hand-written APIs.
 - **[docs/PRD.md](docs/PRD.md)** — product overview, module status, roadmap.
 - **[docs/TODO.md](docs/TODO.md)** — the ordered backlog.
-- **[docs/BLOBSTORE.md](docs/BLOBSTORE.md)** — the `blob` module's **specification, not yet
-  implemented**: content-addressed storage under a stable handle + version chain (§3), viewer,
-  thumbnailer, admin panel. Ownership and row-level access stay in the app's own link table (§9), so
-  `blob` depends on neither `crud` nor `auth`. Migrated from the downstream CLIMB app; it gets its own
-  branch, and is the next module to be built.
+- **[docs/BLOBSTORE.md](docs/BLOBSTORE.md)** — the `blob` guide *and* spec: content-addressed storage
+  under a stable handle + version chain (§3), the store API (§4), ownership in the app's own link
+  table (§9). The **core is shipped** (feature `blob`, `blob/tests.rs`); §5's UI fragments and §6's
+  thumbnailer are still specification, and the document says which is which.
 - **[docs/SORTFILTER.md](docs/SORTFILTER.md)** — a design record: why relation sorting and
   `filter[…]` have the shape they do (kept for the reasoning; the behaviour is documented in CRUD.md).
 - **[CHANGELOG.md](CHANGELOG.md)** — per-release notes; land user-visible changes under `## Unreleased`

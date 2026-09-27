@@ -1,7 +1,9 @@
 # `relativelylight::blob` — content-addressed file storage — DRAFT SPEC
 
-Status: **not implemented.** This is `docs/PRD.md` §6 ("Files"), written up properly. No code exists
-yet; this document is what gets built, in the same sense `AUTH.md` was before `auth` existed.
+Status: **core implemented** (feature `blob`); **`blob-ui` and `blob-thumbnail` are not**. §§1–4 and
+§§9–11 describe shipped behaviour, pinned by `blob/tests.rs`; §5 (viewer, upload form, admin actions)
+and §6 (thumbnailer) are still specification. Where building it changed a decision, the section says
+so rather than being quietly rewritten.
 
 ## 1. Purpose & scope
 
@@ -150,10 +152,29 @@ pub struct Model {
 all, and adds a write race for nothing. "Next" is a query (`WHERE prev_version_id = ?`) or `seq + 1`.
 The single mutable pointer in the whole design is `blob_handle.head_version_id` — git's ref, exactly.
 
-**The `handle ↔ version` foreign keys are circular**, which every supported backend accepts as long as
-one side is nullable: insert the handle with `head_version_id = NULL`, insert version 1, update the
-pointer. `head_version_id` is denormalised on purpose — without it, an admin listing of N handles
-showing each current filename is a per-row subquery that `MetaModel` cannot express.
+**`head_version_id` carries no foreign key** — corrected during implementation, where the original
+plan (declare it, rely on nullability to break the cycle) turned out not to work. Nullability lets you
+*insert* around a cycle; it does nothing for `CREATE TABLE`, where `blob_handle` referencing
+`blob_version` referencing `blob_handle` means one of the two statements forward-references a table
+that does not exist yet. No ordering of the four statements fixes that, and backends differ on whether
+they tolerate it (Postgres does not). Declaring it would mean shipping an `ALTER TABLE` step — this
+crate dictating a two-phase migration to every app that embeds it, to constrain one column.
+
+So the pointer is maintained transactionally instead (every path that writes a version sets it in the
+same transaction), and `fsck` reports any head that doesn't resolve as `dangling_heads`, at the same
+severity as a missing blob. It is the one integrity rule here enforced by a sweep rather than by the
+database, and it is called out as such rather than assumed.
+
+`head_version_id` is denormalised on purpose — without it, an admin listing of N handles showing each
+current filename is a per-row subquery that `MetaModel` cannot express.
+
+**The two uniqueness rules are emitted as table constraints**, not left as comments:
+`blob_version(handle_id, seq)` and `blob_variant(blob_id, variant)`. The first is what stops two
+concurrent `put_version` calls both deciding they are version 4 and forking the chain; the second is
+both an integrity rule and a prerequisite, since `set_variant`'s upsert names it as its conflict
+target and an `ON CONFLICT` with no matching unique index is an error rather than a no-op.
+`Schema::create_table_from_entity` derives columns, primary keys and foreign keys from an entity and
+knows about neither, so `table_create_statements` adds them.
 
 ### 3.3 `created_by` is a snapshot string, and it is *state*, not audit
 
@@ -375,6 +396,15 @@ Every mutating call and `read` takes a `WriteContext`, matching how every other 
 crate carries `headers`/`client_ip` — but it's `Option`-backed and `::none()` is one call, so nothing
 about using the store outside an HTTP handler is awkward. If no observer is registered the context is
 never read.
+
+**Content is buffered in memory while it is hashed — v1's one real limitation.** The digest *is* the
+storage location, so it must be known before the backend can be told where to put anything; with
+[`BlobBackend::write`] as specified, that means reading the upload into memory to hash it in one pass.
+`max_bytes` (default 64 MiB) is therefore also the per-upload **memory** cost, and should be sized
+against expected concurrency rather than only against the largest file to be allowed. The fix is a
+two-phase `stage`/`commit` pair on the backend trait (stage to a temp location while hashing, then
+commit under the computed digest — a temp file and a rename for a filesystem, a multipart upload and a
+copy for an object store); it is §12's first open question rather than something guessed at here.
 
 **Write ordering, and where the transaction starts.** Every content-writing call follows the same
 three phases, and the order is the invariant §4.6's `fsck` is designed around:
@@ -850,6 +880,9 @@ is CMIS's version series and OCFL's inventory; §13 has the reading.
 
 ## 12. Open questions
 
+- **Two-phase `stage`/`commit` on `BlobBackend`**, to stop buffering uploads in memory (§4.3). The
+  shape is clear; what isn't is whether it is worth a second required method on every backend before
+  a deployment actually hits the limit. Until then, `max_bytes` bounds the exposure and says so.
 - **S3/Ceph backend: in this crate, or a companion?** A `relativelylight-blob-s3` crate keeps the core
   free of an AWS SDK at the cost of a second crate to version in step. Leaning companion crate.
 - **PDF thumbnail approach**, if/when needed: bundled renderer (`pdfium-render`, a large binary) vs.

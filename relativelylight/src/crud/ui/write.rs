@@ -269,6 +269,7 @@ async fn notify(
             before_rows,
             headers,
             client_ip,
+            version: None, // `crud` rows have no version chain — see `observe::WriteEvent::version`
         })
         .await;
 }

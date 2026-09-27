@@ -42,7 +42,10 @@ pub struct WriteEvent<'a> {
     /// what tells them apart. It says `autocrud` — this crate's auto-generated CRUD — rather than a
     /// bare `crud`, which in an app that has CRUD screens of its own names nothing in particular.
     pub source: &'static str,
-    /// The mutation kind (`Create` / `Update` / `Delete`).
+    /// What the caller did. `Create` / `Update` / `Delete` from `crud` and `auth`; `blob` also fires
+    /// `Read`, because a download of regulated content can itself be compliance-weight
+    /// (`docs/BLOBSTORE.md` §4.7). The type has carried all five since the gate trait existed — a
+    /// sink matching on it should expect `Read` and `List` rather than assuming three.
     pub op: Operation,
     /// The affected entity (table/slug), e.g. `"auth_user"`, `"zone"`.
     pub entity: &'a str,
@@ -76,6 +79,11 @@ pub struct WriteEvent<'a> {
     /// **same** address the lockout counted and the access log printed, rather than each observer
     /// re-deriving one from `headers` and a proxy policy it has to know about.
     pub client_ip: IpAddr,
+    /// The version row this event concerns, for an entity that keeps a version chain — today only
+    /// `blob` (see `docs/BLOBSTORE.md` §4.7), where `entity`/`key` name a `blob_version` and this
+    /// carries the same id in typed form. `None` from every other emitter, and from any `blob` event
+    /// that isn't about one particular version (a purge, a backup).
+    pub version: Option<i64>,
 }
 
 /// A sink for [`WriteEvent`]s. Register one with `Crud::on_write` and/or `Auth::on_write`; the same

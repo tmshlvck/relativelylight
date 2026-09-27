@@ -58,6 +58,9 @@ mod multipart;
 /// Double-submit CSRF protection for cookie-authenticated writes: [`Csrf`](csrf::Csrf) issues and
 /// verifies the token. Always on for `auth`'s own forms; opt-in for the `crud` API via `Crud::csrf`.
 /// Feature `csrf` (implied by `auth`). See [`docs/AUTH.md` §7](https://github.com/tmshlvck/relativelylight/blob/main/docs/AUTH.md).
+#[cfg(feature = "blob")]
+pub mod blob;
+
 #[cfg(feature = "csrf")]
 pub mod csrf;
 

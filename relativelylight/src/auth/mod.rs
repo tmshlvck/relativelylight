@@ -774,6 +774,7 @@ impl Inner {
             before_rows: &[], // auth writes are never deletes
             headers,
             client_ip,
+            version: None, // `auth` rows have no version chain — see `observe::WriteEvent::version`
         };
         observer.on_write(&ev).await;
     }
