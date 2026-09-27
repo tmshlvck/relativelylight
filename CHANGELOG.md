@@ -39,7 +39,19 @@ is easy to miss in a diff.
   read, and staging is what reconciles that with a single pass. Reads hash the content through once
   and re-open it to serve, keeping "no unverified byte reaches a caller" exact at constant memory.
 
-  Not yet built: `blob-ui` (viewer, upload form, admin actions) and `blob-thumbnail`.
+  **`blob-ui`** (feature `blob-ui`) adds the server-rendered half: `Receiver` streams a posted
+  `multipart/form-data` upload from the socket into the store, `UploadForm` posts to it, `Viewer`
+  renders a version (always as a URL, never inlining stored bytes), `to_response` /
+  `to_inline_response` build the reply, and `Actions` is the gated maintenance page. The upload path
+  **closes the CSRF gap on multipart bodies**: it requires the token to arrive before the file part,
+  which a streaming parser can enforce and a buffered one cannot, and `UploadForm` renders the hidden
+  input first so a browser posts it in that order.
+
+  **`examples/blob`** demonstrates the lot, including §9's ownership pattern — a `ticket_document`
+  link table whose `owner_user_id` is a real foreign key onto `auth_user` with `ON DELETE RESTRICT`,
+  and downloads routed by ticket and attachment rather than by handle.
+
+  Not yet built: `blob-thumbnail`.
 
 - **`observe::WriteEvent` gains `version: Option<i64>`** — which version row an event concerns, for
   an entity that keeps a chain. `None` from `crud` and `auth`. Additive: the struct is

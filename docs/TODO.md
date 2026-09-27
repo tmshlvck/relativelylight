@@ -38,15 +38,18 @@ Both `observe` changes it needed have landed with the core: `WriteEvent::version
 to `WriteEvent::op`'s doc comment (the field was always `authz::Operation`, which has always carried
 `Read` and `List`; `blob` is the first emitter to fire `Read`).
 
-**Remaining on the `blob` branch**, in order:
+`blob` and `blob-ui` have both landed, with `examples/blob`. **Remaining:**
 
-- **`blob-ui`** — `Viewer`, `UploadForm`, `Actions`, `to_response`, `decode_upload` (BLOBSTORE.md §5).
-  Note §5.1: the viewer and upload form take **no** gate, and the reason is written down.
-- **`blob-thumbnail`** — `Thumbnailer` over the `image` crate, raster only (§6).
-- **An example.** Every user-facing feature should be demonstrated somewhere runnable, and §9's
-  ownership pattern is the part an app most needs to see working rather than described.
-- **Two-phase `stage`/`commit` on `BlobBackend`** (§12), if a deployment hits the in-memory staging
-  limit that `max_bytes` currently bounds.
+- **`blob-thumbnail`** — `Thumbnailer` over the `image` crate, raster only (BLOBSTORE.md §6). PDF
+  first-page thumbnails stay out: every option is a heavy binding or a process dependency.
+- **CSRF on `crud::ui`'s CSV import.** `blob-ui` closed this for uploads by requiring the token
+  *before* the file part, which a streaming parser can enforce and a buffered one cannot. The CSV
+  import still takes a buffered `Bytes` body and still has the original gap; the same trick would
+  work if it moved to `multer` too, which is now a dependency in any `blob-ui` build.
+- **The read path assumes re-reading is cheap** (BLOBSTORE.md §4.3, §12) — true of a filesystem,
+  false of an object store. Revisit when a second backend exists, not before.
+- **`crud::ui`'s CSV import is under axum's 2 MB `DefaultBodyLimit`**, because it uses a buffering
+  extractor. Worth a line in the docs at least, since nothing currently says so.
 
 ## Web UI follow-ups (post-MPA)
 

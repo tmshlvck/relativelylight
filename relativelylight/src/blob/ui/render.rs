@@ -313,7 +313,10 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
             "purge" => match self.store.purge(None).await {
                 Ok(r) => ActionOutcome {
                     alarming: false,
-                    message: format!("{} unreferenced blobs deleted.", r.content_deleted.len()),
+                    message: {
+                        let n = r.content_deleted.len();
+                        format!("{n} unreferenced blob{} deleted.", if n == 1 { "" } else { "s" })
+                    },
                 },
                 Err(e) => ActionOutcome { message: format!("Purge failed: {e}"), alarming: true },
             },

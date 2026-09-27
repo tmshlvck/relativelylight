@@ -18,7 +18,7 @@ For the concrete backlog see **[TODO.md](TODO.md)**.
 | **`observe`** (§4) | write-observer hook for audit logging (change + request context) | ✅ implemented | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
 | **`time`** (§5) | timezone-aware display of UTC timestamps (helpers + `$store.tz` + picker) | ✅ implemented | [TIME.md](TIME.md) |
 | **`validate`** | reusable typed field validators + normalizers, shared by CRUD and hand-written APIs | ✅ implemented | [DATAINPUT.md](DATAINPUT.md) |
-| **`blob`** (§6) | content-addressed file storage + version chain, viewer, thumbnailer, admin panel | 🟡 core shipped; UI + thumbnails pending | [BLOBSTORE.md](BLOBSTORE.md) |
+| **`blob`** (§6) | content-addressed file storage + version chain, streaming upload, viewer, admin panel | 🟢 shipped; thumbnailer pending | [BLOBSTORE.md](BLOBSTORE.md) |
 
 > ✅ implemented & verified · 🟡 partial (core done, hardening/extras ahead) · ⛔ future.
 
@@ -189,11 +189,11 @@ any dependency on `auth` while giving ownership a *better* foreign key than an i
 (BLOBSTORE.md §9; CLIMB's `attachments.md` is the reference case the scope line was drawn against).
 Full design: [BLOBSTORE.md](BLOBSTORE.md).
 
-**Status: the core is built** (feature `blob`) — storage, the handle + version chain, dedup, erasure,
-`verify`/`fsck`/`purge`/`backup_to`, and the audit hook including reads, pinned by `blob/tests.rs`.
-**`blob-ui` (viewer, upload form, admin actions) and `blob-thumbnail` are not**, and neither is an
-example. It came from the downstream CLIMB app, which runs an earlier form of this design against a
-real workload.
+**Status: built**, except thumbnailing. `blob` is storage, the handle + version chain, dedup,
+erasure, `verify`/`fsck`/`purge`/`backup_to` and the audit hook including reads; `blob-ui` is the
+streaming upload path, the viewer, the response builder and the gated maintenance page. Both are
+pinned by tests and demonstrated by `examples/blob`. **`blob-thumbnail` is not built.** The design
+came from the downstream CLIMB app, which runs an earlier form of it against a real workload.
 
 ## 7. Open questions
 

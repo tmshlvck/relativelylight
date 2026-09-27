@@ -5,6 +5,9 @@ Status: **implemented** except §6. `blob` (storage, the handle + version chain)
 `blob/ui/tests.rs`; §6's thumbnailer is still specification. Where building it changed a decision,
 the section says so rather than being quietly rewritten.
 
+**Example: `examples/blob`** — `cargo run -p blob-example`. Tickets with attachments: streaming
+uploads, the version chain, erasure, the maintenance page, and §9's ownership link table.
+
 ## 1. Purpose & scope
 
 Every app in this crate's audience ends up storing files — uploads, generated PDFs, photos — and

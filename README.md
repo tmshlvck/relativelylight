@@ -218,9 +218,9 @@ cargo run -p audit-example         # :3000  who called and what they changed: th
   predicates, plus the `MetaField::validate_str/_int` sugar and the crud adapters.
 - **[docs/PRD.md](docs/PRD.md)** — product overview, module status, and roadmap;
   **[docs/TODO.md](docs/TODO.md)** is the ordered backlog behind it.
-- **[docs/BLOBSTORE.md](docs/BLOBSTORE.md)** — the `blob` module's specification: content-addressed
-  file storage with a stable handle + version chain your own tables can reference, viewer,
-  thumbnailer and admin panel. **Specified, not implemented** — the next module to be built.
+- **[docs/BLOBSTORE.md](docs/BLOBSTORE.md)** — the `blob` guide: content-addressed file storage with
+  a stable handle + version chain your own tables can reference, streaming uploads, the viewer, and
+  erasure that keeps the record. **Shipped** except the thumbnailer. (Example: `blob`.)
 - **[CHANGELOG.md](CHANGELOG.md)** — what changed per release, with the breaking changes and upgrade
   steps for each.
 - **[AGENTS.md](AGENTS.md)** — orientation for working *on* the library (workspace layout, build/test,
