@@ -771,6 +771,7 @@ impl Inner {
             key,
             before: None,
             after: Some(after),
+            before_rows: &[], // auth writes are never deletes
             headers,
             client_ip,
         };

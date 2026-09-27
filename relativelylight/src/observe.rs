@@ -50,7 +50,23 @@ pub struct WriteEvent<'a> {
     pub key: Option<String>,
     /// Prior row state where known (update/delete); `None` on create. **Never** put secrets here
     /// (password hashes, TOTP secrets) — the emitters redact them.
+    ///
+    /// For a **bulk** delete this is `None` — one row cannot describe many. Read
+    /// [`before_rows`](WriteEvent::before_rows) instead, which carries every delete uniformly.
     pub before: Option<Value>,
+    /// Every row a **delete** removed, finished as a listing would render them: one element for a
+    /// single-row delete, `N` for a bulk one, and empty for anything that is not a delete.
+    ///
+    /// This exists because a bulk delete is a set-based `DELETE … WHERE`. It fires no per-row hook,
+    /// and by the time an observer runs, the rows it would need to look at are gone — so an app with
+    /// derived state (a search index to evict, a cache to invalidate, a *parent* record to
+    /// re-render) had no way to learn what changed, and the only workaround was to read the rows
+    /// itself before handing the body to the UI, duplicating this crate's query construction outside
+    /// the transaction that does the delete. Now the engine reads them, once, in the right place.
+    ///
+    /// Prefer this over [`before`](WriteEvent::before) for deletes: it has one shape for all three
+    /// of them.
+    pub before_rows: &'a [Value],
     /// New row state where known (create/update); `None` on delete.
     pub after: Option<Value>,
     /// The request headers — resolve the actor from here (`auth.identify`).

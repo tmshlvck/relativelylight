@@ -298,7 +298,7 @@ and none between your handlers and the engine either.
 | `get(slug, pk)` | `Value` | one finished row |
 | `create(slug, &Value)` / `update(slug, pk, &Value)` | `Value` | the written row |
 | `delete(slug, pk)` | `Value` | the deleted row |
-| `delete_where(slug, &ListQuery)` | `u64` | one set-based `DELETE … WHERE`, not a loop |
+| `delete_where(slug, &ListQuery)` | `Vec<Value>` | one set-based `DELETE … WHERE`, not a loop; returns **the rows it removed** (count = `.len()`) |
 | `write_batch(slug, rows)` | `BatchApplied` | many writes as one transaction (what CSV import uses) |
 | `decide(slug, op, &headers)` | `Decision` | the model's gate — `Allow` / `NeedsLogin` / `Denied` |
 
@@ -940,7 +940,8 @@ pub struct WriteEvent<'a> {
     pub op: Operation,          // Create | Update | Delete
     pub entity: &'a str,        // slug, e.g. "post"
     pub key: Option<String>,    // pk (None for a bulk delete)
-    pub before: Option<Value>,  // prior row (update/delete); None on create
+    pub before: Option<Value>,  // prior row (single update/delete); None on create and bulk delete
+    pub before_rows: &'a [Value], // every row a DELETE removed: 1 for a single, N for a bulk, else empty
     pub after: Option<Value>,   // new row (create/update); None on delete
     pub headers: &'a HeaderMap, // resolve the actor (auth.identify) + read X-Forwarded-For
     pub client_ip: IpAddr,        // the caller, already resolved by middleware::resolve_real_ip
@@ -952,8 +953,22 @@ crud.on_write(my_audit_sink.clone());   // Arc<dyn WriteObserver>
 ```
 
 Notes: the observer runs **after commit** (a failed write fires nothing); `before` on update is a
-best-effort pre-fetch; a **bulk delete** reports the affected count in `after` (`{"deleted": N}`), not
-every row, so a "delete all" can't blow up the audit. The library provides only the hook and the
+best-effort pre-fetch.
+
+**Deletes: read `before_rows`, not `before`.** A bulk delete is one set-based `DELETE … WHERE` — it
+names no single row, so `before` and `key` are `None` and `after` carries only the count
+(`{"deleted": N}`). `before_rows` carries the rows themselves, finished as a listing would render
+them, with **one shape for all three delete paths**: one element for a per-row delete, `N` for a bulk
+one, empty for anything that is not a delete. Without it an app with derived state — a search index to
+evict, a cache to invalidate, a *parent* row to re-render or re-publish — could not act on a bulk
+delete at all, because by the time the observer runs the rows are gone. The engine reads them before
+deleting, which costs what listing the same rows costs (`N × R` queries for `R` relation columns) and
+is the only moment at which they can be read.
+
+If you only want the count, use `after["deleted"]` or `before_rows.len()`; nothing forces a big
+"delete all" through an audit table row by row.
+
+The library provides only the hook and the
 `WriteEvent` type — the app owns the audit **table**, resolves the actor from `headers` (e.g.
 `auth.identify`), writes the row, and handles retention — the address arrives already resolved, so every
 audit row names the same client the lockout counted and your request log printed. The same

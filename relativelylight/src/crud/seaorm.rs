@@ -1460,9 +1460,21 @@ where
         Ok(Some(finished))
     }
 
-    async fn delete_many(&self, q: &ListQuery) -> Result<u64> {
+    async fn delete_many(&self, q: &ListQuery) -> Result<Vec<Value>> {
         let pk_c = column::<E>(&self.pk())
             .ok_or_else(|| Error::Backend("no primary-key column".into()))?;
+
+        // Snapshot the rows *before* the transaction, for the same two reasons the single-row
+        // `delete` above does it: `finish` resolves relations through the pool, which would need a
+        // second connection while a write transaction holds one (deadlocking a single-connection
+        // pool), and once the rows are gone there is nothing left to describe. This is what lets an
+        // observer answer "which parent just changed?" for a bulk delete — see `observe::WriteEvent`.
+        let models = E::find().filter(self.build_condition(q)?).all(&self.db).await?;
+        let mut deleted = Vec::with_capacity(models.len());
+        for m in &models {
+            deleted.push(self.finish(&serde_json::to_value(m).unwrap()).await?);
+        }
+
         let txn = self.db.begin().await?;
         let backend = txn.get_database_backend();
         // Clear N:M junction rows for the matching source rows (subquery) BEFORE deleting parents.
@@ -1478,9 +1490,9 @@ where
                 .to_owned();
             txn.execute(backend.build(&del)).await?;
         }
-        let res = E::delete_many().filter(self.build_condition(q)?).exec(&txn).await?;
+        E::delete_many().filter(self.build_condition(q)?).exec(&txn).await?;
         txn.commit().await?;
-        Ok(res.rows_affected)
+        Ok(deleted)
     }
 }
 

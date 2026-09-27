@@ -42,6 +42,9 @@ pub(crate) async fn apply(
     let tz = Tz::from_headers(headers);
     let mut anchor = String::new();
     let mut done: Option<Done> = None;
+    // Every row a delete removed, whichever of the three delete paths it took — see
+    // `observe::WriteEvent::before_rows`. Empty for anything that is not a delete.
+    let mut gone: Vec<Value> = Vec::new();
     let (before, after, key) = match &op {
         Op::Create | Op::Update => {
             let id = posted.one("_id").unwrap_or("").to_string();
@@ -78,6 +81,8 @@ pub(crate) async fn apply(
         Op::DeleteOne(id) => {
             let row = s.engine.delete(s.slug, id).await?;
             done = Some(Done::Deleted(1));
+            // Also as `before_rows`, so an observer reads one field for every delete.
+            gone = vec![row.clone()];
             (Some(row), None, Some(id.clone()))
         }
         Op::DeleteSelected => {
@@ -87,16 +92,16 @@ pub(crate) async fn apply(
             }
             let mut q = s.query.clone();
             q.pk_in = ids;
-            let n = s.engine.delete_where(s.slug, &q).await?;
-            done = Some(Done::Deleted(n));
-            (None, Some(serde_json::json!({ "deleted": n })), None)
+            gone = s.engine.delete_where(s.slug, &q).await?;
+            done = Some(Done::Deleted(gone.len() as u64));
+            (None, Some(serde_json::json!({ "deleted": gone.len() })), None)
         }
         Op::DeleteAll => {
             let mut q = s.query.clone();
             q.all = true; // this view's filters still apply — the button says "matching"
-            let n = s.engine.delete_where(s.slug, &q).await?;
-            done = Some(Done::Deleted(n));
-            (None, Some(serde_json::json!({ "deleted": n })), None)
+            gone = s.engine.delete_where(s.slug, &q).await?;
+            done = Some(Done::Deleted(gone.len() as u64));
+            (None, Some(serde_json::json!({ "deleted": gone.len() })), None)
         }
         Op::Import => {
             // The file the operator chose, read as bytes on the server — or, if they pasted
@@ -134,7 +139,7 @@ pub(crate) async fn apply(
             (None, Some(report), None)
         }
     };
-    notify(s.engine, op.operation(), s.slug, key.as_deref(), before.as_ref(), after.as_ref(), headers, client_ip)
+    notify(s.engine, op.operation(), s.slug, key.as_deref(), before.as_ref(), after.as_ref(), &gone, headers, client_ip)
         .await;
 
     // Back to the list the write came from: the view's own query, plus either a one-shot report of
@@ -249,6 +254,7 @@ async fn notify(
     key: Option<&str>,
     before: Option<&Value>,
     after: Option<&Value>,
+    before_rows: &[Value],
     headers: &HeaderMap,
     client_ip: IpAddr,
 ) {
@@ -260,6 +266,7 @@ async fn notify(
             key: key.map(str::to_string),
             before: before.cloned(),
             after: after.cloned(),
+            before_rows,
             headers,
             client_ip,
         })

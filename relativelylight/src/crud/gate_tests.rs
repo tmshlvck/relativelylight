@@ -97,9 +97,9 @@ impl Accessor for Stub {
         self.calls.write();
         Ok(Some(serde_json::json!({ "id": 1 })))
     }
-    async fn delete_many(&self, _q: &ListQuery) -> Result<u64> {
+    async fn delete_many(&self, _q: &ListQuery) -> Result<Vec<Value>> {
         self.calls.write();
-        Ok(0)
+        Ok(Vec::new())
     }
 }
 

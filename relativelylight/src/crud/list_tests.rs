@@ -353,17 +353,18 @@ async fn several_conditions_in_one_query_all_apply() {
 async fn a_filtered_bulk_delete_deletes_only_the_matching_rows_and_needs_no_all_flag() {
     let e = engine_with(Label::Declared).await;
     let filtered = ViewState::from_query("filter[zone]=1").to_list_query(25);
-    assert_eq!(
-        e.delete_where("record", &filtered).await.expect("a filter is a filter for the guard"),
-        2
-    );
+    let gone = e.delete_where("record", &filtered).await.expect("a filter is a filter for the guard");
+    assert_eq!(gone.len(), 2);
+    // The rows come back finished, which is the whole point: after a set-based delete this is the
+    // only way anything can learn *what* went — a parent to re-render, an index entry to evict.
+    assert!(gone.iter().all(|r| !r["zone"].is_null()), "relations resolved: {gone:?}");
     assert_eq!(list(&e, "record", "").await.expect("lists").total, 5, "other zones untouched");
 
     // The guard still holds for an unfiltered delete — the UI's "Delete all matching" is what sets
     // the flag, and it says so on the button.
     assert!(e.delete_where("record", &ListQuery::default()).await.is_err());
     let all = ListQuery { all: true, ..Default::default() };
-    assert_eq!(e.delete_where("record", &all).await.expect("explicit"), 5);
+    assert_eq!(e.delete_where("record", &all).await.expect("explicit").len(), 5);
 }
 
 #[tokio::test]

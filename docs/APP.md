@@ -435,7 +435,10 @@ Two things to carry over from the library's own forms, because they are easy to 
   payout account, or deleting an installation. See [AUTH.md §5h](AUTH.md).
 
 And if you want the write to appear in the same audit trail as the admin's, call your
-`WriteObserver` yourself with a `WriteEvent` naming your own `source`.
+`WriteObserver` yourself with a `WriteEvent` naming your own `source`. (If your sink also maintains
+derived state — reindexing, cache eviction, re-publishing a parent record — note that a delete hands
+it `before_rows`: every row that went, in one shape for all three of the admin's delete controls. See
+[CRUD.md § Write observer](CRUD.md#write-observer-audit).)
 
 ## 8. Multi-step workflows
 

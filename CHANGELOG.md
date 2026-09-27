@@ -9,6 +9,51 @@ Work that has landed on `main` but isn't tagged yet lives under **Unreleased**; 
 heading to the version + date and adds a compare link. Per-entry commit hashes are given where a change
 is easy to miss in a diff.
 
+## [0.3.1] — 2026-09-27
+
+A **patch** release that carries one small breaking change, deliberately. `Engine::delete_where`
+changes its return type, which for a `0.x` crate would normally bump the minor — but the only known
+consumer of the admin UI is the app this was found in, and the change exists to fix a defect in
+a contract that could not be honoured as written. Judgement call, recorded here rather than hidden.
+
+### Fixed
+
+- **A bulk delete now tells the write observer what it removed.** `WriteEvent` gains
+  **`before_rows: &[Value]`** — every row a delete took, finished as a listing would render them:
+  one element for the per-row Delete, `N` for "Delete selected" and "Delete all matching", and empty
+  for anything that is not a delete. One shape for all three paths.
+
+  The gap was real and had bitten: a bulk delete is one set-based `DELETE … WHERE`, so it fires no
+  per-row SeaORM hook, and the event it *did* fire carried `before: None`, `key: None` and a count in
+  `after`. An app maintaining derived state from these rows — a search index, a cache, a **parent
+  record to re-render** — was told "something was deleted from `record`" and nothing more, and by the
+  time it was asked, the rows were gone. The only workaround was for the app to read the rows itself
+  before handing the body to `submit`, which meant duplicating this crate's query construction
+  (`pk_in`, `all`, the view's filters) outside the transaction that does the delete — mirroring
+  internals nothing pins, and racing any insert in between. The engine now reads them, once, in the
+  one place that can.
+
+  `crud/ui_tests.rs` pins it for all three delete controls, including that a create carries no rows.
+
+### Breaking
+
+- **`Engine::delete_where` and `Accessor::delete_many` return `Vec<Value>` instead of `u64`** — the
+  rows removed, rather than how many. `.len()` is the old value, so a caller that wanted the count
+  adds four characters. An `Accessor` implemented outside this crate must return the rows it
+  deleted; returning `Vec::new()` compiles and keeps the previous (silent) behaviour, which is the
+  wrong default but an honest escape hatch.
+
+  The reads happen **before** the delete and outside its transaction — the same order
+  `Accessor::delete` has always used for a single row, for the same reason (`finish` resolves
+  relations through the pool, and doing that while a write transaction holds a connection deadlocks
+  a single-connection pool). Cost is what listing the same rows costs, `N × R` queries for `R`
+  relation columns. A "delete all matching" of a very large table therefore materialises those rows;
+  `ListQuery::all` already had that property for listing.
+
+- `WriteEvent` gained a field. It is `#[non_exhaustive]` and observers only *read* it, so this is
+  **not** a break for a sink — but a test double or any other in-crate construction of it needs the
+  new field.
+
 ## [0.3.0] — 2026-09-21
 
 The web UI is **re-homed in Rust**: `crud::ui` renders plain server-side HTML, and the JSON/metadata

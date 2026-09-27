@@ -199,9 +199,10 @@ impl Accessor for Mock {
         self.log.record("delete", &json!(pk));
         Ok(Some(json!({ "id": pk })))
     }
-    async fn delete_many(&self, q: &ListQuery) -> Result<u64> {
+    async fn delete_many(&self, q: &ListQuery) -> Result<Vec<Value>> {
         self.log.record("delete_many", &json!({ "ids": q.pk_in, "eq": q.eq, "all": q.all }));
-        Ok(q.pk_in.len() as u64)
+        // One row per id, so a caller reading `before_rows` sees what a real backend would return.
+        Ok(q.pk_in.iter().map(|id| json!({ "id": id })).collect())
     }
 }
 
@@ -998,6 +999,65 @@ async fn one_row_deletes_by_its_own_button() {
     let table = Table::new(&e, "post");
     table.submit(&no_headers(), IP, b"_del=7", &list()).await.unwrap();
     assert_eq!(log.last(), ("delete".into(), json!("7")));
+}
+
+/// One observed `WriteEvent`, reduced to the parts the delete contract is about.
+#[derive(Clone)]
+struct Observed {
+    op: Operation,
+    key: Option<String>,
+    rows: Vec<Value>,
+}
+
+/// Records every `WriteEvent` a test provokes, so the delete contract can be asserted.
+#[derive(Default)]
+struct Seen(std::sync::Mutex<Vec<Observed>>);
+
+#[async_trait]
+impl crate::observe::WriteObserver for Seen {
+    async fn on_write(&self, ev: &crate::observe::WriteEvent<'_>) {
+        self.0.lock().unwrap().push(Observed {
+            op: ev.op,
+            key: ev.key.clone(),
+            rows: ev.before_rows.to_vec(),
+        });
+    }
+}
+
+/// **A delete tells the observer what it removed — all three of them, in one shape.**
+///
+/// Before `before_rows` existed, a bulk delete handed the observer `before: None` and `key: None`:
+/// "something was deleted from `post`", and nothing more. An app with derived state — a search index
+/// to evict, a cache to drop, a parent row to re-render — could not act on that, because by the time
+/// it was called the rows were gone. The only workaround was for the app to read the rows itself
+/// before handing the body over, duplicating this crate's query construction outside the transaction
+/// that does the delete.
+#[tokio::test]
+async fn every_delete_hands_the_observer_the_rows_it_removed() {
+    let seen = Arc::new(Seen::default());
+    let (mut e, _log) = engine();
+    e.set_observer(seen.clone());
+    let table = Table::new(&e, "post");
+
+    table.submit(&no_headers(), IP, b"_del=7", &list()).await.unwrap();
+    table.submit(&no_headers(), IP, b"_op=delete_selected&ids=1&ids=2", &list()).await.unwrap();
+
+    let events = seen.0.lock().unwrap().clone();
+    assert_eq!(events.len(), 2);
+
+    assert_eq!(events[0].op, Operation::Delete);
+    assert_eq!(events[0].key.as_deref(), Some("7"), "a single delete still names its row");
+    assert_eq!(events[0].rows.len(), 1, "and carries it in before_rows too, so one field serves both");
+
+    assert_eq!(events[1].op, Operation::Delete);
+    assert_eq!(events[1].key, None, "a bulk delete names no single row — hence before_rows");
+    assert_eq!(events[1].rows.len(), 2, "one entry per row actually removed");
+
+    // A create is not a delete, and must not look like one.
+    table.submit(&no_headers(), IP, b"_op=create&title=x", &list()).await.unwrap();
+    let last = seen.0.lock().unwrap().last().unwrap().clone();
+    assert_eq!(last.op, Operation::Create);
+    assert!(last.rows.is_empty(), "before_rows is empty for anything that is not a delete");
 }
 
 #[tokio::test]

@@ -447,8 +447,13 @@ pub trait Accessor: Send + Sync {
     async fn update(&self, pk: &str, body: &Value) -> Result<Option<Value>>;
     /// Delete one row; returns the finished deleted record (or `None` if it didn't exist).
     async fn delete(&self, pk: &str) -> Result<Option<Value>>;
-    /// Delete every row matching the query in one set-based operation; returns the count.
-    async fn delete_many(&self, q: &ListQuery) -> Result<u64>;
+    /// Delete every row matching the query in one set-based operation.
+    ///
+    /// Returns **the rows it removed**, finished exactly as [`list`](Accessor::list) would render
+    /// them, because after a set-based delete there is no other way to learn what went — and an app
+    /// with derived state (a search index, a cache, a parent record to re-render) has to know. The
+    /// count is `.len()`.
+    async fn delete_many(&self, q: &ListQuery) -> Result<Vec<Value>>;
 
     /// Apply many writes as **one unit**: `Some(pk)` updates that row, `None` creates. Returns what was
     /// applied, or [`Error::BatchRejected`] naming every row that stopped it — in which case **nothing**
@@ -654,10 +659,16 @@ impl Engine {
         self.accessor(slug)?.write_batch(rows).await
     }
 
-    /// Bulk delete, returning how many rows went. Refuses to wipe the whole (unfiltered) table
-    /// unless `q.all` — the flag the UI's "Delete all (N)" button sets and its "Delete selected"
-    /// button does not.
-    pub async fn delete_where(&self, slug: &str, q: &ListQuery) -> Result<u64> {
+    /// Bulk delete, returning **the rows it removed** (the count is `.len()`). Refuses to wipe the
+    /// whole (unfiltered) table unless `q.all` — the flag the UI's "Delete all (N)" button sets and
+    /// its "Delete selected" button does not.
+    ///
+    /// The rows are read and finished before the delete, so this costs what listing the same rows
+    /// costs — on the order of `N × R` queries for `R` relation columns, the same shape as any
+    /// listing (which is why `Table::per_page_max` exists). That price buys the only chance anything
+    /// has to see what was deleted: a set-based `DELETE … WHERE` fires no per-row hook, and by the
+    /// time an observer is called the rows are gone.
+    pub async fn delete_where(&self, slug: &str, q: &ListQuery) -> Result<Vec<Value>> {
         let has_filter = !q.search.is_empty() || !q.eq.is_empty() || !q.pk_in.is_empty();
         if !has_filter && !q.all {
             return Err(Error::BadRequest(
