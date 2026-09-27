@@ -15,11 +15,18 @@ metadata API and the OpenAPI generator are gone. See [MIGRATION-0.3.md](MIGRATIO
 upgrade and, in its appendix, why. 0.2.0 (security defaults) and 0.2.1 (sorting + filtering) precede
 it. Everything below is follow-on work; nothing here blocked that release.
 
-**`chart` is specified but not agreed** — [CHARTS.md](CHARTS.md) is a draft spec for server-rendered
-SVG bar/line/scatter charts, written against teleddns-server's dashboard, which already runs a
-hand-rolled version. Its §8 argues *against* building it as carefully as for, and the recommendation
-is conditional: build only if no-JavaScript is a requirement rather than a preference, and consider
-shipping `bars` alone first. Read that section before starting; it is the point of the document.
+- **A server-rendered SVG chart module — specified, then dropped.** Bar/line/scatter with nice ticks,
+  `Tz`-formatted time axes and a legend, written up as `docs/CHARTS.md` against teleddns-server's
+  dashboard and deleted once that dashboard answered the question by switching to Chart.js from a
+  CDN. Two things killed it, and both are structural rather than matters of effort: **tooltips** are
+  what people actually want from a chart and cannot exist without a client runtime, and **SVG cannot
+  measure text**, so axis margins are estimates and the design had to cope by *refusing* charts it
+  could not prove would fit. Against that, ~600–900 lines in a crate whose pitch is being small, and
+  a bottomless backlog behind it (log scales, stacking, annotations, thresholds). The spec is in git
+  history — `git show 8a02dfb` — if the idea returns; read its §8 first, which argues both ways.
+  What the downstream app does instead is the recommendation: Chart.js from a CDN, pinned and
+  SRI-checked, treated as a *viewer* on one read-only page like Swagger UI on `/docs`, with the data
+  baked into the page so no JSON endpoint comes back with it.
 
 **The next module is `blob`** — [BLOBSTORE.md](BLOBSTORE.md) is its full specification, written
 against the downstream CLIMB app that already runs the design, and none of it is built. It gets its
