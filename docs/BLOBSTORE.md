@@ -234,7 +234,7 @@ pub trait BlobBackend: Send + Sync + 'static {
     /// object store, typically just the PUT. `BlobStore` only inserts the index row after this
     /// returns `Ok`, so whatever "durable" means for a given backend, that's the ordering that
     /// protects the "no row without bytes" invariant.
-    async fn write(&self, id: &BlobId, data: impl AsyncRead + Send + Unpin) -> Result<(), BlobError>;
+    async fn write(&self, id: &BlobId, data: Reader) -> Result<(), BlobError>;
 
     /// Stream the content back. `BlobStore::get` re-hashes while streaming and compares against
     /// `id` — the backend does not need to verify anything itself.
@@ -253,7 +253,26 @@ pub trait BlobBackend: Send + Sync + 'static {
 }
 
 pub struct StoredEntry { pub id: BlobId, pub written_at: Option<i64> }
+
+/// A boxed byte source. `BlobStore` boxes what the app handed it before calling `write`.
+pub type Reader = Pin<Box<dyn AsyncRead + Send>>;
+
+/// So a `Box<dyn BlobBackend>` is itself a backend — see below.
+#[async_trait]
+impl BlobBackend for Box<dyn BlobBackend> { /* forwards */ }
 ```
+
+**`write` takes a boxed reader, not `impl AsyncRead`, so the trait is dyn-compatible.** A generic
+method cannot go in a vtable — that is base Rust, nothing to do with `#[async_trait]`, which handles
+`impl Trait` arguments happily by desugaring them to generics. Taking `impl AsyncRead` would compile
+and would still leave `Box<dyn BlobBackend>` rejected, which costs two things worth more than the one
+allocation per upload it saves: an app could not choose its backend from configuration at runtime
+(filesystem in development, object store in production is the obvious case), and `B` would have to be
+threaded through every type that touches a store, including `Actions<'a, B>` and every handler
+signature mentioning one.
+
+The ergonomics stay on the *app-facing* side regardless: `BlobStore::create` and `put_version` take
+`impl AsyncRead + Send + Unpin` and do the boxing themselves, so no caller ever writes `Box::pin`.
 
 ### 4.2 `FsBackend` — the shipped implementation
 
@@ -356,6 +375,22 @@ Every mutating call and `read` takes a `WriteContext`, matching how every other 
 crate carries `headers`/`client_ip` — but it's `Option`-backed and `::none()` is one call, so nothing
 about using the store outside an HTTP handler is awkward. If no observer is registered the context is
 never read.
+
+**Write ordering, and where the transaction starts.** Every content-writing call follows the same
+three phases, and the order is the invariant §4.6's `fsck` is designed around:
+
+1. **Hash and store the bytes.** Stream into the backend's `write`, computing the digest as it goes
+   and enforcing `max_bytes`. No database work has happened yet.
+2. **Open a transaction**, and in it: insert the `blob` row if the digest is new (a conflicting insert
+   is a no-op, not an error — identical content is identical), insert the `blob_version` row, and
+   update `blob_handle.head_version_id` to point at it. `create` additionally inserts the handle
+   itself, with a null head, before the version.
+3. **Commit.**
+
+Bytes before rows, always. A crash anywhere leaves either nothing or unreferenced bytes — never a row
+pointing at content that isn't there, which is the one failure the index cannot recover from. That
+asymmetry is why `fsck` treats an orphan as routine and a missing blob as an alarm, and it only holds
+if every path writes in this order; it is stated here rather than left to be rediscovered three times.
 
 **`HandleId`** is a `Uuid` newtype; **`VersionId`** an `i64` newtype; **`BlobId`** a thin newtype over
 the 64-lowercase-hex digest (`FromStr`/`Display`/`TryFrom<&str>` rejecting malformed input). A digest
@@ -584,6 +619,8 @@ What the generic console *can't* express is `verify` / `fsck` / `purge` / `backu
 operations, and not `MetaModel`-shaped. Those get one small companion fragment:
 
 ```rust
+// `B` is usually `FsBackend`; `BlobStore<Box<dyn BlobBackend>>` works too (§4.1), which is how an
+// app that picks its backend from configuration keeps one concrete type in its handlers.
 pub struct Actions<'a, B: BlobBackend> { store: &'a BlobStore<B>, gate: Arc<dyn Authz> }
 impl<'a, B: BlobBackend> Actions<'a, B> {
     pub fn new(store: &'a BlobStore<B>, gate: impl Authz + 'static) -> Self;
@@ -636,10 +673,31 @@ because thumbnails are a property of content (§4.5).
 ## 7. Feature / module layout
 
 ```toml
-blob = ["dep:sea-orm", "dep:tokio", "dep:sha2", "dep:uuid"]   # core: BlobStore, FsBackend, entities
-blob-ui = ["blob", "ui"]                                       # Viewer, UploadForm, Actions, to_response
-blob-thumbnail = ["blob", "dep:image"]                         # Thumbnailer (raster only, v1)
+blob = [
+    "dep:sea-orm", "dep:tokio", "dep:sha2", "dep:uuid",
+    "dep:tokio-util",     # io::StreamReader — an axum body becomes an AsyncRead (see below)
+    "dep:bytes",          # StreamReader's items must be `Buf`
+    "dep:futures-core",   # the `Stream` in BlobBackend::list
+]
+blob-ui = ["blob", "ui"]            # Viewer, UploadForm, Actions, to_response
+blob-thumbnail = ["blob", "dep:image"]   # Thumbnailer (raster only, v1)
 ```
+
+`sea-orm` must have **`with-uuid`** enabled alongside the `with-json` entities already need — the
+handle's primary key and `metadata` are what require them.
+
+**Getting an axum body into `put`** is `tokio_util::io::StreamReader`, which wants a
+`Stream<Item = Result<B, E>>` with `B: Buf` and `E: Into<io::Error>`. `Body::into_data_stream()`
+yields `Result<Bytes, axum::Error>`, so there is a `map_err` in the middle:
+
+```rust
+let reader = StreamReader::new(
+    body.into_data_stream().map_err(|e| std::io::Error::other(e)),
+);
+store.create(reader, meta, ctx).await?
+```
+
+That conversion lives in `blob-ui` (§5.3's `decode_upload`), so plain `blob` never touches axum.
 
 | Enabled | Gets |
 |---|---|
@@ -783,6 +841,10 @@ is CMIS's version series and OCFL's inventory; §13 has the reading.
 - **Reads fire audit events; variant fetches do not; denied reads are the app's** (§4.7).
 - **Downloads are routed by the owning document and are never a library-owned route** (§5.4, §9.2).
 - **Thumbnails are blobs**, hanging off content rather than versions (§4.5).
+- **`BlobBackend` stays dyn-compatible**, which is why `write` takes a boxed reader (§4.1). Runtime
+  backend selection is worth one allocation per upload.
+- **Bytes are written before any row, and rows land in one transaction** (§4.3) — the asymmetry
+  `fsck` depends on.
 - **Filesystem backend ships in v1; object storage does not.** The trait is the deliverable.
 - **PDF thumbnails are out of v1.** Every implementation option is a heavy dependency.
 
