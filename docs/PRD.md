@@ -18,7 +18,7 @@ For the concrete backlog see **[TODO.md](TODO.md)**.
 | **`observe`** (§4) | write-observer hook for audit logging (change + request context) | ✅ implemented | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
 | **`time`** (§5) | timezone-aware display of UTC timestamps (helpers + `$store.tz` + picker) | ✅ implemented | [TIME.md](TIME.md) |
 | **`validate`** | reusable typed field validators + normalizers, shared by CRUD and hand-written APIs | ✅ implemented | [DATAINPUT.md](DATAINPUT.md) |
-| **`blob`** (§6) | content-addressed file storage, viewer, thumbnailer, admin panel | ⛔ specified, unimplemented | [BLOBSTORE.md](BLOBSTORE.md) |
+| **`blob`** (§6) | content-addressed file storage + version chain, viewer, thumbnailer, admin panel | ⛔ specified, unimplemented | [BLOBSTORE.md](BLOBSTORE.md) |
 
 > ✅ implemented & verified · 🟡 partial (core done, hardening/extras ahead) · ⛔ future.
 
@@ -177,10 +177,17 @@ the browser's own zone on a first visit (three lines of app-side JavaScript, del
 
 Digest-verified storage behind a backend trait (filesystem shipped; object storage a future
 implementation of the same trait), a server-rendered viewer/upload/thumbnail/admin layer with no
-JavaScript beyond `ui`'s existing budget, and backup/purge mechanisms an app supplies its own policy
-to. Deliberately stops short of versioning or ownership — those are an app's own typed layer on top
-(CLIMB's `attachments.md` is the reference case this scope line was drawn against). Full design:
-[BLOBSTORE.md](BLOBSTORE.md).
+JavaScript beyond `ui`'s existing budget, and verify/fsck/backup/purge mechanisms an app supplies its
+own policy to.
+
+Three tables, because one is the classic mistake: a **handle** with a stable id an app's own tables
+hold a foreign key to, an immutable **version** chain recording each upload, and digest-addressed
+**content** underneath. Versioning is therefore in scope — it is what makes the handle stable, and
+without it every app rebuilds the same indirection. **Ownership is not**, and neither is row-level
+access: those live in a per-document-kind link table in the app, which is what keeps `blob` free of
+any dependency on `auth` while giving ownership a *better* foreign key than an in-crate column could
+(BLOBSTORE.md §9; CLIMB's `attachments.md` is the reference case the scope line was drawn against).
+Full design: [BLOBSTORE.md](BLOBSTORE.md).
 
 **Status: the specification is written; none of it is built.** It came from the downstream CLIMB app,
 which runs this design against a real workload, and with 0.3.0 out it is the next module to start —

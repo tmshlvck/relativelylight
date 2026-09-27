@@ -316,8 +316,10 @@ timezone demo, its rows straddling both 2026 DST transitions.
 - **[docs/PRD.md](docs/PRD.md)** — product overview, module status, roadmap.
 - **[docs/TODO.md](docs/TODO.md)** — the ordered backlog.
 - **[docs/BLOBSTORE.md](docs/BLOBSTORE.md)** — the `blob` module's **specification, not yet
-  implemented**: content-addressed storage, viewer, thumbnailer, admin panel. Migrated from the
-  downstream CLIMB app; it gets its own branch, and is the next module to be built.
+  implemented**: content-addressed storage under a stable handle + version chain (§3), viewer,
+  thumbnailer, admin panel. Ownership and row-level access stay in the app's own link table (§9), so
+  `blob` depends on neither `crud` nor `auth`. Migrated from the downstream CLIMB app; it gets its own
+  branch, and is the next module to be built.
 - **[docs/SORTFILTER.md](docs/SORTFILTER.md)** — a design record: why relation sorting and
   `filter[…]` have the shape they do (kept for the reasoning; the behaviour is documented in CRUD.md).
 - **[CHANGELOG.md](CHANGELOG.md)** — per-release notes; land user-visible changes under `## Unreleased`

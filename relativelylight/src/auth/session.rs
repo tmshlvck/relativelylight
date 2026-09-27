@@ -30,7 +30,20 @@ pub struct Model {
     pub awaiting_totp: bool,
 }
 
+/// `user_id` is a real foreign key onto `auth_user`, **cascading on delete**: deleting an account
+/// takes its sessions with it, in the database, whatever route did the deleting (an admin panel's
+/// bulk delete, an app's own code, a `DELETE` typed at the console). `identify` refuses an orphaned
+/// session anyway — see `security_tests.rs` — but a row that outlives its user is a credential-shaped
+/// object nothing owns, and the constraint is what stops one existing at all.
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
+pub enum Relation {
+    #[sea_orm(
+        belongs_to = "super::user::Entity",
+        from = "Column::UserId",
+        to = "super::user::Column::Id",
+        on_delete = "Cascade"
+    )]
+    User,
+}
 
 impl ActiveModelBehavior for ActiveModel {}

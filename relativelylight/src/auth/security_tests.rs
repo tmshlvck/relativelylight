@@ -507,7 +507,78 @@ async fn session_of_deactivated_or_deleted_user_does_not_identify() {
     );
 
     user::Entity::delete_by_id(id).exec(&fx.db).await.unwrap();
+    // Belt and braces: the row is gone by cascade (pinned below), and `identify` would refuse it
+    // even if some other schema left it behind.
     assert!(fx.identify_token(&token).await.is_none(), "an orphaned session must not authenticate");
+}
+
+#[tokio::test]
+async fn deleting_a_user_cascades_to_their_sessions_codes_and_memberships() {
+    let fx = Fx::new().await;
+    let alice = fx.user_in("alice", "editors").await;
+    let bob = fx.user_in("bob", "editors").await;
+    let alice_token = fx.session_for("alice").await;
+    let bob_token = fx.session_for("bob").await;
+    recovery::issue(&fx.db, alice).await.expect("issue codes");
+    recovery::issue(&fx.db, bob).await.expect("issue codes");
+
+    // Control: the delete below has to have something to remove, or the assertions are vacuous.
+    assert!(fx.session_row(&alice_token).await.is_some(), "control: alice has a session");
+    assert!(recovery_rows(&fx.db, alice).await > 0, "control: alice has recovery codes");
+    assert_eq!(membership_rows(&fx.db, alice).await, 1, "control: alice is in a group");
+
+    // The delete itself must succeed — with the constraint at its `NO ACTION` default, the
+    // membership row alone makes this a 409 and an account can't be removed at all.
+    user::Entity::delete_by_id(alice).exec(&fx.db).await.expect("delete a user with memberships");
+
+    assert!(fx.session_row(&alice_token).await.is_none(), "sessions go with the account");
+    assert_eq!(recovery_rows(&fx.db, alice).await, 0, "recovery codes go with the account");
+    assert_eq!(membership_rows(&fx.db, alice).await, 0, "memberships go with the account");
+
+    // And only that account's: a cascade that took the neighbours would be worse than the leak.
+    assert!(fx.session_row(&bob_token).await.is_some(), "bob keeps his session");
+    assert!(recovery_rows(&fx.db, bob).await > 0, "bob keeps his codes");
+    assert_eq!(membership_rows(&fx.db, bob).await, 1, "bob keeps his membership");
+}
+
+#[tokio::test]
+async fn deleting_a_group_cascades_to_its_memberships_and_leaves_the_users() {
+    let fx = Fx::new().await;
+    let alice = fx.user_in("alice", "editors").await;
+    let group_id = group::Entity::find()
+        .filter(group::Column::Name.eq("editors"))
+        .one(&fx.db)
+        .await
+        .expect("query")
+        .expect("group exists")
+        .id;
+    assert_eq!(membership_rows(&fx.db, alice).await, 1, "control: the membership exists");
+
+    group::Entity::delete_by_id(group_id).exec(&fx.db).await.expect("delete group");
+
+    assert_eq!(membership_rows(&fx.db, alice).await, 0, "the membership goes with the group");
+    assert!(
+        user::Entity::find_by_id(alice).one(&fx.db).await.expect("query").is_some(),
+        "the user survives the group"
+    );
+}
+
+async fn recovery_rows(db: &DatabaseConnection, user_id: i32) -> usize {
+    recovery::entity::Entity::find()
+        .filter(recovery::entity::Column::UserId.eq(user_id))
+        .all(db)
+        .await
+        .expect("query recovery codes")
+        .len()
+}
+
+async fn membership_rows(db: &DatabaseConnection, user_id: i32) -> usize {
+    user_group::Entity::find()
+        .filter(user_group::Column::UserId.eq(user_id))
+        .all(db)
+        .await
+        .expect("query memberships")
+        .len()
 }
 
 #[tokio::test]

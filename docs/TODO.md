@@ -15,11 +15,24 @@ metadata API and the OpenAPI generator are gone. See [MIGRATION-0.3.md](MIGRATIO
 upgrade and, in its appendix, why. 0.2.0 (security defaults) and 0.2.1 (sorting + filtering) precede
 it. Everything below is follow-on work; nothing here blocked that release.
 
+**`chart` is specified but not agreed** — [CHARTS.md](CHARTS.md) is a draft spec for server-rendered
+SVG bar/line/scatter charts, written against teleddns-server's dashboard, which already runs a
+hand-rolled version. Its §8 argues *against* building it as carefully as for, and the recommendation
+is conditional: build only if no-JavaScript is a requirement rather than a preference, and consider
+shipping `bars` alone first. Read that section before starting; it is the point of the document.
+
 **The next module is `blob`** — [BLOBSTORE.md](BLOBSTORE.md) is its full specification, written
 against the downstream CLIMB app that already runs the design, and none of it is built. It gets its
 own branch rather than items in this list; what belongs here is anything the spec turns out to need
 from `crud`/`ui` first (it named one: CSRF on multipart bodies, which
-[shipped](../CHANGELOG.md) in 0.3.0).
+[shipped](../CHANGELOG.md) in 0.3.0). The rewritten spec names two more, both in `observe`:
+
+- **`WriteEvent` gains `version: Option<VersionId>`** (BLOBSTORE.md §4.7). A blob read or write names
+  a row in a version chain, and `entity` + `key` alone can't say which. The type is
+  `#[non_exhaustive]`, so it's additive — land it with `blob`, not before.
+- **`WriteEvent::op`'s doc comment says "Create / Update / Delete"**, but the field is
+  `authz::Operation`, which has always carried `Read` and `List` too. A one-line correction; `blob`
+  is the first emitter that will fire `Read`, which is how it surfaced.
 
 ## Web UI follow-ups (post-MPA)
 

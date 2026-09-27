@@ -232,6 +232,25 @@ missing tables, so it won't add columns when you upgrade the library (e.g. the T
 > signs in again once — the safe direction. Backfill it to `strftime('%s','now')` (or your dialect's
 > equivalent) instead if you'd rather not log your users out on deploy.
 
+**Foreign keys, and what a deleted account takes with it.** Three tables hold a `user_id` that is a
+real foreign key onto `auth_user`, all three **cascading on delete** — `auth_session`,
+`auth_totp_recovery`, and `auth_user_group` (which cascades from the group side too). Deleting an
+account therefore removes its sessions, its recovery codes and its group memberships in the database,
+whatever route did the deleting: an admin panel's bulk delete, your own code, a `DELETE` typed at a
+console. Nothing is left for `identify` to refuse or for a pruner to find. The two lockout tables key
+on a submitted username and a client address rather than on an account, so they have no foreign key by
+design — a counter for an account that never existed is the normal case there.
+
+> **Upgrading to 0.3.2** adds those constraints, which `migrate` will *not* add to tables that already
+> exist — and on SQLite a constraint cannot be added by `ALTER TABLE` at all, so it is a
+> rename-create-copy-drop rebuild of `auth_session`, `auth_totp_recovery` and `auth_user_group`
+> (`sea-orm-migration` will do this for you; take the new DDL from `table_create_statements` rather
+> than writing it by hand). Skipping the upgrade is not a security problem — `identify` has always
+> refused a session whose user is gone — but it leaves two defects in place: credential-shaped rows
+> outliving the account they belonged to, and, because `auth_user_group`'s pre-existing foreign keys
+> defaulted to `NO ACTION`, **deleting a user who belongs to any group fails outright** with a
+> `409 Conflict` until their memberships are unpicked by hand.
+
 For anything long-lived, drive the schema with **`sea-orm-migration`** — SeaORM's alembic-equivalent:
 versioned `up`/`down` migrations, applied once and tracked in a `seaql_migrations` table. Fold the auth
 tables into your *initial* migration via `auth::table_create_statements(backend)`, and run the migrator

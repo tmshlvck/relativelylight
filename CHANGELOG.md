@@ -9,6 +9,45 @@ Work that has landed on `main` but isn't tagged yet lives under **Unreleased**; 
 heading to the version + date and adds a compare link. Per-entry commit hashes are given where a change
 is easy to miss in a diff.
 
+## Unreleased
+
+### Fixed
+
+- **Deleting a user now works, and takes their sessions, recovery codes and group memberships with
+  it.** `auth_session.user_id` and `auth_totp_recovery.user_id` were plain integers with no foreign
+  key at all, so a deleted account left its sessions and its recovery-code hashes behind — rows shaped
+  like credentials that nothing owned. `auth_user_group` *did* declare its keys, but without an
+  `ON DELETE` action, so they defaulted to `NO ACTION`: deleting a user who belonged to **any** group
+  failed with `FOREIGN KEY constraint failed`, surfacing through the admin panel as a `409 Conflict`
+  with no way forward but unpicking the memberships by hand.
+
+  All three now declare `on_delete = "Cascade"` (and `auth_user_group` cascades from the group side
+  too, so deleting a group drops its memberships and leaves its users). `auth::security_tests.rs`
+  pins both directions, including that the *neighbouring* account keeps its session, codes and
+  membership — a cascade that took the bystanders would be worse than the leak it fixed.
+
+  This never allowed anything through: `identify` has always refused a session whose user is gone,
+  and that assertion is still there. What it fixes is a deletion that couldn't complete, and rows that
+  outlived their owner.
+
+  **Existing databases do not get the constraints from `auth::migrate`**, which only ever creates
+  missing tables — and on SQLite a constraint cannot be added by `ALTER TABLE`, so this is a
+  rename-create-copy-drop rebuild of the three tables. See [docs/AUTH.md § Database schema &
+  migrations](docs/AUTH.md) for the upgrade note.
+
+### Changed
+
+- **`docs/BLOBSTORE.md` rewritten** ahead of implementation (still unimplemented; no code changes).
+  The specification now splits storage into three tables — a stable `blob_handle` an app's own tables
+  hold a foreign key to, an immutable `blob_version` chain, and digest-addressed `blob` content —
+  rather than keying everything off the content hash, which could not carry per-upload metadata under
+  dedup and gave app tables nothing stable to reference. Ownership moves out of the module entirely,
+  into a per-document-kind link table in the app (new §9), which keeps `blob` free of any dependency
+  on `auth` while giving ownership *better* integrity than an in-crate foreign key would have. Also
+  new: erasure as a tombstone rather than a row deletion (§4.8), `fsck` alongside `verify`/`purge`
+  (§4.6), read auditing over the existing `Operation::Read` (§4.7), and which UI surfaces take a gate
+  and which deliberately don't (§5.1).
+
 ## [0.3.1] — 2026-09-27
 
 A **patch** release that carries one small breaking change, deliberately. `Engine::delete_where`

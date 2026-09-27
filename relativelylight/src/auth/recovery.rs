@@ -57,8 +57,18 @@ pub mod entity {
         pub used_at: Option<i64>,
     }
 
+    /// Cascades on delete: a deleted account's codes go with it. They are credential hashes, so
+    /// leaving them behind is strictly worse than useless.
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::super::user::Entity",
+            from = "Column::UserId",
+            to = "super::super::user::Column::Id",
+            on_delete = "Cascade"
+        )]
+        User,
+    }
 
     impl ActiveModelBehavior for ActiveModel {}
 }
