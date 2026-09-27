@@ -67,7 +67,7 @@ pub mod entity;
 #[cfg(test)]
 mod tests;
 
-pub use backend::{BlobBackend, Reader, StoredEntry};
+pub use backend::{BlobBackend, Reader, StagedWrite, StoredEntry};
 pub use error::BlobError;
 pub use fs::FsBackend;
 pub use id::{BlobId, HandleId, VersionId};

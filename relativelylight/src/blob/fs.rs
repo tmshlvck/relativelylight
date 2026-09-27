@@ -14,7 +14,11 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
-use super::{BlobBackend, BlobError, BlobId, Reader, StoredEntry};
+/// Streaming chunk size — big enough that syscall overhead is noise, small enough to be irrelevant
+/// to peak memory however large the upload is.
+pub(crate) const CHUNK: usize = 64 * 1024;
+
+use super::{BlobBackend, BlobError, BlobId, Reader, StagedWrite, StoredEntry};
 
 /// Content-addressed storage on a local filesystem.
 pub struct FsBackend {
@@ -49,57 +53,35 @@ impl FsBackend {
 
 #[async_trait]
 impl BlobBackend for FsBackend {
-    async fn write(&self, id: &BlobId, mut data: Reader) -> Result<(), BlobError> {
-        let final_path = self.path_for(id);
-
-        // Already there? Then the content is already there — the id *is* the content. Skipping is
-        // not an optimisation, it's the semantics: two concurrent uploads of identical bytes are a
-        // race with no loser.
-        if tokio::fs::metadata(&final_path).await.is_ok() {
-            return Ok(());
-        }
-
+    async fn stage(&self) -> Result<Box<dyn StagedWrite>, BlobError> {
         tokio::fs::create_dir_all(self.tmp_dir()).await?;
-        let tmp = self.tmp_dir().join(format!("{}.tmp", uuid::Uuid::now_v7()));
+        let path = self.tmp_dir().join(format!("{}.tmp", uuid::Uuid::now_v7()));
+        let file = tokio::fs::File::create(&path).await?;
+        Ok(Box::new(StagedFile { root: self.root.clone(), path, file: Some(file) }))
+    }
 
-        // Everything from here to the rename is on the temp file, so a crash leaves a file in tmp/
-        // and nothing else. `fsck` reports tmp/ leftovers as neither missing nor orphaned — they are
-        // not addressable content, just litter.
-        let result = async {
-            let mut f = tokio::fs::File::create(&tmp).await?;
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                let n = data.read(&mut buf).await?;
-                if n == 0 {
-                    break;
+    async fn write(&self, id: &BlobId, mut data: Reader) -> Result<(), BlobError> {
+        // The id is already known, so this could write straight to the final path — but going
+        // through the same staging machinery means there is exactly one implementation of
+        // "durable before visible" to get right.
+        let mut staged = self.stage().await?;
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            match data.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if let Err(e) = staged.write_chunk(&buf[..n]).await {
+                        staged.abort().await;
+                        return Err(e);
+                    }
                 }
-                f.write_all(&buf[..n]).await?;
-            }
-            // Durability before visibility: the bytes must be on the device before any name points
-            // at them, or a crash can leave an index row addressing an empty file.
-            f.sync_all().await?;
-            drop(f);
-
-            if let Some(parent) = final_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            tokio::fs::rename(&tmp, &final_path).await?;
-
-            // …and fsync the directory, or the rename itself can be lost on power failure even
-            // though the file's contents were durable.
-            if let Some(parent) = final_path.parent() {
-                if let Ok(dir) = tokio::fs::File::open(parent).await {
-                    let _ = dir.sync_all().await;
+                Err(e) => {
+                    staged.abort().await;
+                    return Err(e.into());
                 }
             }
-            Ok::<_, std::io::Error>(())
         }
-        .await;
-
-        if result.is_err() {
-            let _ = tokio::fs::remove_file(&tmp).await;
-        }
-        result.map_err(BlobError::from)
+        staged.commit(id).await
     }
 
     async fn read(&self, id: &BlobId) -> Result<Reader, BlobError> {
@@ -214,4 +196,71 @@ async fn scan_bucket(bucket: PathBuf) -> Result<Vec<StoredEntry>, BlobError> {
         }
     }
     Ok(out)
+}
+
+/// One in-flight write: a file under `<root>/tmp/` that becomes addressable content on commit.
+///
+/// This is where "durable before visible" lives. The bytes are fsynced *before* any name points at
+/// them, and the containing directory is fsynced after the rename — otherwise a power failure can
+/// lose the rename even though the contents were safe, leaving an index row addressing nothing.
+struct StagedFile {
+    root: PathBuf,
+    path: PathBuf,
+    /// `None` once committed or aborted, which is what makes `Drop` a no-op in the normal case.
+    file: Option<tokio::fs::File>,
+}
+
+#[async_trait]
+impl StagedWrite for StagedFile {
+    async fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), BlobError> {
+        let Some(f) = self.file.as_mut() else {
+            return Err(BlobError::Invalid("staged write already finished".into()));
+        };
+        f.write_all(chunk).await?;
+        Ok(())
+    }
+
+    async fn commit(&mut self, id: &BlobId) -> Result<(), BlobError> {
+        let Some(mut f) = self.file.take() else {
+            return Err(BlobError::Invalid("staged write already finished".into()));
+        };
+        f.flush().await?;
+        f.sync_all().await?;
+        drop(f);
+
+        let (a, b) = id.fanout();
+        let dir = self.root.join(a).join(b);
+        let final_path = dir.join(id.as_str());
+
+        // Already there means the identical bytes are already there — the id *is* the content.
+        // Discard rather than overwrite: rewriting a file something may be reading right now buys
+        // nothing, since by definition it would be rewritten with what it already holds.
+        if tokio::fs::metadata(&final_path).await.is_ok() {
+            let _ = tokio::fs::remove_file(&self.path).await;
+            return Ok(());
+        }
+
+        tokio::fs::create_dir_all(&dir).await?;
+        tokio::fs::rename(&self.path, &final_path).await?;
+        if let Ok(d) = tokio::fs::File::open(&dir).await {
+            let _ = d.sync_all().await;
+        }
+        Ok(())
+    }
+
+    async fn abort(&mut self) {
+        self.file.take();
+        let _ = tokio::fs::remove_file(&self.path).await;
+    }
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        // Covers the one path neither `commit` nor `abort` does: a panic, or a future dropped
+        // mid-upload because the client hung up. Best-effort and synchronous — a blocking unlink of
+        // one temp file is cheap, and the alternative is leaving litter for `fsck`.
+        if self.file.take().is_some() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }

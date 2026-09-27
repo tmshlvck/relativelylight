@@ -32,6 +32,13 @@ is easy to miss in a diff.
   already exist. Reads are digest-verified on the way out and fire an audit event, so a download is
   observable, not just a write.
 
+  Uploads and downloads both **stream**: peak memory is one 64 KiB chunk whether the file is a
+  one-line note or a 500 MiB scan, so `max_bytes` (default 512 MiB) is a policy limit and nothing
+  else. Writes go through `BlobBackend::stage` and commit under the digest that falls out — a blob's
+  id *is* the hash of its bytes, so the destination can't be named until the whole upload has been
+  read, and staging is what reconciles that with a single pass. Reads hash the content through once
+  and re-open it to serve, keeping "no unverified byte reaches a caller" exact at constant memory.
+
   Not yet built: `blob-ui` (viewer, upload form, admin actions) and `blob-thumbnail`.
 
 - **`observe::WriteEvent` gains `version: Option<i64>`** — which version row an event concerns, for

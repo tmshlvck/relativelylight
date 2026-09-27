@@ -21,7 +21,21 @@ use super::{BlobBackend, BlobError, BlobId, HandleId, VersionId};
 /// an app eventually puts megabytes.
 pub const MAX_METADATA_BYTES: usize = 64 * 1024;
 
-const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// 512 MiB. This is a **policy** limit, not a memory one — uploads stream through a fixed-size chunk
+/// buffer (see [`BlobStore::max_bytes`]) — so it is set by what a back-office app should plausibly
+/// accept (a long scanned PDF) rather than by what the process can hold.
+const DEFAULT_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+/// How much of the leading content is kept back for MIME sniffing. Everything else streams straight
+/// through to the backend without ever being held.
+const SNIFF_BYTES: usize = 1024;
+
+/// What one streaming store pass produced.
+struct Stored {
+    id: BlobId,
+    size: u64,
+    prefix: Vec<u8>,
+}
 
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
@@ -137,22 +151,40 @@ pub struct ContentInfo {
     pub verified_at: Option<i64>,
 }
 
-/// An open, digest-verified stream plus the version it came from. `blob-ui`'s `to_response` turns one
-/// into an HTTP reply; anything else can read it directly.
+/// An **already-verified** byte stream plus the version it came from. `blob-ui`'s `to_response` turns
+/// one into an HTTP reply; anything else reads it directly.
 ///
-/// `Debug` deliberately prints the byte *count*, never the bytes: this is user content, and a
-/// `{:?}` in someone's error path should not put a document into a log file.
+/// The digest was checked in full *before* this was handed over (see [`BlobStore::read`]), so the
+/// stream is safe to forward straight to a client — and because it is a stream, a 500 MiB scan costs
+/// the same memory as a one-line note.
+///
+/// `Debug` deliberately says nothing about the content: this is user data, and a `{:?}` on someone's
+/// error path should not put a document in a log file.
 pub struct BlobHandle {
     pub info: VersionInfo,
-    pub bytes: Vec<u8>,
+    reader: super::Reader,
+}
+
+impl BlobHandle {
+    /// The verified stream, for forwarding to a response body.
+    pub fn into_reader(self) -> super::Reader {
+        self.reader
+    }
+
+    /// Collect the whole thing into memory. Convenient for small documents and tests; for anything
+    /// user-sized prefer [`into_reader`](Self::into_reader), which is the reason this type is a
+    /// stream in the first place.
+    pub async fn into_bytes(self) -> Result<Vec<u8>, BlobError> {
+        let mut buf = Vec::new();
+        let mut r = self.reader;
+        r.read_to_end(&mut buf).await?;
+        Ok(buf)
+    }
 }
 
 impl std::fmt::Debug for BlobHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlobHandle")
-            .field("info", &self.info)
-            .field("bytes", &format_args!("<{} bytes>", self.bytes.len()))
-            .finish()
+        f.debug_struct("BlobHandle").field("info", &self.info).finish_non_exhaustive()
     }
 }
 
@@ -255,13 +287,16 @@ impl<B: BlobBackend> BlobStore<B> {
         Self { backend, db, max_bytes: DEFAULT_MAX_BYTES, observer: None }
     }
 
-    /// The largest upload accepted, enforced **while streaming** rather than after buffering.
+    /// The largest upload accepted, enforced **while streaming** and before anything is committed.
     ///
-    /// **This is also the per-upload memory cost.** Content must be hashed before the backend can be
-    /// told where to put it (the digest *is* the location), so v1 holds the upload in memory to hash
-    /// it in one pass. A two-phase `stage`/`commit` pair on [`BlobBackend`] would remove that; it is
-    /// recorded as an open question rather than guessed at here. Size this against expected
-    /// concurrency, not just against the largest file you want to allow.
+    /// A **policy** limit, not a memory one: content is hashed and written through a fixed 64 KiB
+    /// chunk buffer via [`BlobBackend::stage`], so peak memory is the same for a 500 MiB scan as for
+    /// a one-line text file. Set it to whatever your app should accept.
+    ///
+    /// Note that an axum upload route has its own limit in front of this one: `DefaultBodyLimit` is
+    /// **2 MB** and applies to any handler using a buffering extractor (`Bytes`, `Json`, `Form`,
+    /// `Multipart`). A route that takes `Body` and streams it bypasses that entirely, leaving this
+    /// the only limit in play — which is the shape a large upload wants.
     pub fn max_bytes(mut self, n: u64) -> Self {
         self.max_bytes = n;
         self
@@ -289,7 +324,7 @@ impl<B: BlobBackend> BlobStore<B> {
         ctx: WriteContext<'_>,
     ) -> Result<HandleId, BlobError> {
         meta.check()?;
-        let (blob_id, bytes) = self.store_bytes(data).await?;
+        let stored = self.store_bytes(data).await?;
 
         let handle = HandleId::new();
         let now = now_secs();
@@ -304,8 +339,8 @@ impl<B: BlobBackend> BlobStore<B> {
         .insert(&txn)
         .await?;
 
-        upsert_content(&txn, &blob_id, bytes.len() as i64, sniff_mime(&bytes), now).await?;
-        let v = insert_version(&txn, handle, 1, None, Some(&blob_id), &meta, now).await?;
+        upsert_content(&txn, &stored, now).await?;
+        let v = insert_version(&txn, handle, 1, None, Some(&stored.id), &meta, now).await?;
         set_head(&txn, handle, v).await?;
 
         txn.commit().await?;
@@ -323,18 +358,18 @@ impl<B: BlobBackend> BlobStore<B> {
         ctx: WriteContext<'_>,
     ) -> Result<VersionId, BlobError> {
         meta.check()?;
-        let (blob_id, bytes) = self.store_bytes(data).await?;
+        let stored = self.store_bytes(data).await?;
         let prev = self.head_row(handle).await?;
 
         let now = now_secs();
         let txn = self.db.begin().await?;
-        upsert_content(&txn, &blob_id, bytes.len() as i64, sniff_mime(&bytes), now).await?;
+        upsert_content(&txn, &stored, now).await?;
         let v = insert_version(
             &txn,
             handle,
             prev.seq + 1,
             Some(VersionId(prev.id)),
-            Some(&blob_id),
+            Some(&stored.id),
             &meta,
             now,
         )
@@ -494,7 +529,14 @@ impl<B: BlobBackend> BlobStore<B> {
             return Err(BlobError::Erased(version));
         };
 
-        let bytes = self.read_verified(&blob).await?;
+        // Two passes, deliberately (BLOBSTORE.md §4.3): hash the content through once, then re-open
+        // it to serve. That keeps §2's guarantee exact — no unverified byte ever reaches a caller —
+        // at constant memory, and on a local filesystem the second read comes off the page cache.
+        // A future backend where re-reading is expensive (an object store: a second round trip and
+        // a second egress charge) will want a different strategy; see §12.
+        self.verify_content(&blob).await?;
+        let reader = self.backend.read(&blob).await?;
+
         content::Entity::update_many()
             .col_expr(
                 content::Column::VerifiedAt,
@@ -514,7 +556,7 @@ impl<B: BlobBackend> BlobStore<B> {
             ctx,
         )
         .await;
-        Ok(BlobHandle { info, bytes })
+        Ok(BlobHandle { info, reader })
     }
 
     // ===================== variants =====================
@@ -558,9 +600,9 @@ impl<B: BlobBackend> BlobStore<B> {
     /// Store derived content (a thumbnail, a crop) with no version and no handle: it isn't a
     /// document, it's a rendering of one.
     pub async fn put_derived(&self, data: impl AsyncRead + Send + Unpin) -> Result<BlobId, BlobError> {
-        let (id, bytes) = self.store_bytes(data).await?;
-        upsert_content(&self.db, &id, bytes.len() as i64, sniff_mime(&bytes), now_secs()).await?;
-        Ok(id)
+        let stored = self.store_bytes(data).await?;
+        upsert_content(&self.db, &stored, now_secs()).await?;
+        Ok(stored.id)
     }
 
     // ===================== housekeeping =====================
@@ -578,8 +620,8 @@ impl<B: BlobBackend> BlobStore<B> {
         for row in rows {
             let Ok(id) = BlobId::try_from(row.id.clone()) else { continue };
             report.checked += 1;
-            match self.read_verified(&id).await {
-                Ok(_) => {
+            match self.verify_content(&id).await {
+                Ok(()) => {
                     content::Entity::update_many()
                         .col_expr(
                             content::Column::VerifiedAt,
@@ -729,14 +771,16 @@ impl<B: BlobBackend> BlobStore<B> {
                 report.already_present.push(id);
                 continue;
             }
-            match self.read_verified(&id).await {
-                Ok(bytes) => {
-                    let r: super::Reader = Box::pin(std::io::Cursor::new(bytes));
-                    match dest.write(&id, r).await {
+            // Verify, then stream the copy: a backup that faithfully reproduces corruption is
+            // worse than one that reports it, and neither pass holds the blob in memory.
+            match self.verify_content(&id).await {
+                Ok(()) => match self.backend.read(&id).await {
+                    Ok(r) => match dest.write(&id, r).await {
                         Ok(()) => report.copied.push(id),
                         Err(_) => report.failed.push(id),
-                    }
-                }
+                    },
+                    Err(_) => report.failed.push(id),
+                },
                 Err(_) => report.failed.push(id),
             }
         }
@@ -745,49 +789,80 @@ impl<B: BlobBackend> BlobStore<B> {
 
     // ===================== internals =====================
 
-    /// Hash and store, enforcing `max_bytes` while reading. Returns the digest and the bytes.
+    /// Hash and store in **one streaming pass**, enforcing `max_bytes` on the way through.
     ///
-    /// The content has to be hashed before the backend can be told where to put it — the digest *is*
-    /// the location — so v1 reads it into memory once. See [`max_bytes`](Self::max_bytes).
+    /// The digest *is* the storage location, so it can't be known until the whole upload has been
+    /// read — which is exactly what [`BlobBackend::stage`] exists for: write into a staging area
+    /// while hashing, then commit under the address that falls out at the end. Peak memory is one
+    /// chunk regardless of file size.
+    ///
+    /// Returns the digest, the byte count, and a prefix kept back for MIME sniffing.
     async fn store_bytes(
         &self,
         mut data: impl AsyncRead + Send + Unpin,
-    ) -> Result<(BlobId, Vec<u8>), BlobError> {
+    ) -> Result<Stored, BlobError> {
         use sha2::{Digest, Sha256};
 
-        let mut buf = Vec::new();
-        let mut chunk = vec![0u8; 64 * 1024];
+        let mut staged = self.backend.stage().await?;
+        let mut chunk = vec![0u8; super::fs::CHUNK];
+        let mut hasher = Sha256::new();
+        let mut size: u64 = 0;
+        let mut prefix = Vec::new();
+
+        loop {
+            let n = match data.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    staged.abort().await;
+                    return Err(e.into());
+                }
+            };
+            size += n as u64;
+            if size > self.max_bytes {
+                // Refused mid-stream, before anything is committed: the point of streaming is that
+                // an oversized upload costs a partial temp file, not a partial allocation.
+                staged.abort().await;
+                return Err(BlobError::TooLarge { limit: self.max_bytes });
+            }
+            if prefix.len() < SNIFF_BYTES {
+                let want = (SNIFF_BYTES - prefix.len()).min(n);
+                prefix.extend_from_slice(&chunk[..want]);
+            }
+            hasher.update(&chunk[..n]);
+            if let Err(e) = staged.write_chunk(&chunk[..n]).await {
+                staged.abort().await;
+                return Err(e);
+            }
+        }
+
+        let id = BlobId::from_digest(hasher.finalize());
+        // Bytes before rows, always (BLOBSTORE.md §4.3). A crash after this and before the caller's
+        // transaction commits leaves an orphan, which `fsck` calls routine.
+        staged.commit(&id).await?;
+        Ok(Stored { id, size, prefix })
+    }
+
+    /// Read content through, hashing, and confirm it still matches its id. Reads nothing into memory
+    /// beyond one chunk, and hands nothing back — the caller re-opens the content to serve it.
+    async fn verify_content(&self, id: &BlobId) -> Result<(), BlobError> {
+        use sha2::{Digest, Sha256};
+
+        let mut r = self.backend.read(id).await?;
+        let mut chunk = vec![0u8; super::fs::CHUNK];
         let mut hasher = Sha256::new();
         loop {
-            let n = data.read(&mut chunk).await?;
+            let n = r.read(&mut chunk).await?;
             if n == 0 {
                 break;
             }
-            if buf.len() as u64 + n as u64 > self.max_bytes {
-                return Err(BlobError::TooLarge { limit: self.max_bytes });
-            }
             hasher.update(&chunk[..n]);
-            buf.extend_from_slice(&chunk[..n]);
         }
-        let id = BlobId::from_digest(hasher.finalize());
-
-        // Bytes before rows, always (BLOBSTORE.md §4.3). A crash after this and before the caller's
-        // transaction commits leaves an orphan, which `fsck` calls routine.
-        let reader: super::Reader = Box::pin(std::io::Cursor::new(buf.clone()));
-        self.backend.write(&id, reader).await?;
-        Ok((id, buf))
-    }
-
-    /// Read content back, re-hashing, and refuse to hand over anything that doesn't match.
-    async fn read_verified(&self, id: &BlobId) -> Result<Vec<u8>, BlobError> {
-        let mut r = self.backend.read(id).await?;
-        let mut bytes = Vec::new();
-        r.read_to_end(&mut bytes).await?;
-        let found = BlobId::of(&bytes);
+        let found = BlobId::from_digest(hasher.finalize());
         if &found != id {
             return Err(BlobError::Corrupt { expected: id.clone(), found });
         }
-        Ok(bytes)
+        Ok(())
     }
 
     async fn head_row(&self, handle: HandleId) -> Result<version::Model, BlobError> {
@@ -913,15 +988,13 @@ where
 
 async fn upsert_content<C: sea_orm::ConnectionTrait>(
     db: &C,
-    id: &BlobId,
-    size: i64,
-    mime: String,
+    stored: &Stored,
     now: i64,
 ) -> Result<(), BlobError> {
     content::Entity::insert(content::ActiveModel {
-        id: Set(id.to_string()),
-        size_bytes: Set(size),
-        mime_sniffed: Set(mime),
+        id: Set(stored.id.to_string()),
+        size_bytes: Set(stored.size as i64),
+        mime_sniffed: Set(sniff_mime(&stored.prefix)),
         created_at: Set(now),
         verified_at: Set(Some(now)),
     })

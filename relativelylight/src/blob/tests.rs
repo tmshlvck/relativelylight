@@ -65,6 +65,12 @@ impl Fx {
         self.root.path().join(a).join(b).join(id.as_str())
     }
 
+    /// Files left in the staging directory. Should be zero after every completed call, successful
+    /// or not — staging litter is the failure mode a streaming write path introduces.
+    fn staged_files(&self) -> usize {
+        std::fs::read_dir(self.root.path().join("tmp")).map(|d| d.count()).unwrap_or(0)
+    }
+
     async fn content_rows(&self) -> usize {
         content::Entity::find().all(&self.db).await.expect("query").len()
     }
@@ -77,6 +83,12 @@ impl Fx {
             .expect("query")
             .len()
     }
+}
+
+/// Read a version's content all the way into memory — fine for the small fixtures here, and the
+/// reason `BlobHandle` keeps `into_bytes` alongside the stream it actually hands out.
+async fn read_bytes(fx: &Fx, v: VersionId) -> Vec<u8> {
+    fx.store.read(v, WriteContext::none()).await.expect("read").into_bytes().await.expect("collect")
 }
 
 /// One observed event, reduced to what these tests assert about.
@@ -127,7 +139,7 @@ async fn a_round_trip_returns_exactly_what_went_in() {
     assert_eq!(head.size_bytes(), 11);
 
     let got = fx.store.read(head.id, WriteContext::none()).await.expect("read");
-    assert_eq!(got.bytes, b"hello world");
+    assert_eq!(got.into_bytes().await.unwrap(), b"hello world");
 }
 
 #[tokio::test]
@@ -194,8 +206,8 @@ async fn appending_a_version_leaves_every_earlier_one_untouched_and_readable() {
     assert_eq!(fx.store.head(h).await.unwrap().id, second, "the head moved");
 
     // Both are still there, byte for byte. A version chain that loses its history isn't one.
-    assert_eq!(fx.store.read(first.id, WriteContext::none()).await.unwrap().bytes, b"draft");
-    assert_eq!(fx.store.read(second, WriteContext::none()).await.unwrap().bytes, b"final");
+    assert_eq!(read_bytes(&fx, first.id).await, b"draft");
+    assert_eq!(read_bytes(&fx, second).await, b"final");
     assert_eq!(chain[0].created_by.as_deref(), Some("alice"));
     assert_eq!(chain[1].created_by.as_deref(), Some("bob"), "each version keeps its own author");
 }
@@ -243,7 +255,7 @@ async fn content_that_no_longer_hashes_to_its_id_is_refused_and_no_bytes_are_han
     let v = fx.store.head(h).await.unwrap();
 
     // Control: it reads fine before anyone touches the disk.
-    assert_eq!(fx.store.read(v.id, WriteContext::none()).await.unwrap().bytes, b"the real invoice");
+    assert_eq!(read_bytes(&fx, v.id).await, b"the real invoice");
 
     let blob = v.blob.clone().unwrap();
     tokio::fs::write(fx.path_of(&blob), b"the forged invoice!").await.expect("tamper");
@@ -283,6 +295,7 @@ async fn an_upload_over_the_limit_is_refused_while_streaming() {
         .await;
     assert!(matches!(err, Err(BlobError::TooLarge { limit: 16 })));
     assert_eq!(fx.content_rows().await, 0, "nothing was indexed");
+    assert_eq!(fx.staged_files(), 0, "and the partial upload was cleaned up, not left in tmp/");
 }
 
 #[tokio::test]
@@ -651,4 +664,78 @@ async fn regenerating_a_variant_replaces_the_old_mapping_rather_than_duplicating
     // The superseded thumbnail is now unreferenced, and collectable like any other content.
     let report = fx.store.purge(None).await.unwrap();
     assert!(report.content_deleted.contains(&first));
+}
+
+#[tokio::test]
+async fn content_larger_than_one_chunk_streams_through_intact() {
+    // Exercises the multi-chunk path end to end: a PNG header followed by enough data to span
+    // several reads, which is also the case where a buffering implementation would show up as
+    // memory rather than as a failure.
+    let fx = Fx::new().await;
+    let mut body = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    body.extend((0..400_000u32).map(|i| (i % 251) as u8));
+
+    let h = fx.store.create(&body[..], PutMeta::new("scan.png"), WriteContext::none()).await.unwrap();
+    let head = fx.store.head(h).await.unwrap();
+
+    assert_eq!(head.size_bytes(), body.len() as i64);
+    assert_eq!(
+        head.content.as_ref().unwrap().mime_sniffed,
+        "image/png",
+        "the type comes from the retained prefix, not from holding the whole file"
+    );
+    assert_eq!(read_bytes(&fx, head.id).await, body, "every byte survives the round trip");
+    assert_eq!(fx.staged_files(), 0, "the staged file was committed, not abandoned");
+}
+
+#[tokio::test]
+async fn a_read_hands_back_a_stream_that_was_verified_in_full_first() {
+    // The two-pass read (BLOBSTORE.md §4.3): the digest is checked over the whole blob *before* a
+    // reader is handed out, so nothing a caller can forward to a client is ever unverified.
+    let fx = Fx::new().await;
+    let mut body = vec![b'%', b'P', b'D', b'F'];
+    body.extend(std::iter::repeat_n(b'x', 300_000));
+    let h = fx.store.create(&body[..], PutMeta::new("big.pdf"), WriteContext::none()).await.unwrap();
+    let v = fx.store.head(h).await.unwrap();
+
+    assert_eq!(read_bytes(&fx, v.id).await.len(), body.len(), "control: it reads");
+
+    // Corrupt a byte deep inside — past anything a prefix check would catch.
+    let blob = v.blob.clone().unwrap();
+    let mut tampered = body.clone();
+    tampered[250_000] = b'y';
+    tokio::fs::write(fx.path_of(&blob), &tampered).await.unwrap();
+
+    assert!(
+        matches!(fx.store.read(v.id, WriteContext::none()).await, Err(BlobError::Corrupt { .. })),
+        "a change anywhere in the content must be caught before a reader is returned"
+    );
+}
+
+#[tokio::test]
+async fn a_backend_write_failure_leaves_nothing_staged_and_nothing_indexed() {
+    // A reader that dies part-way, as a client hanging up mid-upload would look.
+    struct Fails(usize);
+    impl tokio::io::AsyncRead for Fails {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.0 == 0 {
+                return std::task::Poll::Ready(Err(std::io::Error::other("connection reset")));
+            }
+            let n = self.0.min(buf.remaining());
+            buf.put_slice(&vec![b'a'; n]);
+            self.0 -= n;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    let fx = Fx::new().await;
+    let err = fx.store.create(Fails(100_000), PutMeta::new("truncated.bin"), WriteContext::none()).await;
+
+    assert!(err.is_err(), "a reader that fails mid-stream must fail the upload");
+    assert_eq!(fx.content_rows().await, 0, "nothing was indexed");
+    assert_eq!(fx.staged_files(), 0, "and the half-written staging file went with it");
 }

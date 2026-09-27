@@ -37,11 +37,23 @@ pub struct StoredEntry {
 /// every handler signature.
 #[async_trait]
 pub trait BlobBackend: Send + Sync + 'static {
-    /// Durably store `data` under `id`. **Must not return `Ok` until the content is safe to be
-    /// referenced** — for a filesystem that means write-to-temp + fsync + atomic rename; for an
-    /// object store, typically just the PUT.
+    /// Begin staging content whose address **isn't known yet**.
     ///
-    /// [`BlobStore`](super::BlobStore) only inserts the index row after this returns, so whatever
+    /// This is the primary write path, and the reason it exists rather than just
+    /// [`write`](BlobBackend::write): a blob's id is the digest of its bytes, so the store cannot
+    /// name the destination until it has read the whole upload. Staging lets it hash and store in
+    /// one pass — the alternative is holding the entire upload in memory, which makes `max_bytes`
+    /// a RAM limit instead of a policy one.
+    ///
+    /// For a filesystem this is a temp file that gets fsynced and renamed on
+    /// [`commit`](StagedWrite::commit); for an object store, a temp key and a server-side copy.
+    async fn stage(&self) -> Result<Box<dyn StagedWrite>, BlobError>;
+
+    /// Durably store `data` under an id that is **already known** — copying a blob to a backup
+    /// backend, where the digest came from the index rather than from the bytes in hand.
+    ///
+    /// **Must not return `Ok` until the content is safe to be referenced.**
+    /// [`BlobStore`](super::BlobStore) only inserts the index row after a write returns, so whatever
     /// "durable" means for a given backend, that is the ordering protecting the "no row without
     /// bytes" invariant. Writing an id that already exists is a **success, not an error**: content
     /// addressing makes identical content identical, and two concurrent uploads of the same bytes
@@ -66,10 +78,32 @@ pub trait BlobBackend: Send + Sync + 'static {
     async fn list(&self) -> Result<Pin<Box<dyn Stream<Item = Result<StoredEntry, BlobError>> + Send>>, BlobError>;
 }
 
+/// Content being written before its address is known — see [`BlobBackend::stage`].
+///
+/// Takes `&mut self` rather than consuming `self`, so it stays usable behind `Box<dyn …>`.
+/// **Exactly one** of [`commit`](StagedWrite::commit) or [`abort`](StagedWrite::abort) is called,
+/// and never both; an implementation should also clean up on drop, since a panic between them is
+/// the one path neither covers.
+#[async_trait]
+pub trait StagedWrite: Send {
+    async fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), BlobError>;
+
+    /// Make the staged bytes durably addressable as `id`. Committing over content that already
+    /// exists is a success — the bytes are identical by definition.
+    async fn commit(&mut self, id: &BlobId) -> Result<(), BlobError>;
+
+    /// Discard the staged bytes. Errors are swallowed: the caller is already on a failure path, and
+    /// failing to clean up leaves litter that `fsck` collects rather than anything unsafe.
+    async fn abort(&mut self);
+}
+
 /// So a `Box<dyn BlobBackend>` is itself a backend, and `BlobStore<Box<dyn BlobBackend>>` works —
 /// the whole point of keeping the trait dyn-compatible.
 #[async_trait]
 impl BlobBackend for Box<dyn BlobBackend> {
+    async fn stage(&self) -> Result<Box<dyn StagedWrite>, BlobError> {
+        (**self).stage().await
+    }
     async fn write(&self, id: &BlobId, data: Reader) -> Result<(), BlobError> {
         (**self).write(id, data).await
     }
@@ -92,6 +126,9 @@ impl BlobBackend for Box<dyn BlobBackend> {
 /// So a shared backend can be handed to more than one store.
 #[async_trait]
 impl<T: BlobBackend + ?Sized> BlobBackend for std::sync::Arc<T> {
+    async fn stage(&self) -> Result<Box<dyn StagedWrite>, BlobError> {
+        (**self).stage().await
+    }
     async fn write(&self, id: &BlobId, data: Reader) -> Result<(), BlobError> {
         (**self).write(id, data).await
     }

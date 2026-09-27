@@ -255,6 +255,14 @@ pub trait BlobBackend: Send + Sync + 'static {
     /// object store, typically just the PUT. `BlobStore` only inserts the index row after this
     /// returns `Ok`, so whatever "durable" means for a given backend, that's the ordering that
     /// protects the "no row without bytes" invariant.
+    /// The primary write path: stage content whose address isn't known yet, then commit under the
+    /// digest that falls out. A blob's id *is* the hash of its bytes, so the destination cannot be
+    /// named until the whole upload has been read — staging is what lets that happen in one pass
+    /// instead of in memory.
+    async fn stage(&self) -> Result<Box<dyn StagedWrite>, BlobError>;
+
+    /// For an id that is **already** known — copying to a backup backend, where the digest came
+    /// from the index rather than from the bytes in hand.
     async fn write(&self, id: &BlobId, data: Reader) -> Result<(), BlobError>;
 
     /// Stream the content back. `BlobStore::get` re-hashes while streaming and compares against
@@ -277,6 +285,16 @@ pub struct StoredEntry { pub id: BlobId, pub written_at: Option<i64> }
 
 /// A boxed byte source. `BlobStore` boxes what the app handed it before calling `write`.
 pub type Reader = Pin<Box<dyn AsyncRead + Send>>;
+
+/// Content being written before its address is known. `&mut self` rather than consuming `self`, so
+/// it works behind `Box<dyn …>`; exactly one of `commit`/`abort` is called, and an implementation
+/// cleans up on drop too, since a panic between them is the one path neither covers.
+#[async_trait]
+pub trait StagedWrite: Send {
+    async fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), BlobError>;
+    async fn commit(&mut self, id: &BlobId) -> Result<(), BlobError>;
+    async fn abort(&mut self);
+}
 
 /// So a `Box<dyn BlobBackend>` is itself a backend — see below.
 #[async_trait]
@@ -397,14 +415,21 @@ crate carries `headers`/`client_ip` — but it's `Option`-backed and `::none()` 
 about using the store outside an HTTP handler is awkward. If no observer is registered the context is
 never read.
 
-**Content is buffered in memory while it is hashed — v1's one real limitation.** The digest *is* the
-storage location, so it must be known before the backend can be told where to put anything; with
-[`BlobBackend::write`] as specified, that means reading the upload into memory to hash it in one pass.
-`max_bytes` (default 64 MiB) is therefore also the per-upload **memory** cost, and should be sized
-against expected concurrency rather than only against the largest file to be allowed. The fix is a
-two-phase `stage`/`commit` pair on the backend trait (stage to a temp location while hashing, then
-commit under the computed digest — a temp file and a rename for a filesystem, a multipart upload and a
-copy for an object store); it is §12's first open question rather than something guessed at here.
+**Nothing is held in memory, in either direction.** Peak memory is one 64 KiB chunk whether the
+upload is a one-line note or a 500 MiB scan, so `max_bytes` (default **512 MiB**) is a *policy* limit
+and nothing else — set it to what the app should accept, not to what the process can hold.
+
+- **Writing** streams through `BlobBackend::stage` while hashing, then commits under the digest that
+  results. The digest is the storage location, so it cannot be known up front; staging is what
+  reconciles that with a single pass. An oversized or failed upload is aborted mid-stream, costing a
+  partial temp file that is then removed — pinned by `an_upload_over_the_limit_is_refused_while_streaming`
+  and `a_backend_write_failure_leaves_nothing_staged_and_nothing_indexed`.
+- **Reading** hashes the content through once and then **re-opens it** to serve, so §2's guarantee
+  stays exact — no unverified byte ever reaches a caller — at constant memory. On a local filesystem
+  the second pass comes off the page cache and costs essentially nothing. This is a deliberate bet on
+  cheap re-reads; see §12 for what a backend where that is false would want instead.
+
+Only a 1 KiB prefix is retained, for MIME sniffing.
 
 **Write ordering, and where the transaction starts.** Every content-writing call follows the same
 three phases, and the order is the invariant §4.6's `fsck` is designed around:
@@ -624,6 +649,18 @@ A plain `<form method="post" enctype="multipart/form-data">` with a file input a
 Parsing the posted body reuses this crate's internal `multipart` module (already used by CSV import);
 `blob::ui::decode_upload(body: &[u8]) -> Result<(PutMeta, Bytes), BlobError>` is the one new function
 needed there.
+
+**`decode_upload` buffers, and that is a decision §5 still owes an answer to.** Axum's
+`DefaultBodyLimit` is **2 MB** and is applied by the *buffering* extractors (`Bytes`, `Json`, `Form`,
+`Multipart`); a handler taking `Body` and streaming it bypasses the limit entirely, leaving
+`BlobStore::max_bytes` the only one in play. So a `decode_upload(body: &[u8])` signature means two
+things at once: the app must raise `DefaultBodyLimit` for the route, **and** the whole file is held in
+memory before `blob` ever sees it — undoing §4.3's streaming for exactly the large scans that
+motivated it. (`crud::ui`'s CSV import already lives under that 2 MB default for the same reason.)
+
+Either the admin form gets a streaming multipart parser, or it stays a small-file surface with a
+documented limit while large uploads go through an app-written route taking `Body`. Worth deciding
+before §5 is built, not during.
 
 **CSRF gap, inherited and stated, not solved here.** `csrf::enforce` does not parse multipart bodies
 (`csrf.rs`, `TODO.md`), so an upload route is session-gated but not CSRF-checked. `TODO.md`'s streaming
@@ -880,9 +917,14 @@ is CMIS's version series and OCFL's inventory; §13 has the reading.
 
 ## 12. Open questions
 
-- **Two-phase `stage`/`commit` on `BlobBackend`**, to stop buffering uploads in memory (§4.3). The
-  shape is clear; what isn't is whether it is worth a second required method on every backend before
-  a deployment actually hits the limit. Until then, `max_bytes` bounds the exposure and says so.
+- **The read path assumes re-reading is cheap** (§4.3), which is true of a local filesystem and false
+  of anything across a network: for an object store, verify-then-serve is two round trips and two
+  egress charges per download. Deliberately not solved yet, because only `FsBackend` exists and
+  guessing at the alternative would cost a trait method nothing currently needs. When a second
+  backend lands, the options are a `reread_is_cheap()` predicate the store branches on, buffering up
+  to a threshold, or streaming while hashing and aborting the response body on mismatch (one pass,
+  but some bytes have already left — a weakening of §2's tenet that should be an explicit decision,
+  not a silent one).
 - **S3/Ceph backend: in this crate, or a companion?** A `relativelylight-blob-s3` crate keeps the core
   free of an AWS SDK at the cost of a second crate to version in step. Leaning companion crate.
 - **PDF thumbnail approach**, if/when needed: bundled renderer (`pdfium-render`, a large binary) vs.
