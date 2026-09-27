@@ -11,6 +11,14 @@ is easy to miss in a diff.
 
 ## Unreleased
 
+### Fixed
+
+- **A `Uuid` column could not be filtered or selected by key.** `crud`'s `str_to_db` bound a UUID as
+  a *string*, which compares against a `Uuid` column as a different type and matches nothing — so
+  `filter[relation]=<uuid>` returned an empty listing and a `pk_in` selection (what "delete selected"
+  acts on) selected no rows. Both failed in the safe direction, which is why neither was noticed:
+  nothing shipped had a UUID key until `blob_handle`. Pinned by `blob/tests.rs::uuid_keys`.
+
 ### Added
 
 - **`blob` — content-addressed file storage with a stable handle and an immutable version chain**

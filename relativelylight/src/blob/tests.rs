@@ -739,3 +739,65 @@ async fn a_backend_write_failure_leaves_nothing_staged_and_nothing_indexed() {
     assert_eq!(fx.content_rows().await, 0, "nothing was indexed");
     assert_eq!(fx.staged_files(), 0, "and the half-written staging file went with it");
 }
+
+/// `blob_handle` is the first shipped entity with a **UUID primary key**, and `blob_version` the
+/// first with a UUID foreign key — which is how a latent `crud` defect surfaced: `str_to_db` bound a
+/// UUID as a string, so it compared against the column as a different type and matched nothing.
+///
+/// Both failures were in the safe direction (an empty listing, a delete that removed no rows), which
+/// is precisely why nothing caught them. These pin the two paths from the `blob` side, since this is
+/// the module that has the columns.
+#[cfg(feature = "ui")]
+mod uuid_keys {
+    use super::*;
+    use crate::authz::Open;
+    use crate::crud::engine::ListQuery;
+    use crate::crud::seaorm::{Crud, MetaModel};
+
+    async fn engine(db: &DatabaseConnection) -> crate::crud::engine::Engine {
+        let mut crud = Crud::new(db.clone());
+        crud.register(MetaModel::new(super::super::entity::handle::Entity), Open);
+        crud.register(MetaModel::new(super::super::entity::version::Entity), Open);
+        crud.into_engine()
+    }
+
+    #[tokio::test]
+    async fn a_version_chain_can_be_filtered_to_one_handle() {
+        let fx = Fx::new().await;
+        let a = fx.put("a.txt", b"first document").await;
+        let b = fx.put("b.txt", b"second document").await;
+        fx.store
+            .put_version(a, &b"first, revised"[..], PutMeta::new("a.txt"), WriteContext::none())
+            .await
+            .unwrap();
+        let engine = engine(&fx.db).await;
+
+        let all = engine.list("blob_version", &ListQuery::default(), false).await.expect("list");
+        assert_eq!(all.total, 3, "control: three versions across two documents");
+
+        // The relation name, not the column: `handle_id` is folded into the `handle` relation.
+        let mut q = ListQuery::default();
+        q.eq.push(("handle".into(), a.to_string()));
+        let only_a = engine.list("blob_version", &q, false).await.expect("list");
+        assert_eq!(only_a.total, 2, "filtering by a UUID relation must match its rows, not none");
+
+        let mut q = ListQuery::default();
+        q.eq.push(("handle".into(), b.to_string()));
+        assert_eq!(engine.list("blob_version", &q, false).await.expect("list").total, 1);
+    }
+
+    #[tokio::test]
+    async fn a_uuid_keyed_row_can_be_selected_by_key() {
+        // The `pk_in` path — what "delete selected" acts on. Binding the key as a string selected
+        // nothing, so the button silently did nothing.
+        let fx = Fx::new().await;
+        let a = fx.put("a.txt", b"one").await;
+        let _b = fx.put("b.txt", b"two").await;
+        let engine = engine(&fx.db).await;
+
+        let mut q = ListQuery::default();
+        q.pk_in.push(a.to_string());
+        let got = engine.list("blob_handle", &q, false).await.expect("list");
+        assert_eq!(got.total, 1, "a UUID primary key must select its row");
+    }
+}

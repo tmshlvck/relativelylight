@@ -432,6 +432,15 @@ fn str_to_db(ct: &ColumnType, s: &str) -> DbValue {
         LogicalType::Int => s.parse::<i64>().map(|n| int_to_db(ct, n)).unwrap_or_else(|_| DbValue::from(s.to_string())),
         LogicalType::Float => s.parse::<f64>().map(DbValue::from).unwrap_or_else(|_| DbValue::from(s.to_string())),
         LogicalType::Bool => DbValue::from(matches!(s, "true" | "1")),
+        // A UUID has to be bound as one. Left as a string it compares against a `Uuid` column as a
+        // different type and quietly matches **nothing** — so `filter[handle]=<uuid>` returned an
+        // empty listing, and a `pk_in` delete on a UUID-keyed table selected no rows. Both fail in
+        // the safe direction, which is exactly why neither was noticed: nothing shipped had a UUID
+        // key until `blob_handle`.
+        LogicalType::Uuid => s
+            .parse::<sea_orm::prelude::Uuid>()
+            .map(DbValue::from)
+            .unwrap_or_else(|_| DbValue::from(s.to_string())),
         _ => DbValue::from(s.to_string()),
     }
 }
