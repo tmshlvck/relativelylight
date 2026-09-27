@@ -1,9 +1,9 @@
 # `relativelylight::blob` — content-addressed file storage — DRAFT SPEC
 
-Status: **core implemented** (feature `blob`); **`blob-ui` and `blob-thumbnail` are not**. §§1–4 and
-§§9–11 describe shipped behaviour, pinned by `blob/tests.rs`; §5 (viewer, upload form, admin actions)
-and §6 (thumbnailer) are still specification. Where building it changed a decision, the section says
-so rather than being quietly rewritten.
+Status: **implemented** except §6. `blob` (storage, the handle + version chain) and `blob-ui`
+(viewer, streaming upload, admin actions, response builder) both ship, pinned by `blob/tests.rs` and
+`blob/ui/tests.rs`; §6's thumbnailer is still specification. Where building it changed a decision,
+the section says so rather than being quietly rewritten.
 
 ## 1. Purpose & scope
 
@@ -650,21 +650,22 @@ Parsing the posted body reuses this crate's internal `multipart` module (already
 `blob::ui::decode_upload(body: &[u8]) -> Result<(PutMeta, Bytes), BlobError>` is the one new function
 needed there.
 
-**`decode_upload` buffers, and that is a decision §5 still owes an answer to.** Axum's
-`DefaultBodyLimit` is **2 MB** and is applied by the *buffering* extractors (`Bytes`, `Json`, `Form`,
-`Multipart`); a handler taking `Body` and streaming it bypasses the limit entirely, leaving
-`BlobStore::max_bytes` the only one in play. So a `decode_upload(body: &[u8])` signature means two
-things at once: the app must raise `DefaultBodyLimit` for the route, **and** the whole file is held in
-memory before `blob` ever sees it — undoing §4.3's streaming for exactly the large scans that
-motivated it. (`crud::ui`'s CSV import already lives under that 2 MB default for the same reason.)
+**Uploads stream, and `blob::ui::Receiver` is the way in.** It takes axum's `Body` rather than a
+buffering extractor, which matters twice: `DefaultBodyLimit` (2 MB) is applied by the *buffering*
+extractors (`Bytes`, `Json`, `Form`, `Multipart`) and not to a streamed `Body`, so `max_bytes` is the
+only limit in play; and the file goes from the socket to the store one chunk at a time, never
+assembling in memory. Parsing is [`multer`](https://docs.rs/multer) — the crate axum's own extractor
+uses, and the one `crate::multipart`'s docs already named for when streaming was needed. A
+hand-written parser here would be security-sensitive code with no upside.
 
-Either the admin form gets a streaming multipart parser, or it stays a small-file surface with a
-documented limit while large uploads go through an app-written route taking `Body`. Worth deciding
-before §5 is built, not during.
-
-**CSRF gap, inherited and stated, not solved here.** `csrf::enforce` does not parse multipart bodies
-(`csrf.rs`, `TODO.md`), so an upload route is session-gated but not CSRF-checked. `TODO.md`'s streaming
-pre-scan is the eventual fix, shared with `crud::ui`'s CSV import; this module inherits it when it lands.
+**The CSRF gap is closed on this path**, which was not a given. `csrf::enforce` cannot check a
+multipart body (`csrf.rs`, `TODO.md`), so the historic answer was "session-gated but not
+CSRF-checked". A *buffered* parser could check the token whenever it liked, because it already held
+the whole body; a streaming one has to decide **before it starts writing**. So `Receiver` requires
+`_csrf` to arrive *before* the file part, and `UploadForm` renders the hidden input first — a browser
+posts parts in document order, so that ordering is the mechanism rather than a detail. A body with
+the file first is refused with nothing staged (`a_token_after_the_file_is_refused_with_nothing_written`).
+`crud::ui`'s CSV import still has the original gap; it inherits `TODO.md`'s pre-scan when that lands.
 
 The three `blob*` tables are plain SeaORM entities, so an app with `crud` + `ui` registers them into
 the ordinary console with **zero new UI code** — listing, search, filters, sortable headers:

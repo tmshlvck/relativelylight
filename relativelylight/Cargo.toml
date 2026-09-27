@@ -36,6 +36,7 @@ uuid = { version = "1", features = ["v7", "serde"], optional = true }        # H
 tokio-util = { version = "0.7", features = ["io"], optional = true }         # io::StreamReader — an axum body as AsyncRead
 bytes = { version = "1", optional = true }                                   # StreamReader's items must be `Buf`
 futures-core = { version = "0.3", optional = true }                          # the `Stream` in BlobBackend::list
+multer = { version = "3", optional = true }                                  # streaming multipart — blob-ui uploads never land in memory
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -70,5 +71,8 @@ sso = ["auth", "dep:openidconnect", "dep:regex", "dep:base64"] # OIDC single sig
 # content (docs/BLOBSTORE.md). Depends on neither `crud` nor `auth` — ownership and per-document access
 # live in the app's own link table (BLOBSTORE.md §9), which is what keeps this list short.
 blob = ["dep:sea-orm", "dep:tokio", "dep:sha2", "dep:uuid", "dep:tokio-util", "dep:bytes", "dep:futures-core"]
+# The server-rendered blob components: viewer, upload form, admin actions, and the response builder.
+# Implies `ui` (so `crud` + `axum` + `tz`) because it renders fragments into the same shell.
+blob-ui = ["blob", "ui", "dep:multer"]
 validate-regex = ["dep:regex"]   # validate::regex_match (reuses the regex dep)
 validate-base64 = ["dep:base64"] # validate::base64 / base64_url (reuses the base64 dep)

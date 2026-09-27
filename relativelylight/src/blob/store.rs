@@ -325,27 +325,7 @@ impl<B: BlobBackend> BlobStore<B> {
     ) -> Result<HandleId, BlobError> {
         meta.check()?;
         let stored = self.store_bytes(data).await?;
-
-        let handle = HandleId::new();
-        let now = now_secs();
-        let txn = self.db.begin().await?;
-
-        handle::ActiveModel {
-            id: Set(handle.uuid()),
-            head_version_id: Set(None),
-            created_at: Set(now),
-            metadata: Set(None),
-        }
-        .insert(&txn)
-        .await?;
-
-        upsert_content(&txn, &stored, now).await?;
-        let v = insert_version(&txn, handle, 1, None, Some(&stored.id), &meta, now).await?;
-        set_head(&txn, handle, v).await?;
-
-        txn.commit().await?;
-        self.fire(Operation::Create, Some(v), handle, &meta, ctx).await;
-        Ok(handle)
+        self.record_create(stored, meta, ctx).await
     }
 
     /// Append a version to an existing handle and move its head onto it. The previous version is
@@ -359,26 +339,7 @@ impl<B: BlobBackend> BlobStore<B> {
     ) -> Result<VersionId, BlobError> {
         meta.check()?;
         let stored = self.store_bytes(data).await?;
-        let prev = self.head_row(handle).await?;
-
-        let now = now_secs();
-        let txn = self.db.begin().await?;
-        upsert_content(&txn, &stored, now).await?;
-        let v = insert_version(
-            &txn,
-            handle,
-            prev.seq + 1,
-            Some(VersionId(prev.id)),
-            Some(&stored.id),
-            &meta,
-            now,
-        )
-        .await?;
-        set_head(&txn, handle, v).await?;
-        txn.commit().await?;
-
-        self.fire(Operation::Update, Some(v), handle, &meta, ctx).await;
-        Ok(v)
+        self.record_version(handle, stored, meta, ctx).await
     }
 
     /// A new version over the **same content** — a rename, a corrected MIME type, a re-attribution.
@@ -787,60 +748,120 @@ impl<B: BlobBackend> BlobStore<B> {
         Ok(report)
     }
 
+    /// Begin a streaming store whose chunks **you** push (BLOBSTORE.md §4.3).
+    ///
+    /// [`create`](Self::create) and [`put_version`](Self::put_version) take an [`AsyncRead`] and are
+    /// the usual way in. This is for a source that isn't one — notably a `multipart/form-data` field,
+    /// which yields chunks from a parser rather than implementing `AsyncRead`, and which `blob-ui`'s
+    /// upload path drives directly so an upload never lands in memory on its way to the store.
+    ///
+    /// ```no_run
+    /// # async fn f(store: &relativelylight::blob::BlobStore, mut field: impl Iterator<Item = Vec<u8>>) -> Result<(), relativelylight::blob::BlobError> {
+    /// # use relativelylight::blob::{PutMeta, WriteContext};
+    /// let mut ingest = store.ingest().await?;
+    /// for chunk in field {
+    ///     ingest.write_chunk(&chunk).await?;   // aborts itself on error
+    /// }
+    /// let handle = ingest.commit_new(PutMeta::new("scan.pdf"), WriteContext::none()).await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Dropping an `Ingest` without committing discards the staged bytes.
+    pub async fn ingest(&self) -> Result<Ingest<'_, B>, BlobError> {
+        use sha2::Digest;
+        Ok(Ingest {
+            store: self,
+            staged: Some(self.backend.stage().await?),
+            hasher: sha2::Sha256::new(),
+            size: 0,
+            prefix: Vec::new(),
+        })
+    }
+
     // ===================== internals =====================
 
-    /// Hash and store in **one streaming pass**, enforcing `max_bytes` on the way through.
-    ///
-    /// The digest *is* the storage location, so it can't be known until the whole upload has been
-    /// read — which is exactly what [`BlobBackend::stage`] exists for: write into a staging area
-    /// while hashing, then commit under the address that falls out at the end. Peak memory is one
-    /// chunk regardless of file size.
-    ///
-    /// Returns the digest, the byte count, and a prefix kept back for MIME sniffing.
+    /// The index half of a create: handle + first version + head, in one transaction. Split out so
+    /// [`Ingest::commit_new`] and [`create`](Self::create) cannot drift apart.
+    async fn record_create(
+        &self,
+        stored: Stored,
+        meta: PutMeta,
+        ctx: WriteContext<'_>,
+    ) -> Result<HandleId, BlobError> {
+        let handle = HandleId::new();
+        let now = now_secs();
+        let txn = self.db.begin().await?;
+
+        handle::ActiveModel {
+            id: Set(handle.uuid()),
+            head_version_id: Set(None),
+            created_at: Set(now),
+            metadata: Set(None),
+        }
+        .insert(&txn)
+        .await?;
+
+        upsert_content(&txn, &stored, now).await?;
+        let v = insert_version(&txn, handle, 1, None, Some(&stored.id), &meta, now).await?;
+        set_head(&txn, handle, v).await?;
+
+        txn.commit().await?;
+        self.fire(Operation::Create, Some(v), handle, &meta, ctx).await;
+        Ok(handle)
+    }
+
+    /// The index half of an append.
+    async fn record_version(
+        &self,
+        handle: HandleId,
+        stored: Stored,
+        meta: PutMeta,
+        ctx: WriteContext<'_>,
+    ) -> Result<VersionId, BlobError> {
+        let prev = self.head_row(handle).await?;
+        let now = now_secs();
+        let txn = self.db.begin().await?;
+        upsert_content(&txn, &stored, now).await?;
+        let v = insert_version(
+            &txn,
+            handle,
+            prev.seq + 1,
+            Some(VersionId(prev.id)),
+            Some(&stored.id),
+            &meta,
+            now,
+        )
+        .await?;
+        set_head(&txn, handle, v).await?;
+        txn.commit().await?;
+
+        self.fire(Operation::Update, Some(v), handle, &meta, ctx).await;
+        Ok(v)
+    }
+
+    /// Hash and store in one streaming pass from an [`AsyncRead`]. Convenience over
+    /// [`ingest`](Self::ingest), which is the same loop with the chunks pushed in by the caller.
     async fn store_bytes(
         &self,
         mut data: impl AsyncRead + Send + Unpin,
     ) -> Result<Stored, BlobError> {
-        use sha2::{Digest, Sha256};
-
-        let mut staged = self.backend.stage().await?;
+        let mut ing = self.ingest().await?;
         let mut chunk = vec![0u8; super::fs::CHUNK];
-        let mut hasher = Sha256::new();
-        let mut size: u64 = 0;
-        let mut prefix = Vec::new();
-
         loop {
             let n = match data.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => n,
                 Err(e) => {
-                    staged.abort().await;
+                    ing.abort().await;
                     return Err(e.into());
                 }
             };
-            size += n as u64;
-            if size > self.max_bytes {
-                // Refused mid-stream, before anything is committed: the point of streaming is that
-                // an oversized upload costs a partial temp file, not a partial allocation.
-                staged.abort().await;
-                return Err(BlobError::TooLarge { limit: self.max_bytes });
-            }
-            if prefix.len() < SNIFF_BYTES {
-                let want = (SNIFF_BYTES - prefix.len()).min(n);
-                prefix.extend_from_slice(&chunk[..want]);
-            }
-            hasher.update(&chunk[..n]);
-            if let Err(e) = staged.write_chunk(&chunk[..n]).await {
-                staged.abort().await;
+            if let Err(e) = ing.write_chunk(&chunk[..n]).await {
+                ing.abort().await;
                 return Err(e);
             }
         }
-
-        let id = BlobId::from_digest(hasher.finalize());
-        // Bytes before rows, always (BLOBSTORE.md §4.3). A crash after this and before the caller's
-        // transaction commits leaves an orphan, which `fsck` calls routine.
-        staged.commit(&id).await?;
-        Ok(Stored { id, size, prefix })
+        ing.finish().await
     }
 
     /// Read content through, hashing, and confirm it still matches its id. Reads nothing into memory
@@ -975,6 +996,103 @@ impl<B: BlobBackend> BlobStore<B> {
             version: version.map(|v| v.0),
         };
         obs.on_write(&ev).await;
+    }
+}
+
+/// A streaming store in progress — see [`BlobStore::ingest`].
+///
+/// Enforces [`max_bytes`](BlobStore::max_bytes) as chunks arrive, so an oversized upload is refused
+/// part-way through rather than after it has all been received. Any error aborts the staged write
+/// before returning, so a caller that gives up mid-upload leaves nothing behind.
+pub struct Ingest<'a, B: BlobBackend> {
+    store: &'a BlobStore<B>,
+    /// `None` once finished — which is also what makes `Drop` a no-op in the normal case.
+    staged: Option<Box<dyn super::StagedWrite>>,
+    hasher: sha2::Sha256,
+    size: u64,
+    prefix: Vec<u8>,
+}
+
+impl<B: BlobBackend> Ingest<'_, B> {
+    /// Hash and store one chunk. On error the staged write is already aborted; do not call again.
+    pub async fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), BlobError> {
+        use sha2::Digest;
+
+        let Some(staged) = self.staged.as_mut() else {
+            return Err(BlobError::Invalid("ingest already finished".into()));
+        };
+        self.size += chunk.len() as u64;
+        if self.size > self.store.max_bytes {
+            let limit = self.store.max_bytes;
+            self.abort().await;
+            return Err(BlobError::TooLarge { limit });
+        }
+        if self.prefix.len() < SNIFF_BYTES {
+            let want = (SNIFF_BYTES - self.prefix.len()).min(chunk.len());
+            self.prefix.extend_from_slice(&chunk[..want]);
+        }
+        self.hasher.update(chunk);
+        if let Err(e) = staged.write_chunk(chunk).await {
+            self.abort().await;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Bytes accepted so far.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Commit the content and create a **new handle** with this as its first version.
+    pub async fn commit_new(
+        mut self,
+        meta: PutMeta,
+        ctx: WriteContext<'_>,
+    ) -> Result<HandleId, BlobError> {
+        if let Err(e) = meta.check() {
+            self.abort().await;
+            return Err(e);
+        }
+        let stored = self.finish().await?;
+        self.store.record_create(stored, meta, ctx).await
+    }
+
+    /// Commit the content as a **new version** of an existing handle.
+    pub async fn commit_version(
+        mut self,
+        handle: HandleId,
+        meta: PutMeta,
+        ctx: WriteContext<'_>,
+    ) -> Result<VersionId, BlobError> {
+        if let Err(e) = meta.check() {
+            self.abort().await;
+            return Err(e);
+        }
+        let stored = self.finish().await?;
+        self.store.record_version(handle, stored, meta, ctx).await
+    }
+
+    /// Discard the staged bytes. Idempotent.
+    pub async fn abort(&mut self) {
+        if let Some(mut s) = self.staged.take() {
+            s.abort().await;
+        }
+    }
+
+    /// Commit the content and return its address, with no index row of its own — what
+    /// `put_derived` is built from.
+    async fn finish(&mut self) -> Result<Stored, BlobError> {
+        use sha2::Digest;
+
+        let Some(mut staged) = self.staged.take() else {
+            return Err(BlobError::Invalid("ingest already finished".into()));
+        };
+        let id = BlobId::from_digest(std::mem::take(&mut self.hasher).finalize());
+        // Bytes before rows, always (BLOBSTORE.md §4.3). A crash after this and before the caller's
+        // transaction commits leaves an orphan, which `fsck` calls routine.
+        staged.commit(&id).await?;
+        Ok(Stored { id, size: self.size, prefix: std::mem::take(&mut self.prefix) })
     }
 }
 
