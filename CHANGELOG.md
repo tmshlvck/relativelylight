@@ -35,19 +35,6 @@ is easy to miss in a diff.
   rename-create-copy-drop rebuild of the three tables. See [docs/AUTH.md § Database schema &
   migrations](docs/AUTH.md) for the upgrade note.
 
-### Changed
-
-- **`docs/BLOBSTORE.md` rewritten** ahead of implementation (still unimplemented; no code changes).
-  The specification now splits storage into three tables — a stable `blob_handle` an app's own tables
-  hold a foreign key to, an immutable `blob_version` chain, and digest-addressed `blob` content —
-  rather than keying everything off the content hash, which could not carry per-upload metadata under
-  dedup and gave app tables nothing stable to reference. Ownership moves out of the module entirely,
-  into a per-document-kind link table in the app (new §9), which keeps `blob` free of any dependency
-  on `auth` while giving ownership *better* integrity than an in-crate foreign key would have. Also
-  new: erasure as a tombstone rather than a row deletion (§4.8), `fsck` alongside `verify`/`purge`
-  (§4.6), read auditing over the existing `Operation::Read` (§4.7), and which UI surfaces take a gate
-  and which deliberately don't (§5.1).
-
 ## [0.3.1] — 2026-09-27
 
 A **patch** release that carries one small breaking change, deliberately. `Engine::delete_where`
