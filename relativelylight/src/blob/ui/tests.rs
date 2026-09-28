@@ -366,10 +366,10 @@ fn a_download_button_appears_only_when_the_app_supplies_a_download_url() {
     // download — this crate owns no routes, so it cannot invent the second one.
     let info = fake_version("report.pdf", "application/pdf");
     let plain = Viewer::new(&info, "/v/1").render();
-    assert!(!plain.contains("Download"), "no URL, no button:\n{plain}");
+    assert!(!plain.contains(">download</a>"), "no URL, no control:\n{plain}");
 
     let with = Viewer::new(&info, "/v/1").download_url("/v/1?download=1").render();
-    assert!(with.contains("Download"), "{with}");
+    assert!(with.contains(">download</a>"), "{with}");
     assert!(with.contains("href=\"/v/1?download=1\" download"), "{with}");
 }
 
@@ -379,7 +379,6 @@ fn open_is_a_plain_link_so_the_browsers_own_modifiers_keep_working() {
     // this crate ships no JavaScript to intercept them. Turning it into a button would lose that.
     let info = fake_version("photo.png", "image/png");
     let html = Viewer::new(&info, "/v/1").render();
-    assert!(html.contains("<a class=\"btn btn-sm btn-outline-secondary\" href=\"/v/1\""), "{html}");
     assert!(html.contains("target=\"_blank\""), "{html}");
     assert!(html.contains("rel=\"noopener\""), "{html}");
 }
@@ -398,8 +397,8 @@ fn a_file_with_no_preview_still_offers_its_controls() {
     let info = fake_version("archive.zip", "application/zip");
     let html = Viewer::new(&info, "/v/1").download_url("/v/1?download=1").render();
     assert!(!html.contains("<img"), "nothing to preview: {html}");
-    assert!(!html.contains("Open"), "…and nothing a browser would display inline: {html}");
-    assert!(html.contains("Download"), "but it can still be fetched: {html}");
+    assert!(!html.contains(">open</a>"), "…and nothing a browser would display inline: {html}");
+    assert!(html.contains(">download</a>"), "but it can still be fetched: {html}");
     assert!(html.contains("archive.zip"), "{html}");
 }
 
@@ -755,7 +754,7 @@ fn text_opens_in_the_browser_but_is_not_embedded_in_the_page() {
     // conflating them meant a text file had no Open button at all.
     let info = fake_version("notes.txt", "text/plain");
     let html = Viewer::new(&info, "/v/1").render();
-    assert!(html.contains("Open"), "text is readable in a tab: {html}");
+    assert!(html.contains(">open</a>"), "text is readable in a tab: {html}");
     assert!(!html.contains("<img"), "…but not inlined into someone else's layout: {html}");
     assert!(!html.contains("<embed"), "{html}");
 }
@@ -774,6 +773,33 @@ fn what_the_viewer_offers_to_open_is_what_the_response_will_serve_inline() {
     ] {
         let info = fake_version("f", mime);
         let html = Viewer::new(&info, "/v/1").render();
-        assert_eq!(html.contains(">Open</a>"), openable, "{mime}: {html}");
+        assert_eq!(html.contains(">open</a>"), openable, "{mime}: {html}");
     }
+}
+
+#[test]
+fn retrieval_is_always_a_link_and_never_a_button() {
+    // One rule, because the same two actions used to be buttons beside a preview and plain links
+    // inside a version table. `open` and `download` are GETs — they change nothing — so they are
+    // links everywhere; `btn` is reserved for submitting a form.
+    let info = fake_version("photo.png", "image/png");
+    let html = Viewer::new(&info, "/v/1").download_url("/v/1?download=1").render();
+    assert!(!html.contains("btn"), "no button styling on a retrieval control:\n{html}");
+    assert_eq!(html.matches("<a ").count(), 3, "name, open, download — all anchors:\n{html}");
+
+    // …while the things that *do* submit stay buttons.
+    let form = UploadForm::new("/upload").render();
+    assert!(form.contains("<button class=\"btn btn-primary\" type=\"submit\">"), "{form}");
+}
+
+#[test]
+fn the_controls_sit_with_the_filename_rather_than_at_the_far_edge() {
+    // `me-auto` pushed them to the opposite end of the row, a hand-width from the name they act on.
+    let info = fake_version("photo.png", "image/png");
+    let html = Viewer::new(&info, "/v/1").download_url("/v/1?d=1").render();
+    assert!(!html.contains("me-auto"), "{html}");
+    // The *anchor*, not the `alt` attribute of the preview above it.
+    let name = html.find(">photo.png</a>").expect("name");
+    let open = html.find(">open</a>").expect("open");
+    assert!(open > name && open - name < 200, "the controls follow the name closely:\n{html}");
 }

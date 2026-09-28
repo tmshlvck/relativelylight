@@ -129,6 +129,7 @@ pub struct Browser<'a, B: BlobBackend> {
     title: Option<String>,
     actions: Option<super::Actions<'a, B>>,
     serving: Option<super::Routes>,
+    display: bool,
     /// `{handle}` / `{version}` placeholders, so the component can link to the app's own routes
     /// without inventing any (§2).
     view_url: Option<String>,
@@ -136,7 +137,7 @@ pub struct Browser<'a, B: BlobBackend> {
 
 impl<'a, B: BlobBackend> Browser<'a, B> {
     pub fn new(store: &'a BlobStore<B>, gate: impl Authz + 'static) -> Self {
-        Self { store, gate: Arc::new(gate), per_page: 25, title: Some("Blob store".into()), view_url: None, actions: None, serving: None }
+        Self { store, gate: Arc::new(gate), per_page: 25, title: Some("Blob store".into()), view_url: None, actions: None, serving: None, display: true }
     }
 
     pub fn per_page(mut self, n: u64) -> Self {
@@ -159,6 +160,16 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
     /// and this crate ships none. Same reason `crud::ui` uses `<dialog>` for its editor.
     pub fn actions(mut self, actions: super::Actions<'a, B>) -> Self {
         self.actions = Some(actions.title(""));
+        self
+    }
+
+    /// Whether a handle's page embeds its current version when the browser can render it.
+    ///
+    /// `true` by default. It is one document per page, so the cost the argument against previews
+    /// usually rests on — a *list* of twenty embedded PDFs — does not apply here; seeing what a
+    /// handle actually holds is most of why an operator opened it.
+    pub fn display(mut self, on: bool) -> Self {
+        self.display = on;
         self
     }
 
@@ -317,18 +328,14 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
             self.heading(Some(&handle.to_string()))
         );
 
-        // Reuse the viewer for the current version rather than re-implementing a preview — and
-        // with the preview suppressed: an operator auditing the store is not reading the files, and
-        // a page of embedded PDFs takes a minute to load.
+        // Reuse the viewer for the current version rather than re-implementing a preview.
         if let Some(head) = chain.last() {
             if let Some((view, download)) = self.urls_for(handle, head.id) {
-                out.push_str(&format!(
-                    "<div class=\"mb-3\">{}</div>",
-                    super::Viewer::new(head, view)
-                        .download_url(download)
-                        .suppress_preview()
-                        .render()
-                ));
+                let mut v = super::Viewer::new(head, view).download_url(download);
+                if !self.display {
+                    v = v.suppress_preview();
+                }
+                out.push_str(&format!("<div class=\"mb-3\">{}</div>", v.render()));
             }
         }
 

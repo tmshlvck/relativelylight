@@ -144,26 +144,27 @@ impl<'a> Viewer<'a> {
     /// JavaScript, so there is nothing to intercept them; that behaviour is free and must not be
     /// taken away by turning the link into a button.
     fn controls(&self, url: &str, name: &str, size: &str, openable: bool) -> String {
-        // The filename is always a link, so content is reachable even with no preview and no
-        // download URL — a name with nothing behind it is a dead end, and this crate's whole
-        // discipline is that every branch here is a URL the browser fetches separately.
+        // **Links for GET, buttons for POST** — the one rule these components follow, and the
+        // reason nothing here is a `btn`. `Open` and `Download` fetch; they change nothing, and
+        // dressing them as buttons made the same two actions look like buttons beside a preview and
+        // like links inside a version table. Buttons are reserved for form submission: upload,
+        // delete, the maintenance sweeps.
+        //
+        // They sit immediately after the filename rather than being pushed to the far edge of the
+        // row: they are *about* that name, and a control a hand-width away from its subject reads
+        // as belonging to the layout instead.
         let mut out = format!(
-            "<div class=\"d-flex align-items-center gap-2 flex-wrap mt-2\">\
-             <span class=\"me-auto text-truncate\"><a href=\"{url}\">{name}</a> \
-             <small class=\"text-body-secondary\">({size})</small></span>"
+            "<div class=\"mt-2 text-truncate\"><a href=\"{url}\">{name}</a> \
+             <small class=\"text-body-secondary\">({size})</small>"
         );
         if openable {
             out.push_str(&format!(
-                "<a class=\"btn btn-sm btn-outline-secondary\" href=\"{url}\" \
-                 target=\"_blank\" rel=\"noopener\">Open</a>"
+                " · <a href=\"{url}\" target=\"_blank\" rel=\"noopener\">open</a>"
             ));
         }
         if let Some(d) = &self.download_url {
             // `download` is a hint; the route's Content-Disposition is what actually decides.
-            out.push_str(&format!(
-                "<a class=\"btn btn-sm btn-primary\" href=\"{}\" download>Download</a>",
-                esc_str(d)
-            ));
+            out.push_str(&format!(" · <a href=\"{}\" download>download</a>", esc_str(d)));
         }
         out.push_str("</div>");
         out

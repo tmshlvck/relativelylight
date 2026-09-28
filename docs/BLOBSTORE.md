@@ -662,9 +662,10 @@ acts: creating one is the app's business, because something has to record who ow
 adding a version is the document's. So a standalone `UploadForm` sits on the app's own page for the
 first, and `Portal` offers the second.
 
-`display(false)` renders the name, size and controls with **no embedded preview** — what an admin
-listing wants, where the operator is auditing what is stored rather than reading it, and twenty
-embedded PDFs is a page that takes a minute to load.
+`display(false)` renders the name, size and controls with **no embedded preview**. The argument for
+it rests on a *list* — twenty embedded PDFs is a page that takes a minute to load — so it is off by
+default and `Browser` leaves previews on for a handle's own page, where there is one document and
+seeing what it holds is most of why the page was opened.
 
 ### 5.2a Viewer — the primitive
 
@@ -682,8 +683,15 @@ and wants no I/O. Takes **no gate** — see §5.1.
 | `application/pdf` | `<embed src="{view_url}">` |
 | everything else | no preview — the filename, the size, and the controls |
 
-Under it always: the **filename as a link**, **Open** for anything the browser will render, and
-**Download** when a download URL was given.
+Under it always, on one line with the name: `filename (size) · open · download`.
+
+**Links for GET, buttons for POST** — the one rule these components follow. `open` and `download`
+fetch and change nothing, so they are links everywhere, styled the same in a preview row as in a
+version table; before this they were buttons in one place and plain links in the other, which is the
+same two actions wearing two costumes. Buttons are reserved for submitting a form: upload, delete,
+the maintenance sweeps. The controls also sit immediately after the filename rather than at the far
+edge of the row — they are *about* that name, and a control a hand-width from its subject reads as
+belonging to the page instead.
 
 **Two different questions, kept apart** — conflating them was a bug. *Openable* is "will the browser
 render this if handed it inline", which is exactly `to_inline_response`'s allowlist, so the viewer
