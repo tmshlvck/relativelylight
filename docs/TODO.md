@@ -28,32 +28,21 @@ it. Everything below is follow-on work; nothing here blocked that release.
   SRI-checked, treated as a *viewer* on one read-only page like Swagger UI on `/docs`, with the data
   baked into the page so no JSON endpoint comes back with it.
 
-**The next module is `blob`** — [BLOBSTORE.md](BLOBSTORE.md) is its full specification, written
-against the downstream CLIMB app that already runs the design, and none of it is built. It gets its
-own branch rather than items in this list; what belongs here is anything the spec turns out to need
-from `crud`/`ui` first (it named one: CSRF on multipart bodies, which
-[shipped](../CHANGELOG.md) in 0.3.0). The rewritten spec names two more, both in `observe`:
+**`blob` has shipped** — storage, the handle + version chain, `blob-ui`'s components, and
+`examples/blob`. [BLOBSTORE.md](BLOBSTORE.md) is the guide; the CHANGELOG has what landed.
+**Remaining:**
 
-Both `observe` changes it needed have landed with the core: `WriteEvent::version`, and the correction
-to `WriteEvent::op`'s doc comment (the field was always `authz::Operation`, which has always carried
-`Read` and `List`; `blob` is the first emitter to fire `Read`).
-
-`blob` and `blob-ui` have landed, with `examples/blob` and `examples/blobthumbnailer`. A
-simplification pass then removed the thumbnailer, the variant index and partial erasure from the
-crate — see BLOBSTORE.md §4.5 and §4.8. **Remaining:**
-
-- **Decide whether `examples/blobthumbnailer` earns its place.** It exists to show derived content as
-  app code now that the crate has no thumbnailer; if `examples/blob` covers enough on its own, it can
-  go.
-
-- **CSRF on `crud::ui`'s CSV import.** `blob-ui` closed this for uploads by requiring the token
-  *before* the file part, which a streaming parser can enforce and a buffered one cannot. The CSV
-  import still takes a buffered `Bytes` body and still has the original gap; the same trick would
-  work if it moved to `multer` too, which is now a dependency in any `blob-ui` build.
-- **The read path assumes re-reading is cheap** (BLOBSTORE.md §4.3, §12) — true of a filesystem,
-  false of an object store. Revisit when a second backend exists, not before.
-- **`crud::ui`'s CSV import is under axum's 2 MB `DefaultBodyLimit`**, because it uses a buffering
-  extractor. Worth a line in the docs at least, since nothing currently says so.
+- [ ] **Decide whether `examples/blobthumbnailer` earns its place.** It exists to show derived
+  content as app code now that the crate ships no thumbnailer; if `examples/blob` covers enough on
+  its own, it can go.
+- [ ] **CSRF on `crud::ui`'s CSV import.** `blob-ui` closed this for uploads by requiring the token
+  *before* the file part — which a streaming parser can enforce and a buffered one cannot. The CSV
+  import still takes a buffered `Bytes` body and still has the original gap; the same trick works if
+  it moves to `multer`, already a dependency in any `blob-ui` build.
+- [ ] **`crud::ui`'s CSV import is under axum's 2 MB `DefaultBodyLimit`**, because it uses a
+  buffering extractor. Nothing currently says so; it wants a line in the docs at least.
+- **The blob read path assumes re-reading is cheap** (BLOBSTORE.md §4.3, §12) — true of a
+  filesystem, false of an object store. Revisit when a second backend exists, not before.
 
 ## Web UI follow-ups (post-MPA)
 

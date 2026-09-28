@@ -322,8 +322,10 @@ timezone demo, its rows straddling both 2026 DST transitions.
 - **[docs/TODO.md](docs/TODO.md)** — the ordered backlog.
 - **[docs/BLOBSTORE.md](docs/BLOBSTORE.md)** — the `blob` guide *and* spec: content-addressed storage
   under a stable handle + version chain (§3), the store API (§4), ownership in the app's own link
-  table (§9). **Shipped** (`blob`, `blob-ui`). Deliberately small: a thumbnailer, a variant index and
-  partial erasure were built and then removed — §4.5 and §4.8 record both reversals.
+  table (§9). **Shipped** (`blob`, `blob-ui`): `Portal` for an app page, `Browser` + `Actions` for
+  the admin panel, `Receiver`/`UploadForm` for streaming uploads, an optional `Routes` router.
+  Deliberately small — a thumbnailer, a variant index and partial erasure were built and then
+  removed; §4.5 and §4.8 record both reversals.
 - **[docs/SORTFILTER.md](docs/SORTFILTER.md)** — a design record: why relation sorting and
   `filter[…]` have the shape they do (kept for the reasoning; the behaviour is documented in CRUD.md).
 - **[CHANGELOG.md](CHANGELOG.md)** — per-release notes; land user-visible changes under `## Unreleased`

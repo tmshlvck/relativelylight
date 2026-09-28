@@ -11,26 +11,6 @@ is easy to miss in a diff.
 
 ## Unreleased
 
-### Fixed
-
-- **`MetaModel::field` / `relation` now say which model, and what it does have.** The panic was
-  `no field 'purged_at'` — true, but not which of the registered models, and not what to write
-  instead. It is now `blob_version: no column 'purged_at'. It has: id, handle_id, seq, …`. The usual
-  way to reach it is a column renamed or removed out from under an app's setup code, which is exactly
-  how it was hit.
-
-- **A variant kept its own source alive forever.** `purge` treated a `blob_variant` row as a
-  reference to *both* ends, so any image that had ever been thumbnailed became permanently
-  uncollectable. The edge only runs one way — a derived blob is live while its source is, never the
-  reverse — so reachability now seeds from the versions and follows `source → derived` to a fixed
-  point. Found by a test asserting a thumbnail is collected along with the document it belongs to.
-
-- **A `Uuid` column could not be filtered or selected by key.** `crud`'s `str_to_db` bound a UUID as
-  a *string*, which compares against a `Uuid` column as a different type and matches nothing — so
-  `filter[relation]=<uuid>` returned an empty listing and a `pk_in` selection (what "delete selected"
-  acts on) selected no rows. Both failed in the safe direction, which is why neither was noticed:
-  nothing shipped had a UUID key until `blob_handle`. Pinned by `blob/tests.rs::uuid_keys`.
-
 ### Added
 
 - **`blob` — content-addressed file storage with a stable handle and an immutable version chain**
@@ -59,7 +39,8 @@ is easy to miss in a diff.
   **`blob-ui`** (feature `blob-ui`) adds the server-rendered half: `Receiver` streams a posted
   `multipart/form-data` upload from the socket into the store, `UploadForm` posts to it, `Viewer`
   renders a version (always as a URL, never inlining stored bytes) with download / open / thumbnail
-  controls, `Browser` is a searchable document list drilling into one document's chain,
+  controls, `Browser` is the admin panel — every handle, searchable, drilling into one
+  handle's versions —
   `to_response` / `to_inline_response` build the reply, and `Actions` is the gated maintenance pair
   (**Check consistency** / **Collect garbage**, named after the calls they make). Both `Browser` and
   `Actions` render their own heading rather than leaving it to the app, so a surface cannot end up
@@ -81,7 +62,6 @@ is easy to miss in a diff.
 - **`observe::WriteEvent` gains `version: Option<i64>`** — which version row an event concerns, for
   an entity that keeps a chain. `None` from `crud` and `auth`. Additive: the struct is
   `#[non_exhaustive]`, so no sink needs changing.
-
 
 ### Fixed
 
@@ -107,18 +87,17 @@ is easy to miss in a diff.
   rename-create-copy-drop rebuild of the three tables. See [docs/AUTH.md § Database schema &
   migrations](docs/AUTH.md) for the upgrade note.
 
-### Changed
+- **A `Uuid` column could not be filtered or selected by key.** `crud`'s `str_to_db` bound a UUID as
+  a *string*, which compares against a `Uuid` column as a different type and matches nothing — so
+  `filter[relation]=<uuid>` returned an empty listing and a `pk_in` selection (what "delete selected"
+  acts on) selected no rows. Both failed in the safe direction, which is why neither was noticed:
+  nothing shipped had a UUID key until `blob_handle`. Pinned by `blob/tests.rs::uuid_keys`.
 
-- **`docs/BLOBSTORE.md` rewritten** ahead of implementation (still unimplemented; no code changes).
-  The specification now splits storage into three tables — a stable `blob_handle` an app's own tables
-  hold a foreign key to, an immutable `blob_version` chain, and digest-addressed `blob` content —
-  rather than keying everything off the content hash, which could not carry per-upload metadata under
-  dedup and gave app tables nothing stable to reference. Ownership moves out of the module entirely,
-  into a per-document-kind link table in the app (new §9), which keeps `blob` free of any dependency
-  on `auth` while giving ownership *better* integrity than an in-crate foreign key would have. Also
-  new: erasure as a tombstone rather than a row deletion (§4.8), `fsck` alongside `verify`/`purge`
-  (§4.6), read auditing over the existing `Operation::Read` (§4.7), and which UI surfaces take a gate
-  and which deliberately don't (§5.1).
+- **`MetaModel::field` / `relation` now say which model, and what it does have.** The panic was
+  `no field 'purged_at'` — true, but not which of the registered models, and not what to write
+  instead. It is now `blob_version: no column 'purged_at'. It has: id, handle_id, seq, …`. The usual
+  way to reach it is a column renamed or removed out from under an app's setup code, which is exactly
+  how it was hit.
 
 ## [0.3.1] — 2026-09-27
 

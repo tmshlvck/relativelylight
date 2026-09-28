@@ -1,12 +1,15 @@
-# `relativelylight::blob` — content-addressed file storage — DRAFT SPEC
+# `relativelylight::blob` — content-addressed file storage
 
-Status: **implemented.** `blob` (storage, the handle + version chain), `blob-ui` (viewer, streaming
-upload, document browser, maintenance, response builder) both ship, pinned by `blob/tests.rs` and
-`blob/ui/tests.rs`. Where building it changed a decision, the section says so
-rather than being quietly rewritten.
+The guide to the `blob` and `blob-ui` features: storage under a stable handle with an immutable
+version chain, the components that put it on a page, and the ownership pattern that stays in your
+app. Both ship; `blob/tests.rs` and `blob/ui/tests.rs` pin the behaviour described here.
 
-**Example: `examples/blob`** — `cargo run -p blob-example`. Tickets with attachments: streaming
-uploads, the version chain, erasure, the maintenance page, and §9's ownership link table.
+Several decisions here were reversed during implementation. Where that happened the section says
+what was tried and why it came out again, because the alternative — a clean-looking document that
+reads as if the first answer were the obvious one — invites someone to re-add what was removed.
+
+**Example: `examples/blob`** — `cargo run -p blob-example`. Tickets with attachments: the streaming
+upload, the version chain, the document portal, the admin panel, and §9's ownership link table.
 
 ## 1. Purpose & scope
 
@@ -667,7 +670,7 @@ it rests on a *list* — twenty embedded PDFs is a page that takes a minute to l
 default and `Browser` leaves previews on for a handle's own page, where there is one document and
 seeing what it holds is most of why the page was opened.
 
-### 5.2a Viewer — the primitive
+#### `Viewer` — the primitive underneath
 
 ```rust
 Viewer::new(&version, view_url).download_url(url).thumbnail_url(url)
@@ -828,6 +831,20 @@ An app mounts it at its own route and adds it to the sidebar with
 `Admin::link("Blob store", "/admin/blobs/actions")` — the existing extension point for exactly this
 shape of "a page that isn't a registered entity".
 
+### 5.4 The axum response helper
+
+```rust
+pub fn to_response(stream: ContentStream) -> axum::response::Response;
+pub fn to_inline_response(stream: ContentStream) -> axum::response::Response;
+```
+
+Turns a verified `ContentStream` (an already-hash-checked stream plus its `VersionInfo`) into a `Response`
+with `Content-Type`, `Content-Length`, and a `Content-Disposition` built from the version's filename —
+**not a route.** The app's own handler authorizes, calls `store.read(version, ctx)`, then calls this to
+build the reply. A library-owned download route could do none of the three things that matter here:
+verify the digest, decide whether this caller may see it, and emit whatever the app's compliance regime
+wants emitted.
+
 ### 5.5 `Routes` — an optional gated router
 
 ```rust
@@ -848,21 +865,12 @@ per-document ownership silently undoes that ownership; there, write the route yo
 The URLs live on the same object as the router so a component cannot link to a path the router
 doesn't serve — a base path written twice is a 404 waiting to be discovered.
 
-### 5.6 The axum response helper
+## 6. Derived content
 
-```rust
-pub fn to_response(stream: ContentStream) -> axum::response::Response;
-pub fn to_inline_response(stream: ContentStream) -> axum::response::Response;
-```
-
-Turns a verified `ContentStream` (an already-hash-checked stream plus its `VersionInfo`) into a `Response`
-with `Content-Type`, `Content-Length`, and a `Content-Disposition` built from the version's filename —
-**not a route.** The app's own handler authorizes, calls `store.read(version, ctx)`, then calls this to
-build the reply. A library-owned download route could do none of the three things that matter here:
-verify the digest, decide whether this caller may see it, and emit whatever the app's compliance regime
-wants emitted.
-
-## 6. *(removed — derived content is the app's; see §4.5 and `examples/blobthumbnailer`)*
+Thumbnails, previews and crops are **out of scope** — see §4.5 for why, and
+`examples/blobthumbnailer` for the eighty lines an app writes instead. A derived rendering is stored
+as an ordinary document, so it is listed, read, deleted and collected by the machinery everything
+else uses.
 
 ## 7. Feature / module layout
 
@@ -905,11 +913,12 @@ let handle = store.create(body_stream,
     PutMeta { filename, mime_declared, created_by: None, metadata: None },
     WriteContext::from(&headers, ip)).await?;
 
-// download — the app's own route, its own auth check, then this crate's response builder
+// download — the app's own route, its own auth check, then the response builder (needs `blob-ui`;
+// with plain `blob` you have a verified `ContentStream` and build the reply yourself)
 async fn download(Path(id): Path<Uuid>, State(store): State<Arc<BlobStore>>, headers: HeaderMap) -> Response {
     let head = store.head(HandleId(id)).await?;
     let stream = store.read(head.id, WriteContext::from(&headers, ip)).await?;
-    blob::to_response(stream)
+    blob::ui::to_response(stream)
 }
 ```
 
@@ -990,23 +999,26 @@ is CMIS's version series and OCFL's inventory; §13 has the reading.
 ## 10. Security notes
 
 - **MIME type is advisory, never trusted for dispatch.** `Viewer` dispatches on it to pick a *tag*,
-  never to decide whether to render raw bytes inline; §5.2 is the enforcement of that rule, not a
-  description of it. `mime_declared` (what the uploader said) and `mime_sniffed` (what the bytes look
+  never to decide whether to render raw bytes inline; §5.2's viewer is the enforcement of that rule,
+  not a description of it. `mime_declared` (what the uploader said) and `mime_sniffed` (what the bytes look
   like) are stored separately so an app can compare them and refuse the mismatch if it wants to.
-- **The viewer never inlines content it did not render itself.** Every branch in §5.2 is a URL, so a
-  hostile SVG uploaded as `image/svg+xml` is rendered by the browser as whatever `Content-Type` the
-  download route sets — which is the app's problem to get right (serving `image/svg+xml` inline is an
-  XSS vector independent of this crate; an app accepting SVG should use `Content-Disposition:
-  attachment` or a sandboxing `Content-Security-Policy`), not something `Viewer` can fix by matching
-  a filename extension.
+- **The viewer never inlines content it did not render itself.** Every branch in §5.2 is a URL the
+  browser fetches separately, so what happens next is decided by the `Content-Type` the download
+  route sets. Use `to_inline_response` and that is handled: it serves inline only for an allowlist
+  and downgrades everything else — a hostile SVG is downloaded rather than executed, and the viewer
+  doesn't offer to open what the response would refuse. An app that writes its own route owns that
+  decision, and serving `image/svg+xml` inline is an XSS vector independent of this crate.
 - **Uploads are capped while streaming**, not after buffering (`BlobStore::max_bytes`), and so is
   `metadata` (§3.4).
 - **Handle ids are capability-shaped.** They are unguessable (UUIDv7's 74 random bits), but §9.2's
   routing rule exists so they never have to be relied on as a secret.
 - **`blob_version` must be read-only wherever it is registered** (§5.3) — an editable immutable chain
   is not an immutable chain.
-- **Multipart uploads bypass CSRF** until `TODO.md`'s streaming pre-scan lands — §5.3, stated, not
-  hidden.
+- **Uploads through `Receiver` are CSRF-checked**, which multipart bodies historically were not:
+  `csrf::enforce` cannot parse them, so the token has to be checked by the parser itself. A
+  streaming one must decide *before* it writes, so `Receiver` requires `_csrf` to arrive ahead of
+  the file part and `UploadForm` renders it first (§5.3). `crud::ui`'s CSV import still takes a
+  buffered body and still has the original gap.
 
 ## 11. Decisions (confirmed)
 
@@ -1051,9 +1063,6 @@ is CMIS's version series and OCFL's inventory; §13 has the reading.
   free of an AWS SDK at the cost of a second crate to version in step. Leaning companion crate.
 - **Retention/archival policy** for `copy_content_to` / collection / the audit log — deliberately deferred, and
   deliberately *one* answer rather than three.
-- **Does `check_consistency` want a repair mode**, or only a report? Deleting orphaned bytes is safe past the grace
-  period; nothing can repair a *missing* one, so the asymmetry may argue for report-only plus an
-  explicit `collect_orphans()`.
 
 ## 13. Reading
 
