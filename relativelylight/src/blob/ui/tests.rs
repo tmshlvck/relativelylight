@@ -803,3 +803,18 @@ fn the_controls_sit_with_the_filename_rather_than_at_the_far_edge() {
     let open = html.find(">open</a>").expect("open");
     assert!(open > name && open - name < 200, "the controls follow the name closely:\n{html}");
 }
+
+#[test]
+fn every_preview_scales_down_but_never_up() {
+    // `img-fluid` is `max-width: 100%; height: auto`: natural size when it fits, scaled to the
+    // container when it doesn't. Both image branches need it — the thumbnail one didn't have it,
+    // so a large generated thumbnail overflowed its card.
+    let info = fake_version("photo.png", "image/png");
+    for html in [
+        Viewer::new(&info, "/v/1").render(),
+        Viewer::new(&info, "/v/1").thumbnail_url("/v/1/thumb").render(),
+    ] {
+        assert!(html.contains("<img"), "{html}");
+        assert!(html.contains("img-fluid"), "an unconstrained image can overflow:\n{html}");
+    }
+}

@@ -118,10 +118,14 @@ impl<'a> Viewer<'a> {
             // A thumbnail always wins: it is smaller, and clicking through is the full view anyway.
             (Some(t), _) => format!(
                 "<a href=\"{url}\" target=\"_blank\" rel=\"noopener\">\
-                 <img src=\"{}\" alt=\"{name}\" class=\"rounded border\" loading=\"lazy\"></a>",
+                 <img src=\"{}\" alt=\"{name}\" class=\"img-fluid rounded border\" loading=\"lazy\"></a>",
                 esc_str(t)
             ),
             (None, m) if previewable && m != "application/pdf" => {
+                // `img-fluid` is `max-width: 100%; height: auto` — an image narrower than its
+                // container renders at its **natural size**, a wider one scales down to fit. That is
+                // the behaviour people reach for JavaScript to get; it has been CSS for years, and
+                // this crate ships no JavaScript to do it with anyway.
                 format!("<img src=\"{url}\" alt=\"{name}\" class=\"img-fluid rounded border\" loading=\"lazy\">")
             }
             (None, "application/pdf") => format!(

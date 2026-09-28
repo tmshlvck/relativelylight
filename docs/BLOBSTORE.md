@@ -678,8 +678,8 @@ and wants no I/O. Takes **no gate** — see §5.1.
 
 | Source | Rendered as |
 |---|---|
-| a thumbnail was supplied | `<img src="{thumbnail_url}">` linking to the full view |
-| `image/png`, `jpeg`, `gif`, `webp` | `<img src="{view_url}">` |
+| a thumbnail was supplied | `<img src="{thumbnail_url}">` linking to the full view, `img-fluid` |
+| `image/png`, `jpeg`, `gif`, `webp` | `<img src="{view_url}">`, `img-fluid` |
 | `application/pdf` | `<embed src="{view_url}">` |
 | everything else | no preview — the filename, the size, and the controls |
 
@@ -692,6 +692,11 @@ same two actions wearing two costumes. Buttons are reserved for submitting a for
 the maintenance sweeps. The controls also sit immediately after the filename rather than at the far
 edge of the row — they are *about* that name, and a control a hand-width from its subject reads as
 belonging to the page instead.
+
+Previews carry `img-fluid` — `max-width: 100%; height: auto` — so an image narrower than its
+container renders at its **natural size** and a wider one scales down to fit. That is the behaviour
+people reach for JavaScript to get; it has been CSS for years, which is just as well since this
+crate ships none.
 
 **Two different questions, kept apart** — conflating them was a bug. *Openable* is "will the browser
 render this if handed it inline", which is exactly `to_inline_response`'s allowlist, so the viewer

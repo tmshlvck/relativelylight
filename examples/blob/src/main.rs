@@ -67,6 +67,24 @@ struct Shell {
     css: String,
 }
 
+/// Wrap one component's output in a labelled frame.
+///
+/// Purely this example's doing — the components render plain fragments and know nothing about it.
+/// It exists because the point of this example is *which component produced what*, and on a page
+/// where the app's own markup and three library fragments sit together, that is otherwise guesswork.
+fn frame(component: &str, note: &str, html: String) -> String {
+    format!(
+        "<div class=\"border border-2 border-primary-subtle rounded p-3 mb-3 position-relative\" \
+         style=\"margin-top:1.25rem\">\
+         <span class=\"position-absolute top-0 start-0 translate-middle-y ms-3 badge \
+         text-bg-primary font-monospace fw-normal\">{}</span>\
+         {html}\
+         <div class=\"form-text mt-2 mb-0\">{}</div></div>",
+        esc_str(component),
+        esc_str(note)
+    )
+}
+
 fn page(title: &str, who: Option<&Identity>, body: String) -> Response {
     let html = Shell {
         title: title.into(),
@@ -329,10 +347,15 @@ async fn show_ticket(
             "<div class=\"card my-3\"><div class=\"card-body\">\
              <div class=\"d-flex justify-content-between\">\
              <span class=\"badge text-bg-light\">{}</span>\
-             <small class=\"text-body-secondary\">owner: {}</small></div>\
-             {portal}</div></div>",
+             <small class=\"text-body-secondary\">owner: {}</small></div>{}</div></div>",
             esc_str(&d.role),
             esc_str(&owner),
+            frame(
+                "blob::ui::Portal",
+                "Current version, its history, and a form adding the next one. Its URLs name this \
+                 ticket and attachment, so authorization is a query on our own row.",
+                portal
+            ),
         ));
     }
 
@@ -341,10 +364,15 @@ async fn show_ticket(
          <p><a href=\"/\">&larr; all tickets</a></p>",
         // Creating a document is the *app's* act — it has to record ownership — so this form is
         // standalone rather than something `Portal` offers.
-        UploadForm::new(format!("/ticket/{}/upload", t.id))
-            .max_bytes(256 * 1024 * 1024)
-            .csrf(app.auth.csrf().token(&headers).unwrap_or_default())
-            .render()
+        frame(
+            "blob::ui::UploadForm",
+            "Standalone, because creating a document is the app's act: it has to record an owner. \
+             Adding a *version* is the document's, which is why Portal offers that one.",
+            UploadForm::new(format!("/ticket/{}/upload", t.id))
+                .max_bytes(256 * 1024 * 1024)
+                .csrf(app.auth.csrf().token(&headers).unwrap_or_default())
+                .render(),
+        )
     ));
 
     page(&format!("Ticket #{}", t.id), Some(&who), body)
@@ -634,7 +662,16 @@ async fn render_browser(
         .unwrap_or_default();
 
     // The panel renders its own heading and its own maintenance menu.
-    Ok(format!("{banner}{panel}<p class=\"mt-3\"><a href=\"/\">&larr; tickets</a></p>"))
+    Ok(format!(
+        "{banner}{}<p class=\"mt-3\"><a href=\"/\">&larr; tickets</a></p>",
+        frame(
+            "blob::ui::Browser + Actions",
+            "Every handle in the store, searchable, drilling into one handle's versions. Content \
+             is served by the crate's own gated router, mounted at /admin/blob — admin-only, which \
+             is the only reason a store-wide route is safe here.",
+            panel
+        )
+    ))
 }
 
 // ===================== helpers =====================
