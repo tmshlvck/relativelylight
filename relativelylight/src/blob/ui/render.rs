@@ -253,6 +253,7 @@ pub struct Actions<'a, B: BlobBackend> {
     store: &'a BlobStore<B>,
     gate: Arc<dyn Authz>,
     csrf_token: Option<String>,
+    title: Option<String>,
 }
 
 /// What an [`Actions`] button did, for the app to render.
@@ -266,11 +267,21 @@ pub struct ActionOutcome {
 
 impl<'a, B: BlobBackend> Actions<'a, B> {
     pub fn new(store: &'a BlobStore<B>, gate: impl Authz + 'static) -> Self {
-        Self { store, gate: Arc::new(gate), csrf_token: None }
+        Self { store, gate: Arc::new(gate), csrf_token: None, title: Some("Maintenance".into()) }
     }
 
     pub fn csrf(mut self, token: impl Into<String>) -> Self {
         self.csrf_token = Some(token.into());
+        self
+    }
+
+    /// The heading above the controls. Defaults to `"Maintenance"`; pass `""` for none.
+    ///
+    /// Rendered by the component rather than left to the app, so the button labels and the heading
+    /// they sit under cannot drift apart — which is how the surface ended up calling itself one
+    /// thing while its actions were named another.
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
         self
     }
 
@@ -293,12 +304,16 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
         // each blob, the other re-hashes every byte. That is a checkbox, the way `fsck -c` has
         // always been. Collection stays separate: *is it still wanted* is a different question, and
         // it is the only one that deletes.
+        let heading = match self.title.as_deref().filter(|t| !t.is_empty()) {
+            Some(t) => format!("<h2 class=\"h6\">{}</h2>", esc_str(t)),
+            None => String::new(),
+        };
         Ok(format!(
-            "<div class=\"rl-blob-actions\">\
+            "<div class=\"rl-blob-actions\">{heading}\
              <form method=\"post\" class=\"mb-3\">{csrf}\
              <input type=\"hidden\" name=\"op\" value=\"check\">\
              <div class=\"d-flex align-items-center gap-2\">\
-             <button class=\"btn btn-outline-secondary\" type=\"submit\">Check storage</button>\
+             <button class=\"btn btn-outline-secondary\" type=\"submit\">Check consistency</button>\
              <div class=\"form-check\">\
              <input class=\"form-check-input\" type=\"checkbox\" id=\"rl-blob-deep\" name=\"deep\" value=\"1\">\
              <label class=\"form-check-label\" for=\"rl-blob-deep\">deep</label></div></div>\
@@ -308,9 +323,10 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
              reads every byte.</div></form>\
              <form method=\"post\" class=\"mb-3\">{csrf}\
              <input type=\"hidden\" name=\"op\" value=\"collect\">\
-             <button class=\"btn btn-outline-danger\" type=\"submit\">Collect unreferenced content</button>\
-             <div class=\"form-text\">Delete stored content that no version and no variant points at \
-             any more. Documents are never touched.</div></form></div>"
+             <button class=\"btn btn-outline-danger\" type=\"submit\">Collect garbage</button>\
+             <div class=\"form-text\">Delete stored content that no version points at any more. \
+             Documents are never touched &mdash; this cannot decide that one is unwanted, only that \
+             some bytes are unreachable.</div></form></div>"
         ))
     }
 

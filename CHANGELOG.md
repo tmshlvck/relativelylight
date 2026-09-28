@@ -60,7 +60,10 @@ is easy to miss in a diff.
   `multipart/form-data` upload from the socket into the store, `UploadForm` posts to it, `Viewer`
   renders a version (always as a URL, never inlining stored bytes) with download / open / thumbnail
   controls, `Browser` is a searchable document list drilling into one document's chain,
-  `to_response` / `to_inline_response` build the reply, and `Actions` is the gated maintenance pair.
+  `to_response` / `to_inline_response` build the reply, and `Actions` is the gated maintenance pair
+  (**Check consistency** / **Collect garbage**, named after the calls they make). Both `Browser` and
+  `Actions` render their own heading rather than leaving it to the app, so a surface cannot end up
+  labelled one thing while its actions are named another.
   The upload path **closes the CSRF gap on multipart bodies**: it requires the token to arrive before
   the file part, which a streaming parser can enforce and a buffered one cannot.
 

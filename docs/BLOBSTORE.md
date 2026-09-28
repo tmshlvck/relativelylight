@@ -722,12 +722,22 @@ nothing to join on. That is what `Browser` is for:
 
 ```rust
 Browser::new(store, gate)
-    .view_url("/files/{handle}/v/{version}")   // the app's route; the component invents none
+    .title("Documents")                            // its own heading; "" for none
+    .view_url("/documents/{handle}/v/{version}")   // the app's route; the component invents none
     .render_for(&headers, &BrowseState::from_uri(&uri)).await?
 ```
 
 A searchable list of documents — current name, type, size, version count, who last changed it —
-drilling into one document's chain, newest first. **Gated**, unlike `Viewer`: it lists every document
+drilling into one document's chain, newest first, under a heading it renders itself.
+
+**Both components title themselves**, rather than leaving it to the app. That is not decoration: the
+first version of this surface let the app supply the heading, and the example promptly called it
+"Files" while every button under it was named after something else and the whole module said
+"document". A label and the actions beneath it should not be able to drift apart.
+
+**"Documents", not "files" or "blobs"** — a handle *is* a document. "Blob" is implementation
+vocabulary, like "row", and "files" invites the assumption that one upload is one thing, which the
+version chain is precisely a denial of. **Gated**, unlike `Viewer`: it lists every document
 in the store regardless of owner, so rendering it *is* a read (§5.1). Search matches **any** version's
 filename, not just the current one, because what someone hunting for a file remembers is often the
 name it used to have.
@@ -742,7 +752,8 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
 }
 ```
 
-**Check storage** (with a `deep` checkbox) and **Collect unreferenced content**.
+**Check consistency** (with a `deep` checkbox) and **Collect garbage** — named after the calls
+they make, and both under a heading the component renders itself.
 `check_consistency` and `verify` are one control because they answer the same question — *is the
 stored content still what the index says* — at two depths, differing only in cost: one stats each
 blob, the other re-hashes every byte. That is a checkbox, the way `fsck -c` has always been.

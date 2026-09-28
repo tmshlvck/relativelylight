@@ -555,3 +555,49 @@ mod browser {
         assert!(s.open.is_none());
     }
 }
+
+#[tokio::test]
+async fn the_browser_titles_itself_so_the_page_and_its_actions_cannot_drift_apart() {
+    // The heading is the component's, not the app's. Leaving it to the app is how this surface ended
+    // up calling itself "Files" while everything underneath it said "document".
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path()).await;
+    let b = crate::blob::ui::Browser::new(&store, crate::authz::Open);
+    let s = crate::blob::ui::BrowseState::from_uri(&"/x".parse::<http::Uri>().unwrap());
+
+    let html = b.render_for(&HeaderMap::new(), &s).await.unwrap();
+    assert!(html.contains("<h1 class=\"h4 mb-3\">Documents</h1>"), "{html}");
+
+    let renamed = crate::blob::ui::Browser::new(&store, crate::authz::Open)
+        .title("Attachments")
+        .render_for(&HeaderMap::new(), &s)
+        .await
+        .unwrap();
+    assert!(renamed.contains("Attachments"), "{renamed}");
+    assert!(!renamed.contains("Documents"), "{renamed}");
+
+    let bare = crate::blob::ui::Browser::new(&store, crate::authz::Open)
+        .title("")
+        .render_for(&HeaderMap::new(), &s)
+        .await
+        .unwrap();
+    assert!(!bare.contains("<h1"), "an empty title renders no heading: {bare}");
+}
+
+#[tokio::test]
+async fn the_maintenance_buttons_are_named_after_the_calls_they_make() {
+    // `check_consistency` and `collect_garbage` — not "Check storage" and "Purge", which is what
+    // they said while the API said something else.
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path()).await;
+    let html = crate::blob::ui::Actions::new(&store, crate::authz::Open)
+        .render_for(&HeaderMap::new())
+        .await
+        .expect("render");
+
+    assert!(html.contains("<h2 class=\"h6\">Maintenance</h2>"), "{html}");
+    assert!(html.contains("Check consistency"), "{html}");
+    assert!(html.contains("Collect garbage"), "{html}");
+    assert!(!html.contains("Purge"), "the old name is gone: {html}");
+    assert!(!html.contains("Check storage"), "{html}");
+}

@@ -21,8 +21,8 @@
 //!   version; the chain is append-only.
 //! - **`/admin`** — the blob tables as ordinary CRUD models, with `blob_version` read-only because
 //!   an editable immutable chain isn't one.
-//! - **`/files`** — `blob::ui::Browser`: every document, searchable, drilling into its version
-//!   chain, with the gated consistency check and garbage collection beneath it.
+//! - **`/documents`** — `blob::ui::Browser`: every document, searchable, drilling into its version
+//!   chain, with the gated `Actions` (consistency check / garbage collection) beneath it.
 //! - **stdout** — one line per committed write *and read*, from a `WriteObserver`. A download is an
 //!   auditable event here, not just a write.
 //!
@@ -211,8 +211,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ticket/{tid}/attachment/{did}/v/{seq}", get(download_version))
         .route("/ticket/{tid}/attachment/{did}/replace", post(replace))
         .route("/admin", get(admin_get).post(admin_post))
-        .route("/files", get(browse_get).post(browse_post))
-        .route("/files/{handle}/v/{version}", get(browse_version))
+        .route("/documents", get(browse_get).post(browse_post))
+        .route("/documents/{handle}/v/{version}", get(browse_version))
         .with_state(app)
         // `auth.routes()` carries no state of its own, so merge it after ours is bound.
         .merge(auth.routes())
@@ -249,7 +249,7 @@ async fn index(State(app): State<App>, headers: HeaderMap) -> Response {
             t.id, t.id, esc_str(&t.subject)
         ));
     }
-    body.push_str("</div><p class=\"mt-3\"><a href=\"/files\">Browse all files</a> · <a href=\"/admin\">Admin console</a></p>");
+    body.push_str("</div><p class=\"mt-3\"><a href=\"/documents\">All documents</a> · <a href=\"/admin\">Admin console</a></p>");
     page("Tickets", Some(&who), body)
 }
 
@@ -509,7 +509,7 @@ fn panel(app: &App) -> Admin<'_> {
         .entity("blob_handle")
         .entity("blob_version")
         .entity("blob")
-        .link("Files", "/files")
+        .link("Documents", "/documents")
 }
 
 async fn admin_get(State(app): State<App>, headers: HeaderMap, uri: Uri) -> Response {
@@ -589,7 +589,7 @@ async fn browse_get(State(app): State<App>, headers: HeaderMap, uri: Uri) -> Res
         return Redirect::to(app.auth.login_path()).into_response();
     }
     match render_browser(&app, &headers, &BrowseState::from_uri(&uri), None).await {
-        Ok(html) => page("Files", who.as_ref(), html),
+        Ok(html) => page("Documents", who.as_ref(), html),
         Err(Decision::NeedsLogin) => Redirect::to(app.auth.login_path()).into_response(),
         Err(_) => (StatusCode::FORBIDDEN, "admins only").into_response(),
     }
@@ -618,7 +618,7 @@ async fn browse_post(
         Err(_) => return (StatusCode::FORBIDDEN, "admins only").into_response(),
     };
     match render_browser(&app, &headers, &BrowseState::from_uri(&uri), Some(outcome)).await {
-        Ok(html) => page("Files", who.as_ref(), html),
+        Ok(html) => page("Documents", who.as_ref(), html),
         Err(_) => (StatusCode::FORBIDDEN, "admins only").into_response(),
     }
 }
@@ -637,7 +637,7 @@ async fn render_browser(
     let gate = relativelylight::auth::GroupReadWrite::new(&app.auth, [ADMIN_GROUP.to_string()]);
     let list = Browser::new(&*app.store, gate)
         // The component links versions at a route *the app* owns; it invents none of its own.
-        .view_url("/files/{handle}/v/{version}")
+        .view_url("/documents/{handle}/v/{version}")
         .render_for(headers, state)
         .await?;
 
@@ -652,9 +652,9 @@ async fn render_browser(
         .unwrap_or_default();
     let maintenance = actions(app, headers).render_for(headers).await.unwrap_or_default();
 
+    // Both components render their own heading, so the page is just the two of them plus a banner.
     Ok(format!(
-        "<h1 class=\"h4 mb-3\">Files</h1>{banner}{list}\
-         <hr class=\"my-4\"><h2 class=\"h6\">Maintenance</h2>{maintenance}\
+        "{banner}{list}<hr class=\"my-4\">{maintenance}\
          <p><a href=\"/\">&larr; tickets</a></p>"
     ))
 }

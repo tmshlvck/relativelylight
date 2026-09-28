@@ -120,6 +120,7 @@ pub struct Browser<'a, B: BlobBackend> {
     store: &'a BlobStore<B>,
     gate: Arc<dyn Authz>,
     per_page: u64,
+    title: Option<String>,
     /// `{handle}` / `{version}` placeholders, so the component can link to the app's own routes
     /// without inventing any (§2).
     view_url: Option<String>,
@@ -127,11 +128,22 @@ pub struct Browser<'a, B: BlobBackend> {
 
 impl<'a, B: BlobBackend> Browser<'a, B> {
     pub fn new(store: &'a BlobStore<B>, gate: impl Authz + 'static) -> Self {
-        Self { store, gate: Arc::new(gate), per_page: 25, view_url: None }
+        Self { store, gate: Arc::new(gate), per_page: 25, title: Some("Documents".into()), view_url: None }
     }
 
     pub fn per_page(mut self, n: u64) -> Self {
         self.per_page = n.max(1);
+        self
+    }
+
+    /// The heading above the list. Defaults to `"Documents"`; pass `""` for none.
+    ///
+    /// **"Documents", not "Files" or "Blobs"** — a handle *is* a document, and that is the word this
+    /// module uses for it throughout. "Blob" is implementation vocabulary (so is "row"), and "files"
+    /// invites the assumption that one upload is one thing, which the version chain is precisely a
+    /// denial of.
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
         self
     }
 
@@ -173,13 +185,14 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
         };
 
         let term = state.search.as_deref().unwrap_or("");
-        let mut out = format!(
+        let mut out = self.heading();
+        out.push_str(&format!(
             "<form method=\"get\" class=\"mb-3 d-flex gap-2\">\
              <input class=\"form-control\" type=\"search\" name=\"q\" value=\"{}\" \
              placeholder=\"Search filenames…\">\
              <button class=\"btn btn-outline-secondary\" type=\"submit\">Search</button></form>",
             esc_str(term)
-        );
+        ));
 
         if found.documents.is_empty() {
             out.push_str(
@@ -234,12 +247,13 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
             .unwrap_or_else(|| "(no versions)".into());
 
         let mut out = format!(
-            "<p class=\"mb-2\"><a href=\"{back}\">&larr; all documents</a></p>\
+            "{}<p class=\"mb-2\"><a href=\"{back}\">&larr; all documents</a></p>\
              <h2 class=\"h5\">{title}</h2>\
              <p class=\"text-body-secondary small\">Document {handle}</p>\
              <table class=\"table table-sm align-middle\"><thead><tr>\
              <th>#</th><th>Filename</th><th class=\"text-end\">Size</th><th>By</th>\
-             <th>Content</th></tr></thead><tbody>"
+             <th>Content</th></tr></thead><tbody>",
+            self.heading()
         );
         // Newest first: the current version is what a reader is usually looking for.
         for v in chain.iter().rev() {
@@ -268,6 +282,13 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
         }
         out.push_str("</tbody></table>");
         out
+    }
+
+    fn heading(&self) -> String {
+        match self.title.as_deref().filter(|t| !t.is_empty()) {
+            Some(t) => format!("<h1 class=\"h4 mb-3\">{}</h1>", esc_str(t)),
+            None => String::new(),
+        }
     }
 
     fn pager(&self, state: &BrowseState, page: u64, total: u64) -> String {
