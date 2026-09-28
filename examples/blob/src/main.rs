@@ -185,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Immutable by design: an editable version chain is not a chain (BLOBSTORE.md §5.3).
     for f in [
         "id", "handle_id", "seq", "prev_version_id", "blob_id", "filename", "mime_declared",
-        "created_by", "created_at", "purged_at",
+        "created_by", "created_at",
     ] {
         versions.field(f).read_only = true;
     }

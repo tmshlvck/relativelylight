@@ -645,14 +645,36 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
     pub fn fields(&self) -> impl Iterator<Item = &MetaField> {
         self.fields.iter()
     }
+    /// A column, to configure before registering. **Panics** if there is no such column — this is a
+    /// wiring mistake, and failing at startup is the point.
+    ///
+    /// The message names the table and lists what *is* there, because the usual way to arrive here
+    /// is a column that was renamed or removed out from under an app's setup code, and "no field
+    /// 'purged_at'" on its own doesn't say which model or what to write instead.
     pub fn field(&mut self, name: &str) -> &mut MetaField {
-        self.fields.iter_mut().find(|f| f.name == name).unwrap_or_else(|| panic!("no field '{name}'"))
+        let (table, known) = (self.table.clone(), self.field_names());
+        self.fields.iter_mut().find(|f| f.name == name).unwrap_or_else(|| {
+            panic!("{table}: no column '{name}'. It has: {known}")
+        })
+    }
+
+    fn field_names(&self) -> String {
+        self.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ")
+    }
+
+    fn relation_names(&self) -> String {
+        self.relations.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ")
     }
     pub fn relations(&self) -> impl Iterator<Item = &MetaRelation> {
         self.relations.iter()
     }
+    /// A relation, to configure before registering. **Panics** if there is no such relation, naming
+    /// the table and what it does have — see [`field`](MetaModel::field).
     pub fn relation(&mut self, name: &str) -> &mut MetaRelation {
-        self.relations.iter_mut().find(|r| r.name == name).unwrap_or_else(|| panic!("no relation '{name}'"))
+        let (table, known) = (self.table.clone(), self.relation_names());
+        self.relations.iter_mut().find(|r| r.name == name).unwrap_or_else(|| {
+            panic!("{table}: no relation '{name}'. It has: {known}")
+        })
     }
 
     /// Label rows by one column, and make relations *pointing at this model* sortable by it.

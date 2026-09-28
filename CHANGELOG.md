@@ -13,6 +13,12 @@ is easy to miss in a diff.
 
 ### Fixed
 
+- **`MetaModel::field` / `relation` now say which model, and what it does have.** The panic was
+  `no field 'purged_at'` — true, but not which of the registered models, and not what to write
+  instead. It is now `blob_version: no column 'purged_at'. It has: id, handle_id, seq, …`. The usual
+  way to reach it is a column renamed or removed out from under an app's setup code, which is exactly
+  how it was hit.
+
 - **A variant kept its own source alive forever.** `purge` treated a `blob_variant` row as a
   reference to *both* ends, so any image that had ever been thumbnailed became permanently
   uncollectable. The edge only runs one way — a derived blob is live while its source is, never the
