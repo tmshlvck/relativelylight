@@ -329,12 +329,27 @@ fn a_hostile_filename_or_url_cannot_break_out_of_the_viewer() {
 
 #[test]
 fn the_viewer_never_inlines_stored_bytes_only_urls() {
-    // BLOBSTORE.md §10: a hostile MIME can steer *which tag* is rendered and nothing more.
-    for mime in ["image/svg+xml", "text/html", "image/png"] {
+    // BLOBSTORE.md §10: a hostile MIME can steer *which tag* is rendered and nothing more — and
+    // whatever branch it steers into, the content is reached by URL and never written into the page.
+    for mime in ["image/svg+xml", "text/html", "image/png", "application/pdf", "application/zip"] {
         let info = fake_version("f", mime);
         let html = Viewer::new(&info, "/download/1").render();
         assert!(html.contains("/download/1"), "{mime} must reference, not embed: {html}");
     }
+}
+
+#[test]
+fn the_viewer_only_promises_a_preview_the_download_route_will_actually_serve_inline() {
+    // `to_inline_response` serves an allowlist inline and downgrades the rest to an attachment, so
+    // an <img> pointing at an SVG would be a guaranteed broken-image icon. The two agree.
+    let svg = fake_version("logo.svg", "image/svg+xml");
+    let html = Viewer::new(&svg, "/v/1").render();
+    assert!(!html.contains("<img"), "an SVG gets a link, not an image tag: {html}");
+    assert!(!html.contains("Open"), "{html}");
+
+    let png = fake_version("photo.png", "image/png");
+    let ok = Viewer::new(&png, "/v/1").render();
+    assert!(ok.contains("<img"), "control: an allowlisted type does preview: {ok}");
 }
 
 #[test]
@@ -357,4 +372,214 @@ fn a_hostile_action_or_label_cannot_break_out_of_the_upload_form() {
         .accept("\"><script>alert(3)</script>")
         .render();
     assert!(!html.contains("<script>"), "{html}");
+}
+
+// ===================== Viewer controls =====================
+
+#[test]
+fn a_download_button_appears_only_when_the_app_supplies_a_download_url() {
+    // Without one, a button would have to point at the inline URL and would look like a broken
+    // download — this crate owns no routes, so it cannot invent the second one.
+    let info = fake_version("report.pdf", "application/pdf");
+    let plain = Viewer::new(&info, "/v/1").render();
+    assert!(!plain.contains("Download"), "no URL, no button:\n{plain}");
+
+    let with = Viewer::new(&info, "/v/1").download_url("/v/1?download=1").render();
+    assert!(with.contains("Download"), "{with}");
+    assert!(with.contains("href=\"/v/1?download=1\" download"), "{with}");
+}
+
+#[test]
+fn open_is_a_plain_link_so_the_browsers_own_modifiers_keep_working() {
+    // Shift-click for a new window and ctrl/cmd-click for a background tab are free on an <a>, and
+    // this crate ships no JavaScript to intercept them. Turning it into a button would lose that.
+    let info = fake_version("photo.png", "image/png");
+    let html = Viewer::new(&info, "/v/1").render();
+    assert!(html.contains("<a class=\"btn btn-sm btn-outline-secondary\" href=\"/v/1\""), "{html}");
+    assert!(html.contains("target=\"_blank\""), "{html}");
+    assert!(html.contains("rel=\"noopener\""), "{html}");
+}
+
+#[test]
+fn a_thumbnail_replaces_the_full_image_and_links_to_it() {
+    let info = fake_version("photo.png", "image/png");
+    let html = Viewer::new(&info, "/v/1").thumbnail_url("/v/1/thumb").render();
+    assert!(html.contains("src=\"/v/1/thumb\""), "the thumbnail is what loads: {html}");
+    assert!(!html.contains("src=\"/v/1\""), "not the full image: {html}");
+    assert!(html.contains("href=\"/v/1\""), "but it still links through: {html}");
+}
+
+#[test]
+fn a_file_with_no_preview_still_offers_its_controls() {
+    let info = fake_version("archive.zip", "application/zip");
+    let html = Viewer::new(&info, "/v/1").download_url("/v/1?download=1").render();
+    assert!(!html.contains("<img"), "nothing to preview: {html}");
+    assert!(!html.contains("Open"), "…and nothing a browser would display inline: {html}");
+    assert!(html.contains("Download"), "but it can still be fetched: {html}");
+    assert!(html.contains("archive.zip"), "{html}");
+}
+
+#[test]
+fn an_erased_version_offers_no_controls_at_all() {
+    let mut info = fake_version("gone.pdf", "application/pdf");
+    info.blob = None;
+    info.content = None;
+    info.purged_at = Some(1_700_000_000);
+    let html = Viewer::new(&info, "/v/1").download_url("/v/1?download=1").render();
+    assert!(!html.contains("Download"), "there is nothing to download: {html}");
+    assert!(!html.contains("Open"), "{html}");
+    assert!(html.contains("erased"), "{html}");
+}
+
+#[test]
+fn a_hostile_thumbnail_or_download_url_cannot_break_out() {
+    let info = fake_version("x.png", "image/png");
+    let html = Viewer::new(&info, "/v/1")
+        .thumbnail_url("\"><script>alert(1)</script>")
+        .download_url("\"><script>alert(2)</script>")
+        .render();
+    assert!(!html.contains("<script>"), "{html}");
+}
+
+// ===================== Browser =====================
+
+mod browser {
+    use super::*;
+    use crate::authz::{Decision, Open};
+    use crate::blob::ui::{BrowseState, Browser};
+
+    fn state(query: &str) -> BrowseState {
+        BrowseState::from_uri(&format!("/files?{query}").parse::<http::Uri>().unwrap())
+    }
+
+    #[tokio::test]
+    async fn documents_are_listed_with_their_current_name_and_version_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path()).await;
+        let h = store
+            .create(&b"v1"[..], PutMeta::new("contract.pdf").by("alice"), WriteContext::none())
+            .await
+            .unwrap();
+        store
+            .put_version(h, &b"v2"[..], PutMeta::new("contract-final.pdf").by("bob"), WriteContext::none())
+            .await
+            .unwrap();
+        store
+            .create(&b"x"[..], PutMeta::new("other.txt"), WriteContext::none())
+            .await
+            .unwrap();
+
+        let html = Browser::new(&store, Open)
+            .render_for(&HeaderMap::new(), &state(""))
+            .await
+            .expect("render");
+
+        assert!(html.contains("contract-final.pdf"), "the *current* name, not the first: {html}");
+        assert!(!html.contains(">contract.pdf<"), "the superseded name is not the headline: {html}");
+        assert!(html.contains("other.txt"), "{html}");
+        assert!(html.contains("bob"), "…and who last changed it: {html}");
+    }
+
+    #[tokio::test]
+    async fn search_matches_a_name_the_document_used_to_have() {
+        // What someone hunting for a file actually remembers is often the old name.
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path()).await;
+        let h = store
+            .create(&b"v1"[..], PutMeta::new("invoice-draft.pdf"), WriteContext::none())
+            .await
+            .unwrap();
+        store
+            .amend(h, PutMeta::new("invoice-final.pdf"), WriteContext::none())
+            .await
+            .unwrap();
+        store.create(&b"z"[..], PutMeta::new("unrelated.txt"), WriteContext::none()).await.unwrap();
+
+        let b = Browser::new(&store, Open);
+        let hit = b.render_for(&HeaderMap::new(), &state("q=draft")).await.unwrap();
+        assert!(hit.contains("invoice-final.pdf"), "found by its old name: {hit}");
+        assert!(!hit.contains("unrelated.txt"), "{hit}");
+
+        let miss = b.render_for(&HeaderMap::new(), &state("q=nothingmatches")).await.unwrap();
+        assert!(miss.contains("No documents match"), "{miss}");
+    }
+
+    #[tokio::test]
+    async fn opening_a_document_shows_its_chain_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path()).await;
+        let h = store
+            .create(&b"one"[..], PutMeta::new("a.txt").by("alice"), WriteContext::none())
+            .await
+            .unwrap();
+        store
+            .put_version(h, &b"two"[..], PutMeta::new("a.txt").by("bob"), WriteContext::none())
+            .await
+            .unwrap();
+
+        let html = Browser::new(&store, Open)
+            .view_url("/files/{handle}/v/{version}")
+            .render_for(&HeaderMap::new(), &state(&format!("open={h}")))
+            .await
+            .unwrap();
+
+        let v2 = html.find(">2<").expect("version 2 listed");
+        let v1 = html.find(">1<").expect("version 1 listed");
+        assert!(v2 < v1, "newest first — the current version is what a reader wants: {html}");
+        assert!(html.contains(&format!("/files/{h}/v/")), "links through the app's route: {html}");
+        assert!(html.contains("all documents"), "and back: {html}");
+    }
+
+    #[tokio::test]
+    async fn the_browser_is_a_real_enforcement_point() {
+        struct Denies;
+        #[async_trait::async_trait]
+        impl crate::authz::Authz for Denies {
+            async fn authorize(
+                &self,
+                _: crate::authz::Operation,
+                _: &HeaderMap,
+            ) -> Decision {
+                Decision::Denied
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path()).await;
+        store.create(&b"secret"[..], PutMeta::new("s.txt"), WriteContext::none()).await.unwrap();
+
+        // Unlike `Viewer`, this lists every document in the store, so rendering *is* the read.
+        let denied = Browser::new(&store, Denies).render_for(&HeaderMap::new(), &state("")).await;
+        assert_eq!(denied.err(), Some(Decision::Denied));
+        assert!(Browser::new(&store, Open)
+            .render_for(&HeaderMap::new(), &state(""))
+            .await
+            .is_ok(), "control: an allowing gate renders");
+    }
+
+    #[tokio::test]
+    async fn a_hostile_filename_cannot_break_out_of_the_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path()).await;
+        store
+            .create(
+                &b"x"[..],
+                PutMeta::new("<script>alert(1)</script>.txt").by("<script>alert(2)</script>"),
+                WriteContext::none(),
+            )
+            .await
+            .unwrap();
+
+        let b = Browser::new(&store, Open);
+        let list = b.render_for(&HeaderMap::new(), &state("q=script")).await.unwrap();
+        assert!(!list.contains("<script>"), "listing: {list}");
+        assert!(list.contains("&lt;script&gt;"), "listing should escape: {list}");
+    }
+
+    #[test]
+    fn the_search_term_survives_paging_and_drilling_in() {
+        let s = state("q=annual+report&page=3");
+        assert_eq!(s.search.as_deref(), Some("annual report"));
+        assert_eq!(s.page, 3);
+        assert!(s.open.is_none());
+    }
 }

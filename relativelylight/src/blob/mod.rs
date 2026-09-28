@@ -67,6 +67,12 @@ pub mod entity;
 #[cfg(feature = "blob-ui")]
 pub mod ui;
 
+#[cfg(feature = "blob-thumbnail")]
+mod thumb;
+
+#[cfg(feature = "blob-thumbnail")]
+pub use thumb::Thumbnailer;
+
 #[cfg(test)]
 mod tests;
 
@@ -75,7 +81,8 @@ pub use error::BlobError;
 pub use fs::FsBackend;
 pub use id::{BlobId, HandleId, VersionId};
 pub use store::{
-    BackupReport, BlobHandle, BlobStore, ContentInfo, FsckOptions, FsckReport, HandleReference, Ingest,
+    BackupReport, BlobHandle, BlobStore, BrowsePage, BrowseQuery, ContentInfo, DocumentSummary,
+    FsckOptions, FsckReport, HandleReference, Ingest,
     PurgeReport, PutMeta, VerifyOptions, VerifyReport, VersionInfo, WriteContext,
     MAX_METADATA_BYTES,
 };

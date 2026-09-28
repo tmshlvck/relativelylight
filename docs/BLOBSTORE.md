@@ -1,9 +1,9 @@
 # `relativelylight::blob` — content-addressed file storage — DRAFT SPEC
 
-Status: **implemented** except §6. `blob` (storage, the handle + version chain) and `blob-ui`
-(viewer, streaming upload, admin actions, response builder) both ship, pinned by `blob/tests.rs` and
-`blob/ui/tests.rs`; §6's thumbnailer is still specification. Where building it changed a decision,
-the section says so rather than being quietly rewritten.
+Status: **implemented.** `blob` (storage, the handle + version chain), `blob-ui` (viewer, streaming
+upload, document browser, maintenance, response builder) and `blob-thumbnail` all ship, pinned by
+`blob/tests.rs` and `blob/ui/tests.rs`. Where building it changed a decision, the section says so
+rather than being quietly rewritten.
 
 **Example: `examples/blob`** — `cargo run -p blob-example`. Tickets with attachments: streaming
 uploads, the version chain, erasure, the maintenance page, and §9's ownership link table.
@@ -495,9 +495,13 @@ the same way.
 Nothing here is scheduled by this crate — same rule as `auth::prune`: it returns a report, **the app
 schedules it**.
 
-**`purge`** collects content by *reachability*, which the crate can now compute itself: a `blob` row is
-dead when no `blob_version.blob_id` and no `blob_variant.derived_blob_id` points at it. Variant rows
-are reference edges like any other, and a variant whose source dies goes with it.
+**`purge`** collects content by *reachability*, which the crate computes itself — and the **direction
+matters**, which this section got wrong first time round. A `blob_version` pointing at content is a
+real reference: that content is a document. A `blob_variant` row is **not** a reference to its
+*source* — a thumbnail is a rendering of that content, so it cannot be the reason the content
+survives, or an image would become permanently uncollectable the moment anything rendered it. The
+edge runs one way only: a derived blob is live while its source is. So reachability seeds from the
+versions and follows `source → derived` to a fixed point.
 
 But reachability has a precondition worth stating plainly: **if handles are never deleted, no content
 ever becomes unreachable and `purge` does nothing.** Content is freed by exactly three routes, and an
@@ -630,12 +634,34 @@ impl<'a> Viewer<'a> {
 
 Dispatches on the MIME type to pick a presentation, **always by reference, never by value**:
 
-| MIME | Rendered as |
+```rust
+Viewer::new(&version, view_url)     // inline — the src of the <img>/<embed>, and what "Open" opens
+    .download_url(url)              // attachment disposition — the Download button
+    .thumbnail_url(url)             // optional: render the variant instead of the full image
+```
+
+**Three URLs, because the component owns no routes** (§2). In practice they are one handler:
+`?download=1` answers with `to_response` instead of `to_inline_response`, and the thumbnail route
+serves `BlobStore::variant(blob, "thumb")`.
+
+| Source | Rendered as |
 |---|---|
-| `image/*` | `<img src="{download_url}" alt="{esc filename}">` |
-| `application/pdf` | `<embed src="{download_url}" type="application/pdf">` with a download-link fallback |
-| erased (§4.8) | a disabled placeholder naming the filename and the date the content was destroyed |
-| everything else | a plain `<a href="{download_url}">{filename} ({size})</a>` |
+| a thumbnail was supplied | `<img src="{thumbnail_url}">` wrapped in a link to the full view |
+| `image/png`, `jpeg`, `gif`, `webp` | `<img src="{view_url}">` |
+| `application/pdf` | `<embed src="{view_url}">` |
+| erased (§4.8) | a placeholder naming the file and the date its content was destroyed, and **no controls** |
+| everything else | no preview — the filename, the size, and the controls |
+
+Under it, always: the **filename as a link**, an **Open** control for anything the browser will
+actually display, and a **Download** button when a download URL was given. Open is a plain
+`<a target="_blank">`, so the browser's own modifiers keep working — shift for a new window,
+ctrl/cmd for a background tab. This crate ships no JavaScript, so that behaviour is free, and turning
+the link into a button would be the only way to lose it.
+
+**The preview list matches `to_inline_response`'s allowlist on purpose.** An `<img>` pointing at an
+SVG would be a guaranteed broken-image icon, because the response layer downgrades a non-allowlisted
+type to an attachment. The viewer declines to promise what the response will refuse; the security
+decision stays in one place, at the response.
 
 No case ever writes blob content into the page — every branch is a URL the browser fetches separately,
 with the `Content-Type` the download route sets (§5.4), not a MIME string this component trusted. Even
@@ -686,19 +712,37 @@ crud.register(v, gate.clone());
 Marking every version column read-only is not cosmetic: an editable form over `blob_version` makes the
 immutable chain editable, and the audit value evaporates.
 
-What the generic console *can't* express is `verify` / `fsck` / `purge` / `backup_to` — not row
-operations, and not `MetaModel`-shaped. Those get one small companion fragment:
+What the generic console **can't** express is a document list. The current filename lives on
+`blob_version`, and `head_version_id` carries no declared foreign key (§3.2's cycle), so `crud` has
+nothing to join on. That is what `Browser` is for:
 
 ```rust
-// `B` is usually `FsBackend`; `BlobStore<Box<dyn BlobBackend>>` works too (§4.1), which is how an
-// app that picks its backend from configuration keeps one concrete type in its handlers.
-pub struct Actions<'a, B: BlobBackend> { store: &'a BlobStore<B>, gate: Arc<dyn Authz> }
+Browser::new(store, gate)
+    .view_url("/files/{handle}/v/{version}")   // the app's route; the component invents none
+    .render_for(&headers, &BrowseState::from_uri(&uri)).await?
+```
+
+A searchable list of documents — current name, type, size, version count, who last changed it —
+drilling into one document's chain, newest first. **Gated**, unlike `Viewer`: it lists every document
+in the store regardless of owner, so rendering it *is* a read (§5.1). Search matches **any** version's
+filename, not just the current one, because what someone hunting for a file remembers is often the
+name it used to have.
+
+Maintenance is two controls, not three, and `Actions` renders them for placing under the browser:
+
+```rust
+pub struct Actions<'a, B: BlobBackend> { /* store + gate */ }
 impl<'a, B: BlobBackend> Actions<'a, B> {
-    pub fn new(store: &'a BlobStore<B>, gate: impl Authz + 'static) -> Self;
-    pub async fn render_for(&self, headers: &HeaderMap) -> Result<String, Error>;   // 401/403 from the gate
-    pub async fn submit(&self, headers: &HeaderMap, ip: IpAddr, body: &[u8]) -> Result<Outcome, Error>;
+    pub async fn render_for(&self, headers: &HeaderMap) -> Result<String, Decision>;
+    pub async fn submit(&self, headers: &HeaderMap, op: &str, deep: bool) -> Result<ActionOutcome, Decision>;
 }
 ```
+
+**Check** (with a `deep` checkbox) and **Purge**. `fsck` and `verify` are one control because they
+answer the same question — *is the stored content still what the index says* — at two depths, and
+differ only in cost: one stats each blob, the other re-hashes every byte. That is a checkbox, the way
+`fsck -c` has always been. `purge` stays separate: *is it still wanted* is a different question, and
+it is the only one that deletes.
 
 An app mounts it at its own route and adds it to the sidebar with
 `Admin::link("Blob store", "/admin/blobs/actions")` — the existing extension point for exactly this
@@ -733,8 +777,23 @@ impl Thumbnailer {
 }
 ```
 
-v1 covers `image/*` via the `image` crate (resize, re-encode to WebP with a JPEG fallback) —
-self-contained, no external process. **PDF first-page thumbnails are explicitly not v1**: every option
+Covers `image/*` via the `image` crate, self-contained with no external process.
+
+**JPEG for opaque sources, PNG for those with alpha — not WebP**, which this section originally
+named. `image`'s WebP encoder is **lossless only** (pure Rust, since 0.24.8), and a lossless WebP of
+a photograph is routinely *larger* than the JPEG it was made from, which is the opposite of what a
+thumbnail is for. Alpha cannot survive JPEG at all, so transparency picks PNG. Both are universally
+supported, which was the other half of the original reasoning.
+
+**Never upscales:** a 40 px image asked for a 150 px `thumb` stays 40 px rather than becoming a
+blurry, larger file.
+
+**Decompression bombs are refused before anything is allocated.** A few kilobytes of PNG can declare
+50 000 × 50 000, which is 10 GB of RGBA once decoded — so the guard is a **pixel** budget
+(`max_pixels`, default 64 MP) read from the header first, not a byte cap, which cannot see that
+coming. A source that is not an image, or that this build cannot decode, yields **no variants rather
+than an error**: a page should not fail to render because one attachment isn't the picture it claimed
+to be. **PDF first-page thumbnails are explicitly not v1**: every option
 (`pdfium`, `mupdf`, shelling out to `pdftoppm`) is either a heavy binding or a process dependency, and
 neither belongs in a default feature. `blob-thumbnail-pdf` is reserved as a name.
 
@@ -911,13 +970,17 @@ is CMIS's version series and OCFL's inventory; §13 has the reading.
 - **Erasure is a tombstone**, not a row deletion (§4.8).
 - **Reads fire audit events; variant fetches do not; denied reads are the app's** (§4.7).
 - **Downloads are routed by the owning document and are never a library-owned route** (§5.4, §9.2).
-- **Thumbnails are blobs**, hanging off content rather than versions (§4.5).
+- **Thumbnails are blobs**, hanging off content rather than versions (§4.5), encoded JPEG/PNG rather
+  than WebP (§6), and guarded by a pixel budget rather than a byte one.
+- **A variant does not keep its source alive** (§4.6) — the reachability edge runs source → derived
+  and not back.
 - **`BlobBackend` stays dyn-compatible**, which is why `write` takes a boxed reader (§4.1). Runtime
   backend selection is worth one allocation per upload.
 - **Bytes are written before any row, and rows land in one transaction** (§4.3) — the asymmetry
   `fsck` depends on.
 - **Filesystem backend ships in v1; object storage does not.** The trait is the deliverable.
-- **PDF thumbnails are out of v1.** Every implementation option is a heavy dependency.
+- **PDF thumbnails are out.** Every implementation option is a heavy binding or a process
+  dependency; the `<embed>` fallback covers the case.
 
 ## 12. Open questions
 

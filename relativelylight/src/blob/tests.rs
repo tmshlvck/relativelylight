@@ -801,3 +801,228 @@ mod uuid_keys {
         assert_eq!(got.total, 1, "a UUID primary key must select its row");
     }
 }
+
+#[cfg(feature = "blob-thumbnail")]
+mod thumbnails {
+    use super::*;
+    use crate::blob::Thumbnailer;
+
+    /// A real PNG of a given size, so the tests exercise the actual decoder rather than a fixture
+    /// that only looks like an image.
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    /// A PNG header claiming `w` x `h`, with no image data. Enough for a dimension probe, which is
+    /// exactly what the guard reads — and what a decompression bomb relies on being cheap.
+    fn declared_png(w: u32, h: u32) -> Vec<u8> {
+        fn chunk(tag: &[u8], data: &[u8]) -> Vec<u8> {
+            let mut c = tag.to_vec();
+            c.extend_from_slice(data);
+            let mut out = (data.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(&c);
+            out.extend_from_slice(&crc32(&c).to_be_bytes());
+            out
+        }
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = 0xffff_ffffu32;
+            for b in data {
+                crc ^= u32::from(*b);
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
+                }
+            }
+            !crc
+        }
+        let mut ihdr = w.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8-bit RGB
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        out.extend_from_slice(&chunk(b"IHDR", &ihdr));
+        out.extend_from_slice(&chunk(b"IEND", b""));
+        out
+    }
+
+    fn dimensions(bytes: &[u8]) -> (u32, u32) {
+        image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .unwrap()
+            .into_dimensions()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn variants_are_generated_once_and_reused_thereafter() {
+        let fx = Fx::new().await;
+        let h = fx.store
+            .create(&png(800, 400)[..], PutMeta::new("wide.png"), WriteContext::none())
+            .await
+            .unwrap();
+        let source = fx.store.head(h).await.unwrap().blob.unwrap();
+        let thumbs = Thumbnailer::new().targets([("thumb", 150), ("mobile", 480)]);
+
+        let first = thumbs.ensure(&fx.store, &source, WriteContext::none()).await.expect("ensure");
+        assert_eq!(first.len(), 2);
+        let after_first = fx.content_rows().await;
+
+        let again = thumbs.ensure(&fx.store, &source, WriteContext::none()).await.expect("ensure");
+        assert_eq!(again, first, "the same variants come back");
+        assert_eq!(fx.content_rows().await, after_first, "and nothing new was stored");
+    }
+
+    #[tokio::test]
+    async fn a_variant_fits_its_longest_edge_and_keeps_the_aspect_ratio() {
+        let fx = Fx::new().await;
+        let h = fx.store
+            .create(&png(800, 400)[..], PutMeta::new("wide.png"), WriteContext::none())
+            .await
+            .unwrap();
+        let source = fx.store.head(h).await.unwrap().blob.unwrap();
+
+        let made = Thumbnailer::new()
+            .targets([("thumb", 150)])
+            .ensure(&fx.store, &source, WriteContext::none())
+            .await
+            .unwrap();
+        let bytes = fx.store.read_content(&made[0].1).await.unwrap();
+        let (w, hgt) = dimensions(&bytes);
+        assert_eq!((w, hgt), (150, 75), "2:1 in, 2:1 out, longest edge 150");
+    }
+
+    #[tokio::test]
+    async fn a_small_image_is_not_blown_up() {
+        // Upscaling a 40px image to 150px produces a blurry file that is *bigger* than the original
+        // — the opposite of what a thumbnail is for.
+        let fx = Fx::new().await;
+        let h = fx.store
+            .create(&png(40, 30)[..], PutMeta::new("tiny.png"), WriteContext::none())
+            .await
+            .unwrap();
+        let source = fx.store.head(h).await.unwrap().blob.unwrap();
+
+        let made = Thumbnailer::new()
+            .targets([("thumb", 150)])
+            .ensure(&fx.store, &source, WriteContext::none())
+            .await
+            .unwrap();
+        let bytes = fx.store.read_content(&made[0].1).await.unwrap();
+        assert_eq!(dimensions(&bytes), (40, 30));
+    }
+
+    #[tokio::test]
+    async fn a_non_image_yields_no_variants_rather_than_an_error() {
+        // A page that renders a document list must not fail because one attachment is a text file.
+        let fx = Fx::new().await;
+        let h = fx.put("notes.txt", b"just some prose, definitely not a picture").await;
+        let source = fx.store.head(h).await.unwrap().blob.unwrap();
+
+        let made = Thumbnailer::new().ensure(&fx.store, &source, WriteContext::none()).await;
+        assert_eq!(made.expect("must not error"), vec![]);
+    }
+
+    #[tokio::test]
+    async fn content_that_claims_to_be_an_image_but_isnt_yields_no_variants() {
+        let fx = Fx::new().await;
+        // PNG magic bytes, then nonsense — sniffed as an image, undecodable in fact.
+        let mut fake = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        fake.extend(b"not actually a PNG body at all");
+        let h = fx.store
+            .create(&fake[..], PutMeta::new("liar.png"), WriteContext::none())
+            .await
+            .unwrap();
+        let source = fx.store.head(h).await.unwrap().blob.unwrap();
+
+        let made = Thumbnailer::new().ensure(&fx.store, &source, WriteContext::none()).await;
+        assert_eq!(made.expect("must not error"), vec![]);
+    }
+
+    #[tokio::test]
+    async fn a_decompression_bomb_is_refused_before_it_is_allocated() {
+        // The attack this guard exists for: a tiny file declaring enormous dimensions. 20000x20000
+        // is 1.6 GB of RGBA once decoded, from a PNG of a few kilobytes.
+        let fx = Fx::new().await;
+        // Hand-built: an IHDR *declaring* 20000x20000 (1.6 GB of RGBA) with no pixel data behind
+        // it. Generating one would defeat the point — the whole attack is that the file is tiny.
+        let bomb = declared_png(20_000, 20_000);
+        assert!(bomb.len() < 100, "control: the *file* is tiny — that's the attack");
+
+        let h = fx.store
+            .create(&bomb[..], PutMeta::new("bomb.png"), WriteContext::none())
+            .await
+            .unwrap();
+        let source = fx.store.head(h).await.unwrap().blob.unwrap();
+
+        let made = Thumbnailer::new()
+            .max_pixels(1_000_000)
+            .ensure(&fx.store, &source, WriteContext::none())
+            .await;
+        assert_eq!(made.expect("must refuse, not error"), vec![], "no variant, no allocation");
+
+        // Control: the same guard lets an ordinary image through.
+        let ok = fx.store
+            .create(&png(200, 100)[..], PutMeta::new("fine.png"), WriteContext::none())
+            .await
+            .unwrap();
+        let ok_source = fx.store.head(ok).await.unwrap().blob.unwrap();
+        assert_eq!(
+            Thumbnailer::new()
+                .max_pixels(1_000_000)
+                .targets([("thumb", 50)])
+                .ensure(&fx.store, &ok_source, WriteContext::none())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn two_documents_with_identical_bytes_share_one_thumbnail() {
+        // Variants hang off content, not off a version (§4.5).
+        let fx = Fx::new().await;
+        let bytes = png(300, 300);
+        let a = fx.store.create(&bytes[..], PutMeta::new("a.png"), WriteContext::none()).await.unwrap();
+        let b = fx.store.create(&bytes[..], PutMeta::new("b.png"), WriteContext::none()).await.unwrap();
+        let source = fx.store.head(a).await.unwrap().blob.unwrap();
+
+        let made = Thumbnailer::new()
+            .targets([("thumb", 64)])
+            .ensure(&fx.store, &source, WriteContext::none())
+            .await
+            .unwrap();
+
+        let b_source = fx.store.head(b).await.unwrap().blob.unwrap();
+        assert_eq!(fx.store.variant(&b_source, "thumb").await.unwrap(), Some(made[0].1.clone()));
+    }
+
+    #[tokio::test]
+    async fn a_thumbnail_is_collected_with_its_source() {
+        let fx = Fx::new().await;
+        let h = fx.store
+            .create(&png(300, 300)[..], PutMeta::new("pic.png"), WriteContext::none())
+            .await
+            .unwrap();
+        let source = fx.store.head(h).await.unwrap().blob.unwrap();
+        let made = Thumbnailer::new()
+            .targets([("thumb", 64)])
+            .ensure(&fx.store, &source, WriteContext::none())
+            .await
+            .unwrap();
+        let thumb = made[0].1.clone();
+
+        // Control: while the document lives, the variant row keeps the thumbnail reachable.
+        assert!(!fx.store.purge(None).await.unwrap().content_deleted.contains(&thumb));
+
+        fx.store.delete_handle(h, WriteContext::none()).await.unwrap();
+        let purged = fx.store.purge(None).await.unwrap();
+        assert!(purged.content_deleted.contains(&source), "the source goes");
+        assert!(purged.content_deleted.contains(&thumb), "and the rendering goes with it");
+    }
+}

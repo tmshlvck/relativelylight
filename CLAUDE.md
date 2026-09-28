@@ -34,7 +34,8 @@ sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 | `csrf` | | the **double-submit CSRF token** (`csrf` module) — always on for `auth`'s forms, opt-in for the API; implied by `auth` |
 | `sso` | | **OIDC single sign-on** (Google / Okta / corporate) + group mapping (implies `auth`) |
 | `blob` | | content-addressed **file storage** + a stable handle and version chain (`blob` module); needs neither `crud` nor `auth` |
-| `blob-ui` | | the blob components: streaming upload, viewer, admin actions, response builder; implies `blob` + `ui` |
+| `blob-ui` | | the blob components: streaming upload, viewer, document browser, maintenance, response builder; implies `blob` + `ui` |
+| `blob-thumbnail` | | generated thumbnails for image blobs (headless — needs no `ui`) |
 
 Enable only what you use — an unused feature pulls no dependencies. `auth` works **without** `crud`
 (gate any axum app on its own). The always-on `authz` module (the gate trait + `Open`) is compiled in
@@ -290,8 +291,9 @@ cargo run -p auth-example         # :3000  auth up close: login, /secret, /profi
                                   #         and /admin — the accounts panel users are provisioned from (admin/password)
 cargo run -p audit-example        # :3000  who called + what they changed: the request log (two ways) and the
                                   #         write observer, one line per committed write, both over one RealIp
-cargo run -p blob-example         # :3000  file storage with a version chain: streaming uploads, the viewer,
-                                  #         erasure, blob maintenance, and §9's ownership link table (admin/password)
+cargo run -p blob-example         # :3000  file storage with a version chain: streaming uploads, thumbnails,
+                                  #         the viewer, erasure, the /files browser, and §9's ownership
+                                  #         link table (admin/password)
 ```
 
 **Run one at a time — they all bind port 3000** (fresh seeded in-memory SQLite each start). Only

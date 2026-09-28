@@ -13,6 +13,12 @@ is easy to miss in a diff.
 
 ### Fixed
 
+- **A variant kept its own source alive forever.** `purge` treated a `blob_variant` row as a
+  reference to *both* ends, so any image that had ever been thumbnailed became permanently
+  uncollectable. The edge only runs one way — a derived blob is live while its source is, never the
+  reverse — so reachability now seeds from the versions and follows `source → derived` to a fixed
+  point. Found by a test asserting a thumbnail is collected along with the document it belongs to.
+
 - **A `Uuid` column could not be filtered or selected by key.** `crud`'s `str_to_db` bound a UUID as
   a *string*, which compares against a `Uuid` column as a different type and matches nothing — so
   `filter[relation]=<uuid>` returned an empty listing and a `pk_in` selection (what "delete selected"
@@ -59,7 +65,10 @@ is easy to miss in a diff.
   link table whose `owner_user_id` is a real foreign key onto `auth_user` with `ON DELETE RESTRICT`,
   and downloads routed by ticket and attachment rather than by handle.
 
-  Not yet built: `blob-thumbnail`.
+  **`blob-thumbnail`** generates derived renderings — JPEG for opaque sources, PNG where there's
+  alpha (not WebP: `image`'s encoder is lossless-only, and a lossless WebP of a photo is routinely
+  larger than the JPEG it came from). Never upscales, and refuses decompression bombs on a *pixel*
+  budget read from the header rather than a byte cap, which cannot see them coming.
 
 - **`observe::WriteEvent` gains `version: Option<i64>`** — which version row an event concerns, for
   an entity that keeps a chain. `None` from `crud` and `auth`. Additive: the struct is

@@ -38,10 +38,8 @@ Both `observe` changes it needed have landed with the core: `WriteEvent::version
 to `WriteEvent::op`'s doc comment (the field was always `authz::Operation`, which has always carried
 `Read` and `List`; `blob` is the first emitter to fire `Read`).
 
-`blob` and `blob-ui` have both landed, with `examples/blob`. **Remaining:**
+`blob`, `blob-ui` and `blob-thumbnail` have all landed, with `examples/blob`. **Remaining:**
 
-- **`blob-thumbnail`** — `Thumbnailer` over the `image` crate, raster only (BLOBSTORE.md §6). PDF
-  first-page thumbnails stay out: every option is a heavy binding or a process dependency.
 - **CSRF on `crud::ui`'s CSV import.** `blob-ui` closed this for uploads by requiring the token
   *before* the file part, which a streaming parser can enforce and a buffered one cannot. The CSV
   import still takes a buffered `Bytes` body and still has the original gap; the same trick would

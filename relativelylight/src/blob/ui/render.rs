@@ -19,7 +19,7 @@ use std::sync::Arc;
 use http::HeaderMap;
 
 use crate::authz::{Authz, Decision, Operation};
-use crate::blob::{BlobBackend, BlobStore, FsckOptions, VersionInfo};
+use crate::blob::{BlobBackend, BlobStore, FsckOptions, VerifyOptions, VersionInfo};
 use crate::crud::ui::esc_str;
 
 /// Renders one version for a page — **always by reference, never by value**.
@@ -33,12 +33,47 @@ use crate::crud::ui::esc_str;
 pub struct Viewer<'a> {
     info: &'a VersionInfo,
     url: String,
+    download_url: Option<String>,
+    thumbnail_url: Option<String>,
     tz: Option<&'a crate::time::Tz>,
 }
 
 impl<'a> Viewer<'a> {
-    pub fn new(info: &'a VersionInfo, download_url: impl Into<String>) -> Self {
-        Self { info, url: download_url.into(), tz: None }
+    /// `view_url` is where the content is served **inline** — the `src` of the `<img>`/`<embed>`,
+    /// and what the "Open" link points at.
+    pub fn new(info: &'a VersionInfo, view_url: impl Into<String>) -> Self {
+        Self {
+            info,
+            url: view_url.into(),
+            download_url: None,
+            thumbnail_url: None,
+            tz: None,
+        }
+    }
+
+    /// Where the content is served as an **attachment**, for the download button.
+    ///
+    /// A second URL rather than a flag, because the two responses differ in a header this crate
+    /// does not get to set — the app owns its routes (§2). In practice it is the same handler with
+    /// `?download=1`, answering with [`to_response`](super::to_response) instead of
+    /// [`to_inline_response`](super::to_inline_response).
+    ///
+    /// Without it the download button is omitted rather than pointing somewhere that would render
+    /// inline and look like a broken download.
+    pub fn download_url(mut self, url: impl Into<String>) -> Self {
+        self.download_url = Some(url.into());
+        self
+    }
+
+    /// A generated variant to show in place of the full image — see
+    /// [`Thumbnailer`](crate::blob::Thumbnailer) and `BlobStore::variant`.
+    ///
+    /// When set, the thumbnail is what renders, wrapped in a link to the full view. A listing of
+    /// twenty documents then costs twenty thumbnails rather than twenty full-size images, which is
+    /// the entire reason variants exist.
+    pub fn thumbnail_url(mut self, url: impl Into<String>) -> Self {
+        self.thumbnail_url = Some(url.into());
+        self
     }
 
     /// Render the erasure date in the caller's zone (`docs/TIME.md`). Without this it is UTC —
@@ -55,7 +90,8 @@ impl<'a> Viewer<'a> {
 
         if self.info.is_erased() {
             // The §4.8 case: the record survives its content, and saying so is the point. A blank
-            // space here would read as "there was never anything", which is the opposite.
+            // space here would read as "there was never anything", which is the opposite. No
+            // controls either — there is nothing to open or download.
             let utc;
             let zone = match self.tz {
                 Some(z) => z,
@@ -79,18 +115,69 @@ impl<'a> Viewer<'a> {
         let mime = self.info.content.as_ref().map(|c| c.mime_sniffed.as_str()).unwrap_or("");
         let size = human_size(self.info.size_bytes());
 
-        if mime.starts_with("image/") {
-            format!("<img src=\"{url}\" alt=\"{name}\" class=\"img-fluid rounded border\">")
-        } else if mime == "application/pdf" {
-            format!(
-                "<div class=\"ratio ratio-4x3\"><embed src=\"{url}\" type=\"application/pdf\"></div>\
-                 <p class=\"mt-2 mb-0\"><a href=\"{url}\">{name}</a> <small class=\"text-body-secondary\">({size})</small></p>"
-            )
-        } else {
-            format!(
-                "<a href=\"{url}\">{name}</a> <small class=\"text-body-secondary\">({size})</small>"
-            )
+        // What the browser will actually *render* — which is not the same as what looks like an
+        // image. `to_inline_response` serves only an allowlist inline and downgrades everything else
+        // to an attachment, so an `<img>` pointing at an SVG is a guaranteed broken-image icon. The
+        // two sides agree on purpose: the security decision lives at the response, and the viewer
+        // declines to promise something the response will refuse.
+        let displayable = matches!(
+            mime,
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "application/pdf"
+        );
+
+        let preview = match (&self.thumbnail_url, mime) {
+            // A thumbnail always wins: it is smaller, and clicking through is the full view anyway.
+            (Some(t), _) => format!(
+                "<a href=\"{url}\" target=\"_blank\" rel=\"noopener\">\
+                 <img src=\"{}\" alt=\"{name}\" class=\"rounded border\" loading=\"lazy\"></a>",
+                esc_str(t)
+            ),
+            (None, m) if displayable && m != "application/pdf" => {
+                format!("<img src=\"{url}\" alt=\"{name}\" class=\"img-fluid rounded border\" loading=\"lazy\">")
+            }
+            (None, "application/pdf") => format!(
+                "<div class=\"ratio ratio-4x3\"><embed src=\"{url}\" type=\"application/pdf\"></div>"
+            ),
+            // Anything else has no preview — the filename and the controls below are the whole of it.
+            _ => String::new(),
+        };
+
+        format!(
+            "<div class=\"rl-blob-viewer\">{preview}{}</div>",
+            self.controls(&url, &name, &size, displayable)
+        )
+    }
+
+    /// The row under the preview: what it is, and what you can do with it.
+    ///
+    /// **Open** is a plain `<a>` with `target="_blank"`, which means the browser's own modifiers
+    /// keep working — shift for a new window, ctrl/cmd for a background tab. This crate ships no
+    /// JavaScript, so there is nothing to intercept them; that behaviour is free and must not be
+    /// taken away by turning the link into a button.
+    fn controls(&self, url: &str, name: &str, size: &str, displayable: bool) -> String {
+        // The filename is always a link, so content is reachable even with no preview and no
+        // download URL — a name with nothing behind it is a dead end, and this crate's whole
+        // discipline is that every branch here is a URL the browser fetches separately.
+        let mut out = format!(
+            "<div class=\"d-flex align-items-center gap-2 flex-wrap mt-2\">\
+             <span class=\"me-auto text-truncate\"><a href=\"{url}\">{name}</a> \
+             <small class=\"text-body-secondary\">({size})</small></span>"
+        );
+        if displayable {
+            out.push_str(&format!(
+                "<a class=\"btn btn-sm btn-outline-secondary\" href=\"{url}\" \
+                 target=\"_blank\" rel=\"noopener\">Open</a>"
+            ));
         }
+        if let Some(d) = &self.download_url {
+            // `download` is a hint; the route's Content-Disposition is what actually decides.
+            out.push_str(&format!(
+                "<a class=\"btn btn-sm btn-primary\" href=\"{}\" download>Download</a>",
+                esc_str(d)
+            ));
+        }
+        out.push_str("</div>");
+        out
     }
 }
 
@@ -232,50 +319,43 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
             .map(|t| format!("<input type=\"hidden\" name=\"_csrf\" value=\"{}\">", esc_str(t)))
             .unwrap_or_default();
 
-        let button = |op: &str, label: &str, style: &str, help: &str| {
-            format!(
-                "<form method=\"post\" class=\"mb-3\">{csrf}\
-                 <input type=\"hidden\" name=\"op\" value=\"{op}\">\
-                 <button class=\"btn {style}\" type=\"submit\">{label}</button>\
-                 <div class=\"form-text\">{help}</div></form>"
-            )
-        };
-
+        // Two controls, not three. `fsck` and `verify` answer the same question at two depths —
+        // "is the stored content still what the index says" — and differ only in cost: one stats
+        // each blob, the other re-hashes every byte. That is a checkbox, the way `fsck -c` has
+        // always been. `purge` stays separate because it is a different question (*is it still
+        // wanted*) and the only one that deletes.
         Ok(format!(
-            "<div class=\"rl-blob-actions\">{}{}{}</div>",
-            button(
-                "verify",
-                "Verify content",
-                "btn-outline-secondary",
-                "Re-hash stored content and report anything that no longer matches its digest. \
-                 Incremental: the least recently checked first."
-            ),
-            button(
-                "fsck",
-                "Check the index",
-                "btn-outline-secondary",
-                "Reconcile the index against storage. A missing blob is data loss; an orphan is \
-                 the normal residue of an interrupted upload and is only reported, never deleted."
-            ),
-            button(
-                "purge",
-                "Purge unreferenced content",
-                "btn-outline-danger",
-                "Delete stored content that no version and no variant points at any more. \
-                 Documents are never touched."
-            ),
+            "<div class=\"rl-blob-actions\">\
+             <form method=\"post\" class=\"mb-3\">{csrf}\
+             <input type=\"hidden\" name=\"op\" value=\"check\">\
+             <div class=\"d-flex align-items-center gap-2\">\
+             <button class=\"btn btn-outline-secondary\" type=\"submit\">Check storage</button>\
+             <div class=\"form-check\">\
+             <input class=\"form-check-input\" type=\"checkbox\" id=\"rl-blob-deep\" name=\"deep\" value=\"1\">\
+             <label class=\"form-check-label\" for=\"rl-blob-deep\">deep</label></div></div>\
+             <div class=\"form-text\">Reconcile the index against storage: content the index expects \
+             and cannot find, and stored bytes it has never heard of. <strong>Deep</strong> also \
+             re-hashes content to catch silent corruption &mdash; correspondingly slower, since it \
+             reads every byte.</div></form>\
+             <form method=\"post\" class=\"mb-3\">{csrf}\
+             <input type=\"hidden\" name=\"op\" value=\"purge\">\
+             <button class=\"btn btn-outline-danger\" type=\"submit\">Purge unreferenced content</button>\
+             <div class=\"form-text\">Delete stored content that no version and no variant points at \
+             any more. Documents are never touched.</div></form></div>"
         ))
     }
 
-    /// Run one button. `op` is the posted `op` field; the caller checks CSRF (or passes the token
-    /// through the [`csrf::enforce`](crate::csrf::enforce) layer) before calling.
+    /// Run one button. `op` is the posted `op` field; `deep` comes from the checkbox. The caller
+    /// checks CSRF (or passes the body through the [`csrf::enforce`](crate::csrf::enforce) layer)
+    /// before calling.
     pub async fn submit(
         &self,
         headers: &HeaderMap,
         op: &str,
+        deep: bool,
     ) -> Result<ActionOutcome, Decision> {
-        // Gate on the *write* operation: these change the store, and a caller who may look at the
-        // page is not thereby allowed to purge it.
+        // Gate on the *write* operation for anything destructive: a caller who may look at the page
+        // is not thereby allowed to purge it.
         let needed = if op == "purge" { Operation::Delete } else { Operation::Read };
         match self.gate.authorize(needed, headers).await {
             Decision::Allow => {}
@@ -283,46 +363,80 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
         }
 
         let outcome = match op {
-            "verify" => match self.store.verify(Default::default()).await {
-                Ok(r) => ActionOutcome {
-                    alarming: !r.corrupt.is_empty() || !r.missing.is_empty(),
-                    message: format!(
-                        "Verified {} blobs: {} corrupt, {} missing.",
-                        r.checked,
-                        r.corrupt.len(),
-                        r.missing.len()
-                    ),
-                },
-                Err(e) => ActionOutcome { message: format!("Verify failed: {e}"), alarming: true },
-            },
-            "fsck" => match self.store.fsck(FsckOptions::default(), None).await {
-                Ok(r) => ActionOutcome {
-                    alarming: !r.missing.is_empty() || !r.dangling_heads.is_empty(),
-                    message: format!(
-                        "{} missing, {} orphaned, {} too recent to judge, {} empty documents, \
-                         {} broken current-version pointers.",
-                        r.missing.len(),
-                        r.orphaned.len(),
-                        r.orphans_too_young,
-                        r.orphan_handles.len(),
-                        r.dangling_heads.len()
-                    ),
-                },
-                Err(e) => ActionOutcome { message: format!("Check failed: {e}"), alarming: true },
-            },
+            "check" => self.check(deep).await,
             "purge" => match self.store.purge(None).await {
-                Ok(r) => ActionOutcome {
-                    alarming: false,
-                    message: {
-                        let n = r.content_deleted.len();
-                        format!("{n} unreferenced blob{} deleted.", if n == 1 { "" } else { "s" })
-                    },
-                },
+                Ok(r) => {
+                    let n = r.content_deleted.len();
+                    ActionOutcome {
+                        alarming: false,
+                        message: format!(
+                            "{n} unreferenced blob{} deleted.",
+                            if n == 1 { "" } else { "s" }
+                        ),
+                    }
+                }
                 Err(e) => ActionOutcome { message: format!("Purge failed: {e}"), alarming: true },
             },
             other => ActionOutcome { message: format!("Unknown action {other:?}."), alarming: true },
         };
         Ok(outcome)
+    }
+
+    async fn check(&self, deep: bool) -> ActionOutcome {
+        let fsck = match self.store.fsck(FsckOptions::default(), None).await {
+            Ok(r) => r,
+            Err(e) => return ActionOutcome { message: format!("Check failed: {e}"), alarming: true },
+        };
+
+        let mut parts = Vec::new();
+        let mut alarming = !fsck.missing.is_empty() || !fsck.dangling_heads.is_empty();
+
+        // The alarming findings first, and only when there are any — a report that leads with four
+        // zeroes buries the one number that matters.
+        if !fsck.missing.is_empty() {
+            parts.push(format!("{} blob(s) MISSING from storage", fsck.missing.len()));
+        }
+        if !fsck.dangling_heads.is_empty() {
+            parts.push(format!(
+                "{} document(s) whose current version is missing",
+                fsck.dangling_heads.len()
+            ));
+        }
+        if !fsck.orphan_handles.is_empty() {
+            parts.push(format!("{} document(s) with no versions", fsck.orphan_handles.len()));
+        }
+        if !fsck.orphaned.is_empty() {
+            parts.push(format!(
+                "{} collectable orphan(s) in storage (harmless: the residue of interrupted uploads)",
+                fsck.orphaned.len()
+            ));
+        }
+        if fsck.orphans_too_young > 0 {
+            parts.push(format!("{} orphan(s) too recent to judge", fsck.orphans_too_young));
+        }
+
+        if deep {
+            match self.store.verify(VerifyOptions { oldest: None }).await {
+                Ok(v) => {
+                    if !v.corrupt.is_empty() {
+                        alarming = true;
+                        parts.push(format!("{} blob(s) CORRUPT", v.corrupt.len()));
+                    }
+                    parts.push(format!("{} blob(s) re-hashed", v.checked));
+                }
+                Err(e) => {
+                    alarming = true;
+                    parts.push(format!("deep check failed: {e}"));
+                }
+            }
+        }
+
+        let message = if parts.is_empty() {
+            "Everything checks out.".to_string()
+        } else {
+            parts.join("; ") + "."
+        };
+        ActionOutcome { message, alarming }
     }
 }
 

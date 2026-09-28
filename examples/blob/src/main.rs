@@ -41,8 +41,8 @@ use axum::Router;
 use model::{ticket, ticket_document};
 use relativelylight::auth::{self, Auth, Identity, UserReadGroupWrite};
 use relativelylight::authz::{Authz, Decision};
-use relativelylight::blob::ui::{human_size, Actions, Receiver, UploadForm, Viewer};
-use relativelylight::blob::{self, BlobStore, FsBackend, HandleId, WriteContext};
+use relativelylight::blob::ui::{human_size, Actions, BrowseState, Browser, Receiver, UploadForm, Viewer};
+use relativelylight::blob::{self, BlobStore, FsBackend, HandleId, Thumbnailer, WriteContext};
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::crud::ui::{esc_str, Admin, Outcome, ViewState, CSS};
 use relativelylight::middleware::RealIp;
@@ -211,7 +211,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ticket/{tid}/attachment/{did}/replace", post(replace))
         .route("/ticket/{tid}/attachment/{did}/erase", post(erase))
         .route("/admin", get(admin_get).post(admin_post))
-        .route("/admin/blobs", get(actions_get).post(actions_post))
+        .route("/files", get(browse_get).post(browse_post))
+        .route("/files/{handle}/v/{version}", get(browse_version))
+        .route("/ticket/{tid}/attachment/{did}/thumb", get(thumbnail))
         .with_state(app)
         // `auth.routes()` carries no state of its own, so merge it after ours is bound.
         .merge(auth.routes())
@@ -248,7 +250,7 @@ async fn index(State(app): State<App>, headers: HeaderMap) -> Response {
             t.id, t.id, esc_str(&t.subject)
         ));
     }
-    body.push_str("</div><p class=\"mt-3\"><a href=\"/admin\">Admin console</a> · <a href=\"/admin/blobs\">Blob maintenance</a></p>");
+    body.push_str("</div><p class=\"mt-3\"><a href=\"/files\">Browse all files</a> · <a href=\"/admin\">Admin console</a></p>");
     page("Tickets", Some(&who), body)
 }
 
@@ -290,10 +292,21 @@ async fn show_ticket(
             .map(|u| u.username)
             .unwrap_or_else(|| "?".into());
 
-        // The viewer renders a URL, never the bytes — and the URL names the *ticket and
-        // attachment*, not the handle (BLOBSTORE.md §9.2).
+        // The viewer renders URLs, never the bytes — and each names the *ticket and attachment*,
+        // not the handle (BLOBSTORE.md §9.2). Three of them, because the component owns no routes:
+        // one that serves inline, one that serves as an attachment, one for the generated thumbnail.
         let url = format!("/ticket/{}/attachment/{}", t.id, d.id);
-        let viewer = Viewer::new(&head, &url).tz(&tz).render();
+        let mut viewer = Viewer::new(&head, &url)
+            .download_url(format!("{url}?download=1"))
+            .tz(&tz);
+        // Offer the thumbnail only when one actually exists — `Thumbnailer::ensure` generated it on
+        // upload, and it only exists for images it could decode.
+        if let Some(blob) = &head.blob {
+            if app.store.variant(blob, "thumb").await.ok().flatten().is_some() {
+                viewer = viewer.thumbnail_url(format!("{url}/thumb"));
+            }
+        }
+        let viewer = viewer.render();
 
         let mut history = String::from("<ul class=\"list-unstyled small mb-2\">");
         for v in &chain {
@@ -380,6 +393,17 @@ async fn upload(
         Err(e) => return (e.status(), e.to_string()).into_response(),
     };
 
+    // Derived renderings, generated once and reused thereafter. Cheap to call on every upload:
+    // `ensure` asks the index before it decodes anything, and a non-image yields nothing.
+    if let Ok(head) = app.store.head(upload.handle).await {
+        if let Some(blob) = head.blob {
+            let _ = Thumbnailer::new()
+                .targets([("thumb", 240u32)])
+                .ensure(&*app.store, &blob, WriteContext::none())
+                .await;
+        }
+    }
+
     // Only now does the app's own row appear — with the owner it could not have stored in `blob`.
     let _ = ticket_document::ActiveModel {
         ticket_id: Set(id),
@@ -421,8 +445,54 @@ async fn replace(
         .receive(&headers, body, WriteContext::from(&headers, ip))
         .await
     {
-        Ok(_) => Redirect::to(&format!("/ticket/{tid}")).into_response(),
+        Ok(up) => {
+            if let Ok(v) = app.store.version(up.version).await {
+                if let Some(blob) = v.blob {
+                    let _ = Thumbnailer::new()
+                        .targets([("thumb", 240u32)])
+                        .ensure(&*app.store, &blob, WriteContext::none())
+                        .await;
+                }
+            }
+            Redirect::to(&format!("/ticket/{tid}")).into_response()
+        }
         Err(e) => (e.status(), e.to_string()).into_response(),
+    }
+}
+
+/// The generated thumbnail for an attachment's current version, if there is one. Same gate and the
+/// same document-shaped route as the full content — a derived rendering is no less confidential
+/// than what it was derived from.
+async fn thumbnail(
+    State(app): State<App>,
+    Path((tid, did)): Path<(i32, i32)>,
+    headers: HeaderMap,
+) -> Response {
+    if app.auth.identify(&headers).await.is_none() {
+        return Redirect::to(app.auth.login_path()).into_response();
+    }
+    if app.docs_gate.authorize(relativelylight::authz::Operation::Read, &headers).await
+        != Decision::Allow
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(doc) = find_doc(&app, tid, did).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Ok(head) = app.store.head(HandleId(doc.handle_id)).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(blob) = head.blob else { return StatusCode::GONE.into_response() };
+    let Ok(Some(thumb)) = app.store.variant(&blob, "thumb").await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match app.store.read_content(&thumb).await {
+        Ok(bytes) => (
+            [(axum::http::header::CONTENT_TYPE, "image/jpeg")],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -458,8 +528,12 @@ async fn download(
     Path((tid, did)): Path<(i32, i32)>,
     headers: HeaderMap,
     RealIp(ip): RealIp,
+    uri: Uri,
 ) -> Response {
-    serve(app, tid, did, None, headers, ip).await
+    // One handler, two dispositions. `?download=1` is the second URL the viewer's download button
+    // points at; without it the content is served inline so an <img>/<embed> can display it.
+    let attach = uri.query().unwrap_or("").contains("download=1");
+    serve(app, tid, did, None, headers, ip, attach).await
 }
 
 /// The same, for one numbered version — proof the chain is real and old versions stay readable.
@@ -469,7 +543,7 @@ async fn download_version(
     headers: HeaderMap,
     RealIp(ip): RealIp,
 ) -> Response {
-    serve(app, tid, did, Some(seq), headers, ip).await
+    serve(app, tid, did, Some(seq), headers, ip, false).await
 }
 
 async fn serve(
@@ -479,6 +553,7 @@ async fn serve(
     seq: Option<i32>,
     headers: HeaderMap,
     ip: std::net::IpAddr,
+    attach: bool,
 ) -> Response {
     if app.auth.identify(&headers).await.is_none() {
         return Redirect::to(app.auth.login_path()).into_response();
@@ -511,6 +586,7 @@ async fn serve(
 
     // `read` verifies the digest in full before handing back a stream, and fires the audit event.
     match app.store.read(version.id, WriteContext::from(&headers, ip)).await {
+        Ok(h) if attach => blob::ui::to_response(h),
         // Inline, so the viewer's <img>/<embed> display — but only for the allowlisted types; an
         // SVG comes back as an attachment however it was uploaded.
         Ok(h) => blob::ui::to_inline_response(h),
@@ -535,7 +611,7 @@ fn panel(app: &App) -> Admin<'_> {
         .entity("blob_handle")
         .entity("blob_version")
         .entity("blob")
-        .link("Blob maintenance", "/admin/blobs")
+        .link("Files", "/files")
 }
 
 async fn admin_get(State(app): State<App>, headers: HeaderMap, uri: Uri) -> Response {
@@ -570,50 +646,120 @@ async fn admin_post(
     }
 }
 
-async fn actions_get(State(app): State<App>, headers: HeaderMap) -> Response {
-    let who = app.auth.identify(&headers).await;
+/// Serve any version **by handle** — the one route in this app addressed that way.
+///
+/// BLOBSTORE.md §9.2 says to route by the owning document, and everything a normal user touches
+/// does. This is the deliberate exception, and it is safe for the same reason the browser itself is:
+/// it is gated to the admin group store-wide, so there is no per-document question left to ask. A
+/// route like this behind a *user-facing* gate would be the mistake §9.2 warns about.
+async fn browse_version(
+    State(app): State<App>,
+    Path((handle, version)): Path<(String, i64)>,
+    headers: HeaderMap,
+    RealIp(ip): RealIp,
+) -> Response {
     let gate = relativelylight::auth::GroupReadWrite::new(&app.auth, [ADMIN_GROUP.to_string()]);
-    let actions = Actions::new(&*app.store, gate)
-        .csrf(app.auth.csrf().token(&headers).unwrap_or_default());
-    match actions.render_for(&headers).await {
-        Ok(html) => page("Blob maintenance", who.as_ref(), format!("<h1 class=\"h4 mb-3\">Blob maintenance</h1>{html}<p><a href=\"/\">&larr; back</a></p>")),
+    match gate.authorize(relativelylight::authz::Operation::Read, &headers).await {
+        Decision::Allow => {}
+        Decision::NeedsLogin => return Redirect::to(app.auth.login_path()).into_response(),
+        Decision::Denied => return (StatusCode::FORBIDDEN, "admins only").into_response(),
+    }
+    let Ok(h) = handle.parse::<HandleId>() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    // Confirm the version really belongs to the handle in the URL, rather than trusting the pair.
+    let belongs = app
+        .store
+        .versions(h)
+        .await
+        .map(|vs| vs.iter().any(|v| v.id.0 == version))
+        .unwrap_or(false);
+    if !belongs {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match app.store.read(version.into(), WriteContext::from(&headers, ip)).await {
+        Ok(h) => blob::ui::to_inline_response(h),
+        Err(blob::BlobError::Erased(_)) => (StatusCode::GONE, "content was erased").into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// The store browser: every document, searchable, drilling into one's version chain — with the
+/// maintenance controls beneath it rather than on a page of their own.
+async fn browse_get(State(app): State<App>, headers: HeaderMap, uri: Uri) -> Response {
+    let who = app.auth.identify(&headers).await;
+    if who.is_none() {
+        return Redirect::to(app.auth.login_path()).into_response();
+    }
+    match render_browser(&app, &headers, &BrowseState::from_uri(&uri), None).await {
+        Ok(html) => page("Files", who.as_ref(), html),
         Err(Decision::NeedsLogin) => Redirect::to(app.auth.login_path()).into_response(),
         Err(_) => (StatusCode::FORBIDDEN, "admins only").into_response(),
     }
 }
 
-async fn actions_post(
+async fn browse_post(
     State(app): State<App>,
     headers: HeaderMap,
+    uri: Uri,
     axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>,
 ) -> Response {
     if !app.auth.csrf().verify(&headers, form.get("_csrf").map(String::as_str)) {
         return (StatusCode::FORBIDDEN, "bad CSRF token").into_response();
     }
     let who = app.auth.identify(&headers).await;
-    let gate = relativelylight::auth::GroupReadWrite::new(&app.auth, [ADMIN_GROUP.to_string()]);
-    let actions = Actions::new(&*app.store, gate);
-    match actions.submit(&headers, form.get("op").map(String::as_str).unwrap_or("")).await {
-        Ok(out) => {
-            let class = if out.alarming { "alert-warning" } else { "alert-success" };
-            let rendered = actions
-                .csrf(app.auth.csrf().token(&headers).unwrap_or_default())
-                .render_for(&headers)
-                .await
-                .unwrap_or_default();
-            page(
-                "Blob maintenance",
-                who.as_ref(),
-                format!(
-                    "<h1 class=\"h4 mb-3\">Blob maintenance</h1>\
-                     <div class=\"alert {class}\">{}</div>{rendered}<p><a href=\"/\">&larr; back</a></p>",
-                    esc_str(&out.message)
-                ),
-            )
-        }
-        Err(Decision::NeedsLogin) => Redirect::to(app.auth.login_path()).into_response(),
+    let outcome = match actions(&app, &headers)
+        .submit(
+            &headers,
+            form.get("op").map(String::as_str).unwrap_or(""),
+            form.contains_key("deep"),
+        )
+        .await
+    {
+        Ok(o) => o,
+        Err(Decision::NeedsLogin) => return Redirect::to(app.auth.login_path()).into_response(),
+        Err(_) => return (StatusCode::FORBIDDEN, "admins only").into_response(),
+    };
+    match render_browser(&app, &headers, &BrowseState::from_uri(&uri), Some(outcome)).await {
+        Ok(html) => page("Files", who.as_ref(), html),
         Err(_) => (StatusCode::FORBIDDEN, "admins only").into_response(),
     }
+}
+
+fn actions<'a>(app: &'a App, headers: &HeaderMap) -> Actions<'a, FsBackend> {
+    let gate = relativelylight::auth::GroupReadWrite::new(&app.auth, [ADMIN_GROUP.to_string()]);
+    Actions::new(&*app.store, gate).csrf(app.auth.csrf().token(headers).unwrap_or_default())
+}
+
+async fn render_browser(
+    app: &App,
+    headers: &HeaderMap,
+    state: &BrowseState,
+    outcome: Option<relativelylight::blob::ui::ActionOutcome>,
+) -> Result<String, Decision> {
+    let gate = relativelylight::auth::GroupReadWrite::new(&app.auth, [ADMIN_GROUP.to_string()]);
+    let list = Browser::new(&*app.store, gate)
+        // The component links versions at a route *the app* owns; it invents none of its own.
+        .view_url("/files/{handle}/v/{version}")
+        .render_for(headers, state)
+        .await?;
+
+    let banner = outcome
+        .map(|o| {
+            format!(
+                "<div class=\"alert {}\">{}</div>",
+                if o.alarming { "alert-warning" } else { "alert-success" },
+                esc_str(&o.message)
+            )
+        })
+        .unwrap_or_default();
+    let maintenance = actions(app, headers).render_for(headers).await.unwrap_or_default();
+
+    Ok(format!(
+        "<h1 class=\"h4 mb-3\">Files</h1>{banner}{list}\
+         <hr class=\"my-4\"><h2 class=\"h6\">Maintenance</h2>{maintenance}\
+         <p><a href=\"/\">&larr; tickets</a></p>"
+    ))
 }
 
 // ===================== helpers =====================
@@ -690,6 +836,14 @@ async fn seed(db: &DatabaseConnection, store: &BlobStore<FsBackend>) -> Result<(
             WriteContext::none(),
         )
         .await?;
+
+    // Generate the seeded document's thumbnail up front, so the first page load shows one.
+    if let Some(blob) = store.head(diagram).await?.blob {
+        Thumbnailer::new()
+            .targets([("thumb", 240u32)])
+            .ensure(store, &blob, WriteContext::none())
+            .await?;
+    }
 
     for (handle, role) in [(diagram, "diagram"), (notes, "notes")] {
         ticket_document::ActiveModel {

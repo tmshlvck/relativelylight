@@ -188,6 +188,40 @@ impl std::fmt::Debug for BlobHandle {
     }
 }
 
+/// One page of a browse listing.
+#[derive(Clone, Copy, Debug)]
+pub struct BrowseQuery<'a> {
+    /// Substring match against any version's filename. `None` or empty lists everything.
+    pub search: Option<&'a str>,
+    pub offset: u64,
+    pub limit: u64,
+}
+
+impl Default for BrowseQuery<'_> {
+    fn default() -> Self {
+        Self { search: None, offset: 0, limit: 25 }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BrowsePage {
+    pub documents: Vec<DocumentSummary>,
+    /// Matching documents in total, not on this page — for the pager.
+    pub total: u64,
+}
+
+/// A document as a listing shows it.
+#[derive(Clone, Debug)]
+pub struct DocumentSummary {
+    pub handle: HandleId,
+    /// The current version. `None` only for a handle with no versions at all, which `fsck` reports
+    /// as drift.
+    pub head: Option<VersionInfo>,
+    pub versions: u64,
+    pub created_at: i64,
+    pub metadata: Option<serde_json::Value>,
+}
+
 /// `true` = still referenced, so keep it. Implemented by the app, typically as a `UNION` over its own
 /// document tables (BLOBSTORE.md §9) — the crate cannot see those, which is the whole reason this
 /// trait exists.
@@ -460,6 +494,71 @@ impl<B: BlobBackend> BlobStore<B> {
         self.version(id).await
     }
 
+    /// One page of **documents** (handles) with their current version — what a browse screen lists.
+    ///
+    /// Not expressible as an ordinary `MetaModel` listing: the filename lives on `blob_version`, not
+    /// on `blob_handle`, and `head_version_id` carries no declared foreign key (the table cycle,
+    /// see `entity::handle`), so `crud` cannot auto-join it. This follows the pointer instead.
+    ///
+    /// Searching matches **any** version's filename, not just the current one, so a document that
+    /// was once called something else is still findable under the old name — which is usually what
+    /// someone hunting for it remembers.
+    pub async fn browse(&self, q: &BrowseQuery<'_>) -> Result<BrowsePage, BlobError> {
+        let mut matching: Option<Vec<uuid::Uuid>> = None;
+        if let Some(term) = q.search.map(str::trim).filter(|t| !t.is_empty()) {
+            let hits = version::Entity::find()
+                .filter(version::Column::Filename.contains(term))
+                .all(&self.db)
+                .await?;
+            let mut ids: Vec<uuid::Uuid> = hits.into_iter().map(|v| v.handle_id).collect();
+            ids.sort();
+            ids.dedup();
+            matching = Some(ids);
+        }
+
+        let mut find = handle::Entity::find();
+        if let Some(ids) = &matching {
+            if ids.is_empty() {
+                return Ok(BrowsePage { documents: Vec::new(), total: 0 });
+            }
+            find = find.filter(handle::Column::Id.is_in(ids.clone()));
+        }
+
+        let total = find.clone().count(&self.db).await?;
+        let rows = find
+            .order_by_desc(handle::Column::CreatedAt)
+            .order_by_desc(handle::Column::Id)
+            .offset(q.offset)
+            .limit(q.limit)
+            .all(&self.db)
+            .await?;
+
+        // One head lookup and one count per row. That is N+1, deliberately: a page is 25 rows, and
+        // the alternative is a hand-written join this crate would then owe on every backend.
+        let mut documents = Vec::with_capacity(rows.len());
+        for h in rows {
+            let head = match h.head_version_id {
+                Some(id) => match version::Entity::find_by_id(id).one(&self.db).await? {
+                    Some(v) => Some(self.hydrate(v).await?),
+                    None => None,
+                },
+                None => None,
+            };
+            let versions = version::Entity::find()
+                .filter(version::Column::HandleId.eq(h.id))
+                .count(&self.db)
+                .await?;
+            documents.push(DocumentSummary {
+                handle: HandleId(h.id),
+                head,
+                versions,
+                created_at: h.created_at,
+                metadata: h.metadata,
+            });
+        }
+        Ok(BrowsePage { documents, total })
+    }
+
     /// The whole chain, oldest first.
     pub async fn versions(&self, handle: HandleId) -> Result<Vec<VersionInfo>, BlobError> {
         let rows = version::Entity::find()
@@ -556,6 +655,38 @@ impl<B: BlobBackend> BlobStore<B> {
         .exec(&self.db)
         .await?;
         Ok(())
+    }
+
+    /// The content row for a digest — size and sniffed type without opening the bytes.
+    ///
+    /// Addressed by *content*, not by version, because that is the level derived renderings live at
+    /// (§4.5). Most callers want [`version`](Self::version) instead.
+    pub async fn content_info(&self, id: &BlobId) -> Result<ContentInfo, BlobError> {
+        let row = content::Entity::find_by_id(id.as_str())
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| BlobError::NotFound(id.to_string()))?;
+        Ok(ContentInfo {
+            id: id.clone(),
+            size_bytes: row.size_bytes,
+            mime_sniffed: row.mime_sniffed,
+            created_at: row.created_at,
+            verified_at: row.verified_at,
+        })
+    }
+
+    /// Digest-verified content by its address, collected into memory.
+    ///
+    /// For callers that genuinely need the whole thing at once — image decoding cannot be done
+    /// incrementally — and addressed by content rather than by version, so it fires **no** `Read`
+    /// event: nobody downloaded a document, something re-rendered one. Serving bytes to a person is
+    /// [`read`](Self::read), which is audited.
+    pub async fn read_content(&self, id: &BlobId) -> Result<Vec<u8>, BlobError> {
+        self.verify_content(id).await?;
+        let mut r = self.backend.read(id).await?;
+        let mut bytes = Vec::new();
+        r.read_to_end(&mut bytes).await?;
+        Ok(bytes)
     }
 
     /// Store derived content (a thumbnail, a crop) with no version and no handle: it isn't a
@@ -694,20 +825,35 @@ impl<B: BlobBackend> BlobStore<B> {
             }
         }
 
-        let referenced: HashSet<String> = version::Entity::find()
+        // Reachability, and the direction matters. A `blob_version` pointing at content is a real
+        // reference — that content is a document. A `blob_variant` row is **not** a reference to its
+        // *source*: a thumbnail is a rendering of that content, so it cannot be the reason the
+        // content survives, or an image would become permanently uncollectable the moment anything
+        // rendered it. The edge only runs the other way: a derived blob is live while its source is.
+        //
+        // So: seed from the versions, then follow `source -> derived` to a fixed point (a rendering
+        // of a rendering is not something this crate makes, but the loop costs nothing and does not
+        // have to assume that).
+        let mut referenced: HashSet<String> = version::Entity::find()
             .filter(version::Column::BlobId.is_not_null())
             .all(&self.db)
             .await?
             .into_iter()
             .filter_map(|r| r.blob_id)
-            .chain(
-                variant::Entity::find()
-                    .all(&self.db)
-                    .await?
-                    .into_iter()
-                    .flat_map(|r| [r.blob_id, r.derived_blob_id]),
-            )
             .collect();
+
+        let variants = variant::Entity::find().all(&self.db).await?;
+        loop {
+            let mut grew = false;
+            for v in &variants {
+                if referenced.contains(&v.blob_id) && referenced.insert(v.derived_blob_id.clone()) {
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
 
         for row in content::Entity::find().all(&self.db).await? {
             if referenced.contains(&row.id) {

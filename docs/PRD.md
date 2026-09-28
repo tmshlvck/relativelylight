@@ -18,7 +18,7 @@ For the concrete backlog see **[TODO.md](TODO.md)**.
 | **`observe`** (§4) | write-observer hook for audit logging (change + request context) | ✅ implemented | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
 | **`time`** (§5) | timezone-aware display of UTC timestamps (helpers + `$store.tz` + picker) | ✅ implemented | [TIME.md](TIME.md) |
 | **`validate`** | reusable typed field validators + normalizers, shared by CRUD and hand-written APIs | ✅ implemented | [DATAINPUT.md](DATAINPUT.md) |
-| **`blob`** (§6) | content-addressed file storage + version chain, streaming upload, viewer, admin panel | 🟢 shipped; thumbnailer pending | [BLOBSTORE.md](BLOBSTORE.md) |
+| **`blob`** (§6) | content-addressed file storage + version chain, streaming upload, viewer, thumbnails, browser | 🟢 shipped | [BLOBSTORE.md](BLOBSTORE.md) |
 
 > ✅ implemented & verified · 🟡 partial (core done, hardening/extras ahead) · ⛔ future.
 
@@ -189,10 +189,10 @@ any dependency on `auth` while giving ownership a *better* foreign key than an i
 (BLOBSTORE.md §9; CLIMB's `attachments.md` is the reference case the scope line was drawn against).
 Full design: [BLOBSTORE.md](BLOBSTORE.md).
 
-**Status: built**, except thumbnailing. `blob` is storage, the handle + version chain, dedup,
-erasure, `verify`/`fsck`/`purge`/`backup_to` and the audit hook including reads; `blob-ui` is the
-streaming upload path, the viewer, the response builder and the gated maintenance page. Both are
-pinned by tests and demonstrated by `examples/blob`. **`blob-thumbnail` is not built.** The design
+**Status: built.** `blob` is storage, the handle + version chain, dedup, erasure,
+`verify`/`fsck`/`purge`/`backup_to` and the audit hook including reads; `blob-ui` is the streaming
+upload path, the viewer, the gated document browser and the maintenance controls; `blob-thumbnail`
+generates derived renderings. All pinned by tests and demonstrated by `examples/blob`. The design
 came from the downstream CLIMB app, which runs an earlier form of it against a real workload.
 
 ## 7. Open questions
