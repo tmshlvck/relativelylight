@@ -492,8 +492,20 @@ the same way.
 
 ### 4.6 Housekeeping: `verify`, `fsck`, `purge`, `backup_to`
 
-Nothing here is scheduled by this crate — same rule as `auth::prune`: it returns a report, **the app
-schedules it**.
+Nothing here is scheduled by this crate — same rule as `auth::prune`: each returns a report, **the app
+schedules it**. A reasonable default shape:
+
+| When | Call | Why |
+|---|---|---|
+| once at startup | `fsck(default, None)` | `missing` and `dangling_heads` are data loss; you want to know at boot, not from a user |
+| nightly | `purge(None)` | bounded work, frees whatever the day's deletions and erasures made unreachable |
+| nightly | `verify(oldest(n))` | incremental — run it every night and it converges on a full sweep without ever being one |
+| weekly | `fsck(collect_orphans, None)` | actually deletes the crash residue the daily check only counted |
+| rarely / never | `purge(Some(refs))` | only if the app might leak handles; a codebase that calls `delete_handle` alongside its own deletes does not need it |
+
+`purge(None)` is safe to run at any time and never touches a document — it is the one that belongs on
+a timer. `collect_orphans` is the only sweep that deletes something the index never knew about, which
+is why it is off by default and worth running less often, with the grace period doing the real work.
 
 **`purge`** collects content by *reachability*, which the crate computes itself — and the **direction
 matters**, which this section got wrong first time round. A `blob_version` pointing at content is a
@@ -552,7 +564,7 @@ policy, which §12 does not attempt to settle.
 
 ### 4.7 The write observer, and reads
 
-`create` / `put_version` / `amend` / `delete_handle` / `erase` / `purge` fire the existing
+`create` / `put_version` / `amend` / `delete_handle` / `erase` fire the existing
 `observe::WriteObserver` with `source: "blob"` and the `WriteEvent` shape `crud` and `auth` already
 use. One sink registered with `BlobStore::on_write`, `Crud::on_write` and `Auth::on_write` sees one
 unified trail; register it with none of them and pay nothing.
@@ -572,6 +584,15 @@ correcting. Three things that *are* decisions, settled here:
   app's (§5.4), `read` only ever sees calls that already passed. A refusal never reaches this crate.
   Apps in regimes that require failed-access records must log them at their own gate — the crate says
   so rather than implying coverage it doesn't have.
+
+**`purge` fires nothing for the content it collects**, and that is deliberate: garbage-collecting
+bytes nobody references is not something a person did to a document. The auditable act was the
+`delete_handle` or `erase` that made them unreferenced, and both of those fire. (`purge` does fire a
+`delete_handle` event per handle a `HandleReference` disowns, because that *is* a document going
+away.) The one case where this is arguably thin is proving an erasure was carried through to
+destruction — the tombstone is observed, the later byte deletion isn't. Left as it is rather than
+emitting an event per blob on a sweep that can collect thousands; an app that needs the stronger
+record can log the `PurgeReport` it is handed.
 
 The trait is still named `WriteObserver`/`WriteEvent` while carrying reads. Renaming is a breaking
 change for a marginal gain; the names stay and the docs say what they cover.

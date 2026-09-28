@@ -12,6 +12,18 @@
 //!   at it. This is the constraint that makes [`purge`](super::BlobStore::purge)'s reachability sweep
 //!   safe rather than merely careful — a bug there cannot orphan a version.
 //! - `blob_version.prev_version_id` → **Restrict**: the chain is not to be broken in the middle.
+//!
+//! **A consequence worth knowing before you register these in an admin console.** Because the chain
+//! points backwards with `Restrict`, deleting a `blob_handle` row *directly* fails with a foreign-key
+//! violation as soon as the document has two versions: the cascade removes them in no particular
+//! order, and whichever still has a successor blocks. [`BlobStore::delete_handle`] is the only thing
+//! that can delete a document — it clears the back-pointers first, in one transaction.
+//!
+//! So a console offering a delete button on `blob_handle` or `blob_version` offers one that answers
+//! `409 Conflict`, and a `blob_version` create/edit form would write a row outside the store's
+//! invariants. **Register both read-only** — and read-only as a *gate*, not merely `read_only`
+//! fields, since the fields flag stops a form rewriting a row but leaves the create and delete
+//! controls in place. `examples/blob` has a four-line `ReadOnly` gate wrapper.
 //! - `blob_variant.*` → **Cascade** from the source content, since a rendering of content that no
 //!   longer exists is nothing at all.
 
