@@ -32,9 +32,6 @@ it. Everything below is follow-on work; nothing here blocked that release.
 `examples/blob`. [BLOBSTORE.md](BLOBSTORE.md) is the guide; the CHANGELOG has what landed.
 **Remaining:**
 
-- [ ] **Decide whether `examples/blobthumbnailer` earns its place.** It exists to show derived
-  content as app code now that the crate ships no thumbnailer; if `examples/blob` covers enough on
-  its own, it can go.
 - [ ] **CSRF on `crud::ui`'s CSV import.** `blob-ui` closed this for uploads by requiring the token
   *before* the file part — which a streaming parser can enforce and a buffered one cannot. The CSV
   import still takes a buffered `Bytes` body and still has the original gap; the same trick works if

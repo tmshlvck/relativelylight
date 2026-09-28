@@ -54,16 +54,23 @@ is easy to miss in a diff.
   builds the URLs that reach it, for surfaces where one gate covers the whole store (the admin
   panel); per-document authorization still means writing the route yourself.
 
-  **`examples/blob`** demonstrates the lot, including §9's ownership pattern — a `ticket_document`
-  link table whose `owner_user_id` is a real foreign key onto `auth_user` with `ON DELETE RESTRICT`,
-  and downloads routed by ticket and attachment rather than by handle.
-  **`examples/blobthumbnailer`** shows derived content as app code (§4.5).
+  Two runnable showcases: **`examples/blob`** — attachments on an app's own pages, with §9's
+  ownership pattern (a `ticket_document` link table whose `owner_user_id` is a real foreign key onto
+  `auth_user` with `ON DELETE RESTRICT`) and downloads routed by ticket and attachment rather than
+  by handle — and **`examples/blobthumbnailer`**, a smaller app whose subject is derived content:
+  thumbnails generated and stored by the *app*, since the crate ships no thumbnailer (§4.5).
 
 - **`observe::WriteEvent` gains `version: Option<i64>`** — which version row an event concerns, for
   an entity that keeps a chain. `None` from `crud` and `auth`. Additive: the struct is
   `#[non_exhaustive]`, so no sink needs changing.
 
 ### Fixed
+
+- **Delete controls no longer sit against the table's scrollbar.** When a `crud::ui` table is wider
+  than the viewport, `.table-responsive`'s horizontal scrollbar is drawn *inside* the box and eats
+  the table's own bottom margin, so "Delete selected" ended up squashed against it — a gap that
+  silently depended on whether the table happened to overflow. The separation now lives on the
+  wrapper, outside the scroll box, and is the same either way.
 
 - **Deleting a user now works, and takes their sessions, recovery codes and group memberships with
   it.** `auth_session.user_id` and `auth_totp_recovery.user_id` were plain integers with no foreign

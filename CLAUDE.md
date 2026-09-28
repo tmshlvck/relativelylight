@@ -292,7 +292,8 @@ cargo run -p audit-example        # :3000  who called + what they changed: the r
                                   #         write observer, one line per committed write, both over one RealIp
 cargo run -p blob-example         # :3000  file storage with a version chain: streaming uploads, the viewer,
                                   #         the /files browser, and §9's ownership link table (admin/password)
-cargo run -p blobthumbnailer-example  # :3000  derived content as *app* code — the crate ships no thumbnailer
+cargo run -p blobthumbnailer-example  # :3000  a second blob app, smaller: pictures with generated thumbnails,
+                                  #         derived content written by the *app* (the crate ships no thumbnailer)
 ```
 
 **Run one at a time — they all bind port 3000** (fresh seeded in-memory SQLite each start). Only

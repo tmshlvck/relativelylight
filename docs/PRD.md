@@ -4,10 +4,13 @@
 auto-generated server-rendered web admin, authentication/authorization, and file handling — with **no
 per-model code**. It's one crate of composable, feature-gated modules; take the pieces you need.
 
-This document is the **product overview and roadmap**: what each module is *for*, its status, and
-what's still ahead. It intentionally does **not** teach usage — for a lead-in see
-**[../README.md](../README.md)**, and for the full API/design see the per-module guides linked below.
-For the concrete backlog see **[TODO.md](TODO.md)**.
+This document is the **product overview, the architecture decisions, and the roadmap**: what each
+module is *for*, what was decided across all of them, and what is still ahead.
+
+It deliberately does **not** enumerate features or teach usage — each module's guide owns that, and a
+second copy here would be a second thing to keep true. If a paragraph below could be moved into
+`CRUD.md` or `AUTH.md` without loss, it belongs there. For a lead-in see
+**[../README.md](../README.md)**; for the concrete backlog, **[TODO.md](TODO.md)**.
 
 | Module | What it's for | Status | Guide |
 |---|---|---|---|
@@ -38,6 +41,41 @@ versioning and shape decisions belong to it.
 The library is always **part of** a larger app — the app owns its axum router and its page shell; the
 library contributes HTML fragments and the write path behind them. This is a hard design invariant, not
 a convenience.
+
+## Architecture decisions
+
+The invariants that hold across every module. Each is argued where it bites, in the module guides;
+collected here because they are what makes the pieces fit together, and because an addition that
+breaks one of them should have to argue with this list first.
+
+1. **The library is part of an app, never its frame.** The app owns the axum router, the page shell
+   and the URLs. Modules contribute HTML *fragments* and the write path behind them. `auth::routes`
+   and `blob::ui::Routes` are the two exceptions, both opt-in and both mounted by the app at a path
+   it chooses.
+2. **The contract in the middle is typed and in-process** — `Vec<Column>` + `Page`, not a wire
+   format. 0.3 removed the JSON layer that used to sit there; an app wanting a JSON API for its own
+   clients writes it over the same `Engine`, where the versioning decisions belong to it.
+3. **No mandatory coupling between modules.** `auth` works without `crud`; `blob` needs neither.
+   Every feature an app doesn't enable costs it no dependencies. The one exception is deliberate and
+   named: `middleware::resolve_real_ip` is required, so the lockout, the audit events and the app's
+   own log cannot disagree about who called.
+4. **Authorization is a per-model gate handed the request headers**, resolving identity itself. Two
+   consequences the modules lean on: a gate needs no middleware and injects nothing, and *row-level*
+   access is out of scope — an app expresses it by shape instead (a table per document kind, §6),
+   which turns a row question into a model question the existing gate already answers.
+5. **The app owns its database.** Modules describe their own tables (`table_create_statements`) and
+   the app's migration applies them. Nothing migrates itself on start except the examples.
+6. **State and audit are different things.** A table says what something *is*; the `observe` seam
+   says what someone *did*. Neither is asked to do the other's job — which is why `created_by` is a
+   snapshot column rather than an audit lookup, and why a deleted document leaves no tombstone in
+   its own chain.
+7. **Server-rendered, no JavaScript framework, and the URL is the state.** Page, sort, filters,
+   search, the open dialog: all in the query string, so every view is a link and the library needs
+   no route of its own. Interactivity uses native elements (`<dialog>`, `<details>`) rather than a
+   runtime.
+8. **Policy belongs to the app; mechanism belongs here.** Retention, ownership, thumbnail sizes,
+   what a request log contains — all refused on purpose, each with the same reasoning: the crate
+   cannot know, and a wrong default is worse than an absent one.
 
 ---
 
@@ -76,22 +114,11 @@ a Rust `match` per cell and per input. The app supplies the shell (Bootstrap 5's
 The **URL is the view** — page, sort, filters, search, active entity, open dialog — so every screen is
 linkable; writes are `POST` → `303` → `GET` from the app's own route, via `submit`.
 
-- **`Form`** — one entity's create/edit form, standalone, for the **app's own** pages: field subset +
-  order, per-field widget overrides (textarea / radio / slider / email / url / datetime), gate-aware
-  rendering (`401`/`403` rather than a form that can't submit), a redirect or a saved message after a
-  save, and render-time refusal of a form that could never work (unknown / read-only /
-  required-but-unrendered column).
-- **`Table`** — one entity: search, **sortable headers** (relations included), **filter controls** (a
-  relation picker, an enum's values, a boolean, or a value pinned by the page), windowed pager, that
-  same form in a native `<dialog>` (typed inputs, boolean switch, enum dropdown or radio group,
-  relation dropdown, timezone-aware datetime picker, inline validation that keeps the operator's
-  input), per-row + bulk delete, CSV import/export,
-  boolean/relation badges, custom cell renderers. A filter governs the export and the bulk delete as
-  well as the listing, so no control can act on a wider set than the one on screen.
-- **`Admin`** — a model side panel over many `Table`s (configurable order, group headings, separators,
-  custom links), rendering **one** of them per request (`?entity=post`), plus **one filter shared
-  across every listed table that has the column** — the difference between usable and unusable once an
-  admin lists many tables of the same shape.
+Three components — **`Form`** (one entity, standalone, for the app's own pages), **`Table`** (one
+entity with search, sorting, filters, pager, dialog editor, bulk delete, CSV) and **`Admin`** (a side
+panel over many tables, rendering one per request). What each offers is
+[CRUD.md → Web UI](CRUD.md#web-ui-ui); what matters here is that a filter governs the CSV export and
+the bulk delete as well as the listing, so no control can act on a wider set than the one on screen.
 
 All three are **one implementation**, so the requirement above — *no hand-written forms* — is met once
 and `Admin` stays a composition of the parts rather than a fourth thing to maintain.
@@ -107,28 +134,13 @@ can take a file rather than a paste; optional cross-document view transitions.
 surface.
 Identity is resolved **on demand** (no middleware, nothing injected into the request).
 
-**Implemented:** argon2id login/logout with a server-side session cookie; `Auth::identify → Identity`;
-a per-model `Authz` gate with presets (`Open` / `UserReadWrite` / `UserReadGroupWrite` /
-`PublicReadGroupWrite` / `GroupReadWrite`) wired into `crud` (→ 401/403); self-service profile with
-password change; **TOTP 2FA**
-(enrol/verify/login/disable, single-use codes, plus **recovery codes** for a lost authenticator); **OIDC SSO** (feature `sso`: Google / Okta / corporate,
-claim→group
-mapping, optional auto-registration, cached provider discovery, and a callback whose rejection paths are
-tested against a fake IdP); **double-submit CSRF protection** (feature `csrf`: always on for
-the login/profile forms, `Crud::csrf` for the admin's writes, a `csrf::enforce` layer for the app's own routes, and an
-app-supplied rejection page); **attempt limiting** on the unauthenticated
-credential checks (DB-backed lockout → 429, by account name and by source address, both mandatory, the
-unlock being a row delete in the admin panel); **session lifetime + revocation** (absolute *and* idle
-clocks, id rotation when the second factor completes, a password change or manager reset signing the
-user's other sessions out, "sign out other sessions" on `/profile`); **re-authentication before sensitive
-changes** (a password or a fresh TOTP code before disabling/enrolling 2FA or a manager's reset, plus
-`Auth::reauthenticate` for app-owned actions); a **password-strength policy**
-(`validate::PasswordPolicy` — length-first, no composition rules per NIST SP 800-63B; on by default on the
-profile pages, opt-out two ways, wired separately into the admin form); UTC lifecycle timestamps
-on the auth entities. The rejection
-paths (bad credentials, unusable sessions, wrong TOTP codes, replayed codes, idle/expired sessions,
-non-manager profile writes, each gate preset) are covered by an automated negative-path suite —
-[AUTH.md §10a](AUTH.md).
+**Implemented:** password login with server-side sessions, TOTP 2FA with recovery codes, OIDC SSO,
+CSRF, attempt lockout, session lifetime and revocation, re-authentication before sensitive changes, a
+password-strength policy, and the gate presets wired into `crud`. [AUTH.md](AUTH.md) is the guide;
+what belongs here is that the **rejection** paths — bad credentials, unusable sessions, replayed
+codes, non-manager profile writes, each gate preset — are covered by an automated negative-path suite
+([AUTH.md §10a](AUTH.md)), because a security module that only tests its happy path is testing the
+wrong half.
 
 **Roadmap / deferred (see [TODO.md](TODO.md) for the ordered backlog):**
 re-auth through the IdP for SSO accounts, breached-password screening, and CSRF on multipart bodies.
@@ -189,12 +201,11 @@ any dependency on `auth` while giving ownership a *better* foreign key than an i
 (BLOBSTORE.md §9; CLIMB's `attachments.md` is the reference case the scope line was drawn against).
 Full design: [BLOBSTORE.md](BLOBSTORE.md).
 
-**Status: built.** `blob` is storage, the handle + version chain, dedup, `verify` /
-`check_consistency` / `collect_garbage` / `copy_content_to`, and the audit hook including reads.
-`blob-ui` is the streaming upload (`Receiver` + `UploadForm`), the document `Portal` an app page
-mounts, the gated admin `Browser` + `Actions`, an optional content `Routes` router, and the response
-builders. Pinned by tests and demonstrated by `examples/blob`; `examples/blobthumbnailer` shows
-derived content as app code.
+**Status: built** — storage and the chain in `blob`, the components in `blob-ui`, both pinned by
+tests. Two runnable showcases: **`examples/blob`** (attachments on an app's own pages, with the
+ownership link table and the admin panel) and **`examples/blobthumbnailer`** (a smaller app whose
+subject is derived content — thumbnails generated and stored by the *app*, since the crate ships no
+thumbnailer).
 
 **Deliberately smaller than it was.** A thumbnailer, a variant index and partial erasure were built
 and then removed: each added a second way to think about the same data, and this is load-bearing
@@ -203,6 +214,14 @@ underneath, and one way to delete. BLOBSTORE.md §4.5 and §4.8 record both reve
 
 ## 7. Open questions
 
-- **Presentation config** (widgets, formatting beyond label/help/default) lives downstream of the
-  metadata, on the frontend components — not in the wire contract.
-- **auth** and **files** get their own full specs as the metadata contract settles in use.
+Per-module questions live in each guide's own section; these are the ones that cut across.
+
+- **A second backend.** The `Accessor` seam exists for it and nothing in the engine assumes SeaORM,
+  but until something real sits behind it the seam is untested as an abstraction rather than as
+  code. The same is true of `BlobBackend`: one implementation is not proof of a good trait.
+- **Where a second frontend would strain the contract.** `Vec<Column>` + `Page` is shaped by the one
+  renderer that consumes it. A second would be the first honest test of whether it is a contract or
+  just an interface.
+- **Row-level authorization** stays out (decision 4), on the bet that shape — a table per kind —
+  answers it. That bet holds for documents; it has not been tested by an app whose rows differ in
+  visibility *within* one kind.

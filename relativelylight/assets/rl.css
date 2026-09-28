@@ -47,3 +47,11 @@
 .rl-table th:hover .rl-add,
 .rl-table th .rl-add:focus { opacity: 1; }
 .rl-table .badge + .badge { margin-left: 0.15rem; }
+
+/* A horizontal scrollbar inside .table-responsive is drawn *inside* the box, over the bottom of it —
+   so it eats the table's own bottom margin and the delete controls below end up squashed against
+   the scrollbar, with a gap that changes depending on whether the table happens to be wider than
+   the viewport. Move the separation onto the wrapper, where the scrollbar cannot reach it, and the
+   spacing is the same either way. */
+.table-responsive { margin-bottom: 1rem; }
+.table-responsive > .table { margin-bottom: 0; }

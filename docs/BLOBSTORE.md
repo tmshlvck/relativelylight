@@ -8,8 +8,9 @@ Several decisions here were reversed during implementation. Where that happened 
 what was tried and why it came out again, because the alternative — a clean-looking document that
 reads as if the first answer were the obvious one — invites someone to re-add what was removed.
 
-**Example: `examples/blob`** — `cargo run -p blob-example`. Tickets with attachments: the streaming
+**Two runnable examples.** `cargo run -p blob-example` — tickets with attachments: the streaming
 upload, the version chain, the document portal, the admin panel, and §9's ownership link table.
+`cargo run -p blobthumbnailer-example` — a smaller app whose subject is derived content (§6).
 
 ## 1. Purpose & scope
 
@@ -867,10 +868,13 @@ doesn't serve — a base path written twice is a 404 waiting to be discovered.
 
 ## 6. Derived content
 
-Thumbnails, previews and crops are **out of scope** — see §4.5 for why, and
-`examples/blobthumbnailer` for the eighty lines an app writes instead. A derived rendering is stored
-as an ordinary document, so it is listed, read, deleted and collected by the machinery everything
-else uses.
+Thumbnails, previews and crops are **out of scope** — see §4.5 for why.
+
+**`examples/blobthumbnailer`** is the second runnable blob app and shows what that costs: about
+eighty lines of `image`-crate code, a `picture` table holding two handles (the upload and its
+thumbnail), and one deletion path for both. A derived rendering is an ordinary document, so it is
+listed, read, deleted and collected by the machinery everything else uses — which is the whole
+argument for keeping it out of the crate.
 
 ## 7. Feature / module layout
 
