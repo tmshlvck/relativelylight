@@ -747,3 +747,33 @@ async fn two_handles_created_moments_apart_are_told_apart_in_the_listing() {
     assert!(html.contains(&a.to_string()), "the full handle is shown: {html}");
     assert!(html.contains(&b.to_string()), "{html}");
 }
+
+#[test]
+fn text_opens_in_the_browser_but_is_not_embedded_in_the_page() {
+    // Two different questions: *will the browser render this inline* (so offer Open) and *should
+    // it go in this page* (so embed it). Text answers yes to the first and no to the second —
+    // conflating them meant a text file had no Open button at all.
+    let info = fake_version("notes.txt", "text/plain");
+    let html = Viewer::new(&info, "/v/1").render();
+    assert!(html.contains("Open"), "text is readable in a tab: {html}");
+    assert!(!html.contains("<img"), "…but not inlined into someone else's layout: {html}");
+    assert!(!html.contains("<embed"), "{html}");
+}
+
+#[test]
+fn what_the_viewer_offers_to_open_is_what_the_response_will_serve_inline() {
+    // If these drift, the viewer promises something the response refuses — an SVG rendered as a
+    // broken-image icon, or text offered as a download when it would have displayed fine.
+    for (mime, openable) in [
+        ("image/png", true),
+        ("application/pdf", true),
+        ("text/plain", true),
+        ("image/svg+xml", false),
+        ("text/html", false),
+        ("application/zip", false),
+    ] {
+        let info = fake_version("f", mime);
+        let html = Viewer::new(&info, "/v/1").render();
+        assert_eq!(html.contains(">Open</a>"), openable, "{mime}: {html}");
+    }
+}

@@ -43,7 +43,7 @@ use axum::Router;
 use model::{ticket, ticket_document};
 use relativelylight::auth::{self, Auth, Identity, UserReadGroupWrite};
 use relativelylight::authz::{Authz, Decision};
-use relativelylight::blob::ui::{human_size, Actions, BrowseState, Browser, Receiver, UploadForm, Viewer};
+use relativelylight::blob::ui::{Actions, BrowseState, Browser, Portal, Receiver, Routes, UploadForm};
 use relativelylight::blob::{self, BlobStore, FsBackend, HandleId, WriteContext};
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::crud::ui::{esc_str, Admin, Outcome, ViewState, CSS};
@@ -84,6 +84,10 @@ struct App {
     db: DatabaseConnection,
     auth: Auth,
     store: Arc<BlobStore<FsBackend>>,
+    /// Where the **admin** panel serves content from. Store-wide gated, which is why nothing
+    /// user-facing uses it: ticket attachments go through `/ticket/{id}/attachment/{n}`, whose
+    /// authorization is a query on the app's own row (BLOBSTORE.md §9.2).
+    admin_routes: Routes,
     engine: Arc<relativelylight::crud::engine::Engine>,
     /// The gate over `ticket_document`: logged-in users read, the admin group writes. Per *model*,
     /// which is exactly why the link table is per document kind — see `model.rs`.
@@ -201,7 +205,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.register(content, admin_only.clone());
     let engine = Arc::new(crud.into_engine());
 
-    let app = App { db: db.clone(), auth: auth.clone(), store, engine, docs_gate };
+    let admin_routes = Routes::new("/admin/blob");
+    let app = App {
+        db: db.clone(),
+        auth: auth.clone(),
+        store: store.clone(),
+        engine,
+        docs_gate,
+        admin_routes: admin_routes.clone(),
+    };
 
     let router = Router::new()
         .route("/", get(index))
@@ -212,8 +224,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ticket/{tid}/attachment/{did}/replace", post(replace))
         .route("/admin", get(admin_get).post(admin_post))
         .route("/documents", get(browse_get).post(browse_post))
-        .route("/documents/{handle}/v/{version}", get(browse_version))
         .with_state(app)
+        // The crate's own content router, mounted for the **admin** surface only and gated to the
+        // admin group. Everything a normal user touches is routed by its owning ticket instead.
+        .nest(
+            "/admin/blob",
+            admin_routes.router(
+                store,
+                relativelylight::auth::GroupReadWrite::new(&auth, [ADMIN_GROUP.to_string()]),
+            ),
+        )
         // `auth.routes()` carries no state of its own, so merge it after ours is bound.
         .merge(auth.routes())
         .layer(axum::middleware::from_fn_with_state(
@@ -280,8 +300,6 @@ async fn show_ticket(
 
     for d in &docs {
         let handle = HandleId(d.handle_id);
-        let Ok(head) = app.store.head(handle).await else { continue };
-        let Ok(chain) = app.store.versions(handle).await else { continue };
         let owner = auth::user::Entity::find_by_id(d.owner_user_id)
             .one(&app.db)
             .await
@@ -290,40 +308,29 @@ async fn show_ticket(
             .map(|u| u.username)
             .unwrap_or_else(|| "?".into());
 
-        // The viewer renders URLs, never the bytes — and each names the *ticket and attachment*,
-        // not the handle (BLOBSTORE.md §9.2). Two of them, because the component owns no routes:
-        // one that serves inline and one that serves as an attachment.
-        let url = format!("/ticket/{}/attachment/{}", t.id, d.id);
-        let viewer =
-            Viewer::new(&head, &url).download_url(format!("{url}?download=1")).render();
-
-        let mut history = String::from("<ul class=\"list-unstyled small mb-2\">");
-        for v in &chain {
-            let state = format!("{} · {}", esc_str(&v.filename), human_size(v.size_bytes()));
-            history.push_str(&format!(
-                "<li>v{} — {state} — {} <a href=\"{url}/v/{}\">open</a></li>",
-                v.seq,
-                esc_str(v.created_by.as_deref().unwrap_or("?")),
-                v.seq
-            ));
-        }
-        history.push_str("</ul>");
-
-        let replace = UploadForm::new(format!("{url}/replace"))
-            .label("Replace with a new version")
-            .submit("Upload new version")
-            .csrf(app.auth.csrf().token(&headers).unwrap_or_default())
-            .render();
+        // One component for the whole attachment: current version, history, and the form that adds
+        // the next one. Its URLs name the *ticket and attachment*, never the handle — so
+        // authorization stays a gated query on our own row (BLOBSTORE.md §9.2) and the admin
+        // router mounted at /admin/blob is not involved.
+        let base = format!("/ticket/{}/attachment/{}", t.id, d.id);
+        let portal = Portal::new(&*app.store, handle, app.docs_gate.clone())
+            .view_url(format!("{base}/v/{{version}}"))
+            .versions(true)
+            .upload_form(
+                UploadForm::new(format!("{base}/replace"))
+                    .as_new_version()
+                    .csrf(app.auth.csrf().token(&headers).unwrap_or_default()),
+            )
+            .render_for(&headers)
+            .await
+            .unwrap_or_else(|_| "<em>not allowed</em>".into());
 
         body.push_str(&format!(
             "<div class=\"card my-3\"><div class=\"card-body\">\
-             <div class=\"d-flex justify-content-between\"><h2 class=\"h6\">{} <span class=\"badge text-bg-light\">{}</span></h2>\
+             <div class=\"d-flex justify-content-between\">\
+             <span class=\"badge text-bg-light\">{}</span>\
              <small class=\"text-body-secondary\">owner: {}</small></div>\
-             {viewer}\
-             <h3 class=\"h6 mt-3\">Versions</h3>{history}\
-             {replace}\
-             </div></div>",
-            esc_str(&head.filename),
+             {portal}</div></div>",
             esc_str(&d.role),
             esc_str(&owner),
         ));
@@ -332,6 +339,8 @@ async fn show_ticket(
     body.push_str(&format!(
         "<div class=\"card my-3\"><div class=\"card-body\"><h2 class=\"h6\">Attach a document</h2>{}</div></div>\
          <p><a href=\"/\">&larr; all tickets</a></p>",
+        // Creating a document is the *app's* act — it has to record ownership — so this form is
+        // standalone rather than something `Portal` offers.
         UploadForm::new(format!("/ticket/{}/upload", t.id))
             .max_bytes(256 * 1024 * 1024)
             .csrf(app.auth.csrf().token(&headers).unwrap_or_default())
@@ -437,21 +446,28 @@ async fn download(
     serve(app, tid, did, None, headers, ip, attach).await
 }
 
-/// The same, for one numbered version — proof the chain is real and old versions stay readable.
+/// The same, for one specific version — proof the chain is real and old versions stay readable.
+///
+/// Addressed by **version id**, which is what `Portal`'s `{version}` placeholder substitutes. The
+/// id alone would be enough to find the row, but the route still checks it belongs to *this*
+/// attachment's handle: the authorization we just did was about the ticket, so a version from some
+/// other document must not be reachable through it.
 async fn download_version(
     State(app): State<App>,
-    Path((tid, did, seq)): Path<(i32, i32, i32)>,
+    Path((tid, did, version)): Path<(i32, i32, i64)>,
     headers: HeaderMap,
     RealIp(ip): RealIp,
+    uri: Uri,
 ) -> Response {
-    serve(app, tid, did, Some(seq), headers, ip, false).await
+    let attach = uri.query().unwrap_or("").contains("download=1");
+    serve(app, tid, did, Some(version.into()), headers, ip, attach).await
 }
 
 async fn serve(
     app: App,
     tid: i32,
     did: i32,
-    seq: Option<i32>,
+    want: Option<blob::VersionId>,
     headers: HeaderMap,
     ip: std::net::IpAddr,
     attach: bool,
@@ -469,17 +485,13 @@ async fn serve(
     };
 
     let handle = HandleId(doc.handle_id);
-    let version = match seq {
+    let version = match want {
         None => app.store.head(handle).await,
-        Some(s) => app
-            .store
-            .versions(handle)
-            .await
-            .and_then(|v| {
-                v.into_iter()
-                    .find(|v| v.seq == s)
-                    .ok_or_else(|| blob::BlobError::NotFound(format!("v{s}")))
-            }),
+        Some(id) => app.store.versions(handle).await.and_then(|vs| {
+            vs.into_iter()
+                .find(|v| v.id == id)
+                .ok_or_else(|| blob::BlobError::NotFound(format!("version {id} of this attachment")))
+        }),
     };
     let Ok(version) = version else {
         return (StatusCode::NOT_FOUND, "no such version").into_response();
@@ -509,6 +521,7 @@ fn panel(app: &App) -> Admin<'_> {
         .entity("blob_handle")
         .entity("blob_version")
         .entity("blob")
+        .separator()
         .link("Blob store", "/documents")
 }
 
@@ -541,43 +554,6 @@ async fn admin_post(
             }
         }
         Err(e) => e.into_response(), // crud::Error maps itself to 401/403/409/…
-    }
-}
-
-/// Serve any version **by handle** — the one route in this app addressed that way.
-///
-/// BLOBSTORE.md §9.2 says to route by the owning document, and everything a normal user touches
-/// does. This is the deliberate exception, and it is safe for the same reason the browser itself is:
-/// it is gated to the admin group store-wide, so there is no per-document question left to ask. A
-/// route like this behind a *user-facing* gate would be the mistake §9.2 warns about.
-async fn browse_version(
-    State(app): State<App>,
-    Path((handle, version)): Path<(String, i64)>,
-    headers: HeaderMap,
-    RealIp(ip): RealIp,
-) -> Response {
-    let gate = relativelylight::auth::GroupReadWrite::new(&app.auth, [ADMIN_GROUP.to_string()]);
-    match gate.authorize(relativelylight::authz::Operation::Read, &headers).await {
-        Decision::Allow => {}
-        Decision::NeedsLogin => return Redirect::to(app.auth.login_path()).into_response(),
-        Decision::Denied => return (StatusCode::FORBIDDEN, "admins only").into_response(),
-    }
-    let Ok(h) = handle.parse::<HandleId>() else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    // Confirm the version really belongs to the handle in the URL, rather than trusting the pair.
-    let belongs = app
-        .store
-        .versions(h)
-        .await
-        .map(|vs| vs.iter().any(|v| v.id.0 == version))
-        .unwrap_or(false);
-    if !belongs {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    match app.store.read(version.into(), WriteContext::from(&headers, ip)).await {
-        Ok(h) => blob::ui::to_inline_response(h),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -634,7 +610,7 @@ fn browser<'a>(
         relativelylight::auth::GroupReadWrite::new(&app.auth, [ADMIN_GROUP.to_string()]);
     Browser::new(&*app.store, gate)
         // The component links versions at a route *the app* owns; it invents none of its own.
-        .view_url("/documents/{handle}/v/{version}")
+        .routes(&app.admin_routes)
         .actions(Actions::new(&*app.store, actions_gate).csrf(token))
 }
 

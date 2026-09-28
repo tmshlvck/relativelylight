@@ -128,6 +128,7 @@ pub struct Browser<'a, B: BlobBackend> {
     per_page: u64,
     title: Option<String>,
     actions: Option<super::Actions<'a, B>>,
+    serving: Option<super::Routes>,
     /// `{handle}` / `{version}` placeholders, so the component can link to the app's own routes
     /// without inventing any (§2).
     view_url: Option<String>,
@@ -135,7 +136,7 @@ pub struct Browser<'a, B: BlobBackend> {
 
 impl<'a, B: BlobBackend> Browser<'a, B> {
     pub fn new(store: &'a BlobStore<B>, gate: impl Authz + 'static) -> Self {
-        Self { store, gate: Arc::new(gate), per_page: 25, title: Some("Blob store".into()), view_url: None, actions: None }
+        Self { store, gate: Arc::new(gate), per_page: 25, title: Some("Blob store".into()), view_url: None, actions: None, serving: None }
     }
 
     pub fn per_page(mut self, n: u64) -> Self {
@@ -161,11 +162,18 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
         self
     }
 
-    /// A template for linking a version at the app's own download route — `{handle}` and
-    /// `{version}` are substituted, e.g. `"/files/{handle}/v/{version}"`.
+    /// Where content is served — normally the same [`Routes`](super::Routes) the app mounted.
+    pub fn routes(mut self, routes: &super::Routes) -> Self {
+        self.serving = Some(routes.clone());
+        self
+    }
+
+    /// A template for linking a version at the app's **own** download route — `{handle}` and
+    /// `{version}` are substituted, e.g. `"/invoice/{handle}/v/{version}"`. Use this instead of
+    /// [`routes`](Self::routes) when authorization is per-document.
     ///
-    /// Omit it and the listing names documents without linking to their content: this crate owns no
-    /// routes, and a link it invented would 404.
+    /// With neither, the listing names handles without linking to their content: this crate owns no
+    /// routes unless you mount some, and a link it invented would 404.
     pub fn view_url(mut self, template: impl Into<String>) -> Self {
         self.view_url = Some(template.into());
         self
@@ -309,16 +317,19 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
             self.heading(Some(&handle.to_string()))
         );
 
-        // Reuse the viewer for the current version, rather than re-implementing a preview. It needs
-        // a URL, which only the app can supply — without one the table below is the whole of it.
-        if let (Some(t), Some(head)) = (&self.view_url, chain.last()) {
-            let url = t
-                .replace("{handle}", &handle.to_string())
-                .replace("{version}", &head.id.to_string());
-            out.push_str(&format!(
-                "<div class=\"mb-3\">{}</div>",
-                super::Viewer::new(head, &url).download_url(format!("{url}?download=1")).render()
-            ));
+        // Reuse the viewer for the current version rather than re-implementing a preview — and
+        // with the preview suppressed: an operator auditing the store is not reading the files, and
+        // a page of embedded PDFs takes a minute to load.
+        if let Some(head) = chain.last() {
+            if let Some((view, download)) = self.urls_for(handle, head.id) {
+                out.push_str(&format!(
+                    "<div class=\"mb-3\">{}</div>",
+                    super::Viewer::new(head, view)
+                        .download_url(download)
+                        .suppress_preview()
+                        .render()
+                ));
+            }
         }
 
         out.push_str(
@@ -330,13 +341,13 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
         let head_id = chain.last().map(|l| l.id);
         // Newest first: the current version is what a reader is usually looking for.
         for v in chain.iter().rev() {
-            let link = match &self.view_url {
-                Some(t) => {
-                    let url = t
-                        .replace("{handle}", &handle.to_string())
-                        .replace("{version}", &v.id.to_string());
-                    format!("<a href=\"{}\" target=\"_blank\" rel=\"noopener\">open</a>", esc_str(&url))
-                }
+            let link = match self.urls_for(handle, v.id) {
+                Some((view, download)) => format!(
+                    "<a href=\"{}\" target=\"_blank\" rel=\"noopener\">open</a> · \
+                     <a href=\"{}\" download>download</a>",
+                    esc_str(&view),
+                    esc_str(&download)
+                ),
                 None => "—".to_string(),
             };
             out.push_str(&format!(
@@ -400,6 +411,23 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
         )
     }
 
+
+    /// `(view, download)` for one version, from whichever the app configured.
+    fn urls_for(
+        &self,
+        handle: HandleId,
+        version: crate::blob::VersionId,
+    ) -> Option<(String, String)> {
+        if let Some(r) = &self.serving {
+            return Some((r.view(version), r.download(version)));
+        }
+        let t = self.view_url.as_ref()?;
+        let view = t
+            .replace("{handle}", &handle.to_string())
+            .replace("{version}", &version.to_string());
+        let download = format!("{view}?download=1");
+        Some((view, download))
+    }
 
     fn heading(&self, handle: Option<&str>) -> String {
         let Some(t) = self.title.as_deref().filter(|t| !t.is_empty()) else { return String::new() };

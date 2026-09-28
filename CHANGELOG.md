@@ -67,6 +67,12 @@ is easy to miss in a diff.
   The upload path **closes the CSRF gap on multipart bodies**: it requires the token to arrive before
   the file part, which a streaming parser can enforce and a buffered one cannot.
 
+  **`Portal`** is the component an app page uses for one document — current version, optional
+  history, optional "add a version" form — built on `Viewer` so a document looks the same on an app
+  page as in the admin panel. **`Routes`** is an optional gated router that serves content and
+  builds the URLs that reach it, for surfaces where one gate covers the whole store (the admin
+  panel); per-document authorization still means writing the route yourself.
+
   **`examples/blob`** demonstrates the lot, including §9's ownership pattern — a `ticket_document`
   link table whose `owner_user_id` is a real foreign key onto `auth_user` with `ON DELETE RESTRICT`,
   and downloads routed by ticket and attachment rather than by handle.

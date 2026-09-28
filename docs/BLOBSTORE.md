@@ -607,6 +607,21 @@ shares them, so "erase every copy" means deleting every handle that references t
 Server-rendered Askama fragments; the page works with JavaScript disabled; the one place raw bytes
 could become an XSS hole is closed by construction rather than by convention (§10).
 
+| Component | For |
+|---|---|
+| [`Portal`](#52-portal) | **one document** on an app page: current version, optional history, optional upload |
+| `Viewer` | the primitive `Portal` is built from — render one version you already hold |
+| `UploadForm` | the form; `as_new_version()` for adding to a document, plain for creating one |
+| `Receiver` | streams a posted upload into the store (§5.3) |
+| `Browser` + `Actions` | **the admin panel**: every handle, searchable, with maintenance (§5.4) |
+| `Routes` | an optional gated router serving content, plus URLs that match it (§5.5) |
+| `to_response` / `to_inline_response` | a verified `ContentStream` as an HTTP reply (§5.6) |
+
+**Three surfaces, and they compose rather than overlap.** `Portal` is what an app page uses;
+`Browser` is what an operator uses and links each handle to a `Portal`-shaped view; `Viewer` is the
+shared rendering both go through, so a document cannot look like one thing on a ticket and another
+in the admin panel.
+
 ### 5.1 Which surfaces take a gate — and which don't
 
 | Surface | Gate | Why |
@@ -626,53 +641,58 @@ check a caller who, by construction, has already been checked.
 Because the gate trait lives in the always-compiled `authz` module, taking an `Arc<dyn Authz>` costs
 `blob` **no dependency at all** — `Open` in a build with no `auth`, a preset in one that has it.
 
-### 5.2 Viewer
+### 5.2 Portal — one document
 
 ```rust
-pub struct Viewer<'a> { info: &'a VersionInfo, download_url: String }
-
-impl<'a> Viewer<'a> {
-    pub fn new(info: &'a VersionInfo, download_url: impl Into<String>) -> Self;
-    pub fn render(&self) -> String;   // an HTML fragment, sync — no I/O
-}
+Portal::new(store, handle, gate)
+    .view_url("/invoice/42/attachment/{version}")  // …or .routes(&mounted) — §5.5
+    .versions(true)        // add the history, collapsed
+    .display(true)         // embed content the browser can render (default)
+    .upload("/invoice/42/attachment/replace")      // a form that adds the *next* version
+    .render_for(&headers).await?                   // 401/403 from the gate
 ```
 
-Dispatches on the MIME type to pick a presentation, **always by reference, never by value**:
+**One component, not two.** "Current version only" and "with history" differ by a table, so they are
+`versions(bool)` rather than two types that would have to be kept looking alike by hand.
+
+**Gated**, unlike `Viewer`: it fetches the version chain, so rendering *is* a read.
+
+`upload` offers a **new version** of this document and never a new document. The two are different
+acts: creating one is the app's business, because something has to record who owns it (§9), while
+adding a version is the document's. So a standalone `UploadForm` sits on the app's own page for the
+first, and `Portal` offers the second.
+
+`display(false)` renders the name, size and controls with **no embedded preview** — what an admin
+listing wants, where the operator is auditing what is stored rather than reading it, and twenty
+embedded PDFs is a page that takes a minute to load.
+
+### 5.2a Viewer — the primitive
 
 ```rust
-Viewer::new(&version, view_url)     // inline — the src of the <img>/<embed>, and what "Open" opens
-    .download_url(url)              // attachment disposition — the Download button
-    .thumbnail_url(url)             // optional: the app's own thumbnail, in place of the full image
+Viewer::new(&version, view_url).download_url(url).thumbnail_url(url)
 ```
 
-**Three URLs, because the component owns no routes** (§2). In practice they are one handler:
-`?download=1` answers with `to_response` instead of `to_inline_response`, and the thumbnail route
-serves whatever route the app uses for its own thumbnails — the crate generates none (§4.5).
+What `Portal` renders each version through, exposed for a page that already holds a `VersionInfo`
+and wants no I/O. Takes **no gate** — see §5.1.
 
 | Source | Rendered as |
 |---|---|
-| a thumbnail was supplied | `<img src="{thumbnail_url}">` wrapped in a link to the full view |
+| a thumbnail was supplied | `<img src="{thumbnail_url}">` linking to the full view |
 | `image/png`, `jpeg`, `gif`, `webp` | `<img src="{view_url}">` |
 | `application/pdf` | `<embed src="{view_url}">` |
 | everything else | no preview — the filename, the size, and the controls |
 
-Under it, always: the **filename as a link**, an **Open** control for anything the browser will
-actually display, and a **Download** button when a download URL was given. Open is a plain
-`<a target="_blank">`, so the browser's own modifiers keep working — shift for a new window,
-ctrl/cmd for a background tab. This crate ships no JavaScript, so that behaviour is free, and turning
-the link into a button would be the only way to lose it.
+Under it always: the **filename as a link**, **Open** for anything the browser will render, and
+**Download** when a download URL was given.
 
-**The preview list matches `to_inline_response`'s allowlist on purpose.** An `<img>` pointing at an
-SVG would be a guaranteed broken-image icon, because the response layer downgrades a non-allowlisted
-type to an attachment. The viewer declines to promise what the response will refuse; the security
-decision stays in one place, at the response.
+**Two different questions, kept apart** — conflating them was a bug. *Openable* is "will the browser
+render this if handed it inline", which is exactly `to_inline_response`'s allowlist, so the viewer
+never promises what the response will refuse (an `<img>` at an SVG, which the response downgrades to
+an attachment, is a guaranteed broken-image icon). *Previewable* is the narrower "should this go in
+**this** page" — text renders fine in a tab of its own and has no business inlined into someone
+else's layout.
 
-No case ever writes blob content into the page — every branch is a URL the browser fetches separately,
-with the `Content-Type` the download route sets (§5.4), not a MIME string this component trusted. Even
-a maliciously-crafted MIME in the row steers only *which tag* is rendered, never what is parsed as HTML
-in the current document.
-
-### 5.3 Upload form and admin actions
+### 5.3 Upload, and the admin panel
 
 ```rust
 pub struct UploadForm { action: String, accept: Option<String>, max_bytes: Option<u64> }
@@ -783,7 +803,27 @@ An app mounts it at its own route and adds it to the sidebar with
 `Admin::link("Blob store", "/admin/blobs/actions")` — the existing extension point for exactly this
 shape of "a page that isn't a registered entity".
 
-### 5.4 The axum response helper
+### 5.5 `Routes` — an optional gated router
+
+```rust
+let routes = Routes::new("/admin/blob");
+app.nest("/admin/blob", routes.router(store.clone(), admin_gate));
+// …then hand the same object to the components, which build URLs from it:
+Browser::new(&store, gate).routes(&routes)
+```
+
+**Read the caveat before mounting it.** §2 says downloads stay an app route and §9.2 says route by
+the owning document; both still hold for anything user-facing. What this serves is the other case —
+a surface where **one gate covers the whole store**: the admin panel, or an app where every signed-in
+user may see everything. A caller who reaches it can fetch any version by id, because the only check
+is the gate you passed. Mounting it behind a `UserReadWrite` gate in an app that *does* have
+per-document ownership silently undoes that ownership; there, write the route yourself and pass
+`view_url` instead. Every component takes either.
+
+The URLs live on the same object as the router so a component cannot link to a path the router
+doesn't serve — a base path written twice is a 404 waiting to be discovered.
+
+### 5.6 The axum response helper
 
 ```rust
 pub fn to_response(stream: ContentStream) -> axum::response::Response;

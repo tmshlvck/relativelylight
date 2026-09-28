@@ -16,7 +16,7 @@
 //! **A consequence worth knowing before you register these in an admin console.** Because the chain
 //! points backwards with `Restrict`, deleting a `blob_handle` row *directly* fails with a foreign-key
 //! violation as soon as the document has two versions: the cascade removes them in no particular
-//! order, and whichever still has a successor blocks. [`BlobStore::delete_handle`] is the only thing
+//! order, and whichever still has a successor blocks. [`BlobStore::delete_handle`](crate::blob::BlobStore::delete_handle) is the only thing
 //! that can delete a document — it clears the back-pointers first, in one transaction.
 //!
 //! So a console offering a delete button on `blob_handle` or `blob_version` offers one that answers
@@ -49,7 +49,7 @@ pub mod handle {
         ///
         /// So the pointer is maintained transactionally by `BlobStore` — every path that writes a
         /// version sets it in the same transaction — and
-        /// [`check_consistency`](super::super::BlobStore::check_consistency) reports any head that doesn't resolve
+        /// [`check_consistency`](crate::blob::BlobStore::check_consistency) reports any head that doesn't resolve
         /// (`dangling_heads`) as the compensating check.
         pub head_version_id: Option<i64>,
         pub created_at: i64,
@@ -126,7 +126,7 @@ pub mod version {
 /// The content. Nothing in this row is a fact about *an upload* — only about the bytes. Table `blob`.
 ///
 /// Reached only through a version: nothing else in this crate references content, which is what makes
-/// [`collect_garbage`](super::super::BlobStore::collect_garbage) a single question rather than a
+/// [`collect_garbage`](crate::blob::BlobStore::collect_garbage) a single question rather than a
 /// graph walk.
 pub mod content {
     use sea_orm::entity::prelude::*;
@@ -142,7 +142,7 @@ pub mod content {
         pub mime_sniffed: String,
         pub created_at: i64,
         /// When the digest was last confirmed against the stored bytes — by a read, or by a
-        /// [`verify`](super::super::BlobStore::verify) sweep. `None` means "not since it was written".
+        /// [`verify`](crate::blob::BlobStore::verify) sweep. `None` means "not since it was written".
         pub verified_at: Option<i64>,
     }
 

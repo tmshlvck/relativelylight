@@ -232,8 +232,8 @@ pub struct CheckReport {
     pub orphans_too_young: usize,
     /// Handles with no version at all — drift, since every path that creates one gives it a first
     /// version in the same transaction. Handles the *app* no longer references are a different
-    /// question, and only the app can answer it: see
-    /// [`delete_unreferenced_handles`](BlobStore::delete_unreferenced_handles).
+    /// question, and only the app can answer it — `browse` plus `delete_handle`, which is why this
+    /// crate ships no sweep for it.
     pub orphan_handles: Vec<HandleId>,
     /// **Alarm.** Handles whose `head_version_id` names a version that isn't there. That pointer is
     /// the one column with no foreign key behind it (see `entity::handle`), so this check is what
@@ -756,7 +756,7 @@ impl<B: BlobBackend> BlobStore<B> {
 
     /// Begin a streaming store whose chunks **you** push (BLOBSTORE.md §4.3).
     ///
-    /// [`create`](Self::create) and [`put_version`](Self::put_version) take an [`AsyncRead`] and are
+    /// [`create`](Self::create) and [`add_version`](Self::add_version) take an [`AsyncRead`] and are
     /// the usual way in. This is for a source that isn't one — notably a `multipart/form-data` field,
     /// which yields chunks from a parser rather than implementing `AsyncRead`, and which `blob-ui`'s
     /// upload path drives directly so an upload never lands in memory on its way to the store.

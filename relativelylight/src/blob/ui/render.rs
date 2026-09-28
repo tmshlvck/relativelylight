@@ -35,6 +35,7 @@ pub struct Viewer<'a> {
     url: String,
     download_url: Option<String>,
     thumbnail_url: Option<String>,
+    preview: bool,
 }
 
 impl<'a> Viewer<'a> {
@@ -46,6 +47,7 @@ impl<'a> Viewer<'a> {
             url: view_url.into(),
             download_url: None,
             thumbnail_url: None,
+            preview: true,
         }
     }
 
@@ -63,14 +65,27 @@ impl<'a> Viewer<'a> {
         self
     }
 
-    /// A generated variant to show in place of the full image — see
-    /// [`Thumbnailer`](crate::blob::Thumbnailer) and `BlobStore::variant`.
+    /// A thumbnail to show in place of the full image.
+    ///
+    /// The crate generates none — derived content is the app's (BLOBSTORE.md §4.5), and
+    /// `examples/blobthumbnailer` shows the twenty lines that make one. This is where you point at
+    /// whatever route serves yours.
     ///
     /// When set, the thumbnail is what renders, wrapped in a link to the full view. A listing of
     /// twenty documents then costs twenty thumbnails rather than twenty full-size images, which is
     /// the entire reason variants exist.
     pub fn thumbnail_url(mut self, url: impl Into<String>) -> Self {
         self.thumbnail_url = Some(url.into());
+        self
+    }
+
+    /// Render the name, size and controls but **no embedded preview**, whatever the type.
+    ///
+    /// For a listing that is about auditing what is stored rather than reading it: twenty embedded
+    /// PDFs make a page that takes a minute to load. [`Portal::display(false)`](super::Portal) is
+    /// what reaches for this.
+    pub fn suppress_preview(mut self) -> Self {
+        self.preview = false;
         self
     }
 
@@ -82,24 +97,31 @@ impl<'a> Viewer<'a> {
         let mime = self.info.content.as_ref().map(|c| c.mime_sniffed.as_str()).unwrap_or("");
         let size = human_size(self.info.size_bytes());
 
-        // What the browser will actually *render* — which is not the same as what looks like an
-        // image. `to_inline_response` serves only an allowlist inline and downgrades everything else
-        // to an attachment, so an `<img>` pointing at an SVG is a guaranteed broken-image icon. The
-        // two sides agree on purpose: the security decision lives at the response, and the viewer
-        // declines to promise something the response will refuse.
-        let displayable = matches!(
+        // Two different questions, and conflating them was a bug.
+        //
+        // *Openable*: will the browser render this if we hand it over inline? That is exactly
+        // `to_inline_response`'s allowlist — the two agree on purpose, since the security decision
+        // lives at the response and the viewer should not promise what the response will refuse.
+        // An `<img>` pointing at an SVG, which the response downgrades to an attachment, is a
+        // guaranteed broken-image icon.
+        //
+        // *Previewable*: should we embed it **in this page**? A narrower set — text renders fine in
+        // a tab of its own but has no business being inlined into someone else's layout.
+        let openable = matches!(
             mime,
-            "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "application/pdf"
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "application/pdf" | "text/plain"
         );
+        let previewable = openable && mime != "text/plain";
 
         let preview = match (&self.thumbnail_url, mime) {
+            _ if !self.preview => String::new(),
             // A thumbnail always wins: it is smaller, and clicking through is the full view anyway.
             (Some(t), _) => format!(
                 "<a href=\"{url}\" target=\"_blank\" rel=\"noopener\">\
                  <img src=\"{}\" alt=\"{name}\" class=\"rounded border\" loading=\"lazy\"></a>",
                 esc_str(t)
             ),
-            (None, m) if displayable && m != "application/pdf" => {
+            (None, m) if previewable && m != "application/pdf" => {
                 format!("<img src=\"{url}\" alt=\"{name}\" class=\"img-fluid rounded border\" loading=\"lazy\">")
             }
             (None, "application/pdf") => format!(
@@ -111,7 +133,7 @@ impl<'a> Viewer<'a> {
 
         format!(
             "<div class=\"rl-blob-viewer\">{preview}{}</div>",
-            self.controls(&url, &name, &size, displayable)
+            self.controls(&url, &name, &size, openable)
         )
     }
 
@@ -121,7 +143,7 @@ impl<'a> Viewer<'a> {
     /// keep working — shift for a new window, ctrl/cmd for a background tab. This crate ships no
     /// JavaScript, so there is nothing to intercept them; that behaviour is free and must not be
     /// taken away by turning the link into a button.
-    fn controls(&self, url: &str, name: &str, size: &str, displayable: bool) -> String {
+    fn controls(&self, url: &str, name: &str, size: &str, openable: bool) -> String {
         // The filename is always a link, so content is reachable even with no preview and no
         // download URL — a name with nothing behind it is a dead end, and this crate's whole
         // discipline is that every branch here is a URL the browser fetches separately.
@@ -130,7 +152,7 @@ impl<'a> Viewer<'a> {
              <span class=\"me-auto text-truncate\"><a href=\"{url}\">{name}</a> \
              <small class=\"text-body-secondary\">({size})</small></span>"
         );
-        if displayable {
+        if openable {
             out.push_str(&format!(
                 "<a class=\"btn btn-sm btn-outline-secondary\" href=\"{url}\" \
                  target=\"_blank\" rel=\"noopener\">Open</a>"
@@ -174,6 +196,17 @@ impl UploadForm {
             csrf_token: None,
             max_bytes: None,
         }
+    }
+
+    /// Label this form as adding the **next version** of an existing document rather than creating
+    /// a new one — it changes the wording, not the behaviour, which is decided by whether your
+    /// handler calls [`Receiver::as_version_of`](super::Receiver::as_version_of).
+    ///
+    /// The two acts are separate on purpose: creating a document is the app's business (it has to
+    /// record ownership somewhere), while adding a version is the document's, which is why
+    /// [`Portal`](super::Portal) offers the second and never the first.
+    pub fn as_new_version(self) -> Self {
+        self.label("New version").submit("Upload new version")
     }
 
     /// The `accept` attribute — a **hint to the file picker**, not enforcement. Anything can still
@@ -323,11 +356,11 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
              <button class=\"btn btn-outline-secondary\" type=\"submit\">Check consistency</button>\
              <div class=\"form-check\">\
              <input class=\"form-check-input\" type=\"checkbox\" id=\"rl-blob-deep\" name=\"deep\" value=\"1\">\
-             <label class=\"form-check-label\" for=\"rl-blob-deep\">deep</label></div></div>\
+             <label class=\"form-check-label\" for=\"rl-blob-deep\">check data hashes</label></div></div>\
              <div class=\"form-text\">Reconcile the index against storage: content the index expects \
-             and cannot find, and stored bytes it has never heard of. <strong>Deep</strong> also \
-             re-hashes the least recently checked content to catch silent corruption &mdash; slower, \
-             since it reads every byte of what it checks, so it covers a bounded batch per run.\
+             and cannot find, and stored bytes it has never heard of. <strong>Check data hashes</strong> \
+             additionally re-hashes the least recently checked content, catching silent corruption &mdash; \
+             slower, since it reads every byte of what it checks, so it covers a bounded batch per run.\
              </div></form>\
              <form method=\"post\" class=\"mb-3\">{csrf}\
              <input type=\"hidden\" name=\"op\" value=\"collect\">\

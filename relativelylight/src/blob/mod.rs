@@ -6,9 +6,9 @@
 //!
 //! | Layer | Type | What it is |
 //! |---|---|---|
-//! | **Content** | [`BlobId`] | the SHA-256 of some bytes; immutable, deduped, shared |
-//! | **Version** | [`VersionId`] | one upload — filename, who, when — pointing at content |
-//! | **Handle** | [`HandleId`] | the stable id **your own tables hold a foreign key to** |
+//! | **Content** | [`BlobId`](crate::blob::BlobId) | the SHA-256 of some bytes; immutable, deduped, shared |
+//! | **Version** | [`VersionId`](crate::blob::VersionId) | one upload — filename, who, when — pointing at content |
+//! | **Handle** | [`HandleId`](crate::blob::HandleId) | the stable id **your own tables hold a foreign key to** |
 //!
 //! Collapsing these is the classic error. A digest cannot be an app's foreign key: it changes on
 //! every edit, and under dedup it cannot carry per-upload metadata (two people uploading the same
@@ -46,15 +46,15 @@
 //!
 //! # Housekeeping is yours to schedule
 //!
-//! Same rule as [`auth::prune`](crate::auth): this crate spawns no tasks. [`BlobStore::verify`],
-//! [`BlobStore::check_consistency`] and [`BlobStore::collect_garbage`] return reports; the app runs them.
+//! Same rule as [`auth::prune`](crate::auth): this crate spawns no tasks. [`BlobStore::verify`](crate::blob::BlobStore::verify),
+//! [`BlobStore::check_consistency`](crate::blob::BlobStore::check_consistency) and [`BlobStore::collect_garbage`](crate::blob::BlobStore::collect_garbage) return reports; the app runs them.
 //!
 //! # Writes are ordered, and the order is the contract
 //!
 //! Bytes reach the backend **before** any row references them, and the rows then land in one
 //! transaction. A crash therefore leaves either nothing or unreferenced bytes — never a row pointing
-//! at content that isn't there. That asymmetry is why [`CheckReport::orphaned`] is routine and
-//! [`CheckReport::missing`] is an alarm.
+//! at content that isn't there. That asymmetry is why [`CheckReport::orphaned`](crate::blob::CheckReport::orphaned) is routine and
+//! [`CheckReport::missing`](crate::blob::CheckReport::missing) is an alarm.
 
 mod backend;
 mod error;
@@ -91,7 +91,7 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, DbErr, Schema};
 ///
 /// The statements carry the foreign keys **and their `ON DELETE` actions** (versions cascade from
 /// their handle; content is `RESTRICT`ed while a version points at it), so the guarantees
-/// [`BlobStore::collect_garbage`] relies on are enforced by the database rather than by this crate being
+/// [`BlobStore::collect_garbage`](crate::blob::BlobStore::collect_garbage) relies on are enforced by the database rather than by this crate being
 /// careful. Order matters — `blob` and `blob_handle` before `blob_version`.
 pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> {
     use sea_orm::sea_query::Index;

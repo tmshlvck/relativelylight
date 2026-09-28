@@ -19,8 +19,17 @@ use crate::blob::ContentStream;
 /// image to a user and a scriptable document to a browser, and `text/html` needs no explanation.
 /// Sniffed content types are advisory (BLOBSTORE.md §10), so the question this answers isn't "what
 /// is this file" but "what is safe to *say* it is while asking a browser to render it".
-const INLINE_SAFE: &[&str] =
-    &["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"];
+const INLINE_SAFE: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "application/pdf",
+    // Safe *because* of the `nosniff` header below: told `text/plain` and forbidden to sniff, a
+    // browser renders the bytes as text even if they happen to be HTML source. Without `nosniff`
+    // this line would be an XSS hole.
+    "text/plain",
+];
 
 /// A download: `Content-Disposition: attachment`, so nothing renders in the browsing context.
 ///
