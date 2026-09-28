@@ -766,8 +766,14 @@ Browser::new(store, gate)
     .render_for(&headers, &BrowseState::from_uri(&uri)).await?
 ```
 
-A searchable list of documents — current name, type, size, version count, who last changed it —
-drilling into one document's chain, newest first, under a heading it renders itself.
+A searchable list of handles — current filename, type, size, version count, `created_by` — drilling
+into one handle's chain, newest first, under a heading it renders itself.
+
+Column headers name the thing they show, with one name per concept: the person is `created_by` in
+the admin panel (matching the column) and "created by" in `Portal` (matching its audience), never
+"last change by" in one table and "by" in another. A `text-end` column immediately followed by a
+left-aligned one carries `pe-4`, because a number flush to its right edge and text flush to the next
+cell's left edge read as one squashed column rather than two.
 
 **It speaks the schema.** Columns are `handle`, `seq`, `blob`, `created_by` — not "document" and
 "file". This is an operator's surface: the reader is looking at `blob_handle`, `blob_version` and

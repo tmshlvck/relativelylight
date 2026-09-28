@@ -200,7 +200,7 @@ impl<'a, B: BlobBackend> Portal<'a, B> {
                 None => "—".to_string(),
             };
             rows.push_str(&format!(
-                "<tr{}><td>{}</td><td>{}</td><td class=\"text-end\">{}</td>\
+                "<tr{}><td>{}</td><td>{}</td><td class=\"text-end pe-4\">{}</td>\
                  <td><small>{}</small></td><td>{links}</td></tr>",
                 if Some(v.id) == head_id { " class=\"table-active\"" } else { "" },
                 v.seq,
@@ -212,7 +212,8 @@ impl<'a, B: BlobBackend> Portal<'a, B> {
         format!(
             "<details class=\"mt-3\"><summary class=\"small\">{} version(s)</summary>\
              <table class=\"table table-sm align-middle mt-2\"><thead><tr>\
-             <th>seq</th><th>filename</th><th class=\"text-end\">size</th><th>by</th><th></th>\
+             <th>seq</th><th>filename</th><th class=\"text-end pe-4\">size</th>\
+             <th>created by</th><th></th>\
              </tr></thead><tbody>{rows}</tbody></table></details>",
             chain.len()
         )

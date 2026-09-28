@@ -282,10 +282,13 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
             return out;
         }
 
+        // `pe-4` on the last right-aligned column before a left-aligned one. A number flush to
+        // its right edge and text flush to the next cell's left edge collide visually, and the
+        // reader sees one squashed column rather than two.
         out.push_str(
             "<table class=\"table table-sm align-middle\"><thead><tr>\
              <th>handle</th><th>filename</th><th>type</th><th class=\"text-end\">size</th>\
-             <th class=\"text-end\">versions</th><th>last change by</th></tr></thead><tbody>",
+             <th class=\"text-end pe-4\">versions</th><th>created_by</th></tr></thead><tbody>",
         );
         for d in &found.documents {
             let (name, mime, size, by) = match &d.head {
@@ -306,7 +309,7 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
             out.push_str(&format!(
                 "<tr><td><a href=\"{}\"><code class=\"small\">{}</code></a></td><td>{name}</td>\
                  <td><small>{mime}</small></td><td class=\"text-end\">{size}</td>\
-                 <td class=\"text-end\">{}</td><td><small>{by}</small></td></tr>",
+                 <td class=\"text-end pe-4\">{}</td><td><small>{by}</small></td></tr>",
                 esc_str(&state.href(page, Some(d.handle))),
                 esc_str(&d.handle.to_string()),
                 d.versions
@@ -342,7 +345,7 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
         out.push_str(
             "<table class=\"table table-sm align-middle\"><thead><tr>\
              <th>seq</th><th>blob</th><th>filename</th><th>declared type</th>\
-             <th class=\"text-end\">size</th><th>created_by</th><th>created_at (UTC)</th>\
+             <th class=\"text-end pe-4\">size</th><th>created_by</th><th>created_at (UTC)</th>\
              <th></th></tr></thead><tbody>",
         );
         let head_id = chain.last().map(|l| l.id);
@@ -359,7 +362,7 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
             };
             out.push_str(&format!(
                 "<tr{}><td>{}</td><td><code>{}</code></td><td>{}</td><td><small>{}</small></td>\
-                 <td class=\"text-end\">{}</td><td><small>{}</small></td>\
+                 <td class=\"text-end pe-4\">{}</td><td><small>{}</small></td>\
                  <td><small>{}</small></td><td>{link}</td></tr>",
                 if Some(v.id) == head_id { " class=\"table-active\"" } else { "" },
                 v.seq,

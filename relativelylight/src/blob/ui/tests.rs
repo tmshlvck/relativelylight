@@ -643,7 +643,7 @@ mod panel {
         let h = store.create(&b"x"[..], PutMeta::new("a.txt"), WriteContext::none()).await.unwrap();
 
         let list = Browser::new(&store, Open).render_for(&HeaderMap::new(), &state("")).await.unwrap();
-        for col in ["<th>handle</th>", "<th>filename</th>", "<th class=\"text-end\">versions</th>"] {
+        for col in ["<th>handle</th>", "<th>filename</th>", ">versions</th>"] {
             assert!(list.contains(col), "missing {col}:\n{list}");
         }
 
@@ -868,4 +868,44 @@ fn a_long_filename_truncates_without_taking_the_controls_with_it() {
     // Both controls live in the unshrinkable tail, after the truncating span closes.
     assert!(html[tail_span..].contains(">open</a>"), "{html}");
     assert!(html[tail_span..].contains(">download</a>"), "{html}");
+}
+
+#[tokio::test]
+async fn a_right_aligned_column_is_never_flush_against_the_text_beside_it() {
+    // A number pinned to its right edge and text pinned to the next cell's left edge read as one
+    // squashed column. Every `text-end` header immediately followed by a left-aligned one carries
+    // `pe-4` so there is a gap to see the boundary in.
+    use crate::authz::Open;
+    use crate::blob::ui::{Actions, BrowseState, Browser, Portal};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path()).await;
+    let h = store.create(&b"x"[..], PutMeta::new("a.txt").by("alice"), WriteContext::none()).await.unwrap();
+    let st = |q: &str| BrowseState::from_uri(&format!("/x?{q}").parse::<http::Uri>().unwrap());
+
+    // The handle list: `versions` sits beside `created_by`.
+    let list = Browser::new(&store, Open).render_for(&HeaderMap::new(), &st("")).await.unwrap();
+    assert!(list.contains("<th class=\"text-end pe-4\">versions</th><th>created_by</th>"), "{list}");
+
+    // One handle's versions: `size` sits beside `created_by`.
+    let one = Browser::new(&store, Open)
+        .render_for(&HeaderMap::new(), &st(&format!("open={h}")))
+        .await
+        .unwrap();
+    assert!(one.contains("<th class=\"text-end pe-4\">size</th><th>created_by</th>"), "{one}");
+
+    // And the portal's history: `size` beside `created by`.
+    let portal = Portal::new(&store, h, Open)
+        .versions(true)
+        .render_for(&HeaderMap::new())
+        .await
+        .unwrap();
+    assert!(portal.contains("text-end pe-4\">size</th>"), "{portal}");
+    assert!(portal.contains("<th>created by</th>"), "{portal}");
+
+    // The concept has one name everywhere — it was "last change by" in one table and "by" in
+    // another, for the same column.
+    assert!(!list.contains("last change by"), "{list}");
+    assert!(!portal.contains("<th>by</th>"), "{portal}");
+    let _ = Actions::new(&store, Open);
 }
