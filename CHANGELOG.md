@@ -9,7 +9,7 @@ Work that has landed on `main` but isn't tagged yet lives under **Unreleased**; 
 heading to the version + date and adds a compare link. Per-entry commit hashes are given where a change
 is easy to miss in a diff.
 
-## Unreleased
+## [0.3.2] — 2026-09-28
 
 ### Added
 
@@ -968,6 +968,8 @@ Renames the authorization presets to a consistent `<ReadAudience>Read<WriteAudie
 First published release: the `crud` engine + SeaORM backend, the Bootstrap/Alpine admin UI, OpenAPI and
 CSV adapters, and the `auth` module (sessions, login, TOTP 2FA, OIDC SSO, per-model gates).
 
+[0.3.2]: https://github.com/tmshlvck/relativelylight/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/tmshlvck/relativelylight/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/tmshlvck/relativelylight/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/tmshlvck/relativelylight/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/tmshlvck/relativelylight/compare/v0.1.2...v0.2.0
