@@ -89,10 +89,14 @@ is easy to miss in a diff.
   and that assertion is still there. What it fixes is a deletion that couldn't complete, and rows that
   outlived their owner.
 
-  **Existing databases do not get the constraints from `auth::migrate`**, which only ever creates
-  missing tables — and on SQLite a constraint cannot be added by `ALTER TABLE`, so this is a
-  rename-create-copy-drop rebuild of the three tables. See [docs/AUTH.md § Database schema &
-  migrations](docs/AUTH.md) for the upgrade note.
+  **Upgrading is optional and nothing breaks without it.** `auth::migrate` only ever creates
+  *missing* tables, and SeaORM's relations describe joins rather than validating a live schema, so
+  an existing deployment that upgrades the crate and changes nothing keeps working — pinned by
+  `the_crate_still_works_against_a_database_that_has_not_been_migrated`. What it does not get is the
+  fix: the old deletion behaviour persists until the constraints are added. On PostgreSQL/MySQL that
+  is a few `ALTER TABLE`s; on SQLite it is a table rebuild, because SQLite's `ALTER TABLE` cannot
+  add or alter a constraint at all. [docs/AUTH.md → Upgrading an existing
+  database](docs/AUTH.md) has both, and the orphan cleanup the rebuild needs first.
 
 - **A `Uuid` column could not be filtered or selected by key.** `crud`'s `str_to_db` bound a UUID as
   a *string*, which compares against a `Uuid` column as a different type and matches nothing — so

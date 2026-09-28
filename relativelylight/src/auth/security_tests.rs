@@ -3183,3 +3183,82 @@ fn urlencode(s: &str) -> String {
     }
     out
 }
+
+/// **Upgrading the crate without migrating the database.** The 0.3.2 foreign keys are added by
+/// `table_create_statements`, and `auth::migrate` only ever *creates missing* tables — so an
+/// existing deployment keeps its old schema until its own migration changes it.
+///
+/// This builds that older shape on purpose (sessions and recovery codes with no foreign key at all;
+/// memberships with keys but no `ON DELETE`, which is what they defaulted to) and runs the current
+/// code against it. Nothing here should break: SeaORM's declared relations describe joins and
+/// generate DDL, they do not validate a live schema.
+#[cfg(test)]
+async fn downgrade_schema_to_pre_cascade(db: &DatabaseConnection) {
+    for sql in [
+        "DROP TABLE auth_session",
+        "DROP TABLE auth_user_group",
+        "DROP TABLE auth_totp_recovery",
+        // No FK at all — what these two looked like before.
+        r#"CREATE TABLE "auth_session" ( "id" varchar NOT NULL PRIMARY KEY, "user_id" integer NOT NULL,
+             "expires_at" bigint NOT NULL, "last_seen_at" bigint NOT NULL, "awaiting_totp" boolean NOT NULL )"#,
+        r#"CREATE TABLE "auth_totp_recovery" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+             "user_id" integer NOT NULL, "code_hash" varchar NOT NULL, "created_at" bigint NOT NULL,
+             "used_at" bigint NULL )"#,
+        // Keys, but no ON DELETE — so they default to NO ACTION, which is the bug.
+        r#"CREATE TABLE "auth_user_group" ( "user_id" integer NOT NULL, "group_id" integer NOT NULL,
+             CONSTRAINT "pk-auth_user_group" PRIMARY KEY ("user_id", "group_id"),
+             FOREIGN KEY ("user_id") REFERENCES "auth_user" ("id"),
+             FOREIGN KEY ("group_id") REFERENCES "auth_group" ("id") )"#,
+    ] {
+        db.execute(sea_orm::Statement::from_string(db.get_database_backend(), sql.to_string()))
+            .await
+            .expect("rebuild the pre-cascade schema");
+    }
+}
+
+#[tokio::test]
+async fn the_crate_still_works_against_a_database_that_has_not_been_migrated() {
+    // The question an existing deployment actually has: does upgrading the crate break my app
+    // before I get round to the schema change? It does not — everything below is the ordinary
+    // happy path, running against the old tables.
+    let fx = Fx::new().await;
+    downgrade_schema_to_pre_cascade(&fx.db).await;
+
+    let id = fx.user_in("alice", "editors").await;
+    let token = fx.session_for("alice").await;
+    recovery::issue(&fx.db, id).await.expect("recovery codes still issue");
+
+    assert!(fx.identify_token(&token).await.is_some(), "sessions still authenticate");
+    assert!(fx.password_works("alice", PW).await, "passwords still verify");
+    let res = fx.post("/login", &format!("username=alice&password={PW}&_csrf={CSRF}"), None).await;
+    assert_ne!(res.status, StatusCode::INTERNAL_SERVER_ERROR, "login still works: {:?}", res.status);
+    assert_eq!(membership_rows(&fx.db, id).await, 1);
+}
+
+#[tokio::test]
+async fn an_unmigrated_database_keeps_the_old_deletion_behaviour_and_nothing_worse() {
+    // What you *don't* get until you migrate — stated precisely, because "it still works" is only
+    // half an answer. This is the 0.3.1 behaviour, unchanged: the bug is still there, and no new
+    // one has appeared.
+    let fx = Fx::new().await;
+    downgrade_schema_to_pre_cascade(&fx.db).await;
+
+    let grouped = fx.user_in("alice", "editors").await;
+    let solo = fx.user("bob").await;
+    let bob_token = fx.session_for("bob").await;
+    recovery::issue(&fx.db, solo).await.unwrap();
+
+    // Still refused, exactly as before: memberships default to NO ACTION.
+    assert!(
+        user::Entity::delete_by_id(grouped).exec(&fx.db).await.is_err(),
+        "deleting a user who is in a group is still the pre-migration 409"
+    );
+
+    // And a user with no memberships still deletes, still orphaning their rows.
+    user::Entity::delete_by_id(solo).exec(&fx.db).await.expect("delete");
+    assert!(fx.session_row(&bob_token).await.is_some(), "the session is orphaned, as before");
+    assert!(recovery_rows(&fx.db, solo).await > 0, "so are the recovery codes");
+
+    // The property that held throughout and still does: an orphan authenticates nobody.
+    assert!(fx.identify_token(&bob_token).await.is_none());
+}

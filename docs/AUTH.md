@@ -241,15 +241,59 @@ console. Nothing is left for `identify` to refuse or for a pruner to find. The t
 on a submitted username and a client address rather than on an account, so they have no foreign key by
 design — a counter for an account that never existed is the normal case there.
 
-> **Upgrading to 0.3.2** adds those constraints, which `migrate` will *not* add to tables that already
-> exist — and on SQLite a constraint cannot be added by `ALTER TABLE` at all, so it is a
-> rename-create-copy-drop rebuild of `auth_session`, `auth_totp_recovery` and `auth_user_group`
-> (`sea-orm-migration` will do this for you; take the new DDL from `table_create_statements` rather
-> than writing it by hand). Skipping the upgrade is not a security problem — `identify` has always
-> refused a session whose user is gone — but it leaves two defects in place: credential-shaped rows
-> outliving the account they belonged to, and, because `auth_user_group`'s pre-existing foreign keys
-> defaulted to `NO ACTION`, **deleting a user who belongs to any group fails outright** with a
-> `409 Conflict` until their memberships are unpicked by hand.
+#### Upgrading an existing database
+
+**Nothing breaks if you do nothing.** `auth::migrate` only ever *creates missing* tables, and
+SeaORM's declared relations describe joins and generate DDL — they do not validate a live schema. An
+existing deployment that upgrades the crate and changes nothing keeps working: logins, sessions,
+recovery codes and memberships all behave exactly as before. `security_tests.rs` pins this against a
+deliberately un-migrated schema
+(`the_crate_still_works_against_a_database_that_has_not_been_migrated`).
+
+What you don't get until you migrate is the **fix**: credential-shaped rows still outlive the account
+they belonged to, and deleting a user who belongs to any group still fails with a `409` until their
+memberships are unpicked by hand. That is the pre-upgrade behaviour, unchanged — not a new failure.
+
+**On PostgreSQL / MySQL** the change is three statements, because both can add a constraint in place:
+
+```sql
+ALTER TABLE auth_session        ADD CONSTRAINT fk_auth_session_user
+  FOREIGN KEY (user_id) REFERENCES auth_user(id) ON DELETE CASCADE;
+ALTER TABLE auth_totp_recovery  ADD CONSTRAINT fk_auth_totp_recovery_user
+  FOREIGN KEY (user_id) REFERENCES auth_user(id) ON DELETE CASCADE;
+-- auth_user_group already has its keys; they need replacing to gain ON DELETE CASCADE:
+ALTER TABLE auth_user_group DROP CONSTRAINT <existing_user_fk>,  ADD CONSTRAINT fk_aug_user
+  FOREIGN KEY (user_id)  REFERENCES auth_user(id)  ON DELETE CASCADE;
+ALTER TABLE auth_user_group DROP CONSTRAINT <existing_group_fk>, ADD CONSTRAINT fk_aug_group
+  FOREIGN KEY (group_id) REFERENCES auth_group(id) ON DELETE CASCADE;
+```
+
+**On SQLite it is a table rebuild**, because SQLite's `ALTER TABLE` cannot add, drop or alter a
+constraint at all — it only renames tables/columns and adds columns. The supported way to change one
+is [SQLite's own documented procedure](https://sqlite.org/lang_altertable.html#otheralter): create a
+new table with the wanted schema under a temporary name, `INSERT INTO … SELECT` the rows across, drop
+the original, and rename the new one into place — all inside a transaction with
+`PRAGMA foreign_keys=OFF` around it. That is what "rename-create-copy-drop" means; there is no
+in-place edit available.
+
+`sea-orm-migration` will do this for you, and the new DDL should come from
+[`table_create_statements`](crate::auth::table_create_statements) rather than being written by hand,
+so the rebuilt table matches what a fresh install gets:
+
+```rust
+// Sketch of the SQLite path, per table. Wrap in a transaction.
+m.get_connection().execute_unprepared("PRAGMA foreign_keys=OFF").await?;
+// 1. the new shape, under a temporary name — take it from table_create_statements and rename
+// 2. INSERT INTO auth_session_new SELECT * FROM auth_session
+// 3. DROP TABLE auth_session
+// 4. ALTER TABLE auth_session_new RENAME TO auth_session
+m.get_connection().execute_unprepared("PRAGMA foreign_keys=ON").await?;
+```
+
+**Copy the rows before you rely on the cascade.** The rebuild is also the moment any rows that were
+*already* orphaned — sessions and recovery codes belonging to users deleted before the upgrade —
+would violate the new constraint. Delete them first (`DELETE FROM auth_session WHERE user_id NOT IN
+(SELECT id FROM auth_user)`, and the same for `auth_totp_recovery`), or the copy step fails.
 
 For anything long-lived, drive the schema with **`sea-orm-migration`** — SeaORM's alembic-equivalent:
 versioned `up`/`down` migrations, applied once and tracked in a `seaql_migrations` table. Fold the auth
