@@ -19,7 +19,7 @@ use std::sync::Arc;
 use http::HeaderMap;
 
 use crate::authz::{Authz, Decision, Operation};
-use crate::blob::{BlobBackend, BlobStore, FsckOptions, VerifyOptions, VersionInfo};
+use crate::blob::{BlobBackend, BlobStore, CheckOptions, VerifyOptions, VersionInfo};
 use crate::crud::ui::esc_str;
 
 /// Renders one version for a page — **always by reference, never by value**.
@@ -35,7 +35,6 @@ pub struct Viewer<'a> {
     url: String,
     download_url: Option<String>,
     thumbnail_url: Option<String>,
-    tz: Option<&'a crate::time::Tz>,
 }
 
 impl<'a> Viewer<'a> {
@@ -47,7 +46,6 @@ impl<'a> Viewer<'a> {
             url: view_url.into(),
             download_url: None,
             thumbnail_url: None,
-            tz: None,
         }
     }
 
@@ -76,41 +74,10 @@ impl<'a> Viewer<'a> {
         self
     }
 
-    /// Render the erasure date in the caller's zone (`docs/TIME.md`). Without this it is UTC —
-    /// correct, just not local. `Tz::from_headers(&headers)` is the usual argument.
-    pub fn tz(mut self, tz: &'a crate::time::Tz) -> Self {
-        self.tz = Some(tz);
-        self
-    }
-
     /// An HTML fragment. Synchronous — it reads the [`VersionInfo`] it was given and nothing else.
     pub fn render(&self) -> String {
         let url = esc_str(&self.url);
         let name = esc_str(&self.info.filename);
-
-        if self.info.is_erased() {
-            // The §4.8 case: the record survives its content, and saying so is the point. A blank
-            // space here would read as "there was never anything", which is the opposite. No
-            // controls either — there is nothing to open or download.
-            let utc;
-            let zone = match self.tz {
-                Some(z) => z,
-                None => {
-                    utc = crate::time::Tz::named("UTC");
-                    &utc
-                }
-            };
-            let when = self
-                .info
-                .purged_at
-                .map(|t| format!(" on {}", esc_str(&zone.format(t))))
-                .unwrap_or_default();
-            return format!(
-                "<div class=\"border rounded p-3 text-body-secondary bg-body-tertiary\">\
-                 <strong>{name}</strong><br>\
-                 <small>Content was erased{when}. The version record is retained.</small></div>"
-            );
-        }
 
         let mime = self.info.content.as_ref().map(|c| c.mime_sniffed.as_str()).unwrap_or("");
         let size = human_size(self.info.size_bytes());
@@ -277,7 +244,8 @@ impl UploadForm {
     }
 }
 
-/// The store-wide maintenance page: `verify`, `fsck`, `purge` (BLOBSTORE.md §5.3).
+/// The store-wide maintenance controls: consistency checking and garbage collection
+/// (BLOBSTORE.md §5.3).
 ///
 /// What the generic CRUD console can't express — these aren't row operations and aren't
 /// `MetaModel`-shaped. **Gated**, because every button acts across the whole store.
@@ -319,11 +287,12 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
             .map(|t| format!("<input type=\"hidden\" name=\"_csrf\" value=\"{}\">", esc_str(t)))
             .unwrap_or_default();
 
-        // Two controls, not three. `fsck` and `verify` answer the same question at two depths —
+        // Two controls, not three. `check_consistency` and `verify` answer the same question at two
+        // depths —
         // "is the stored content still what the index says" — and differ only in cost: one stats
         // each blob, the other re-hashes every byte. That is a checkbox, the way `fsck -c` has
-        // always been. `purge` stays separate because it is a different question (*is it still
-        // wanted*) and the only one that deletes.
+        // always been. Collection stays separate: *is it still wanted* is a different question, and
+        // it is the only one that deletes.
         Ok(format!(
             "<div class=\"rl-blob-actions\">\
              <form method=\"post\" class=\"mb-3\">{csrf}\
@@ -338,8 +307,8 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
              re-hashes content to catch silent corruption &mdash; correspondingly slower, since it \
              reads every byte.</div></form>\
              <form method=\"post\" class=\"mb-3\">{csrf}\
-             <input type=\"hidden\" name=\"op\" value=\"purge\">\
-             <button class=\"btn btn-outline-danger\" type=\"submit\">Purge unreferenced content</button>\
+             <input type=\"hidden\" name=\"op\" value=\"collect\">\
+             <button class=\"btn btn-outline-danger\" type=\"submit\">Collect unreferenced content</button>\
              <div class=\"form-text\">Delete stored content that no version and no variant points at \
              any more. Documents are never touched.</div></form></div>"
         ))
@@ -355,8 +324,8 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
         deep: bool,
     ) -> Result<ActionOutcome, Decision> {
         // Gate on the *write* operation for anything destructive: a caller who may look at the page
-        // is not thereby allowed to purge it.
-        let needed = if op == "purge" { Operation::Delete } else { Operation::Read };
+        // is not thereby allowed to collect it.
+        let needed = if op == "collect" { Operation::Delete } else { Operation::Read };
         match self.gate.authorize(needed, headers).await {
             Decision::Allow => {}
             other => return Err(other),
@@ -364,9 +333,9 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
 
         let outcome = match op {
             "check" => self.check(deep).await,
-            "purge" => match self.store.purge(None).await {
+            "collect" => match self.store.collect_garbage().await {
                 Ok(r) => {
-                    let n = r.content_deleted.len();
+                    let n = r.deleted.len();
                     ActionOutcome {
                         alarming: false,
                         message: format!(
@@ -375,7 +344,7 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
                         ),
                     }
                 }
-                Err(e) => ActionOutcome { message: format!("Purge failed: {e}"), alarming: true },
+                Err(e) => ActionOutcome { message: format!("Collection failed: {e}"), alarming: true },
             },
             other => ActionOutcome { message: format!("Unknown action {other:?}."), alarming: true },
         };
@@ -383,36 +352,36 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
     }
 
     async fn check(&self, deep: bool) -> ActionOutcome {
-        let fsck = match self.store.fsck(FsckOptions::default(), None).await {
+        let found = match self.store.check_consistency(CheckOptions::default()).await {
             Ok(r) => r,
             Err(e) => return ActionOutcome { message: format!("Check failed: {e}"), alarming: true },
         };
 
         let mut parts = Vec::new();
-        let mut alarming = !fsck.missing.is_empty() || !fsck.dangling_heads.is_empty();
+        let mut alarming = !found.missing.is_empty() || !found.dangling_heads.is_empty();
 
         // The alarming findings first, and only when there are any — a report that leads with four
         // zeroes buries the one number that matters.
-        if !fsck.missing.is_empty() {
-            parts.push(format!("{} blob(s) MISSING from storage", fsck.missing.len()));
+        if !found.missing.is_empty() {
+            parts.push(format!("{} blob(s) MISSING from storage", found.missing.len()));
         }
-        if !fsck.dangling_heads.is_empty() {
+        if !found.dangling_heads.is_empty() {
             parts.push(format!(
                 "{} document(s) whose current version is missing",
-                fsck.dangling_heads.len()
+                found.dangling_heads.len()
             ));
         }
-        if !fsck.orphan_handles.is_empty() {
-            parts.push(format!("{} document(s) with no versions", fsck.orphan_handles.len()));
+        if !found.orphan_handles.is_empty() {
+            parts.push(format!("{} document(s) with no versions", found.orphan_handles.len()));
         }
-        if !fsck.orphaned.is_empty() {
+        if !found.orphaned.is_empty() {
             parts.push(format!(
                 "{} collectable orphan(s) in storage (harmless: the residue of interrupted uploads)",
-                fsck.orphaned.len()
+                found.orphaned.len()
             ));
         }
-        if fsck.orphans_too_young > 0 {
-            parts.push(format!("{} orphan(s) too recent to judge", fsck.orphans_too_young));
+        if found.orphans_too_young > 0 {
+            parts.push(format!("{} orphan(s) too recent to judge", found.orphans_too_young));
         }
 
         if deep {

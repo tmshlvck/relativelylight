@@ -1,8 +1,8 @@
 # `relativelylight::blob` — content-addressed file storage — DRAFT SPEC
 
 Status: **implemented.** `blob` (storage, the handle + version chain), `blob-ui` (viewer, streaming
-upload, document browser, maintenance, response builder) and `blob-thumbnail` all ship, pinned by
-`blob/tests.rs` and `blob/ui/tests.rs`. Where building it changed a decision, the section says so
+upload, document browser, maintenance, response builder) both ship, pinned by `blob/tests.rs` and
+`blob/ui/tests.rs`. Where building it changed a decision, the section says so
 rather than being quietly rewritten.
 
 **Example: `examples/blob`** — `cargo run -p blob-example`. Tickets with attachments: streaming
@@ -23,8 +23,9 @@ stored.
 | Content-addressed storage: write once, read back digest-verified | **Ownership** — who a document belongs to, and to what (§9) |
 | A **stable handle** app tables can FK to, and its **version chain** | **Row-level authorization** — may *this* caller see *this* document (§9) |
 | A backend trait + a shipped filesystem implementation | The download route itself (§5.4) |
-| Viewer, upload form, thumbnailer, a companion admin panel | Backup / retention *policy* (what's worth keeping, for how long) |
-| Integrity sweeps, backup and purge *mechanisms* | Anything requiring `auth` (§2) |
+| Viewer, streaming upload form, document browser | **Derived content** — thumbnails, previews, crops (§4.5) |
+| Consistency checking, garbage collection, content copying | Retention *policy* (what's worth keeping, for how long) |
+| | Anything requiring `auth` (§2) |
 
 The right mental model is `auth` vs. an app's own RBAC group taxonomy: this module owns the mechanism
 and ships something usable standalone; an app that needs ownership and per-document access builds a
@@ -34,8 +35,7 @@ app.
 ## 2. Design tenets
 
 **No mandatory coupling — including to `auth`.** `blob` alone (no `crud`, no `auth`, no `observe`
-wiring) is a complete, useful library. Every other layer — versioning, UI, thumbnails, audit — is
-additive. Ownership *could* have been a typed FK onto `auth_user`, bought with a hard dependency on
+wiring) is a complete, useful library. Every other layer — UI, audit — is additive. Ownership *could* have been a typed FK onto `auth_user`, bought with a hard dependency on
 `auth`; §9 shows why the app's own table is the better home for it, and why nothing is lost by
 keeping it out.
 
@@ -48,9 +48,11 @@ makes a crash leave only garbage (never a dangling row) live once, in `BlobStore
 trait — not re-implemented per backend. A backend's job is narrower than it looks: durably store bytes
 under an id, hand them back, and enumerate them.
 
-**Derived content is still content.** A thumbnail is a blob like any other — content-addressed, stored
-through the same backend, subject to the same verify/purge machinery. No second storage mechanism, no
-separate cache invalidation story.
+**Deliberately small.** This is load-bearing infrastructure in every app that uses it, so the bar for
+adding a concept is high and several things that were here have been taken back out: derived content
+(§4.5), a variant index, and partial erasure. Each was defensible on its own and each added a second
+way to think about the same data. What is left is documents, their versions, and the bytes underneath
+— three tables, and one way to delete.
 
 **The viewer never inlines what it didn't generate itself.** Rendered HTML gets an `<img src>` or
 `<embed src>` pointing at a route the app serves; raw uploaded bytes are never interpolated into a
@@ -76,8 +78,8 @@ each bite on their own:
    sequence of bytes.
 2. **The digest changes on every edit.** An app table FK'd to it must be rewritten whenever the
    document changes — which is exactly the indirection layer every app would end up building.
-3. **Purge needs reference *counting*, not a boolean.** One content row can back many documents; "is
-   this content still in use" is not a question any single app table can answer.
+3. **Collection needs reference *counting*, not a boolean.** One content row can back many documents;
+   "is this content still in use" is not a question any single app table can answer.
 4. **Erasure lands on dedup.** Destroying one subject's document must not destroy identical bytes
    another tenant legitimately holds. Same counting problem, with a legal deadline.
 5. **Width.** 64 hex characters in every referencing table and every index, versus 16 bytes.
@@ -113,12 +115,11 @@ pub struct Model {
     pub handle_id: Uuid,              // FK → blob_handle.id, ON DELETE CASCADE
     pub seq: i32,                     // 1, 2, 3… unique (handle_id, seq)
     pub prev_version_id: Option<i64>, // FK → blob_version.id; None on the first
-    pub blob_id: Option<String>,      // FK → blob.id; None once the content has been erased (§4.8)
+    pub blob_id: String,              // FK → blob.id, RESTRICT. Not nullable: a version always has bytes
     pub filename: String,             // as at THIS version — a rename is a new version
     pub mime_declared: String,        // what the uploader claimed; advisory, never trusted (§10)
     pub created_by: Option<String>,   // identity **snapshot**, not a key — see §3.3
     pub created_at: i64,
-    pub purged_at: Option<i64>,       // set when the content was erased out from under this version
     pub metadata: Option<Json>,       // free-form, app-owned, immutable — see §3.4
 }
 // unique (handle_id, seq)
@@ -137,19 +138,6 @@ pub struct Model {
 }
 ```
 
-```rust
-#[sea_orm(table_name = "blob_variant")]
-pub struct Model {
-    #[sea_orm(primary_key)]
-    pub id: i32,
-    pub blob_id: String,         // FK → blob.id, the source
-    pub variant: String,         // "thumb" | "mobile" | "desktop", or an app's own string — §6
-    pub derived_blob_id: String, // FK → blob.id, the generated content
-    pub generated_at: i64,
-}
-// unique (blob_id, variant)
-```
-
 **`prev_version_id` only — there is no `next`.** Storing both directions means appending a version
 *rewrites the previous row*, which destroys the property that makes version rows usable as a record at
 all, and adds a write race for nothing. "Next" is a query (`WHERE prev_version_id = ?`) or `seq + 1`.
@@ -164,20 +152,17 @@ they tolerate it (Postgres does not). Declaring it would mean shipping an `ALTER
 crate dictating a two-phase migration to every app that embeds it, to constrain one column.
 
 So the pointer is maintained transactionally instead (every path that writes a version sets it in the
-same transaction), and `fsck` reports any head that doesn't resolve as `dangling_heads`, at the same
+same transaction), and `check_consistency` reports any head that doesn't resolve as `dangling_heads`, at the same
 severity as a missing blob. It is the one integrity rule here enforced by a sweep rather than by the
 database, and it is called out as such rather than assumed.
 
 `head_version_id` is denormalised on purpose — without it, an admin listing of N handles showing each
 current filename is a per-row subquery that `MetaModel` cannot express.
 
-**The two uniqueness rules are emitted as table constraints**, not left as comments:
-`blob_version(handle_id, seq)` and `blob_variant(blob_id, variant)`. The first is what stops two
-concurrent `put_version` calls both deciding they are version 4 and forking the chain; the second is
-both an integrity rule and a prerequisite, since `set_variant`'s upsert names it as its conflict
-target and an `ON CONFLICT` with no matching unique index is an error rather than a no-op.
-`Schema::create_table_from_entity` derives columns, primary keys and foreign keys from an entity and
-knows about neither, so `table_create_statements` adds them.
+**`blob_version(handle_id, seq)` is a unique constraint**, emitted as a table constraint rather than
+left as a comment: it is what stops two concurrent `add_version` calls both deciding they are version
+4 and forking the chain. `Schema::create_table_from_entity` derives columns, primary keys and foreign
+keys from an entity and knows nothing about it, so `table_create_statements` adds it.
 
 ### 3.3 `created_by` is a snapshot string, and it is *state*, not audit
 
@@ -274,11 +259,11 @@ pub trait BlobBackend: Send + Sync + 'static {
 
     async fn exists(&self, id: &BlobId) -> Result<bool, BlobError>;
 
-    /// Only called by `purge` (§4.6), and only after the index row is gone.
+    /// Only called by `collect_garbage` (§4.6), and only after the index row is gone.
     async fn delete(&self, id: &BlobId) -> Result<(), BlobError>;
 
     /// Enumerate stored ids, with the time each was written where the backend knows it. Needed only
-    /// by `fsck` (§4.6) to find bytes the index has never heard of; a filesystem walks its fan-out
+    /// by `check_consistency` (§4.6) to find bytes the index has never heard of; a filesystem walks its fan-out
     /// directories, an object store pages `ListObjectsV2`. It is on the trait rather than optional
     /// because a backend that cannot be swept cannot be trusted to be complete.
     async fn list(&self) -> Result<Pin<Box<dyn Stream<Item = Result<StoredEntry, BlobError>> + Send>>, BlobError>;
@@ -313,7 +298,7 @@ allocation per upload it saves: an app could not choose its backend from configu
 threaded through every type that touches a store, including `Actions<'a, B>` and every handler
 signature mentioning one.
 
-The ergonomics stay on the *app-facing* side regardless: `BlobStore::create` and `put_version` take
+The ergonomics stay on the *app-facing* side regardless: `BlobStore::create` and `add_version` take
 `impl AsyncRead + Send + Unpin` and do the boxing themselves, so no caller ever writes `Box::pin`.
 
 ### 4.2 `FsBackend` — the shipped implementation
@@ -360,7 +345,7 @@ impl<B: BlobBackend> BlobStore<B> {
 
     /// Append a version to an existing handle and move `head_version_id` onto it. The previous
     /// version is untouched — that is the whole point of the chain.
-    pub async fn put_version(&self, handle: HandleId, data: impl AsyncRead + Send + Unpin,
+    pub async fn add_version(&self, handle: HandleId, data: impl AsyncRead + Send + Unpin,
                              meta: PutMeta, ctx: WriteContext<'_>) -> Result<VersionId, BlobError>;
 
     /// A new version over the **same content** — a rename, a metadata correction, a re-attribution.
@@ -373,7 +358,7 @@ impl<B: BlobBackend> BlobStore<B> {
     pub async fn version(&self, id: VersionId) -> Result<VersionInfo, BlobError>;
 
     /// Delete a handle, its versions, and its handle-level metadata. Content that no surviving
-    /// version references becomes collectable by `purge` (§4.6). Call this in the same transaction
+    /// version references becomes collectable by `collect_garbage` (§4.6). Call this in the same transaction
     /// the app deletes its own document row in.
     pub async fn delete_handle(&self, handle: HandleId, ctx: WriteContext<'_>) -> Result<(), BlobError>;
 
@@ -382,7 +367,7 @@ impl<B: BlobBackend> BlobStore<B> {
     /// Open a version's content, hashing while streaming and comparing to the recorded digest. A
     /// mismatch is `BlobError::Corrupt` — no partial bytes reach the caller — never a silent
     /// hand-back of wrong content. On success, stamps `verified_at` and fires a `Read` event (§4.7).
-    pub async fn read(&self, version: VersionId, ctx: WriteContext<'_>) -> Result<BlobHandle, BlobError>;
+    pub async fn read(&self, version: VersionId, ctx: WriteContext<'_>) -> Result<ContentStream, BlobError>;
 
     /// The version row without opening the content — for a listing or an `<img>` tag that only needs
     /// size/mime/filename.
@@ -391,10 +376,9 @@ impl<B: BlobBackend> BlobStore<B> {
     // ---- housekeeping (§4.6) --------------------------------------------------------------
 
     pub async fn verify(&self, opts: VerifyOptions) -> Result<VerifyReport, BlobError>;
-    pub async fn fsck(&self, opts: FsckOptions) -> Result<FsckReport, BlobError>;
-    pub async fn purge(&self, refs: Option<&dyn HandleReference>) -> Result<PurgeReport, BlobError>;
-    pub async fn backup_to(&self, dest: &impl BlobBackend) -> Result<BackupReport, BlobError>;
-    pub async fn erase(&self, version: VersionId, ctx: WriteContext<'_>) -> Result<(), BlobError>;  // §4.8
+    pub async fn check_consistency(&self, opts: CheckOptions) -> Result<CheckReport, BlobError>;
+    pub async fn collect_garbage(&self) -> Result<CollectReport, BlobError>;      // no argument, by design
+    pub async fn copy_content_to(&self, dest: &impl BlobBackend) -> Result<CopyReport, BlobError>;
 }
 ```
 
@@ -435,7 +419,7 @@ and nothing else — set it to what the app should accept, not to what the proce
 Only a 1 KiB prefix is retained, for MIME sniffing.
 
 **Write ordering, and where the transaction starts.** Every content-writing call follows the same
-three phases, and the order is the invariant §4.6's `fsck` is designed around:
+three phases, and the order is the invariant §4.6's `check_consistency` is designed around:
 
 1. **Hash and store the bytes.** Stream into the backend's `write`, computing the digest as it goes
    and enforcing `max_bytes`. No database work has happened yet.
@@ -447,7 +431,7 @@ three phases, and the order is the invariant §4.6's `fsck` is designed around:
 
 Bytes before rows, always. A crash anywhere leaves either nothing or unreferenced bytes — never a row
 pointing at content that isn't there, which is the one failure the index cannot recover from. That
-asymmetry is why `fsck` treats an orphan as routine and a missing blob as an alarm, and it only holds
+asymmetry is why `check_consistency` treats an orphan as routine and a missing blob as an alarm, and it only holds
 if every path writes in this order; it is stated here rather than left to be rediscovered three times.
 
 **`HandleId`** is a `Uuid` newtype; **`VersionId`** an `i64` newtype; **`BlobId`** a thin newtype over
@@ -463,7 +447,6 @@ pub enum BlobError {
     TooLarge { limit: u64 },
     NotFound(String),
     Corrupt { expected: BlobId, found: BlobId },
-    Erased(VersionId),          // the version exists; its content was destroyed (§4.8)
     BadId(String),
 }
 ```
@@ -471,100 +454,82 @@ pub enum BlobError {
 `Backend` is intentionally opaque — `BlobStore` doesn't know or care whether a backend failure was a
 filesystem `ENOSPC` or an S3 timeout, only that the write didn't happen.
 
-### 4.5 Derived content and `blob_variant`
+### 4.5 Derived content is the app's
 
-A thumbnail is produced by hashing its own bytes and storing them exactly like any upload — it becomes
-a `blob` row like any other, with no version and no handle (it isn't a document; it's a rendering of
-one). `blob_variant` records which derived blob answers which `(source, variant)` pair, so a caller can
-ask "does `desktop` already exist for this content" without regenerating it.
+Thumbnails, previews, crops and OCR text are **out of scope**, and this is a reversal: a
+`Thumbnailer` and a `blob_variant` index were built, shipped, and then taken back out.
 
-```rust
-impl<B: BlobBackend> BlobStore<B> {
-    pub async fn variant(&self, source: &BlobId, variant: &str) -> Result<Option<BlobId>, BlobError>;
-    pub async fn set_variant(&self, source: &BlobId, variant: &str, derived: &BlobId) -> Result<(), BlobError>;
-}
-```
+The argument that removed them is the one §9 already makes about ownership. Sizes, formats and
+quality are policy, and the crate cannot know what an app wants — `image`'s WebP encoder being
+lossless-only, so that a "small" WebP of a photograph comes out larger than its JPEG, is the kind of
+detail that has to be somebody's decision and should not be this crate's.
 
-Variants hang off **content**, not off a version — two versions with identical bytes share one
-thumbnail, and a rename doesn't regenerate anything. `blob::thumb` (§6) is the only thing in this crate
-that calls `set_variant`; nothing stops an app registering its own derived content (an OG-image crop)
-the same way.
+What it cost to remove is small and what it bought is not:
 
-### 4.6 Housekeeping: `verify`, `fsck`, `purge`, `backup_to`
+- A thumbnail is now **an ordinary document** — its own handle, its own version chain, referenced
+  from the app's own table. It is listed, read, deleted and collected by exactly the machinery
+  everything else uses.
+- Garbage collection became one question (*does a version point at this?*) instead of a graph walk.
+  The variant index had already produced one real bug: it was treated as a reference to its own
+  *source*, so any image that had ever been thumbnailed became permanently uncollectable.
+- The `image` dependency, a decompression-bomb guard and a feature flag left with it.
+
+`examples/blobthumbnailer` is the whole of what an app writes instead: about eighty lines, generating
+a thumbnail and storing it with `create`. Nothing stops an app doing the same for any derived
+content.
+
+### 4.6 Housekeeping: `check_consistency`, `verify`, `collect_garbage`, `copy_content_to`
 
 Nothing here is scheduled by this crate — same rule as `auth::prune`: each returns a report, **the app
-schedules it**. A reasonable default shape:
+schedules it**.
 
 | When | Call | Why |
 |---|---|---|
-| once at startup | `fsck(default, None)` | `missing` and `dangling_heads` are data loss; you want to know at boot, not from a user |
-| nightly | `purge(None)` | bounded work, frees whatever the day's deletions and erasures made unreachable |
+| once at startup | `check_consistency(default)` | `missing` and `dangling_heads` are data loss; you want to know at boot, not from a user |
+| nightly | `collect_garbage()` | bounded, safe, frees whatever the day's deletions made unreachable |
 | nightly | `verify(oldest(n))` | incremental — run it every night and it converges on a full sweep without ever being one |
-| weekly | `fsck(collect_orphans, None)` | actually deletes the crash residue the daily check only counted |
-| rarely / never | `purge(Some(refs))` | only if the app might leak handles; a codebase that calls `delete_handle` alongside its own deletes does not need it |
+| weekly | `check_consistency(collect_orphans)` | actually deletes the crash residue the daily check only counted |
 
-`purge(None)` is safe to run at any time and never touches a document — it is the one that belongs on
-a timer. `collect_orphans` is the only sweep that deletes something the index never knew about, which
-is why it is off by default and worth running less often, with the grace period doing the real work.
+**`collect_garbage`** deletes stored content that no version points at, and its bytes. It **takes no
+argument and can never touch a document** — that is the whole point of its shape. It used to be
+`purge(Option<&dyn HandleReference>)`, where passing `Some` *also* deleted whole documents the app
+disowned: one call doing two different things, with the destructive one reachable by adding an
+argument. Now there is one operation, and it is the one that belongs on a timer.
 
-**`purge`** collects content by *reachability*, which the crate computes itself — and the **direction
-matters**, which this section got wrong first time round. A `blob_version` pointing at content is a
-real reference: that content is a document. A `blob_variant` row is **not** a reference to its
-*source* — a thumbnail is a rendering of that content, so it cannot be the reason the content
-survives, or an image would become permanently uncollectable the moment anything rendered it. The
-edge runs one way only: a derived blob is live while its source is. So reachability seeds from the
-versions and follows `source → derived` to a fixed point.
+Reachability is a single query: a version is the only thing that can reference content. Content
+becomes unreachable when its document is deleted, or when a new version supersedes the last reference
+to an older blob. Dedup is why collection is never immediate — the bytes under one document may be
+another's, so "delete this document" can never mean "delete these bytes".
 
-But reachability has a precondition worth stating plainly: **if handles are never deleted, no content
-ever becomes unreachable and `purge` does nothing.** Content is freed by exactly three routes, and an
-app needs at least one of them:
+*(An app that deletes its own rows without calling `delete_handle` leaks handles. There is no sweep
+for that in the crate: it is `browse()` plus `delete_handle()`, about eight lines, and it needed a
+public trait to express. `check_consistency`'s `orphan_handles` count is how you notice you need it.)*
 
-1. `delete_handle` — the normal case, called alongside the app's own document row.
-2. A retention prune of *versions* (keep the last K, or the last N years) — app policy, app-driven.
-3. `erase` — §4.8, for content that must be destroyed while its history survives.
-
-**`HandleReference`** is the sweeper for route 1 gone wrong. Foreign keys stop an app deleting a
-handle something still points at, but deleting the app's *document* row doesn't cascade upward, so a
-handle can be left behind. The crate cannot see this; only the app can:
-
-```rust
-#[async_trait]
-pub trait HandleReference: Send + Sync {
-    /// `true` = still referenced. Typically a UNION over the app's own document tables (§9).
-    async fn is_referenced(&self, handle: HandleId) -> bool;
-}
-```
-
-`purge(None)` collects unreachable *content* only and never touches a handle — the safe default.
-`purge(Some(&checker))` additionally deletes handles the app disowns. An app that calls
-`delete_handle` diligently never needs the checker; one that wants a safety net implements six lines
-of `UNION`.
-
-**`fsck`** reconciles the index against the backend, in two directions whose severities are opposite:
+**`check_consistency`** reconciles the index against storage, and against itself:
 
 | Finding | Meaning | Severity |
 |---|---|---|
-| **missing** | a `blob` row whose bytes are absent from the backend | **Alarm.** Data loss; a version chain points at nothing. |
-| **orphaned** | bytes the index has never heard of | **Expected.** The §4.1 write ordering is bytes-then-row precisely so a crash leaves this, never the reverse. |
-| **orphan handle** | a handle with no version, or (with a `HandleReference`) one nothing references | Drift; report a count even without a checker, so it's visible before it's large. |
+| **missing** | a `blob` row whose bytes are absent from the backend | **Alarm.** Data loss; a version points at nothing. |
+| **dangling_heads** | a handle whose current version isn't there | **Alarm.** The one pointer with no foreign key behind it (§3.2). |
+| **orphan_handles** | a handle with no versions at all | Drift — every path that creates one gives it a first version in the same transaction. |
+| **orphaned** | stored bytes the index has never heard of | **Routine.** The §4.3 write ordering is bytes-then-row precisely so a crash leaves this and never the reverse. |
 
-Orphaned bytes are only collected past a grace period (`FsckOptions::orphan_grace_secs`, default 24 h,
-measured from `StoredEntry::written_at`) — otherwise the sweep races an upload that is mid-flight
-between `write` and the index insert. `git gc --prune=2.weeks.ago` and restic's prune take the same
-precaution for the same reason.
+Orphaned bytes are only collected past a grace period (`orphan_grace_secs`, default 24 h), and only
+when `collect_orphans` is set — otherwise the sweep races an upload mid-flight between `write` and
+its index insert. `git gc --prune=2.weeks.ago` and restic's prune take the same precaution.
 
-**`verify`** re-hashes content without serving it anywhere. A full sweep over terabytes is brutal, so
-it is incremental by default: `VerifyOptions::oldest(n)` takes the `n` rows with the stalest
-`verified_at`, which turned into a nightly job converges on a full sweep without ever being one.
+**`verify`** re-hashes stored content to catch silent corruption — a different question from
+`check_consistency`'s *is it there*, and a much more expensive one, since it reads every byte. It is
+incremental by default: `VerifyOptions::oldest(n)` takes the `n` rows with the stalest `verified_at`.
 
-**`backup_to`** copies content to another `BlobBackend` (local→S3, local→a second local path for
-offline media), verifying each digest as it goes and reporting what copied, what was already present,
-and what failed. Deliberately just a mechanism — *what's worth keeping, for how long* is retention
-policy, which §12 does not attempt to settle.
+**`copy_content_to`** copies every blob's content to another backend, re-hashing on the way so a copy
+cannot faithfully reproduce corruption. **Content only — not a restorable backup on its own:** the
+index lives in the database, and backing that up is the app's business as it is for every other table
+it owns.
 
 ### 4.7 The write observer, and reads
 
-`create` / `put_version` / `amend` / `delete_handle` / `erase` fire the existing
+`create` / `add_version` / `relabel` / `delete_handle` fire the existing
 `observe::WriteObserver` with `source: "blob"` and the `WriteEvent` shape `crud` and `auth` already
 use. One sink registered with `BlobStore::on_write`, `Crud::on_write` and `Auth::on_write` sees one
 unified trail; register it with none of them and pay nothing.
@@ -577,46 +542,65 @@ correcting. Three things that *are* decisions, settled here:
 - **Where the version goes.** `WriteEvent` gains a `version: Option<VersionId>` field. It is
   `#[non_exhaustive]`, so this is additive; `entity` is `"blob_version"` and `key` the version id,
   with the handle id in `after`.
-- **Variants do not fire.** A gallery page with twenty thumbnails would otherwise write twenty audit
-  rows per view. `BlobStore::read` on a *version* fires; a variant fetch does not. An app that wants
-  thumbnail-level telemetry has an access log for it.
 - **Denied reads are the app's to record.** Because the download route and its authorization are the
   app's (§5.4), `read` only ever sees calls that already passed. A refusal never reaches this crate.
   Apps in regimes that require failed-access records must log them at their own gate — the crate says
   so rather than implying coverage it doesn't have.
 
-**`purge` fires nothing for the content it collects**, and that is deliberate: garbage-collecting
-bytes nobody references is not something a person did to a document. The auditable act was the
-`delete_handle` or `erase` that made them unreferenced, and both of those fire. (`purge` does fire a
-`delete_handle` event per handle a `HandleReference` disowns, because that *is* a document going
-away.) The one case where this is arguably thin is proving an erasure was carried through to
-destruction — the tombstone is observed, the later byte deletion isn't. Left as it is rather than
-emitting an event per blob on a sweep that can collect thousands; an app that needs the stronger
-record can log the `PurgeReport` it is handed.
+**`collect_garbage` fires nothing for the content it collects**, and that is deliberate:
+garbage-collecting bytes nobody references is not something a person did to a document. The auditable
+act was the `delete_handle` that made them unreferenced, and that fires. The one case where this is
+arguably thin is proving a subject-access erasure was carried through to destruction — the deletion
+is observed, the later byte collection isn't. Left as it is rather than emitting an event per blob on
+a sweep that can collect thousands; an app that needs the stronger record can log the `CollectReport`
+it is handed.
 
 The trait is still named `WriteObserver`/`WriteEvent` while carrying reads. Renaming is a breaking
 change for a marginal gain; the names stay and the docs say what they cover.
 
-### 4.8 Erasure — destroying content without destroying the record
+### 4.8 Deletion: one path
 
-A subject-access erasure ("delete every copy of this person's document") and an audit trail ("the
-history must show what happened") are in direct conflict if a version row is the only record and
-deleting it is the only way to free the bytes. The resolution is the one records management and S3's
-delete markers both use — destroy the content, keep the entry:
+| You call | Goes immediately | Left for `collect_garbage` |
+|---|---|---|
+| `delete_handle(h)` | the handle and **all** its versions (FK cascade) | its content, once no other version references it |
+| *app deletes its own document row* | its row only | **nothing** — the handle is now orphaned (§9.3) |
+| `collect_garbage()` | unreferenced content and its bytes | — |
 
-```rust
-pub async fn erase(&self, version: VersionId, ctx: WriteContext<'_>) -> Result<(), BlobError>;
-```
+Three rules behind it:
 
-Sets `blob_id = NULL` and `purged_at = now` on the version, leaving `filename`, `created_by`,
-`created_at`, `seq` and the chain intact; the content is freed for `purge` once no other version
-references it (dedup means "this document's bytes" may still be another document's). The history then
-reads *"version 3, uploaded by alice on the 4th, content destroyed on the 19th"* rather than going
-silently discontinuous. `read` on such a version is `BlobError::Erased`, not `NotFound` — the
-difference matters to a caller and to a log.
+1. **Nothing deletes content directly.** Every path frees content by making it *unreachable*;
+   `collect_garbage` is the only thing that removes a `blob` row or asks a backend to delete bytes.
+2. **A version is never deleted, ever.** Not on its own, and there is no operation that hollows one
+   out. `prev_version_id` is `Restrict` so nothing can be excised from the middle of a history, and
+   the chain is append-only for its whole life. To be rid of a document's history, delete the
+   document and create a new one if you still need the file.
+3. **The app's own row is not the crate's business.** Deleting `document_invoice` does not touch the
+   handle it points at. Call `delete_handle` alongside it (§9.3).
 
-Erasing does not rewrite history and does not renumber: `seq` and `prev_version_id` are untouched, so
-a gap is visible as a gap.
+Note also that only `delete_handle` can delete a document: deleting a `blob_handle` row *directly*
+fails with a foreign-key violation once it has two versions, because the cascade removes them in no
+particular order and whichever still has a successor blocks. So a console registering `blob_handle`
+or `blob_version` writable offers a delete button that answers `409` — **register them behind a
+read-only gate**, and as a gate rather than `read_only` fields, which stop a form rewriting a row but
+leave the create and delete controls in place.
+
+**Destroying content — including for a subject-access erasure — is `delete_handle` plus
+`collect_garbage`.** There is deliberately no way to destroy one version's bytes and keep its row.
+
+That is a reversal. A tombstone was built, where `blob_id` went null and `purged_at` was stamped, so
+the chain could show *"a version was here and was destroyed on the 19th"*. It came out again because
+it made the **state** table carry an **action** record — the exact confusion §3.3 argues against when
+it explains why `created_by` is a snapshot rather than a key. The version chain says what a document
+*is*; the app's audit log (§4.7) says what someone *did*, including the `Delete` naming who destroyed
+it and when. Two mechanisms, one job each.
+
+What that costs, stated plainly: you cannot keep a document row while erasing its content, and the
+record of destruction lives in the audit log rather than in the history. An app whose regulator wants
+the gap visible *in the chain* keeps its own tombstone row — in its own table, where it can also say
+why.
+
+Dedup applies either way: erasing a subject's document destroys bytes only if no other document
+shares them, so "erase every copy" means deleting every handle that references the content.
 
 ## 5. Frontend components (feature `blob-ui`, needs `ui`)
 
@@ -658,19 +642,18 @@ Dispatches on the MIME type to pick a presentation, **always by reference, never
 ```rust
 Viewer::new(&version, view_url)     // inline — the src of the <img>/<embed>, and what "Open" opens
     .download_url(url)              // attachment disposition — the Download button
-    .thumbnail_url(url)             // optional: render the variant instead of the full image
+    .thumbnail_url(url)             // optional: the app's own thumbnail, in place of the full image
 ```
 
 **Three URLs, because the component owns no routes** (§2). In practice they are one handler:
 `?download=1` answers with `to_response` instead of `to_inline_response`, and the thumbnail route
-serves `BlobStore::variant(blob, "thumb")`.
+serves whatever route the app uses for its own thumbnails — the crate generates none (§4.5).
 
 | Source | Rendered as |
 |---|---|
 | a thumbnail was supplied | `<img src="{thumbnail_url}">` wrapped in a link to the full view |
 | `image/png`, `jpeg`, `gif`, `webp` | `<img src="{view_url}">` |
 | `application/pdf` | `<embed src="{view_url}">` |
-| erased (§4.8) | a placeholder naming the file and the date its content was destroyed, and **no controls** |
 | everything else | no preview — the filename, the size, and the controls |
 
 Under it, always: the **filename as a link**, an **Open** control for anything the browser will
@@ -759,11 +742,12 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
 }
 ```
 
-**Check** (with a `deep` checkbox) and **Purge**. `fsck` and `verify` are one control because they
-answer the same question — *is the stored content still what the index says* — at two depths, and
-differ only in cost: one stats each blob, the other re-hashes every byte. That is a checkbox, the way
-`fsck -c` has always been. `purge` stays separate: *is it still wanted* is a different question, and
-it is the only one that deletes.
+**Check storage** (with a `deep` checkbox) and **Collect unreferenced content**.
+`check_consistency` and `verify` are one control because they answer the same question — *is the
+stored content still what the index says* — at two depths, differing only in cost: one stats each
+blob, the other re-hashes every byte. That is a checkbox, the way `fsck -c` has always been.
+Collection stays separate: *is it still wanted* is a different question, and it is the only one that
+deletes.
 
 An app mounts it at its own route and adds it to the sidebar with
 `Admin::link("Blob store", "/admin/blobs/actions")` — the existing extension point for exactly this
@@ -772,94 +756,47 @@ shape of "a page that isn't a registered entity".
 ### 5.4 The axum response helper
 
 ```rust
-pub fn to_response(handle: BlobHandle) -> axum::response::Response;
+pub fn to_response(stream: ContentStream) -> axum::response::Response;
+pub fn to_inline_response(stream: ContentStream) -> axum::response::Response;
 ```
 
-Turns a verified `BlobHandle` (an open, hash-checked stream plus its `VersionInfo`) into a `Response`
+Turns a verified `ContentStream` (an already-hash-checked stream plus its `VersionInfo`) into a `Response`
 with `Content-Type`, `Content-Length`, and a `Content-Disposition` built from the version's filename —
 **not a route.** The app's own handler authorizes, calls `store.read(version, ctx)`, then calls this to
 build the reply. A library-owned download route could do none of the three things that matter here:
 verify the digest, decide whether this caller may see it, and emit whatever the app's compliance regime
 wants emitted.
 
-## 6. Thumbnailing (feature `blob-thumbnail`)
-
-```rust
-pub struct Thumbnailer { targets: Vec<(&'static str, u32)> }  // variant name → target long edge, px
-
-impl Thumbnailer {
-    pub fn new() -> Self;   // defaults: ("thumb", 150), ("mobile", 480), ("desktop", 1024)
-    pub fn targets(self, targets: Vec<(&'static str, u32)>) -> Self;
-
-    /// Generates whichever configured variants don't already exist for `source` (checked via
-    /// `BlobStore::variant`), stores each through the same `store`, and calls `set_variant`.
-    pub async fn ensure<B: BlobBackend>(&self, store: &BlobStore<B>, source: &BlobId,
-                                        ctx: WriteContext<'_>) -> Result<Vec<(String, BlobId)>, BlobError>;
-}
-```
-
-Covers `image/*` via the `image` crate, self-contained with no external process.
-
-**JPEG for opaque sources, PNG for those with alpha — not WebP**, which this section originally
-named. `image`'s WebP encoder is **lossless only** (pure Rust, since 0.24.8), and a lossless WebP of
-a photograph is routinely *larger* than the JPEG it was made from, which is the opposite of what a
-thumbnail is for. Alpha cannot survive JPEG at all, so transparency picks PNG. Both are universally
-supported, which was the other half of the original reasoning.
-
-**Never upscales:** a 40 px image asked for a 150 px `thumb` stays 40 px rather than becoming a
-blurry, larger file.
-
-**Decompression bombs are refused before anything is allocated.** A few kilobytes of PNG can declare
-50 000 × 50 000, which is 10 GB of RGBA once decoded — so the guard is a **pixel** budget
-(`max_pixels`, default 64 MP) read from the header first, not a byte cap, which cannot see that
-coming. A source that is not an image, or that this build cannot decode, yields **no variants rather
-than an error**: a page should not fail to render because one attachment isn't the picture it claimed
-to be. **PDF first-page thumbnails are explicitly not v1**: every option
-(`pdfium`, `mupdf`, shelling out to `pdftoppm`) is either a heavy binding or a process dependency, and
-neither belongs in a default feature. `blob-thumbnail-pdf` is reserved as a name.
-
-`ensure` is deliberately headless — nothing about it requires `ui`. It takes a `BlobId`, not a version,
-because thumbnails are a property of content (§4.5).
+## 6. *(removed — derived content is the app's; see §4.5 and `examples/blobthumbnailer`)*
 
 ## 7. Feature / module layout
 
 ```toml
 blob = [
     "dep:sea-orm", "dep:tokio", "dep:sha2", "dep:uuid",
-    "dep:tokio-util",     # io::StreamReader — an axum body becomes an AsyncRead (see below)
+    "dep:tokio-util",     # io::StreamReader — an axum body becomes an AsyncRead
     "dep:bytes",          # StreamReader's items must be `Buf`
     "dep:futures-core",   # the `Stream` in BlobBackend::list
 ]
-blob-ui = ["blob", "ui"]            # Viewer, UploadForm, Actions, to_response
-blob-thumbnail = ["blob", "dep:image"]   # Thumbnailer (raster only, v1)
+blob-ui = ["blob", "ui", "dep:multer"]   # Viewer, UploadForm, Browser, Actions, to_response
 ```
 
 `sea-orm` must have **`with-uuid`** enabled alongside the `with-json` entities already need — the
-handle's primary key and `metadata` are what require them.
-
-**Getting an axum body into `put`** is `tokio_util::io::StreamReader`, which wants a
-`Stream<Item = Result<B, E>>` with `B: Buf` and `E: Into<io::Error>`. `Body::into_data_stream()`
-yields `Result<Bytes, axum::Error>`, so there is a `map_err` in the middle:
-
-```rust
-let reader = StreamReader::new(
-    body.into_data_stream().map_err(|e| std::io::Error::other(e)),
-);
-store.create(reader, meta, ctx).await?
-```
-
-That conversion lives in `blob-ui` (§5.3's `decode_upload`), so plain `blob` never touches axum.
+handle's primary key and the two `metadata` columns are what require them.
 
 | Enabled | Gets |
 |---|---|
-| `blob` only | Storage, versioning, dedup, verify/fsck/backup/purge — no HTTP surface at all |
-| `blob` + `blob-thumbnail` | The above plus thumbnail generation, usable from a background job with no `ui` |
-| `blob` + `blob-ui` | Storage plus the viewer/upload/admin fragments |
-| all three | The full stack |
+| `blob` only | Storage, versioning, dedup, consistency checking, collection, copying — no HTTP surface |
+| `blob` + `blob-ui` | Plus the streaming upload path, the viewer, the browser and the maintenance controls |
 
-**No combination requires `crud`, `auth`, or `observe` to be wired to anything** — §2's tenet, checked
+**Neither requires `crud`, `auth`, or `observe` to be wired to anything** — §2's tenet, checked
 against every line rather than asserted once. `authz` is compiled in every build regardless, so the
 gates in §5.1 cost nothing.
+
+**Getting an axum body into an upload** is `tokio_util::io::StreamReader`, which wants a
+`Stream<Item = Result<B, E>>` with `B: Buf` and `E: Into<io::Error>`. `Body::into_data_stream()`
+yields `Result<Bytes, axum::Error>`, so there is a `map_err` in the middle — inside
+`blob::ui::Receiver`, so plain `blob` never touches axum.
 
 ## 8. Worked example: an app with no ownership or audit
 
@@ -883,7 +820,7 @@ async fn download(Path(id): Path<Uuid>, State(store): State<Arc<BlobStore>>, hea
 
 One struct, three calls, a route the app had to write anyway. This is the bar §2 is held to: it must
 stay this small when that's all an app wants. Adding a second version later is one more call
-(`put_version`) and no schema change anywhere.
+(`add_version`) and no schema change anywhere.
 
 ## 9. The integration pattern: ownership, in the app's own table
 
@@ -944,8 +881,8 @@ store.delete_handle(handle, ctx).await?;   // in the same transaction as the doc
 ```
 
 Foreign keys stop you deleting a handle something still points at; nothing stops you deleting the
-document row and forgetting the handle. `HandleReference` (§4.6) is the safety net, and `fsck`'s orphan
-count is how you notice you need it.
+document row and forgetting the handle. `check_consistency`'s `orphan_handles` count is how you
+notice when something did.
 
 ### 9.4 Versioning on top
 
@@ -988,20 +925,22 @@ is CMIS's version series and OCFL's inventory; §13 has the reading.
   generatable app-side.
 - **`created_by` is a typed snapshot column**, not an FK and not a metadata key (§3.3).
 - **Free-form `metadata` on both handle and version**, capped, never holding ownership (§3.4).
-- **Erasure is a tombstone**, not a row deletion (§4.8).
-- **Reads fire audit events; variant fetches do not; denied reads are the app's** (§4.7).
+- **A version is never deleted or hollowed out** (§4.8). Destroying content is `delete_handle` plus
+  `collect_garbage`; the record of destruction lives in the app's audit log, not in the chain.
+  Reversed from an earlier tombstone design, which made the state table carry an action record.
+- **Derived content is the app's** (§4.5) — no thumbnailer, no variant index. Reversed from an earlier
+  design for the same reason ownership is app-side: format and size are policy. It also removed the
+  one construct that had produced a real reachability bug.
+- **`collect_garbage` takes no argument and cannot touch a document** (§4.6). Deleting handles the
+  app disowns was folded into the same call behind an `Option`; that made the destructive case the
+  easy one to reach, so it is gone — it is `browse` plus `delete_handle`.
+- **Reads fire audit events; denied reads are the app's** (§4.7).
 - **Downloads are routed by the owning document and are never a library-owned route** (§5.4, §9.2).
-- **Thumbnails are blobs**, hanging off content rather than versions (§4.5), encoded JPEG/PNG rather
-  than WebP (§6), and guarded by a pixel budget rather than a byte one.
-- **A variant does not keep its source alive** (§4.6) — the reachability edge runs source → derived
-  and not back.
 - **`BlobBackend` stays dyn-compatible**, which is why `write` takes a boxed reader (§4.1). Runtime
   backend selection is worth one allocation per upload.
 - **Bytes are written before any row, and rows land in one transaction** (§4.3) — the asymmetry
-  `fsck` depends on.
-- **Filesystem backend ships in v1; object storage does not.** The trait is the deliverable.
-- **PDF thumbnails are out.** Every implementation option is a heavy binding or a process
-  dependency; the `<embed>` fallback covers the case.
+  `check_consistency` depends on.
+- **Filesystem backend ships; object storage does not.** The trait is the deliverable.
 
 ## 12. Open questions
 
@@ -1015,15 +954,9 @@ is CMIS's version series and OCFL's inventory; §13 has the reading.
   not a silent one).
 - **S3/Ceph backend: in this crate, or a companion?** A `relativelylight-blob-s3` crate keeps the core
   free of an AWS SDK at the cost of a second crate to version in step. Leaning companion crate.
-- **PDF thumbnail approach**, if/when needed: bundled renderer (`pdfium-render`, a large binary) vs.
-  shelling out to `pdftoppm` (a runtime dependency on poppler-utils) vs. keeping the `<embed>` fallback
-  forever.
-- **Variant naming.** Shipping `thumb`/`mobile`/`desktop` as documented conventions over a free-form
-  `variant: String` (rather than an enum) lets an app register `"og-image"` through the same call. Worth
-  confirming before implementing.
-- **Retention/archival policy** for `backup_to` / `purge` / the audit log — deliberately deferred, and
+- **Retention/archival policy** for `copy_content_to` / collection / the audit log — deliberately deferred, and
   deliberately *one* answer rather than three.
-- **Does `fsck` want a repair mode**, or only a report? Deleting orphaned bytes is safe past the grace
+- **Does `check_consistency` want a repair mode**, or only a report? Deleting orphaned bytes is safe past the grace
   period; nothing can repair a *missing* one, so the asymmetry may argue for report-only plus an
   explicit `collect_orphans()`.
 

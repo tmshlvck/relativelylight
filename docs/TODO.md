@@ -38,7 +38,13 @@ Both `observe` changes it needed have landed with the core: `WriteEvent::version
 to `WriteEvent::op`'s doc comment (the field was always `authz::Operation`, which has always carried
 `Read` and `List`; `blob` is the first emitter to fire `Read`).
 
-`blob`, `blob-ui` and `blob-thumbnail` have all landed, with `examples/blob`. **Remaining:**
+`blob` and `blob-ui` have landed, with `examples/blob` and `examples/blobthumbnailer`. A
+simplification pass then removed the thumbnailer, the variant index and partial erasure from the
+crate — see BLOBSTORE.md §4.5 and §4.8. **Remaining:**
+
+- **Decide whether `examples/blobthumbnailer` earns its place.** It exists to show derived content as
+  app code now that the crate has no thumbnailer; if `examples/blob` covers enough on its own, it can
+  go.
 
 - **CSRF on `crud::ui`'s CSV import.** `blob-ui` closed this for uploads by requiring the token
   *before* the file part, which a streaming parser can enforce and a buffered one cannot. The CSV

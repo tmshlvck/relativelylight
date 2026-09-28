@@ -47,14 +47,14 @@
 //! # Housekeeping is yours to schedule
 //!
 //! Same rule as [`auth::prune`](crate::auth): this crate spawns no tasks. [`BlobStore::verify`],
-//! [`BlobStore::fsck`] and [`BlobStore::purge`] return reports; the app runs them.
+//! [`BlobStore::check_consistency`] and [`BlobStore::collect_garbage`] return reports; the app runs them.
 //!
 //! # Writes are ordered, and the order is the contract
 //!
 //! Bytes reach the backend **before** any row references them, and the rows then land in one
 //! transaction. A crash therefore leaves either nothing or unreferenced bytes — never a row pointing
-//! at content that isn't there. That asymmetry is why [`FsckReport::orphaned`] is routine and
-//! [`FsckReport::missing`] is an alarm.
+//! at content that isn't there. That asymmetry is why [`CheckReport::orphaned`] is routine and
+//! [`CheckReport::missing`] is an alarm.
 
 mod backend;
 mod error;
@@ -67,11 +67,6 @@ pub mod entity;
 #[cfg(feature = "blob-ui")]
 pub mod ui;
 
-#[cfg(feature = "blob-thumbnail")]
-mod thumb;
-
-#[cfg(feature = "blob-thumbnail")]
-pub use thumb::Thumbnailer;
 
 #[cfg(test)]
 mod tests;
@@ -81,40 +76,35 @@ pub use error::BlobError;
 pub use fs::FsBackend;
 pub use id::{BlobId, HandleId, VersionId};
 pub use store::{
-    BackupReport, BlobHandle, BlobStore, BrowsePage, BrowseQuery, ContentInfo, DocumentSummary,
-    FsckOptions, FsckReport, HandleReference, Ingest,
-    PurgeReport, PutMeta, VerifyOptions, VerifyReport, VersionInfo, WriteContext,
-    MAX_METADATA_BYTES,
+    BlobStore, BrowsePage, BrowseQuery, CheckOptions, CheckReport, CollectReport, ContentInfo,
+    ContentStream, CopyReport, DocumentSummary, Ingest, PutMeta, VerifyOptions, VerifyReport,
+    VersionInfo, WriteContext, MAX_METADATA_BYTES,
 };
 
 use sea_orm::sea_query::TableCreateStatement;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, DbErr, Schema};
 
-/// DDL for the four tables, for an app's own migration to apply — mirroring
+/// DDL for the three tables, for an app's own migration to apply — mirroring
 /// [`auth::table_create_statements`](crate::auth::table_create_statements), and for the same reason:
 /// the app owns the database and its migration history, this crate only knows how to describe its own
 /// tables.
 ///
 /// The statements carry the foreign keys **and their `ON DELETE` actions** (versions cascade from
 /// their handle; content is `RESTRICT`ed while a version points at it), so the guarantees
-/// [`BlobStore::purge`] relies on are enforced by the database rather than by this crate being
+/// [`BlobStore::collect_garbage`] relies on are enforced by the database rather than by this crate being
 /// careful. Order matters — `blob` and `blob_handle` before `blob_version`.
 pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> {
     use sea_orm::sea_query::Index;
 
     let schema = Schema::new(backend);
     let mut version = schema.create_table_from_entity(entity::version::Entity);
-    let mut variant = schema.create_table_from_entity(entity::variant::Entity);
 
-    // Two uniqueness rules the design depends on, emitted as table constraints so they hold in the
-    // database rather than in this crate's discipline. `create_table_from_entity` derives columns,
-    // primary keys and foreign keys from the entity, but knows nothing about either of these.
+    // One uniqueness rule the design depends on, emitted as a table constraint so it holds in the
+    // database rather than in this crate's discipline: `create_table_from_entity` derives columns,
+    // primary keys and foreign keys from an entity, but knows nothing about this.
     //
-    // `(handle_id, seq)` is what stops two concurrent `put_version` calls both deciding they are
+    // `(handle_id, seq)` is what stops two concurrent `add_version` calls both deciding they are
     // version 4 — without it the loser silently becomes a second version 4 and the chain forks.
-    // `(blob_id, variant)` is both an integrity rule and a prerequisite: `set_variant`'s upsert
-    // names it as its conflict target, and an `ON CONFLICT` with no matching unique index is an
-    // error, not a no-op.
     version.index(
         Index::create()
             .name("idx-blob_version-handle-seq")
@@ -122,19 +112,10 @@ pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> 
             .col(entity::version::Column::Seq)
             .unique(),
     );
-    variant.index(
-        Index::create()
-            .name("idx-blob_variant-source-name")
-            .col(entity::variant::Column::BlobId)
-            .col(entity::variant::Column::Variant)
-            .unique(),
-    );
-
     vec![
         schema.create_table_from_entity(entity::content::Entity),
         schema.create_table_from_entity(entity::handle::Entity),
         version,
-        variant,
     ]
 }
 

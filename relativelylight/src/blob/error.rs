@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use super::{BlobId, VersionId};
+use super::BlobId;
 
 /// Everything the store can refuse to do.
 #[derive(Debug)]
@@ -21,10 +21,6 @@ pub enum BlobError {
     /// the caller** — a silent hand-back of the wrong content is the one thing a content-addressed
     /// store must never do.
     Corrupt { expected: BlobId, found: BlobId },
-    /// The version exists and its history is intact, but its content was deliberately destroyed
-    /// (BLOBSTORE.md §4.8). Distinct from `NotFound` because the difference matters to a caller
-    /// deciding what to show, and to whatever reads the log afterwards.
-    Erased(VersionId),
     BadId(String),
     /// A write that would break the shape of the chain — appending to a handle that doesn't exist,
     /// or amending one with no versions yet.
@@ -41,7 +37,6 @@ impl fmt::Display for BlobError {
             BlobError::Corrupt { expected, found } => {
                 write!(f, "corrupt: {expected} read back as {found}")
             }
-            BlobError::Erased(v) => write!(f, "version {v}: content was erased"),
             BlobError::BadId(s) => write!(f, "malformed id: {s:?}"),
             BlobError::Invalid(m) => write!(f, "invalid: {m}"),
         }

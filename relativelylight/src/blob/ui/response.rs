@@ -1,4 +1,4 @@
-//! Turning a verified [`BlobHandle`] into an HTTP reply — BLOBSTORE.md §5.4.
+//! Turning a verified [`ContentStream`] into an HTTP reply — BLOBSTORE.md §5.4.
 //!
 //! **Not a route.** The app's own handler authorises the request, calls
 //! [`BlobStore::read`](crate::blob::BlobStore::read), and calls one of these to build the response.
@@ -11,7 +11,7 @@ use axum::response::Response;
 use http::header;
 use tokio_util::io::ReaderStream;
 
-use crate::blob::BlobHandle;
+use crate::blob::ContentStream;
 
 /// Types safe to render in the browser without becoming script. Everything else is downloaded.
 ///
@@ -26,7 +26,7 @@ const INLINE_SAFE: &[&str] =
 ///
 /// The right default. Prefer it unless a page needs to *display* the content, in which case
 /// [`to_inline_response`] is the considered version.
-pub fn to_response(handle: BlobHandle) -> Response {
+pub fn to_response(handle: ContentStream) -> Response {
     build(handle, false)
 }
 
@@ -37,11 +37,11 @@ pub fn to_response(handle: BlobHandle) -> Response {
 /// an attachment rather than being rendered. So a hostile SVG uploaded as `image/svg+xml` is
 /// downloaded, not executed, even though the viewer asked for it inline — the decision is made here
 /// where the `Content-Type` is actually set, not where the tag was chosen.
-pub fn to_inline_response(handle: BlobHandle) -> Response {
+pub fn to_inline_response(handle: ContentStream) -> Response {
     build(handle, true)
 }
 
-fn build(handle: BlobHandle, want_inline: bool) -> Response {
+fn build(handle: ContentStream, want_inline: bool) -> Response {
     let info = handle.info.clone();
     let mime = info
         .content

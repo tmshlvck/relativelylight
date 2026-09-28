@@ -9,7 +9,7 @@
 //! - `blob_version.handle_id` → **Cascade**: versions are the handle's history; deleting the handle
 //!   ends it.
 //! - `blob_version.blob_id` → **Restrict**: content may not be deleted while a version still points
-//!   at it. This is the constraint that makes [`purge`](super::BlobStore::purge)'s reachability sweep
+//!   at it. This is the constraint that makes [`collect_garbage`](super::BlobStore::collect_garbage)'s reachability sweep
 //!   safe rather than merely careful — a bug there cannot orphan a version.
 //! - `blob_version.prev_version_id` → **Restrict**: the chain is not to be broken in the middle.
 //!
@@ -24,8 +24,6 @@
 //! invariants. **Register both read-only** — and read-only as a *gate*, not merely `read_only`
 //! fields, since the fields flag stops a form rewriting a row but leaves the create and delete
 //! controls in place. `examples/blob` has a four-line `ReadOnly` gate wrapper.
-//! - `blob_variant.*` → **Cascade** from the source content, since a rendering of content that no
-//!   longer exists is nothing at all.
 
 /// The stable identity (BLOBSTORE.md §3.2). Deliberately almost empty: nothing in here can be wrong,
 /// and it is what an app's own tables hold a foreign key to — forever, across every edit.
@@ -51,7 +49,7 @@ pub mod handle {
         ///
         /// So the pointer is maintained transactionally by `BlobStore` — every path that writes a
         /// version sets it in the same transaction — and
-        /// [`fsck`](super::super::BlobStore::fsck) reports any head that doesn't resolve
+        /// [`check_consistency`](super::super::BlobStore::check_consistency) reports any head that doesn't resolve
         /// (`dangling_heads`) as the compensating check.
         pub head_version_id: Option<i64>,
         pub created_at: i64,
@@ -80,8 +78,10 @@ pub mod version {
         /// version leaves its number behind, so a gap reads as a gap.
         pub seq: i32,
         pub prev_version_id: Option<i64>,
-        /// `None` once the content has been erased out from under this version (§4.8).
-        pub blob_id: Option<String>,
+        /// The content. **Not nullable**: a version always has bytes behind it. Destroying content
+        /// means deleting the document (`BlobStore::delete_handle`), which takes its whole chain —
+        /// there is deliberately no way to hollow out one version and leave the row.
+        pub blob_id: String,
         /// The filename **as at this version** — a rename is a new version over the same content.
         pub filename: String,
         /// What the uploader claimed. Advisory, never trusted for dispatch (§10); compare it against
@@ -91,7 +91,6 @@ pub mod version {
         /// which survives the account being deleted — as an audit attribution must.
         pub created_by: Option<String>,
         pub created_at: i64,
-        pub purged_at: Option<i64>,
         /// Free-form, app-owned, **immutable** — facts about *this upload* (§3.4).
         pub metadata: Option<Json>,
     }
@@ -125,6 +124,10 @@ pub mod version {
 }
 
 /// The content. Nothing in this row is a fact about *an upload* — only about the bytes. Table `blob`.
+///
+/// Reached only through a version: nothing else in this crate references content, which is what makes
+/// [`collect_garbage`](super::super::BlobStore::collect_garbage) a single question rather than a
+/// graph walk.
 pub mod content {
     use sea_orm::entity::prelude::*;
 
@@ -145,45 +148,6 @@ pub mod content {
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-/// `(source content, variant name) → derived content` — BLOBSTORE.md §4.5. Variants hang off
-/// **content**, not off a version, so two versions with identical bytes share one thumbnail and a
-/// rename regenerates nothing.
-pub mod variant {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, serde::Serialize, serde::Deserialize)]
-    #[sea_orm(table_name = "blob_variant")]
-    pub struct Model {
-        #[sea_orm(primary_key)]
-        pub id: i32,
-        pub blob_id: String,
-        /// `"thumb"` | `"mobile"` | `"desktop"`, or an app's own name (`"og-image"`).
-        pub variant: String,
-        pub derived_blob_id: String,
-        pub generated_at: i64,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {
-        #[sea_orm(
-            belongs_to = "super::content::Entity",
-            from = "Column::BlobId",
-            to = "super::content::Column::Id",
-            on_delete = "Cascade"
-        )]
-        Source,
-        #[sea_orm(
-            belongs_to = "super::content::Entity",
-            from = "Column::DerivedBlobId",
-            to = "super::content::Column::Id",
-            on_delete = "Cascade"
-        )]
-        Derived,
-    }
 
     impl ActiveModelBehavior for ActiveModel {}
 }

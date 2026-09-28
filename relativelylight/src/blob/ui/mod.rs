@@ -8,9 +8,9 @@
 //! | [`Receiver`] | streams a posted `multipart/form-data` upload straight into the store |
 //! | [`UploadForm`] | the form that posts to it |
 //! | [`Viewer`] | renders one version — always as a URL, never inlining stored bytes |
-//! | [`to_response`] / [`to_inline_response`] | a verified [`BlobHandle`](crate::blob::BlobHandle) as an HTTP reply |
+//! | [`to_response`] / [`to_inline_response`] | a verified [`ContentStream`](crate::blob::BlobHandle) as an HTTP reply |
 //! | [`Browser`] | a searchable list of documents, drilling into one's version chain |
-//! | [`Actions`] | the gated store-wide maintenance controls (check / purge) |
+//! | [`Actions`] | the gated store-wide maintenance controls (consistency check / garbage collection) |
 //!
 //! Two things here are less obvious than they look, and both are in the sub-module docs rather than
 //! here: why the upload path requires the CSRF token to arrive *before* the file part

@@ -262,7 +262,7 @@ impl<'a, B: BlobBackend> Receiver<'a, B> {
                     Ok(None) => break,
                     Err(e) => {
                         // A client that hangs up mid-upload: discard the staged bytes rather than
-                        // leaving them for `fsck`.
+                        // leaving them for `check_consistency`.
                         ingest.abort().await;
                         return Err(UploadError::Malformed(e.to_string()));
                     }

@@ -28,47 +28,40 @@ is easy to miss in a diff.
 ### Added
 
 - **`blob` — content-addressed file storage with a stable handle and an immutable version chain**
-  (feature `blob`, off by default; `docs/BLOBSTORE.md`). Three identities rather than one:
-  `BlobId` addresses bytes, `VersionId` records one upload of them, and **`HandleId` is the stable id
-  your own tables hold a foreign key to** — unchanged for the life of a document however many
-  versions it takes. Uploading the same file twice stores the bytes once and still keeps each
-  upload's own filename and attribution, which is the defect a single digest-keyed table cannot
-  avoid.
+  (feature `blob`, off by default; `docs/BLOBSTORE.md`). Three identities rather than one: `BlobId`
+  addresses bytes, `VersionId` records one upload of them, and **`HandleId` is the stable id your own
+  tables hold a foreign key to** — unchanged for the life of a document however many versions it
+  takes. Uploading the same file twice stores the bytes once and still keeps each upload's own
+  filename and attribution, which is the defect a single digest-keyed table cannot avoid.
 
-  `BlobStore` is the type an app holds: `create` / `put_version` / `amend` / `head` / `versions` /
-  `read` / `delete_handle`, plus `erase` (destroy content, keep the record — GDPR Article 17 against
-  an audit trail that must not go discontinuous), `verify`, `fsck`, `purge` and `backup_to`.
-  `BlobBackend` is the storage seam, with `FsBackend` shipped; it is dyn-compatible, so
+  `BlobStore`: `create` / `add_version` / `relabel` / `head` / `versions` / `browse` / `read` /
+  `delete_handle`, plus `verify`, `check_consistency`, `collect_garbage` and `copy_content_to`.
+  `BlobBackend` is the storage seam with `FsBackend` shipped; it is dyn-compatible, so
   `BlobStore<Box<dyn BlobBackend>>` lets an app pick its backend from configuration.
-
-  **Depends on neither `crud` nor `auth`** — ownership and per-document access live in the app's own
-  link table (BLOBSTORE.md §9), where they get a real foreign key and the per-model gates that
-  already exist. Reads are digest-verified on the way out and fire an audit event, so a download is
-  observable, not just a write.
 
   Uploads and downloads both **stream**: peak memory is one 64 KiB chunk whether the file is a
   one-line note or a 500 MiB scan, so `max_bytes` (default 512 MiB) is a policy limit and nothing
   else. Writes go through `BlobBackend::stage` and commit under the digest that falls out — a blob's
   id *is* the hash of its bytes, so the destination can't be named until the whole upload has been
-  read, and staging is what reconciles that with a single pass. Reads hash the content through once
-  and re-open it to serve, keeping "no unverified byte reaches a caller" exact at constant memory.
+  read. Reads hash the content through once and re-open it to serve, keeping "no unverified byte
+  reaches a caller" exact at constant memory.
+
+  **Depends on neither `crud` nor `auth`** — ownership and per-document access live in the app's own
+  link table (BLOBSTORE.md §9), where they get a real foreign key and the per-model gates that
+  already exist. Reads fire an audit event, so a download is observable, not just a write.
 
   **`blob-ui`** (feature `blob-ui`) adds the server-rendered half: `Receiver` streams a posted
   `multipart/form-data` upload from the socket into the store, `UploadForm` posts to it, `Viewer`
-  renders a version (always as a URL, never inlining stored bytes), `to_response` /
-  `to_inline_response` build the reply, and `Actions` is the gated maintenance page. The upload path
-  **closes the CSRF gap on multipart bodies**: it requires the token to arrive before the file part,
-  which a streaming parser can enforce and a buffered one cannot, and `UploadForm` renders the hidden
-  input first so a browser posts it in that order.
+  renders a version (always as a URL, never inlining stored bytes) with download / open / thumbnail
+  controls, `Browser` is a searchable document list drilling into one document's chain,
+  `to_response` / `to_inline_response` build the reply, and `Actions` is the gated maintenance pair.
+  The upload path **closes the CSRF gap on multipart bodies**: it requires the token to arrive before
+  the file part, which a streaming parser can enforce and a buffered one cannot.
 
   **`examples/blob`** demonstrates the lot, including §9's ownership pattern — a `ticket_document`
   link table whose `owner_user_id` is a real foreign key onto `auth_user` with `ON DELETE RESTRICT`,
   and downloads routed by ticket and attachment rather than by handle.
-
-  **`blob-thumbnail`** generates derived renderings — JPEG for opaque sources, PNG where there's
-  alpha (not WebP: `image`'s encoder is lossless-only, and a lossless WebP of a photo is routinely
-  larger than the JPEG it came from). Never upscales, and refuses decompression bombs on a *pixel*
-  budget read from the header rather than a byte cap, which cannot see them coming.
+  **`examples/blobthumbnailer`** shows derived content as app code (§4.5).
 
 - **`observe::WriteEvent` gains `version: Option<i64>`** — which version row an event concerns, for
   an entity that keeps a chain. `None` from `crud` and `auth`. Additive: the struct is

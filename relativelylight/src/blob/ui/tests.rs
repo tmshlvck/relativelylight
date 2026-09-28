@@ -297,14 +297,11 @@ fn fake_version(filename: &str, mime: &str) -> VersionInfo {
         handle: crate::blob::HandleId::new(),
         seq: 1,
         prev: None,
-        // Set, or `is_erased()` is true and every case below takes the tombstone branch instead of
-        // the one it means to test.
-        blob: Some(crate::blob::BlobId::of(b"x")),
+        blob: crate::blob::BlobId::of(b"x"),
         filename: filename.into(),
         mime_declared: mime.into(),
         created_by: None,
         created_at: 0,
-        purged_at: None,
         metadata: None,
         content: Some(crate::blob::ContentInfo {
             id: crate::blob::BlobId::of(b"x"),
@@ -350,19 +347,6 @@ fn the_viewer_only_promises_a_preview_the_download_route_will_actually_serve_inl
     let png = fake_version("photo.png", "image/png");
     let ok = Viewer::new(&png, "/v/1").render();
     assert!(ok.contains("<img"), "control: an allowlisted type does preview: {ok}");
-}
-
-#[test]
-fn an_erased_version_says_so_rather_than_rendering_nothing() {
-    let mut info = fake_version("personal.pdf", "application/pdf");
-    info.blob = None;
-    info.content = None;
-    info.purged_at = Some(1_700_000_000);
-
-    let html = Viewer::new(&info, "/download/1").render();
-    assert!(html.contains("personal.pdf"), "the record still names the document: {html}");
-    assert!(html.contains("erased"), "{html}");
-    assert!(!html.contains("<embed"), "and offers nothing to fetch: {html}");
 }
 
 #[test]
@@ -420,18 +404,6 @@ fn a_file_with_no_preview_still_offers_its_controls() {
 }
 
 #[test]
-fn an_erased_version_offers_no_controls_at_all() {
-    let mut info = fake_version("gone.pdf", "application/pdf");
-    info.blob = None;
-    info.content = None;
-    info.purged_at = Some(1_700_000_000);
-    let html = Viewer::new(&info, "/v/1").download_url("/v/1?download=1").render();
-    assert!(!html.contains("Download"), "there is nothing to download: {html}");
-    assert!(!html.contains("Open"), "{html}");
-    assert!(html.contains("erased"), "{html}");
-}
-
-#[test]
 fn a_hostile_thumbnail_or_download_url_cannot_break_out() {
     let info = fake_version("x.png", "image/png");
     let html = Viewer::new(&info, "/v/1")
@@ -461,7 +433,7 @@ mod browser {
             .await
             .unwrap();
         store
-            .put_version(h, &b"v2"[..], PutMeta::new("contract-final.pdf").by("bob"), WriteContext::none())
+            .add_version(h, &b"v2"[..], PutMeta::new("contract-final.pdf").by("bob"), WriteContext::none())
             .await
             .unwrap();
         store
@@ -490,7 +462,7 @@ mod browser {
             .await
             .unwrap();
         store
-            .amend(h, PutMeta::new("invoice-final.pdf"), WriteContext::none())
+            .relabel(h, PutMeta::new("invoice-final.pdf"), WriteContext::none())
             .await
             .unwrap();
         store.create(&b"z"[..], PutMeta::new("unrelated.txt"), WriteContext::none()).await.unwrap();
@@ -513,7 +485,7 @@ mod browser {
             .await
             .unwrap();
         store
-            .put_version(h, &b"two"[..], PutMeta::new("a.txt").by("bob"), WriteContext::none())
+            .add_version(h, &b"two"[..], PutMeta::new("a.txt").by("bob"), WriteContext::none())
             .await
             .unwrap();
 

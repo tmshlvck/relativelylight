@@ -381,6 +381,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "blobthumbnailer-example"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "image",
+ "relativelylight",
+ "sea-orm",
+ "tokio",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2559,7 +2571,6 @@ dependencies = [
  "csv",
  "futures-core",
  "http",
- "image",
  "ipnet",
  "jiff",
  "multer",

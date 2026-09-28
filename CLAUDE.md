@@ -35,7 +35,6 @@ sea-orm = { version = "1.1", features = ["macros", "with-json"] }
 | `sso` | | **OIDC single sign-on** (Google / Okta / corporate) + group mapping (implies `auth`) |
 | `blob` | | content-addressed **file storage** + a stable handle and version chain (`blob` module); needs neither `crud` nor `auth` |
 | `blob-ui` | | the blob components: streaming upload, viewer, document browser, maintenance, response builder; implies `blob` + `ui` |
-| `blob-thumbnail` | | generated thumbnails for image blobs (headless — needs no `ui`) |
 
 Enable only what you use — an unused feature pulls no dependencies. `auth` works **without** `crud`
 (gate any axum app on its own). The always-on `authz` module (the gate trait + `Open`) is compiled in
@@ -291,9 +290,9 @@ cargo run -p auth-example         # :3000  auth up close: login, /secret, /profi
                                   #         and /admin — the accounts panel users are provisioned from (admin/password)
 cargo run -p audit-example        # :3000  who called + what they changed: the request log (two ways) and the
                                   #         write observer, one line per committed write, both over one RealIp
-cargo run -p blob-example         # :3000  file storage with a version chain: streaming uploads, thumbnails,
-                                  #         the viewer, erasure, the /files browser, and §9's ownership
-                                  #         link table (admin/password)
+cargo run -p blob-example         # :3000  file storage with a version chain: streaming uploads, the viewer,
+                                  #         the /files browser, and §9's ownership link table (admin/password)
+cargo run -p blobthumbnailer-example  # :3000  derived content as *app* code — the crate ships no thumbnailer
 ```
 
 **Run one at a time — they all bind port 3000** (fresh seeded in-memory SQLite each start). Only
@@ -323,8 +322,8 @@ timezone demo, its rows straddling both 2026 DST transitions.
 - **[docs/TODO.md](docs/TODO.md)** — the ordered backlog.
 - **[docs/BLOBSTORE.md](docs/BLOBSTORE.md)** — the `blob` guide *and* spec: content-addressed storage
   under a stable handle + version chain (§3), the store API (§4), ownership in the app's own link
-  table (§9). The **core is shipped** (feature `blob`, `blob/tests.rs`); §5's UI fragments and §6's
-  thumbnailer are still specification, and the document says which is which.
+  table (§9). **Shipped** (`blob`, `blob-ui`). Deliberately small: a thumbnailer, a variant index and
+  partial erasure were built and then removed — §4.5 and §4.8 record both reversals.
 - **[docs/SORTFILTER.md](docs/SORTFILTER.md)** — a design record: why relation sorting and
   `filter[…]` have the shape they do (kept for the reasoning; the behaviour is documented in CRUD.md).
 - **[CHANGELOG.md](CHANGELOG.md)** — per-release notes; land user-visible changes under `## Unreleased`

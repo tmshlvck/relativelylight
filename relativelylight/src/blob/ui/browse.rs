@@ -195,12 +195,6 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
         );
         for d in &found.documents {
             let (name, mime, size, by) = match &d.head {
-                Some(v) if v.is_erased() => (
-                    format!("<em>{}</em>", esc_str(&v.filename)),
-                    "<em>erased</em>".to_string(),
-                    "—".to_string(),
-                    esc_str(v.created_by.as_deref().unwrap_or("—")),
-                ),
                 Some(v) => (
                     esc_str(&v.filename),
                     esc_str(v.content.as_ref().map(|c| c.mime_sniffed.as_str()).unwrap_or("—")),
@@ -249,15 +243,14 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
         );
         // Newest first: the current version is what a reader is usually looking for.
         for v in chain.iter().rev() {
-            let link = match (&self.view_url, v.is_erased()) {
-                (Some(t), false) => {
+            let link = match &self.view_url {
+                Some(t) => {
                     let url = t
                         .replace("{handle}", &handle.to_string())
                         .replace("{version}", &v.id.to_string());
                     format!("<a href=\"{}\" target=\"_blank\" rel=\"noopener\">open</a>", esc_str(&url))
                 }
-                (_, true) => "<em class=\"text-body-secondary\">erased</em>".to_string(),
-                (None, false) => "—".to_string(),
+                None => "—".to_string(),
             };
             out.push_str(&format!(
                 "<tr{}><td>{}</td><td>{}</td><td class=\"text-end\">{}</td><td><small>{}</small></td>\
@@ -269,7 +262,7 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
                 },
                 v.seq,
                 esc_str(&v.filename),
-                if v.is_erased() { "—".to_string() } else { human_size(v.size_bytes()) },
+                human_size(v.size_bytes()),
                 esc_str(v.created_by.as_deref().unwrap_or("—")),
             ));
         }

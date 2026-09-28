@@ -18,12 +18,12 @@ use super::{BlobError, BlobId};
 pub type Reader = Pin<Box<dyn AsyncRead + Send>>;
 
 /// One stored object as the backend sees it — used only by
-/// [`fsck`](super::BlobStore::fsck) to find bytes the index has never heard of.
+/// [`check_consistency`](super::BlobStore::check_consistency) to find bytes the index has never heard of.
 #[derive(Clone, Debug)]
 pub struct StoredEntry {
     pub id: BlobId,
     /// Unix seconds the object was written, where the backend knows it. `None` disables the orphan
-    /// grace period for that entry, which `fsck` treats as "too young to judge" rather than
+    /// grace period for that entry, which `check_consistency` treats as "too young to judge" rather than
     /// "collectable" — the conservative direction.
     pub written_at: Option<i64>,
 }
@@ -66,12 +66,12 @@ pub trait BlobBackend: Send + Sync + 'static {
 
     async fn exists(&self, id: &BlobId) -> Result<bool, BlobError>;
 
-    /// Only called by [`purge`](super::BlobStore::purge) and
-    /// [`fsck`](super::BlobStore::fsck), and only once nothing references the id. Deleting something
-    /// already absent is a success — a purge that crashed half-way must be re-runnable.
+    /// Only called by [`collect_garbage`](super::BlobStore::collect_garbage) and
+    /// [`check_consistency`](super::BlobStore::check_consistency), and only once nothing references the id. Deleting something
+    /// already absent is a success — a collection that crashed half-way must be re-runnable.
     async fn delete(&self, id: &BlobId) -> Result<(), BlobError>;
 
-    /// Enumerate what is actually stored. Needed only by [`fsck`](super::BlobStore::fsck), to find
+    /// Enumerate what is actually stored. Needed only by [`check_consistency`](super::BlobStore::check_consistency), to find
     /// bytes the index has never heard of; a filesystem walks its fan-out directories, an object
     /// store pages its listing API. It is on the trait rather than optional because a backend that
     /// cannot be swept cannot be shown to be complete.
@@ -93,7 +93,7 @@ pub trait StagedWrite: Send {
     async fn commit(&mut self, id: &BlobId) -> Result<(), BlobError>;
 
     /// Discard the staged bytes. Errors are swallowed: the caller is already on a failure path, and
-    /// failing to clean up leaves litter that `fsck` collects rather than anything unsafe.
+    /// failing to clean up leaves litter that `check_consistency` collects rather than anything unsafe.
     async fn abort(&mut self);
 }
 

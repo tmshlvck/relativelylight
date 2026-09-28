@@ -102,7 +102,7 @@ impl BlobBackend for FsBackend {
     async fn delete(&self, id: &BlobId) -> Result<(), BlobError> {
         match tokio::fs::remove_file(self.path_for(id)).await {
             Ok(()) => Ok(()),
-            // Already gone is success: a purge that crashed half-way has to be re-runnable.
+            // Already gone is success: a collection that crashed half-way has to be re-runnable.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),
         }
@@ -258,7 +258,7 @@ impl Drop for StagedFile {
     fn drop(&mut self) {
         // Covers the one path neither `commit` nor `abort` does: a panic, or a future dropped
         // mid-upload because the client hung up. Best-effort and synchronous — a blocking unlink of
-        // one temp file is cheap, and the alternative is leaving litter for `fsck`.
+        // one temp file is cheap, and the alternative is leaving litter for `check_consistency`.
         if self.file.take().is_some() {
             let _ = std::fs::remove_file(&self.path);
         }

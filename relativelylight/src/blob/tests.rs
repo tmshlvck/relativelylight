@@ -13,8 +13,7 @@
 //!   without being asked to serve it.
 //! - **constraints** — the database, not this crate's care, is what stops content disappearing from
 //!   under a version.
-//! - **erasure** — content dies, history doesn't (§4.8).
-//! - **fsck** — missing is an alarm, orphaned is routine, and neither is guessed at inside the
+//! - **consistency** — missing is an alarm, orphaned is routine, and neither is guessed at inside the
 //!   grace period.
 //! - **audit** — every committed write and every served read reaches the observer, reads included.
 
@@ -175,7 +174,7 @@ async fn a_handle_survives_every_edit_of_its_content() {
     let h = fx.put("doc.txt", b"v1").await;
     for body in [&b"v2"[..], b"v3"] {
         fx.store
-            .put_version(h, body, PutMeta::new("doc.txt").by("alice"), WriteContext::none())
+            .add_version(h, body, PutMeta::new("doc.txt").by("alice"), WriteContext::none())
             .await
             .expect("put_version");
     }
@@ -194,7 +193,7 @@ async fn appending_a_version_leaves_every_earlier_one_untouched_and_readable() {
 
     let second = fx
         .store
-        .put_version(h, &b"final"[..], PutMeta::new("report.txt").by("bob"), WriteContext::none())
+        .add_version(h, &b"final"[..], PutMeta::new("report.txt").by("bob"), WriteContext::none())
         .await
         .expect("put_version");
 
@@ -219,7 +218,7 @@ async fn amend_makes_a_new_version_over_the_same_content_without_storing_it_twic
     let before = fx.store.head(h).await.unwrap();
 
     fx.store
-        .amend(h, PutMeta::new("corrected.txt").by("bob"), WriteContext::none())
+        .relabel(h, PutMeta::new("corrected.txt").by("bob"), WriteContext::none())
         .await
         .expect("amend");
 
@@ -241,7 +240,7 @@ async fn a_handle_with_no_versions_cannot_be_appended_to_or_read() {
     let ghost = HandleId::new();
     assert!(matches!(fx.store.head(ghost).await, Err(BlobError::NotFound(_))));
     assert!(matches!(
-        fx.store.amend(ghost, PutMeta::new("x"), WriteContext::none()).await,
+        fx.store.relabel(ghost, PutMeta::new("x"), WriteContext::none()).await,
         Err(BlobError::NotFound(_))
     ));
 }
@@ -257,7 +256,7 @@ async fn content_that_no_longer_hashes_to_its_id_is_refused_and_no_bytes_are_han
     // Control: it reads fine before anyone touches the disk.
     assert_eq!(read_bytes(&fx, v.id).await, b"the real invoice");
 
-    let blob = v.blob.clone().unwrap();
+    let blob = v.blob.clone();
     tokio::fs::write(fx.path_of(&blob), b"the forged invoice!").await.expect("tamper");
 
     match fx.store.read(v.id, WriteContext::none()).await {
@@ -273,8 +272,8 @@ async fn verify_finds_corruption_and_loss_without_serving_anything() {
     let bad = fx.put("bad.txt", b"will be corrupted").await;
     let gone = fx.put("gone.txt", b"will be deleted").await;
 
-    let bad_blob = fx.store.head(bad).await.unwrap().blob.unwrap();
-    let gone_blob = fx.store.head(gone).await.unwrap().blob.unwrap();
+    let bad_blob = fx.store.head(bad).await.unwrap().blob;
+    let gone_blob = fx.store.head(gone).await.unwrap().blob;
     tokio::fs::write(fx.path_of(&bad_blob), b"corrupted").await.unwrap();
     tokio::fs::remove_file(fx.path_of(&gone_blob)).await.unwrap();
 
@@ -282,7 +281,7 @@ async fn verify_finds_corruption_and_loss_without_serving_anything() {
     assert_eq!(report.checked, 3);
     assert_eq!(report.corrupt, vec![bad_blob]);
     assert_eq!(report.missing, vec![gone_blob]);
-    let good_blob = fx.store.head(good).await.unwrap().blob.unwrap();
+    let good_blob = fx.store.head(good).await.unwrap().blob;
     assert!(!report.corrupt.contains(&good_blob), "control: the intact blob is not flagged");
 }
 
@@ -333,7 +332,7 @@ async fn the_database_refuses_to_delete_content_a_version_still_points_at() {
     // reachability sweep cannot orphan a version.
     let fx = Fx::new().await;
     let h = fx.put("doc.txt", b"referenced").await;
-    let blob = fx.store.head(h).await.unwrap().blob.unwrap();
+    let blob = fx.store.head(h).await.unwrap().blob;
 
     let err = content::Entity::delete_by_id(blob.to_string()).exec(&fx.db).await;
     assert!(err.is_err(), "deleting referenced content must violate the foreign key");
@@ -345,7 +344,7 @@ async fn deleting_a_handle_takes_its_whole_chain_with_it() {
     let fx = Fx::new().await;
     let h = fx.put("doc.txt", b"v1").await;
     fx.store
-        .put_version(h, &b"v2"[..], PutMeta::new("doc.txt"), WriteContext::none())
+        .add_version(h, &b"v2"[..], PutMeta::new("doc.txt"), WriteContext::none())
         .await
         .unwrap();
     let bystander = fx.put("other.txt", b"untouched").await;
@@ -361,39 +360,13 @@ async fn deleting_a_handle_takes_its_whole_chain_with_it() {
 
 // ===================== Erasure (§4.8) =====================
 
-#[tokio::test]
-async fn erasing_destroys_the_content_and_keeps_the_record() {
-    let fx = Fx::new().await;
-    let h = fx.put("personal.pdf", b"subject data").await;
-    fx.store
-        .put_version(h, &b"later revision"[..], PutMeta::new("personal.pdf"), WriteContext::none())
-        .await
-        .unwrap();
-    let first = fx.store.versions(h).await.unwrap()[0].id;
-
-    fx.store.erase(first, WriteContext::none()).await.expect("erase");
-
-    let chain = fx.store.versions(h).await.unwrap();
-    assert_eq!(chain.len(), 2, "the entry stays in the history");
-    assert_eq!(chain[0].seq, 1, "and is not renumbered — a gap must read as a gap");
-    assert!(chain[0].is_erased());
-    assert!(chain[0].purged_at.is_some());
-    assert_eq!(chain[0].filename, "personal.pdf", "the record still says what it was");
-    assert_eq!(chain[1].prev, Some(first), "the chain is not broken");
-
-    // `Erased`, not `NotFound`: the difference matters to whatever renders this.
-    assert!(matches!(
-        fx.store.read(first, WriteContext::none()).await,
-        Err(BlobError::Erased(v)) if v == first
-    ));
-    assert!(fx.store.read(chain[1].id, WriteContext::none()).await.is_ok(), "control: the other version still reads");
-}
+// ===================== Garbage collection =====================
 
 #[tokio::test]
-async fn purge_frees_erased_content_but_spares_bytes_another_document_shares() {
+async fn deleting_a_document_frees_its_content_but_spares_bytes_another_document_shares() {
+    // The case a careless collector destroys someone else's file. Dedup is exactly why deletion is
+    // never immediate: "delete this document" can never mean "delete these bytes".
     let fx = Fx::new().await;
-    // Two documents, identical content — the case where a careless purge destroys someone else's
-    // file.
     let mine = fx
         .store
         .create(&b"shared bytes"[..], PutMeta::new("mine.pdf"), WriteContext::none())
@@ -405,58 +378,76 @@ async fn purge_frees_erased_content_but_spares_bytes_another_document_shares() {
         .await
         .unwrap();
     let lonely = fx.put("lonely.txt", b"referenced once").await;
-    let shared_blob = fx.store.head(mine).await.unwrap().blob.unwrap();
-    let lonely_blob = fx.store.head(lonely).await.unwrap().blob.unwrap();
+    let shared = fx.store.head(mine).await.unwrap().blob;
+    let lonely_blob = fx.store.head(lonely).await.unwrap().blob;
 
-    fx.store.erase(fx.store.head(mine).await.unwrap().id, WriteContext::none()).await.unwrap();
-    fx.store.erase(fx.store.head(lonely).await.unwrap().id, WriteContext::none()).await.unwrap();
+    fx.store.delete_handle(mine, WriteContext::none()).await.unwrap();
+    fx.store.delete_handle(lonely, WriteContext::none()).await.unwrap();
 
-    let report = fx.store.purge(None).await.expect("purge");
-    assert!(report.content_deleted.contains(&lonely_blob), "content nothing references is collected");
-    assert!(
-        !report.content_deleted.contains(&shared_blob),
-        "content another document still points at is not"
-    );
-    assert!(fx.store.read(fx.store.head(theirs).await.unwrap().id, WriteContext::none()).await.is_ok());
+    let report = fx.store.collect_garbage().await.expect("collect");
+    assert!(report.deleted.contains(&lonely_blob), "content nothing references is collected");
+    assert!(!report.deleted.contains(&shared), "content another document still holds is not");
     assert!(!fx.path_of(&lonely_blob).exists(), "and the bytes really went");
+
+    // The bystander is untouched and still readable.
+    let v = fx.store.head(theirs).await.unwrap();
+    assert_eq!(read_bytes(&fx, v.id).await, b"shared bytes");
 }
 
 #[tokio::test]
-async fn purge_without_a_checker_never_touches_a_handle() {
+async fn superseded_content_is_freed_once_no_version_points_at_it() {
+    let fx = Fx::new().await;
+    let h = fx.put("doc.txt", b"first draft").await;
+    let first = fx.store.head(h).await.unwrap().blob;
+    fx.store
+        .add_version(h, &b"second draft"[..], PutMeta::new("doc.txt"), WriteContext::none())
+        .await
+        .unwrap();
+
+    // Still referenced: version 1 holds it. A chain keeps its history's content alive.
+    assert!(!fx.store.collect_garbage().await.unwrap().deleted.contains(&first));
+
+    fx.store.delete_handle(h, WriteContext::none()).await.unwrap();
+    assert!(fx.store.collect_garbage().await.unwrap().deleted.contains(&first));
+}
+
+#[tokio::test]
+async fn collect_garbage_never_touches_a_document() {
+    // It takes no argument for this reason: it cannot decide a document is unwanted, only that some
+    // bytes are unreachable.
     let fx = Fx::new().await;
     let h = fx.put("doc.txt", b"still here").await;
-    let report = fx.store.purge(None).await.expect("purge");
-    assert!(report.handles_deleted.is_empty(), "the safe default disowns nothing");
-    assert!(fx.store.head(h).await.is_ok());
+    let report = fx.store.collect_garbage().await.expect("collect");
+    assert!(report.deleted.is_empty());
+    assert!(fx.store.head(h).await.is_ok(), "the document is untouched");
 }
 
 #[tokio::test]
-async fn purge_with_a_checker_drops_the_handles_the_app_disowns() {
-    struct Disowns(HandleId);
-    #[async_trait]
-    impl HandleReference for Disowns {
-        async fn is_referenced(&self, h: HandleId) -> bool {
-            h != self.0
-        }
-    }
-
+async fn copying_content_elsewhere_verifies_it_and_skips_what_is_already_there() {
     let fx = Fx::new().await;
-    let dropped = fx.put("orphan.txt", b"nothing points here").await;
-    let kept = fx.put("kept.txt", b"still referenced").await;
+    fx.put("one.txt", b"first").await;
+    fx.put("two.txt", b"second").await;
 
-    let report = fx.store.purge(Some(&Disowns(dropped))).await.expect("purge");
-    assert_eq!(report.handles_deleted, vec![dropped]);
-    assert!(fx.store.head(dropped).await.is_err());
-    assert!(fx.store.head(kept).await.is_ok(), "control: the referenced one survives");
+    let dest_dir = tempfile::tempdir().unwrap();
+    let dest = FsBackend::new(dest_dir.path());
+    dest.init().await.unwrap();
+
+    let first = fx.store.copy_content_to(&dest).await.expect("copy");
+    assert_eq!(first.copied.len(), 2);
+    assert!(first.failed.is_empty());
+
+    let again = fx.store.copy_content_to(&dest).await.expect("copy");
+    assert!(again.copied.is_empty(), "a second run copies nothing");
+    assert_eq!(again.already_present.len(), 2);
 }
 
-// ===================== fsck =====================
+// ===================== consistency =====================
 
 #[tokio::test]
 async fn fsck_calls_a_missing_blob_an_alarm_and_a_young_orphan_nothing_at_all() {
     let fx = Fx::new().await;
     let h = fx.put("doc.txt", b"indexed and present").await;
-    let blob = fx.store.head(h).await.unwrap().blob.unwrap();
+    let blob = fx.store.head(h).await.unwrap().blob;
 
     // An orphan exactly as a crash between `write` and the index insert would leave one.
     let orphan = BlobId::of(b"written but never indexed");
@@ -466,21 +457,21 @@ async fn fsck_calls_a_missing_blob_an_alarm_and_a_young_orphan_nothing_at_all() 
         .await
         .unwrap();
 
-    let clean = fx.store.fsck(FsckOptions::default(), None).await.expect("fsck");
+    let clean = fx.store.check_consistency(CheckOptions::default()).await.expect("fsck");
     assert!(clean.missing.is_empty(), "control: nothing is missing yet");
     assert!(clean.orphaned.is_empty(), "a fresh orphan is inside the grace period");
     assert_eq!(clean.orphans_too_young, 1, "…and is counted, not ignored");
 
     // Past the grace period it becomes collectable — but only when asked.
-    let opts = FsckOptions { orphan_grace_secs: -1, collect_orphans: false };
-    let seen = fx.store.fsck(opts, None).await.expect("fsck");
+    let opts = CheckOptions { orphan_grace_secs: -1, collect_orphans: false };
+    let seen = fx.store.check_consistency(opts).await.expect("fsck");
     assert_eq!(seen.orphaned, vec![orphan.clone()]);
     assert_eq!(seen.orphans_collected, 0, "reporting is not collecting");
     assert!(fx.store.backend().exists(&orphan).await.unwrap());
 
     let collected = fx
         .store
-        .fsck(FsckOptions { orphan_grace_secs: -1, collect_orphans: true }, None)
+        .check_consistency(CheckOptions { orphan_grace_secs: -1, collect_orphans: true })
         .await
         .expect("fsck");
     assert_eq!(collected.orphans_collected, 1);
@@ -488,7 +479,7 @@ async fn fsck_calls_a_missing_blob_an_alarm_and_a_young_orphan_nothing_at_all() 
 
     // And the other direction: bytes vanishing under a live row is the alarm.
     tokio::fs::remove_file(fx.path_of(&blob)).await.unwrap();
-    let broken = fx.store.fsck(FsckOptions::default(), None).await.expect("fsck");
+    let broken = fx.store.check_consistency(CheckOptions::default()).await.expect("fsck");
     assert_eq!(broken.missing, vec![blob]);
 }
 
@@ -499,7 +490,7 @@ async fn fsck_reports_a_head_pointing_at_nothing() {
     let fx = Fx::new().await;
     let h = fx.put("doc.txt", b"body").await;
     assert!(
-        fx.store.fsck(FsckOptions::default(), None).await.unwrap().dangling_heads.is_empty(),
+        fx.store.check_consistency(CheckOptions::default()).await.unwrap().dangling_heads.is_empty(),
         "control: a healthy head"
     );
 
@@ -510,53 +501,10 @@ async fn fsck_reports_a_head_pointing_at_nothing() {
         .await
         .unwrap();
 
-    assert_eq!(fx.store.fsck(FsckOptions::default(), None).await.unwrap().dangling_heads, vec![h]);
+    assert_eq!(fx.store.check_consistency(CheckOptions::default()).await.unwrap().dangling_heads, vec![h]);
 }
 
 // ===================== Variants and backup =====================
-
-#[tokio::test]
-async fn a_variant_hangs_off_content_so_two_documents_with_the_same_bytes_share_it() {
-    let fx = Fx::new().await;
-    let a = fx.store.create(&b"an image"[..], PutMeta::new("a.png"), WriteContext::none()).await.unwrap();
-    let b = fx.store.create(&b"an image"[..], PutMeta::new("b.png"), WriteContext::none()).await.unwrap();
-    let source = fx.store.head(a).await.unwrap().blob.unwrap();
-
-    assert_eq!(fx.store.variant(&source, "thumb").await.unwrap(), None, "control: none yet");
-    let derived = fx.store.put_derived(&b"a thumbnail"[..]).await.unwrap();
-    fx.store.set_variant(&source, "thumb", &derived).await.unwrap();
-
-    assert_eq!(fx.store.variant(&source, "thumb").await.unwrap(), Some(derived.clone()));
-    let b_source = fx.store.head(b).await.unwrap().blob.unwrap();
-    assert_eq!(
-        fx.store.variant(&b_source, "thumb").await.unwrap(),
-        Some(derived.clone()),
-        "the other document gets it for free — a rendering belongs to bytes, not to a document"
-    );
-
-    // A variant is a reference edge: purge must not collect the thumbnail.
-    let report = fx.store.purge(None).await.unwrap();
-    assert!(!report.content_deleted.contains(&derived));
-}
-
-#[tokio::test]
-async fn backup_copies_verified_content_and_skips_what_is_already_there() {
-    let fx = Fx::new().await;
-    fx.put("one.txt", b"first").await;
-    fx.put("two.txt", b"second").await;
-
-    let dest_dir = tempfile::tempdir().unwrap();
-    let dest = FsBackend::new(dest_dir.path());
-    dest.init().await.unwrap();
-
-    let first = fx.store.backup_to(&dest).await.expect("backup");
-    assert_eq!(first.copied.len(), 2);
-    assert!(first.failed.is_empty());
-
-    let again = fx.store.backup_to(&dest).await.expect("backup");
-    assert!(again.copied.is_empty(), "a second run copies nothing");
-    assert_eq!(again.already_present.len(), 2);
-}
 
 // ===================== Audit (§4.7) =====================
 
@@ -568,7 +516,7 @@ async fn every_write_and_every_served_read_reaches_the_observer() {
     let h = fx.put("doc.txt", b"v1").await;
     let v2 = fx
         .store
-        .put_version(h, &b"v2"[..], PutMeta::new("doc.txt"), WriteContext::none())
+        .add_version(h, &b"v2"[..], PutMeta::new("doc.txt"), WriteContext::none())
         .await
         .unwrap();
     fx.store.read(v2, WriteContext::none()).await.unwrap();
@@ -626,12 +574,11 @@ async fn a_handle_cannot_have_two_versions_with_the_same_sequence_number() {
         handle_id: Set(h.uuid()),
         seq: Set(first.seq), // the number version 1 already holds
         prev_version_id: Set(None),
-        blob_id: Set(first.blob.map(|b| b.to_string())),
+        blob_id: Set(first.blob.to_string()),
         filename: Set("forked.txt".into()),
         mime_declared: Set(String::new()),
         created_by: Set(None),
         created_at: Set(0),
-        purged_at: Set(None),
         metadata: Set(None),
         ..Default::default()
     }
@@ -643,27 +590,10 @@ async fn a_handle_cannot_have_two_versions_with_the_same_sequence_number() {
 
     // Control: the next sequence number is accepted, so the index isn't refusing everything.
     fx.store
-        .put_version(h, &b"v2"[..], PutMeta::new("doc.txt"), WriteContext::none())
+        .add_version(h, &b"v2"[..], PutMeta::new("doc.txt"), WriteContext::none())
         .await
         .expect("the real append still works");
     assert_eq!(fx.version_rows(h).await, 2);
-}
-
-#[tokio::test]
-async fn regenerating_a_variant_replaces_the_old_mapping_rather_than_duplicating_it() {
-    let fx = Fx::new().await;
-    let h = fx.put("photo.png", b"an image").await;
-    let source = fx.store.head(h).await.unwrap().blob.unwrap();
-
-    let first = fx.store.put_derived(&b"thumbnail v1"[..]).await.unwrap();
-    fx.store.set_variant(&source, "thumb", &first).await.unwrap();
-    let second = fx.store.put_derived(&b"thumbnail v2"[..]).await.unwrap();
-    fx.store.set_variant(&source, "thumb", &second).await.expect("re-registering must upsert");
-
-    assert_eq!(fx.store.variant(&source, "thumb").await.unwrap(), Some(second));
-    // The superseded thumbnail is now unreferenced, and collectable like any other content.
-    let report = fx.store.purge(None).await.unwrap();
-    assert!(report.content_deleted.contains(&first));
 }
 
 #[tokio::test]
@@ -701,7 +631,7 @@ async fn a_read_hands_back_a_stream_that_was_verified_in_full_first() {
     assert_eq!(read_bytes(&fx, v.id).await.len(), body.len(), "control: it reads");
 
     // Corrupt a byte deep inside — past anything a prefix check would catch.
-    let blob = v.blob.clone().unwrap();
+    let blob = v.blob.clone();
     let mut tampered = body.clone();
     tampered[250_000] = b'y';
     tokio::fs::write(fx.path_of(&blob), &tampered).await.unwrap();
@@ -767,7 +697,7 @@ mod uuid_keys {
         let a = fx.put("a.txt", b"first document").await;
         let b = fx.put("b.txt", b"second document").await;
         fx.store
-            .put_version(a, &b"first, revised"[..], PutMeta::new("a.txt"), WriteContext::none())
+            .add_version(a, &b"first, revised"[..], PutMeta::new("a.txt"), WriteContext::none())
             .await
             .unwrap();
         let engine = engine(&fx.db).await;
@@ -799,230 +729,5 @@ mod uuid_keys {
         q.pk_in.push(a.to_string());
         let got = engine.list("blob_handle", &q, false).await.expect("list");
         assert_eq!(got.total, 1, "a UUID primary key must select its row");
-    }
-}
-
-#[cfg(feature = "blob-thumbnail")]
-mod thumbnails {
-    use super::*;
-    use crate::blob::Thumbnailer;
-
-    /// A real PNG of a given size, so the tests exercise the actual decoder rather than a fixture
-    /// that only looks like an image.
-    fn png(w: u32, h: u32) -> Vec<u8> {
-        let img = image::RgbImage::from_fn(w, h, |x, y| {
-            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
-        });
-        let mut out = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgb8(img)
-            .write_to(&mut out, image::ImageFormat::Png)
-            .unwrap();
-        out.into_inner()
-    }
-
-    /// A PNG header claiming `w` x `h`, with no image data. Enough for a dimension probe, which is
-    /// exactly what the guard reads — and what a decompression bomb relies on being cheap.
-    fn declared_png(w: u32, h: u32) -> Vec<u8> {
-        fn chunk(tag: &[u8], data: &[u8]) -> Vec<u8> {
-            let mut c = tag.to_vec();
-            c.extend_from_slice(data);
-            let mut out = (data.len() as u32).to_be_bytes().to_vec();
-            out.extend_from_slice(&c);
-            out.extend_from_slice(&crc32(&c).to_be_bytes());
-            out
-        }
-        fn crc32(data: &[u8]) -> u32 {
-            let mut crc = 0xffff_ffffu32;
-            for b in data {
-                crc ^= u32::from(*b);
-                for _ in 0..8 {
-                    crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
-                }
-            }
-            !crc
-        }
-        let mut ihdr = w.to_be_bytes().to_vec();
-        ihdr.extend_from_slice(&h.to_be_bytes());
-        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8-bit RGB
-        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
-        out.extend_from_slice(&chunk(b"IHDR", &ihdr));
-        out.extend_from_slice(&chunk(b"IEND", b""));
-        out
-    }
-
-    fn dimensions(bytes: &[u8]) -> (u32, u32) {
-        image::ImageReader::new(std::io::Cursor::new(bytes))
-            .with_guessed_format()
-            .unwrap()
-            .into_dimensions()
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn variants_are_generated_once_and_reused_thereafter() {
-        let fx = Fx::new().await;
-        let h = fx.store
-            .create(&png(800, 400)[..], PutMeta::new("wide.png"), WriteContext::none())
-            .await
-            .unwrap();
-        let source = fx.store.head(h).await.unwrap().blob.unwrap();
-        let thumbs = Thumbnailer::new().targets([("thumb", 150), ("mobile", 480)]);
-
-        let first = thumbs.ensure(&fx.store, &source, WriteContext::none()).await.expect("ensure");
-        assert_eq!(first.len(), 2);
-        let after_first = fx.content_rows().await;
-
-        let again = thumbs.ensure(&fx.store, &source, WriteContext::none()).await.expect("ensure");
-        assert_eq!(again, first, "the same variants come back");
-        assert_eq!(fx.content_rows().await, after_first, "and nothing new was stored");
-    }
-
-    #[tokio::test]
-    async fn a_variant_fits_its_longest_edge_and_keeps_the_aspect_ratio() {
-        let fx = Fx::new().await;
-        let h = fx.store
-            .create(&png(800, 400)[..], PutMeta::new("wide.png"), WriteContext::none())
-            .await
-            .unwrap();
-        let source = fx.store.head(h).await.unwrap().blob.unwrap();
-
-        let made = Thumbnailer::new()
-            .targets([("thumb", 150)])
-            .ensure(&fx.store, &source, WriteContext::none())
-            .await
-            .unwrap();
-        let bytes = fx.store.read_content(&made[0].1).await.unwrap();
-        let (w, hgt) = dimensions(&bytes);
-        assert_eq!((w, hgt), (150, 75), "2:1 in, 2:1 out, longest edge 150");
-    }
-
-    #[tokio::test]
-    async fn a_small_image_is_not_blown_up() {
-        // Upscaling a 40px image to 150px produces a blurry file that is *bigger* than the original
-        // — the opposite of what a thumbnail is for.
-        let fx = Fx::new().await;
-        let h = fx.store
-            .create(&png(40, 30)[..], PutMeta::new("tiny.png"), WriteContext::none())
-            .await
-            .unwrap();
-        let source = fx.store.head(h).await.unwrap().blob.unwrap();
-
-        let made = Thumbnailer::new()
-            .targets([("thumb", 150)])
-            .ensure(&fx.store, &source, WriteContext::none())
-            .await
-            .unwrap();
-        let bytes = fx.store.read_content(&made[0].1).await.unwrap();
-        assert_eq!(dimensions(&bytes), (40, 30));
-    }
-
-    #[tokio::test]
-    async fn a_non_image_yields_no_variants_rather_than_an_error() {
-        // A page that renders a document list must not fail because one attachment is a text file.
-        let fx = Fx::new().await;
-        let h = fx.put("notes.txt", b"just some prose, definitely not a picture").await;
-        let source = fx.store.head(h).await.unwrap().blob.unwrap();
-
-        let made = Thumbnailer::new().ensure(&fx.store, &source, WriteContext::none()).await;
-        assert_eq!(made.expect("must not error"), vec![]);
-    }
-
-    #[tokio::test]
-    async fn content_that_claims_to_be_an_image_but_isnt_yields_no_variants() {
-        let fx = Fx::new().await;
-        // PNG magic bytes, then nonsense — sniffed as an image, undecodable in fact.
-        let mut fake = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
-        fake.extend(b"not actually a PNG body at all");
-        let h = fx.store
-            .create(&fake[..], PutMeta::new("liar.png"), WriteContext::none())
-            .await
-            .unwrap();
-        let source = fx.store.head(h).await.unwrap().blob.unwrap();
-
-        let made = Thumbnailer::new().ensure(&fx.store, &source, WriteContext::none()).await;
-        assert_eq!(made.expect("must not error"), vec![]);
-    }
-
-    #[tokio::test]
-    async fn a_decompression_bomb_is_refused_before_it_is_allocated() {
-        // The attack this guard exists for: a tiny file declaring enormous dimensions. 20000x20000
-        // is 1.6 GB of RGBA once decoded, from a PNG of a few kilobytes.
-        let fx = Fx::new().await;
-        // Hand-built: an IHDR *declaring* 20000x20000 (1.6 GB of RGBA) with no pixel data behind
-        // it. Generating one would defeat the point — the whole attack is that the file is tiny.
-        let bomb = declared_png(20_000, 20_000);
-        assert!(bomb.len() < 100, "control: the *file* is tiny — that's the attack");
-
-        let h = fx.store
-            .create(&bomb[..], PutMeta::new("bomb.png"), WriteContext::none())
-            .await
-            .unwrap();
-        let source = fx.store.head(h).await.unwrap().blob.unwrap();
-
-        let made = Thumbnailer::new()
-            .max_pixels(1_000_000)
-            .ensure(&fx.store, &source, WriteContext::none())
-            .await;
-        assert_eq!(made.expect("must refuse, not error"), vec![], "no variant, no allocation");
-
-        // Control: the same guard lets an ordinary image through.
-        let ok = fx.store
-            .create(&png(200, 100)[..], PutMeta::new("fine.png"), WriteContext::none())
-            .await
-            .unwrap();
-        let ok_source = fx.store.head(ok).await.unwrap().blob.unwrap();
-        assert_eq!(
-            Thumbnailer::new()
-                .max_pixels(1_000_000)
-                .targets([("thumb", 50)])
-                .ensure(&fx.store, &ok_source, WriteContext::none())
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn two_documents_with_identical_bytes_share_one_thumbnail() {
-        // Variants hang off content, not off a version (§4.5).
-        let fx = Fx::new().await;
-        let bytes = png(300, 300);
-        let a = fx.store.create(&bytes[..], PutMeta::new("a.png"), WriteContext::none()).await.unwrap();
-        let b = fx.store.create(&bytes[..], PutMeta::new("b.png"), WriteContext::none()).await.unwrap();
-        let source = fx.store.head(a).await.unwrap().blob.unwrap();
-
-        let made = Thumbnailer::new()
-            .targets([("thumb", 64)])
-            .ensure(&fx.store, &source, WriteContext::none())
-            .await
-            .unwrap();
-
-        let b_source = fx.store.head(b).await.unwrap().blob.unwrap();
-        assert_eq!(fx.store.variant(&b_source, "thumb").await.unwrap(), Some(made[0].1.clone()));
-    }
-
-    #[tokio::test]
-    async fn a_thumbnail_is_collected_with_its_source() {
-        let fx = Fx::new().await;
-        let h = fx.store
-            .create(&png(300, 300)[..], PutMeta::new("pic.png"), WriteContext::none())
-            .await
-            .unwrap();
-        let source = fx.store.head(h).await.unwrap().blob.unwrap();
-        let made = Thumbnailer::new()
-            .targets([("thumb", 64)])
-            .ensure(&fx.store, &source, WriteContext::none())
-            .await
-            .unwrap();
-        let thumb = made[0].1.clone();
-
-        // Control: while the document lives, the variant row keeps the thumbnail reachable.
-        assert!(!fx.store.purge(None).await.unwrap().content_deleted.contains(&thumb));
-
-        fx.store.delete_handle(h, WriteContext::none()).await.unwrap();
-        let purged = fx.store.purge(None).await.unwrap();
-        assert!(purged.content_deleted.contains(&source), "the source goes");
-        assert!(purged.content_deleted.contains(&thumb), "and the rendering goes with it");
     }
 }

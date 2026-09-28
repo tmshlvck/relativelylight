@@ -16,11 +16,13 @@
 //!   CSRF-checkable at all; `UploadForm` renders it first for exactly that reason.
 //! - **Replace a file** — a new *version* of the same document. The attachment's id never changes,
 //!   so nothing in `ticket_document` is rewritten. That is the whole argument for the handle.
-//! - **Erase** — destroys the content and keeps the record (§4.8): the history still shows a version
-//!   was there and when it went, which is what an audit trail and a deletion request need at once.
+//! - **Delete** — the only way content goes: delete the document, and the next collection frees
+//!   whatever bytes no other document still holds. There is deliberately no way to hollow out one
+//!   version; the chain is append-only.
 //! - **`/admin`** — the blob tables as ordinary CRUD models, with `blob_version` read-only because
 //!   an editable immutable chain isn't one.
-//! - **`/admin/blobs`** — `blob::ui::Actions`: verify / fsck / purge, gated.
+//! - **`/files`** — `blob::ui::Browser`: every document, searchable, drilling into its version
+//!   chain, with the gated consistency check and garbage collection beneath it.
 //! - **stdout** — one line per committed write *and read*, from a `WriteObserver`. A download is an
 //!   auditable event here, not just a write.
 //!
@@ -42,12 +44,11 @@ use model::{ticket, ticket_document};
 use relativelylight::auth::{self, Auth, Identity, UserReadGroupWrite};
 use relativelylight::authz::{Authz, Decision};
 use relativelylight::blob::ui::{human_size, Actions, BrowseState, Browser, Receiver, UploadForm, Viewer};
-use relativelylight::blob::{self, BlobStore, FsBackend, HandleId, Thumbnailer, WriteContext};
+use relativelylight::blob::{self, BlobStore, FsBackend, HandleId, WriteContext};
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::crud::ui::{esc_str, Admin, Outcome, ViewState, CSS};
 use relativelylight::middleware::RealIp;
 use relativelylight::observe::{WriteEvent, WriteObserver};
-use relativelylight::time::Tz;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter,
     QueryOrder, Set,
@@ -209,11 +210,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ticket/{tid}/attachment/{did}", get(download))
         .route("/ticket/{tid}/attachment/{did}/v/{seq}", get(download_version))
         .route("/ticket/{tid}/attachment/{did}/replace", post(replace))
-        .route("/ticket/{tid}/attachment/{did}/erase", post(erase))
         .route("/admin", get(admin_get).post(admin_post))
         .route("/files", get(browse_get).post(browse_post))
         .route("/files/{handle}/v/{version}", get(browse_version))
-        .route("/ticket/{tid}/attachment/{did}/thumb", get(thumbnail))
         .with_state(app)
         // `auth.routes()` carries no state of its own, so merge it after ours is bound.
         .merge(auth.routes())
@@ -265,8 +264,7 @@ async fn show_ticket(
     let Ok(Some(t)) = ticket::Entity::find_by_id(id).one(&app.db).await else {
         return (StatusCode::NOT_FOUND, "no such ticket").into_response();
     };
-    let tz = Tz::from_headers(&headers);
-    let docs = ticket_document::Entity::find()
+        let docs = ticket_document::Entity::find()
         .filter(ticket_document::Column::TicketId.eq(id))
         .order_by_asc(ticket_document::Column::Id)
         .all(&app.db)
@@ -293,28 +291,15 @@ async fn show_ticket(
             .unwrap_or_else(|| "?".into());
 
         // The viewer renders URLs, never the bytes — and each names the *ticket and attachment*,
-        // not the handle (BLOBSTORE.md §9.2). Three of them, because the component owns no routes:
-        // one that serves inline, one that serves as an attachment, one for the generated thumbnail.
+        // not the handle (BLOBSTORE.md §9.2). Two of them, because the component owns no routes:
+        // one that serves inline and one that serves as an attachment.
         let url = format!("/ticket/{}/attachment/{}", t.id, d.id);
-        let mut viewer = Viewer::new(&head, &url)
-            .download_url(format!("{url}?download=1"))
-            .tz(&tz);
-        // Offer the thumbnail only when one actually exists — `Thumbnailer::ensure` generated it on
-        // upload, and it only exists for images it could decode.
-        if let Some(blob) = &head.blob {
-            if app.store.variant(blob, "thumb").await.ok().flatten().is_some() {
-                viewer = viewer.thumbnail_url(format!("{url}/thumb"));
-            }
-        }
-        let viewer = viewer.render();
+        let viewer =
+            Viewer::new(&head, &url).download_url(format!("{url}?download=1")).render();
 
         let mut history = String::from("<ul class=\"list-unstyled small mb-2\">");
         for v in &chain {
-            let state = if v.is_erased() {
-                "<em>content erased</em>".to_string()
-            } else {
-                format!("{} · {}", esc_str(&v.filename), human_size(v.size_bytes()))
-            };
+            let state = format!("{} · {}", esc_str(&v.filename), human_size(v.size_bytes()));
             history.push_str(&format!(
                 "<li>v{} — {state} — {} <a href=\"{url}/v/{}\">open</a></li>",
                 v.seq,
@@ -336,16 +321,11 @@ async fn show_ticket(
              <small class=\"text-body-secondary\">owner: {}</small></div>\
              {viewer}\
              <h3 class=\"h6 mt-3\">Versions</h3>{history}\
-             {replace}\
-             <form method=\"post\" action=\"{url}/erase\" class=\"mt-2\">\
-             <input type=\"hidden\" name=\"_csrf\" value=\"{}\">\
-             <button class=\"btn btn-outline-danger btn-sm\">Erase current content (keep the record)</button>\
-             </form>\
+             {replace}\\
              </div></div>",
             esc_str(&head.filename),
             esc_str(&d.role),
             esc_str(&owner),
-            esc_str(&app.auth.csrf().token(&headers).unwrap_or_default()),
         ));
     }
 
@@ -393,17 +373,6 @@ async fn upload(
         Err(e) => return (e.status(), e.to_string()).into_response(),
     };
 
-    // Derived renderings, generated once and reused thereafter. Cheap to call on every upload:
-    // `ensure` asks the index before it decodes anything, and a non-image yields nothing.
-    if let Ok(head) = app.store.head(upload.handle).await {
-        if let Some(blob) = head.blob {
-            let _ = Thumbnailer::new()
-                .targets([("thumb", 240u32)])
-                .ensure(&*app.store, &blob, WriteContext::none())
-                .await;
-        }
-    }
-
     // Only now does the app's own row appear — with the owner it could not have stored in `blob`.
     let _ = ticket_document::ActiveModel {
         ticket_id: Set(id),
@@ -445,77 +414,9 @@ async fn replace(
         .receive(&headers, body, WriteContext::from(&headers, ip))
         .await
     {
-        Ok(up) => {
-            if let Ok(v) = app.store.version(up.version).await {
-                if let Some(blob) = v.blob {
-                    let _ = Thumbnailer::new()
-                        .targets([("thumb", 240u32)])
-                        .ensure(&*app.store, &blob, WriteContext::none())
-                        .await;
-                }
-            }
-            Redirect::to(&format!("/ticket/{tid}")).into_response()
-        }
+        Ok(_) => Redirect::to(&format!("/ticket/{tid}")).into_response(),
         Err(e) => (e.status(), e.to_string()).into_response(),
     }
-}
-
-/// The generated thumbnail for an attachment's current version, if there is one. Same gate and the
-/// same document-shaped route as the full content — a derived rendering is no less confidential
-/// than what it was derived from.
-async fn thumbnail(
-    State(app): State<App>,
-    Path((tid, did)): Path<(i32, i32)>,
-    headers: HeaderMap,
-) -> Response {
-    if app.auth.identify(&headers).await.is_none() {
-        return Redirect::to(app.auth.login_path()).into_response();
-    }
-    if app.docs_gate.authorize(relativelylight::authz::Operation::Read, &headers).await
-        != Decision::Allow
-    {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    let Some(doc) = find_doc(&app, tid, did).await else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let Ok(head) = app.store.head(HandleId(doc.handle_id)).await else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let Some(blob) = head.blob else { return StatusCode::GONE.into_response() };
-    let Ok(Some(thumb)) = app.store.variant(&blob, "thumb").await else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    match app.store.read_content(&thumb).await {
-        Ok(bytes) => (
-            [(axum::http::header::CONTENT_TYPE, "image/jpeg")],
-            bytes,
-        )
-            .into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-async fn erase(
-    State(app): State<App>,
-    Path((tid, did)): Path<(i32, i32)>,
-    headers: HeaderMap,
-    RealIp(ip): RealIp,
-) -> Response {
-    let Some(who) = app.auth.identify(&headers).await else {
-        return Redirect::to(app.auth.login_path()).into_response();
-    };
-    let Some(doc) = find_doc(&app, tid, did).await else {
-        return (StatusCode::NOT_FOUND, "no such attachment").into_response();
-    };
-    if !may_write(&app, &who, &doc, &headers).await {
-        return (StatusCode::FORBIDDEN, "not your document").into_response();
-    }
-    if let Ok(head) = app.store.head(HandleId(doc.handle_id)).await {
-        // Content destroyed, record kept: the version still says what it was and when it went.
-        let _ = app.store.erase(head.id, WriteContext::from(&headers, ip)).await;
-    }
-    Redirect::to(&format!("/ticket/{tid}")).into_response()
 }
 
 // ===================== downloads =====================
@@ -590,9 +491,6 @@ async fn serve(
         // Inline, so the viewer's <img>/<embed> display — but only for the allowlisted types; an
         // SVG comes back as an attachment however it was uploaded.
         Ok(h) => blob::ui::to_inline_response(h),
-        Err(blob::BlobError::Erased(_)) => {
-            (StatusCode::GONE, "this version's content was erased").into_response()
-        }
         Err(blob::BlobError::Corrupt { .. }) => {
             (StatusCode::INTERNAL_SERVER_ERROR, "stored content failed its digest check")
                 .into_response()
@@ -679,7 +577,6 @@ async fn browse_version(
     }
     match app.store.read(version.into(), WriteContext::from(&headers, ip)).await {
         Ok(h) => blob::ui::to_inline_response(h),
-        Err(blob::BlobError::Erased(_)) => (StatusCode::GONE, "content was erased").into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -821,7 +718,7 @@ async fn seed(db: &DatabaseConnection, store: &BlobStore<FsBackend>) -> Result<(
         )
         .await?;
     store
-        .put_version(
+        .add_version(
             diagram,
             &include_bytes!("../assets/diagram-v2.png")[..],
             blob::PutMeta::new("diagram.png").mime("image/png").by("admin"),
@@ -836,14 +733,6 @@ async fn seed(db: &DatabaseConnection, store: &BlobStore<FsBackend>) -> Result<(
             WriteContext::none(),
         )
         .await?;
-
-    // Generate the seeded document's thumbnail up front, so the first page load shows one.
-    if let Some(blob) = store.head(diagram).await?.blob {
-        Thumbnailer::new()
-            .targets([("thumb", 240u32)])
-            .ensure(store, &blob, WriteContext::none())
-            .await?;
-    }
 
     for (handle, role) in [(diagram, "diagram"), (notes, "notes")] {
         ticket_document::ActiveModel {

@@ -3,7 +3,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
@@ -14,7 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use crate::observe::{WriteEvent, WriteObserver};
 use crate::authz::Operation;
 
-use super::entity::{content, handle, variant, version};
+use super::entity::{content, handle, version};
 use super::{BlobBackend, BlobError, BlobId, HandleId, VersionId};
 
 /// The metadata cap from BLOBSTORE.md §3.4, enforced on write. An uncapped free-form column is where
@@ -119,24 +118,18 @@ pub struct VersionInfo {
     pub handle: HandleId,
     pub seq: i32,
     pub prev: Option<VersionId>,
-    /// `None` once the content has been erased (BLOBSTORE.md §4.8).
-    pub blob: Option<BlobId>,
+    pub blob: BlobId,
     pub filename: String,
     pub mime_declared: String,
     pub created_by: Option<String>,
     pub created_at: i64,
-    pub purged_at: Option<i64>,
     pub metadata: Option<serde_json::Value>,
-    /// The content row, absent when the version has been erased.
+    /// The content row. `None` only if the index is inconsistent, which
+    /// [`check_consistency`](BlobStore::check_consistency) reports.
     pub content: Option<ContentInfo>,
 }
 
 impl VersionInfo {
-    /// Whether this version's content was deliberately destroyed while its history was kept.
-    pub fn is_erased(&self) -> bool {
-        self.purged_at.is_some() || self.blob.is_none()
-    }
-
     pub fn size_bytes(&self) -> i64 {
         self.content.as_ref().map(|c| c.size_bytes).unwrap_or(0)
     }
@@ -160,12 +153,12 @@ pub struct ContentInfo {
 ///
 /// `Debug` deliberately says nothing about the content: this is user data, and a `{:?}` on someone's
 /// error path should not put a document in a log file.
-pub struct BlobHandle {
+pub struct ContentStream {
     pub info: VersionInfo,
     reader: super::Reader,
 }
 
-impl BlobHandle {
+impl ContentStream {
     /// The verified stream, for forwarding to a response body.
     pub fn into_reader(self) -> super::Reader {
         self.reader
@@ -182,9 +175,9 @@ impl BlobHandle {
     }
 }
 
-impl std::fmt::Debug for BlobHandle {
+impl std::fmt::Debug for ContentStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlobHandle").field("info", &self.info).finish_non_exhaustive()
+        f.debug_struct("ContentStream").field("info", &self.info).finish_non_exhaustive()
     }
 }
 
@@ -214,7 +207,7 @@ pub struct BrowsePage {
 #[derive(Clone, Debug)]
 pub struct DocumentSummary {
     pub handle: HandleId,
-    /// The current version. `None` only for a handle with no versions at all, which `fsck` reports
+    /// The current version. `None` only for a handle with no versions at all, which `check_consistency` reports
     /// as drift.
     pub head: Option<VersionInfo>,
     pub versions: u64,
@@ -222,24 +215,14 @@ pub struct DocumentSummary {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// `true` = still referenced, so keep it. Implemented by the app, typically as a `UNION` over its own
-/// document tables (BLOBSTORE.md §9) — the crate cannot see those, which is the whole reason this
-/// trait exists.
-#[async_trait]
-pub trait HandleReference: Send + Sync {
-    async fn is_referenced(&self, handle: HandleId) -> bool;
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CollectReport {
+    /// Content whose row and bytes were deleted because no version pointed at it.
+    pub deleted: Vec<BlobId>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PurgeReport {
-    /// Content rows whose bytes were deleted because nothing referenced them any more.
-    pub content_deleted: Vec<BlobId>,
-    /// Handles dropped because the app's [`HandleReference`] disowned them.
-    pub handles_deleted: Vec<HandleId>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct FsckReport {
+pub struct CheckReport {
     /// **Alarm.** Index rows whose bytes are absent: a version chain points at nothing.
     pub missing: Vec<BlobId>,
     /// **Routine.** Stored bytes the index has never heard of, older than the grace period — the
@@ -247,7 +230,10 @@ pub struct FsckReport {
     pub orphaned: Vec<BlobId>,
     /// Orphans too young to judge; they may belong to an upload still in flight.
     pub orphans_too_young: usize,
-    /// Handles with no version at all, or (with a checker) that the app disowns.
+    /// Handles with no version at all — drift, since every path that creates one gives it a first
+    /// version in the same transaction. Handles the *app* no longer references are a different
+    /// question, and only the app can answer it: see
+    /// [`delete_unreferenced_handles`](BlobStore::delete_unreferenced_handles).
     pub orphan_handles: Vec<HandleId>,
     /// **Alarm.** Handles whose `head_version_id` names a version that isn't there. That pointer is
     /// the one column with no foreign key behind it (see `entity::handle`), so this check is what
@@ -258,7 +244,7 @@ pub struct FsckReport {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct FsckOptions {
+pub struct CheckOptions {
     /// Bytes younger than this are never reported as collectable — otherwise the sweep races an
     /// upload that is between `write` and its index insert. `git gc --prune=2.weeks.ago` and
     /// restic's prune take the same precaution.
@@ -269,7 +255,7 @@ pub struct FsckOptions {
     pub collect_orphans: bool,
 }
 
-impl Default for FsckOptions {
+impl Default for CheckOptions {
     fn default() -> Self {
         Self { orphan_grace_secs: 24 * 3600, collect_orphans: false }
     }
@@ -299,7 +285,7 @@ pub struct VerifyReport {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BackupReport {
+pub struct CopyReport {
     pub copied: Vec<BlobId>,
     pub already_present: Vec<BlobId>,
     pub failed: Vec<BlobId>,
@@ -364,7 +350,7 @@ impl<B: BlobBackend> BlobStore<B> {
 
     /// Append a version to an existing handle and move its head onto it. The previous version is
     /// untouched — that is the whole point of the chain.
-    pub async fn put_version(
+    pub async fn add_version(
         &self,
         handle: HandleId,
         data: impl AsyncRead + Send + Unpin,
@@ -379,7 +365,7 @@ impl<B: BlobBackend> BlobStore<B> {
     /// A new version over the **same content** — a rename, a corrected MIME type, a re-attribution.
     /// No bytes move, and no new content row appears; the chain records that something about the
     /// document changed without pretending the file did.
-    pub async fn amend(
+    pub async fn relabel(
         &self,
         handle: HandleId,
         meta: PutMeta,
@@ -387,11 +373,7 @@ impl<B: BlobBackend> BlobStore<B> {
     ) -> Result<VersionId, BlobError> {
         meta.check()?;
         let prev = self.head_row(handle).await?;
-        let blob_id = prev
-            .blob_id
-            .clone()
-            .map(BlobId::try_from)
-            .transpose()?;
+        let blob_id = BlobId::try_from(prev.blob_id.clone())?;
 
         let now = now_secs();
         let txn = self.db.begin().await?;
@@ -400,7 +382,7 @@ impl<B: BlobBackend> BlobStore<B> {
             handle,
             prev.seq + 1,
             Some(VersionId(prev.id)),
-            blob_id.as_ref(),
+            &blob_id,
             &meta,
             now,
         )
@@ -413,7 +395,7 @@ impl<B: BlobBackend> BlobStore<B> {
     }
 
     /// Delete a handle and its whole chain (the foreign key cascades). Content that no surviving
-    /// version references becomes collectable by [`purge`](Self::purge) — it is **not** deleted here,
+    /// version references becomes collectable by [`collect_garbage`](Self::collect_garbage) — it is **not** deleted here,
     /// because dedup means these bytes may still be another document's.
     ///
     /// Call this in the same transaction the app deletes its own document row in (BLOBSTORE.md §9.3).
@@ -448,32 +430,6 @@ impl<B: BlobBackend> BlobStore<B> {
 
         self.fire_raw(Operation::Delete, "blob_handle", Some(handle.to_string()), None, None, ctx)
             .await;
-        Ok(())
-    }
-
-    /// Destroy a version's **content** while keeping its place in the history (BLOBSTORE.md §4.8).
-    ///
-    /// Sets `blob_id = NULL` and `purged_at`, leaving the filename, the attribution and the sequence
-    /// number intact, so the record reads *"version 3, uploaded by alice, content destroyed on the
-    /// 19th"* rather than going silently discontinuous. The bytes themselves are freed for
-    /// [`purge`](Self::purge) once no other version references them.
-    pub async fn erase(&self, version: VersionId, ctx: WriteContext<'_>) -> Result<(), BlobError> {
-        let row = self.version_row(version).await?;
-        let handle = HandleId(row.handle_id);
-        let mut am: version::ActiveModel = row.into();
-        am.blob_id = Set(None);
-        am.purged_at = Set(Some(now_secs()));
-        am.update(&self.db).await?;
-
-        self.fire_raw(
-            Operation::Delete,
-            "blob_version",
-            Some(version.to_string()),
-            Some(version),
-            Some(handle),
-            ctx,
-        )
-        .await;
         Ok(())
     }
 
@@ -583,11 +539,9 @@ impl<B: BlobBackend> BlobStore<B> {
         &self,
         version: VersionId,
         ctx: WriteContext<'_>,
-    ) -> Result<BlobHandle, BlobError> {
+    ) -> Result<ContentStream, BlobError> {
         let info = self.version(version).await?;
-        let Some(blob) = info.blob.clone() else {
-            return Err(BlobError::Erased(version));
-        };
+        let blob = info.blob.clone();
 
         // Two passes, deliberately (BLOBSTORE.md §4.3): hash the content through once, then re-open
         // it to serve. That keeps §2's guarantee exact — no unverified byte ever reaches a caller —
@@ -616,70 +570,14 @@ impl<B: BlobBackend> BlobStore<B> {
             ctx,
         )
         .await;
-        Ok(BlobHandle { info, reader })
+        Ok(ContentStream { info, reader })
     }
 
-    // ===================== variants =====================
-
-    pub async fn variant(
-        &self,
-        source: &BlobId,
-        name: &str,
-    ) -> Result<Option<BlobId>, BlobError> {
-        let row = variant::Entity::find()
-            .filter(variant::Column::BlobId.eq(source.as_str()))
-            .filter(variant::Column::Variant.eq(name))
-            .one(&self.db)
-            .await?;
-        row.map(|r| BlobId::try_from(r.derived_blob_id)).transpose()
-    }
-
-    pub async fn set_variant(
-        &self,
-        source: &BlobId,
-        name: &str,
-        derived: &BlobId,
-    ) -> Result<(), BlobError> {
-        variant::Entity::insert(variant::ActiveModel {
-            blob_id: Set(source.to_string()),
-            variant: Set(name.to_owned()),
-            derived_blob_id: Set(derived.to_string()),
-            generated_at: Set(now_secs()),
-            ..Default::default()
-        })
-        .on_conflict(
-            OnConflict::columns([variant::Column::BlobId, variant::Column::Variant])
-                .update_columns([variant::Column::DerivedBlobId, variant::Column::GeneratedAt])
-                .to_owned(),
-        )
-        .exec(&self.db)
-        .await?;
-        Ok(())
-    }
-
-    /// The content row for a digest — size and sniffed type without opening the bytes.
+    /// Digest-verified content by its **address**, collected into memory.
     ///
-    /// Addressed by *content*, not by version, because that is the level derived renderings live at
-    /// (§4.5). Most callers want [`version`](Self::version) instead.
-    pub async fn content_info(&self, id: &BlobId) -> Result<ContentInfo, BlobError> {
-        let row = content::Entity::find_by_id(id.as_str())
-            .one(&self.db)
-            .await?
-            .ok_or_else(|| BlobError::NotFound(id.to_string()))?;
-        Ok(ContentInfo {
-            id: id.clone(),
-            size_bytes: row.size_bytes,
-            mime_sniffed: row.mime_sniffed,
-            created_at: row.created_at,
-            verified_at: row.verified_at,
-        })
-    }
-
-    /// Digest-verified content by its address, collected into memory.
-    ///
-    /// For callers that genuinely need the whole thing at once — image decoding cannot be done
+    /// For the callers that genuinely need the whole thing at once — image decoding cannot be done
     /// incrementally — and addressed by content rather than by version, so it fires **no** `Read`
-    /// event: nobody downloaded a document, something re-rendered one. Serving bytes to a person is
+    /// event: nobody downloaded a document, something re-read one. Serving bytes to a person is
     /// [`read`](Self::read), which is audited.
     pub async fn read_content(&self, id: &BlobId) -> Result<Vec<u8>, BlobError> {
         self.verify_content(id).await?;
@@ -687,14 +585,6 @@ impl<B: BlobBackend> BlobStore<B> {
         let mut bytes = Vec::new();
         r.read_to_end(&mut bytes).await?;
         Ok(bytes)
-    }
-
-    /// Store derived content (a thumbnail, a crop) with no version and no handle: it isn't a
-    /// document, it's a rendering of one.
-    pub async fn put_derived(&self, data: impl AsyncRead + Send + Unpin) -> Result<BlobId, BlobError> {
-        let stored = self.store_bytes(data).await?;
-        upsert_content(&self.db, &stored, now_secs()).await?;
-        Ok(stored.id)
     }
 
     // ===================== housekeeping =====================
@@ -734,15 +624,11 @@ impl<B: BlobBackend> BlobStore<B> {
     /// Reconcile the index against the backend, in the two directions whose severities are opposite
     /// (BLOBSTORE.md §4.6): a **missing** blob is data loss, an **orphan** is the routine residue of
     /// the bytes-before-rows ordering.
-    pub async fn fsck(
-        &self,
-        opts: FsckOptions,
-        refs: Option<&dyn HandleReference>,
-    ) -> Result<FsckReport, BlobError> {
+    pub async fn check_consistency(&self, opts: CheckOptions) -> Result<CheckReport, BlobError> {
         use futures_core::Stream;
         use std::pin::Pin;
 
-        let mut report = FsckReport::default();
+        let mut report = CheckReport::default();
 
         let indexed: HashSet<String> = content::Entity::find()
             .all(&self.db)
@@ -790,7 +676,7 @@ impl<B: BlobBackend> BlobStore<B> {
                 .count(&self.db)
                 .await?
                 == 0;
-            if empty || matches!(refs, Some(r) if !r.is_referenced(id).await) {
+            if empty {
                 report.orphan_handles.push(id);
             }
             if let Some(head) = h.head_version_id {
@@ -803,75 +689,49 @@ impl<B: BlobBackend> BlobStore<B> {
         Ok(report)
     }
 
-    /// Collect content nothing references any more.
+    /// Delete stored content that no version points at, and its bytes.
     ///
-    /// Reachability is computed **inside** the crate: a `blob` row is dead when no
-    /// `blob_version.blob_id` and no `blob_variant.derived_blob_id` points at it. `purge(None)` never
-    /// touches a handle — the safe default. Passing a [`HandleReference`] additionally drops handles
-    /// the app disowns (BLOBSTORE.md §4.6).
-    pub async fn purge(
-        &self,
-        refs: Option<&dyn HandleReference>,
-    ) -> Result<PurgeReport, BlobError> {
-        let mut report = PurgeReport::default();
-
-        if let Some(checker) = refs {
-            for h in handle::Entity::find().all(&self.db).await? {
-                let id = HandleId(h.id);
-                if !checker.is_referenced(id).await {
-                    self.delete_handle(id, WriteContext::none()).await?;
-                    report.handles_deleted.push(id);
-                }
-            }
-        }
-
-        // Reachability, and the direction matters. A `blob_version` pointing at content is a real
-        // reference — that content is a document. A `blob_variant` row is **not** a reference to its
-        // *source*: a thumbnail is a rendering of that content, so it cannot be the reason the
-        // content survives, or an image would become permanently uncollectable the moment anything
-        // rendered it. The edge only runs the other way: a derived blob is live while its source is.
-        //
-        // So: seed from the versions, then follow `source -> derived` to a fixed point (a rendering
-        // of a rendering is not something this crate makes, but the loop costs nothing and does not
-        // have to assume that).
-        let mut referenced: HashSet<String> = version::Entity::find()
-            .filter(version::Column::BlobId.is_not_null())
+    /// **Takes no argument and never touches a document.** Safe to run on a timer: it cannot decide
+    /// that a document is unwanted, only that some bytes are unreachable — which, since a version is
+    /// the only thing that can reference content, is one query rather than a graph walk.
+    ///
+    /// Content becomes unreachable when the document that held it is deleted
+    /// ([`delete_handle`](Self::delete_handle)), or when a
+    /// [`relabel`](Self::relabel)/[`add_version`](Self::add_version) leaves an older blob with no
+    /// version left pointing at it. Dedup is why deletion is never immediate: the bytes under one
+    /// document may be another's, so "delete this document" can never mean "delete these bytes".
+    pub async fn collect_garbage(&self) -> Result<CollectReport, BlobError> {
+        let referenced: HashSet<String> = version::Entity::find()
             .all(&self.db)
             .await?
             .into_iter()
-            .filter_map(|r| r.blob_id)
+            .map(|r| r.blob_id)
             .collect();
 
-        let variants = variant::Entity::find().all(&self.db).await?;
-        loop {
-            let mut grew = false;
-            for v in &variants {
-                if referenced.contains(&v.blob_id) && referenced.insert(v.derived_blob_id.clone()) {
-                    grew = true;
-                }
-            }
-            if !grew {
-                break;
-            }
-        }
-
+        let mut report = CollectReport::default();
         for row in content::Entity::find().all(&self.db).await? {
             if referenced.contains(&row.id) {
                 continue;
             }
             let Ok(id) = BlobId::try_from(row.id.clone()) else { continue };
             // Row first, then bytes: the reverse would leave a row addressing nothing if we crashed
-            // between them, which is the one state `fsck` calls an alarm.
+            // between them, which is the one state `check_consistency` calls an alarm.
             content::Entity::delete_by_id(row.id).exec(&self.db).await?;
             self.backend.delete(&id).await?;
-            report.content_deleted.push(id);
+            report.deleted.push(id);
         }
         Ok(report)
     }
 
-    /// Copy every stored blob to another backend, verifying each digest on the way through.
-    pub async fn backup_to(&self, dest: &impl BlobBackend) -> Result<BackupReport, BlobError> {
-        let mut report = BackupReport::default();
+    /// Copy every stored blob's **content** to another backend, re-hashing each on the way through
+    /// so a copy cannot faithfully reproduce corruption.
+    ///
+    /// **Content only — this is not a restorable backup on its own.** The index (which documents
+    /// exist, their versions, their filenames) lives in the database, and backing that up is the
+    /// app's business, as it is for every other table the app owns. What this gives you is the other
+    /// half: the bytes, somewhere else, verified.
+    pub async fn copy_content_to(&self, dest: &impl BlobBackend) -> Result<CopyReport, BlobError> {
+        let mut report = CopyReport::default();
         for row in content::Entity::find().all(&self.db).await? {
             let Ok(id) = BlobId::try_from(row.id.clone()) else { continue };
             if dest.exists(&id).await.unwrap_or(false) {
@@ -948,7 +808,7 @@ impl<B: BlobBackend> BlobStore<B> {
         .await?;
 
         upsert_content(&txn, &stored, now).await?;
-        let v = insert_version(&txn, handle, 1, None, Some(&stored.id), &meta, now).await?;
+        let v = insert_version(&txn, handle, 1, None, &stored.id, &meta, now).await?;
         set_head(&txn, handle, v).await?;
 
         txn.commit().await?;
@@ -973,7 +833,7 @@ impl<B: BlobBackend> BlobStore<B> {
             handle,
             prev.seq + 1,
             Some(VersionId(prev.id)),
-            Some(&stored.id),
+            &stored.id,
             &meta,
             now,
         )
@@ -1054,22 +914,16 @@ impl<B: BlobBackend> BlobStore<B> {
     }
 
     async fn hydrate(&self, row: version::Model) -> Result<VersionInfo, BlobError> {
-        let blob = row.blob_id.clone().map(BlobId::try_from).transpose()?;
-        let content = match &blob {
-            Some(b) => content::Entity::find_by_id(b.as_str())
-                .one(&self.db)
-                .await?
-                .and_then(|c| {
-                    BlobId::try_from(c.id.clone()).ok().map(|id| ContentInfo {
-                        id,
-                        size_bytes: c.size_bytes,
-                        mime_sniffed: c.mime_sniffed,
-                        created_at: c.created_at,
-                        verified_at: c.verified_at,
-                    })
-                }),
-            None => None,
-        };
+        let blob = BlobId::try_from(row.blob_id.clone())?;
+        let content = content::Entity::find_by_id(blob.as_str()).one(&self.db).await?.and_then(|c| {
+            BlobId::try_from(c.id.clone()).ok().map(|id| ContentInfo {
+                id,
+                size_bytes: c.size_bytes,
+                mime_sniffed: c.mime_sniffed,
+                created_at: c.created_at,
+                verified_at: c.verified_at,
+            })
+        });
         Ok(VersionInfo {
             id: VersionId(row.id),
             handle: HandleId(row.handle_id),
@@ -1080,7 +934,6 @@ impl<B: BlobBackend> BlobStore<B> {
             mime_declared: row.mime_declared,
             created_by: row.created_by,
             created_at: row.created_at,
-            purged_at: row.purged_at,
             metadata: row.metadata,
             content,
         })
@@ -1276,7 +1129,7 @@ async fn insert_version<C: sea_orm::ConnectionTrait>(
     handle: HandleId,
     seq: i32,
     prev: Option<VersionId>,
-    blob: Option<&BlobId>,
+    blob: &BlobId,
     meta: &PutMeta,
     now: i64,
 ) -> Result<VersionId, BlobError> {
@@ -1284,12 +1137,11 @@ async fn insert_version<C: sea_orm::ConnectionTrait>(
         handle_id: Set(handle.uuid()),
         seq: Set(seq),
         prev_version_id: Set(prev.map(|v| v.0)),
-        blob_id: Set(blob.map(|b| b.to_string())),
+        blob_id: Set(blob.to_string()),
         filename: Set(meta.filename.clone()),
         mime_declared: Set(meta.mime_declared.clone()),
         created_by: Set(meta.created_by.clone()),
         created_at: Set(now),
-        purged_at: Set(None),
         metadata: Set(meta.metadata.clone()),
         ..Default::default()
     }
