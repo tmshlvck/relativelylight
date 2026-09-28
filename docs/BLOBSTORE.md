@@ -730,14 +730,33 @@ Browser::new(store, gate)
 A searchable list of documents — current name, type, size, version count, who last changed it —
 drilling into one document's chain, newest first, under a heading it renders itself.
 
-**Both components title themselves**, rather than leaving it to the app. That is not decoration: the
-first version of this surface let the app supply the heading, and the example promptly called it
-"Files" while every button under it was named after something else and the whole module said
-"document". A label and the actions beneath it should not be able to drift apart.
+**It speaks the schema.** Columns are `handle`, `seq`, `blob`, `created_by` — not "document" and
+"file". This is an operator's surface: the reader is looking at `blob_handle`, `blob_version` and
+`blob` and wants to map what they see onto those tables, and a truncated digest in a column is how
+you notice two versions share content. An *end-user* attachment list wants the opposite vocabulary,
+and that is what `Viewer` is for — §9's `examples/blob` shows both on the same store.
 
-**"Documents", not "files" or "blobs"** — a handle *is* a document. "Blob" is implementation
-vocabulary, like "row", and "files" invites the assumption that one upload is one thing, which the
-version chain is precisely a denial of. **Gated**, unlike `Viewer`: it lists every document
+Handles are shown **in full**, only digests truncated. A `HandleId` is a UUIDv7, which leads with a
+*timestamp*: two handles created in the same millisecond share their prefix, so a truncated one
+produces a column where distinct rows look identical. Digests are uniformly random and cut safely.
+
+**Both components title themselves** rather than leaving it to the app — the first version left the
+heading open and the example promptly called the page "Files" while every button under it was named
+after something else. A label and the actions beneath it should not be able to drift apart.
+
+**Maintenance is a `<details>` menu beside the search**, shown only on the list: the controls act on
+the whole store, and offering them while a reader is looking at one handle invites the reading that
+they apply to it. A disclosure element rather than a Bootstrap dropdown, because those need
+Bootstrap's JavaScript and this crate ships none — the same reason `crud::ui` uses `<dialog>`.
+
+**`Browser::submit` is the panel's one write entry point**, dispatching `delete` / `check` /
+`collect` and gating each, so an app writes one POST handler rather than getting the gating right
+three times. `delete` is the **only** route to removing a document from a console: a plain CRUD
+delete on `blob_handle` violates the foreign key once there are two versions.
+
+A **deep** check re-hashes a bounded batch (the 500 least recently verified), not everything —
+`verify` reads every byte of what it checks, and an unbounded sweep behind a web button is a request
+that never returns. Run it repeatedly and it covers the store. **Gated**, unlike `Viewer`: it lists every document
 in the store regardless of owner, so rendering it *is* a read (§5.1). Search matches **any** version's
 filename, not just the current one, because what someone hunting for a file remembers is often the
 name it used to have.

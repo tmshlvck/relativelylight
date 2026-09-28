@@ -244,6 +244,9 @@ impl UploadForm {
     }
 }
 
+/// How many blobs a **deep** check re-hashes in one run. See `Actions::submit`.
+const DEEP_CHECK_BLOBS: u64 = 500;
+
 /// The store-wide maintenance controls: consistency checking and garbage collection
 /// (BLOBSTORE.md §5.3).
 ///
@@ -285,6 +288,10 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
         self
     }
 
+    pub(super) fn csrf_token(&self) -> Option<String> {
+        self.csrf_token.clone()
+    }
+
     /// Render the buttons, or refuse. `Err(Decision)` is the gate's answer for the caller to map to
     /// `401`/`403` — this is a real enforcement point, not a way to hide buttons.
     pub async fn render_for(&self, headers: &HeaderMap) -> Result<String, Decision> {
@@ -319,8 +326,9 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
              <label class=\"form-check-label\" for=\"rl-blob-deep\">deep</label></div></div>\
              <div class=\"form-text\">Reconcile the index against storage: content the index expects \
              and cannot find, and stored bytes it has never heard of. <strong>Deep</strong> also \
-             re-hashes content to catch silent corruption &mdash; correspondingly slower, since it \
-             reads every byte.</div></form>\
+             re-hashes the least recently checked content to catch silent corruption &mdash; slower, \
+             since it reads every byte of what it checks, so it covers a bounded batch per run.\
+             </div></form>\
              <form method=\"post\" class=\"mb-3\">{csrf}\
              <input type=\"hidden\" name=\"op\" value=\"collect\">\
              <button class=\"btn btn-outline-danger\" type=\"submit\">Collect garbage</button>\
@@ -401,13 +409,20 @@ impl<'a, B: BlobBackend> Actions<'a, B> {
         }
 
         if deep {
-            match self.store.verify(VerifyOptions { oldest: None }).await {
+            // Bounded, not exhaustive. `verify` reads **every byte** of what it checks, so an
+            // unbounded sweep behind a web button is a request that never returns on a large store.
+            // Incremental is also how `verify` is meant to be used: run it repeatedly and it
+            // converges on full coverage, oldest-checked first.
+            match self.store.verify(VerifyOptions { oldest: Some(DEEP_CHECK_BLOBS) }).await {
                 Ok(v) => {
                     if !v.corrupt.is_empty() {
                         alarming = true;
                         parts.push(format!("{} blob(s) CORRUPT", v.corrupt.len()));
                     }
-                    parts.push(format!("{} blob(s) re-hashed", v.checked));
+                    parts.push(format!(
+                        "{} blob(s) re-hashed (the {} least recently checked)",
+                        v.checked, DEEP_CHECK_BLOBS
+                    ));
                 }
                 Err(e) => {
                     alarming = true;

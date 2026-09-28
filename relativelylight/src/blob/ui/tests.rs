@@ -473,7 +473,7 @@ mod browser {
         assert!(!hit.contains("unrelated.txt"), "{hit}");
 
         let miss = b.render_for(&HeaderMap::new(), &state("q=nothingmatches")).await.unwrap();
-        assert!(miss.contains("No documents match"), "{miss}");
+        assert!(miss.contains("Nothing matches"), "{miss}");
     }
 
     #[tokio::test]
@@ -499,7 +499,7 @@ mod browser {
         let v1 = html.find(">1<").expect("version 1 listed");
         assert!(v2 < v1, "newest first — the current version is what a reader wants: {html}");
         assert!(html.contains(&format!("/files/{h}/v/")), "links through the app's route: {html}");
-        assert!(html.contains("all documents"), "and back: {html}");
+        assert!(html.contains("all handles"), "and back: {html}");
     }
 
     #[tokio::test]
@@ -566,7 +566,7 @@ async fn the_browser_titles_itself_so_the_page_and_its_actions_cannot_drift_apar
     let s = crate::blob::ui::BrowseState::from_uri(&"/x".parse::<http::Uri>().unwrap());
 
     let html = b.render_for(&HeaderMap::new(), &s).await.unwrap();
-    assert!(html.contains("<h1 class=\"h4 mb-3\">Documents</h1>"), "{html}");
+    assert!(html.contains("<h1 class=\"h4 mb-3\">Blob store</h1>"), "{html}");
 
     let renamed = crate::blob::ui::Browser::new(&store, crate::authz::Open)
         .title("Attachments")
@@ -574,7 +574,7 @@ async fn the_browser_titles_itself_so_the_page_and_its_actions_cannot_drift_apar
         .await
         .unwrap();
     assert!(renamed.contains("Attachments"), "{renamed}");
-    assert!(!renamed.contains("Documents"), "{renamed}");
+    assert!(!renamed.contains("Blob store"), "{renamed}");
 
     let bare = crate::blob::ui::Browser::new(&store, crate::authz::Open)
         .title("")
@@ -600,4 +600,150 @@ async fn the_maintenance_buttons_are_named_after_the_calls_they_make() {
     assert!(html.contains("Collect garbage"), "{html}");
     assert!(!html.contains("Purge"), "the old name is gone: {html}");
     assert!(!html.contains("Check storage"), "{html}");
+}
+
+mod panel {
+    use super::*;
+    use crate::authz::{Decision, Open};
+    use crate::blob::ui::{Actions, BrowseState, Browser};
+    use std::collections::HashMap;
+
+    const TOKEN: &str = "5cbf19b46ff34d0a8de0dcbe12b6b7e2c0c1a5f4b3e2d1c0b9a8978685746352";
+
+    fn state(q: &str) -> BrowseState {
+        BrowseState::from_uri(&format!("/x?{q}").parse::<http::Uri>().unwrap())
+    }
+
+    #[tokio::test]
+    async fn maintenance_is_a_menu_on_the_list_and_absent_from_one_handles_page() {
+        // The controls act on the whole store. Offering them while a reader is looking at one
+        // handle's chain invites the reading that they apply to that handle.
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path()).await;
+        let h = store.create(&b"x"[..], PutMeta::new("a.txt"), WriteContext::none()).await.unwrap();
+
+        let panel = || {
+            Browser::new(&store, Open).actions(Actions::new(&store, Open).csrf(TOKEN))
+        };
+
+        let list = panel().render_for(&HeaderMap::new(), &state("")).await.unwrap();
+        assert!(list.contains("<details"), "a disclosure menu, not a JS dropdown: {list}");
+        assert!(list.contains("Check consistency") && list.contains("Collect garbage"), "{list}");
+
+        let one = panel().render_for(&HeaderMap::new(), &state(&format!("open={h}"))).await.unwrap();
+        assert!(!one.contains("Check consistency"), "store-wide controls stay off this page: {one}");
+        assert!(!one.contains("Collect garbage"), "{one}");
+    }
+
+    #[tokio::test]
+    async fn the_panel_speaks_the_schema() {
+        // An operator reading this is looking at `blob_handle`, `blob_version` and `blob`, and wants
+        // to map what they see onto those tables.
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path()).await;
+        let h = store.create(&b"x"[..], PutMeta::new("a.txt"), WriteContext::none()).await.unwrap();
+
+        let list = Browser::new(&store, Open).render_for(&HeaderMap::new(), &state("")).await.unwrap();
+        for col in ["<th>handle</th>", "<th>filename</th>", "<th class=\"text-end\">versions</th>"] {
+            assert!(list.contains(col), "missing {col}:\n{list}");
+        }
+
+        let one = Browser::new(&store, Open)
+            .render_for(&HeaderMap::new(), &state(&format!("open={h}")))
+            .await
+            .unwrap();
+        for col in ["<th>seq</th>", "<th>blob</th>", "<th>created_by</th>"] {
+            assert!(one.contains(col), "missing {col}:\n{one}");
+        }
+        assert!(one.contains("handle <code>"), "the page names the handle it is showing:\n{one}");
+    }
+
+    #[tokio::test]
+    async fn a_handle_can_be_deleted_from_the_panel_and_the_gate_is_asked_separately() {
+        // There is no other route: a plain CRUD delete on `blob_handle` violates the foreign key
+        // once there are two versions.
+        struct ReadOnly;
+        #[async_trait::async_trait]
+        impl crate::authz::Authz for ReadOnly {
+            async fn authorize(&self, op: crate::authz::Operation, _: &HeaderMap) -> Decision {
+                if op.is_write() { Decision::Denied } else { Decision::Allow }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path()).await;
+        let h = store.create(&b"v1"[..], PutMeta::new("a.txt"), WriteContext::none()).await.unwrap();
+        store.add_version(h, &b"v2"[..], PutMeta::new("a.txt"), WriteContext::none()).await.unwrap();
+
+        let mut form = HashMap::new();
+        form.insert("op".to_string(), "delete".to_string());
+        form.insert("handle".to_string(), h.to_string());
+
+        // Reading the store is not permission to empty it.
+        let refused = Browser::new(&store, ReadOnly)
+            .actions(Actions::new(&store, ReadOnly).csrf(TOKEN))
+            .submit(&HeaderMap::new(), &form, WriteContext::none())
+            .await;
+        assert_eq!(refused.err(), Some(Decision::Denied));
+        assert!(store.head(h).await.is_ok(), "still there");
+
+        let done = Browser::new(&store, Open)
+            .actions(Actions::new(&store, Open).csrf(TOKEN))
+            .submit(&HeaderMap::new(), &form, WriteContext::none())
+            .await
+            .expect("allowed");
+        assert!(!done.alarming, "{}", done.message);
+        assert!(store.head(h).await.is_err(), "the handle and its chain are gone");
+
+        // Content is freed by collection, not by the delete — dedup is why.
+        assert_eq!(store.collect_garbage().await.unwrap().deleted.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_delete_button_is_omitted_when_the_panel_has_no_write_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path()).await;
+        let h = store.create(&b"x"[..], PutMeta::new("a.txt"), WriteContext::none()).await.unwrap();
+
+        // No `actions`, so no CSRF token, so no button that would be refused on submit.
+        let bare = Browser::new(&store, Open)
+            .render_for(&HeaderMap::new(), &state(&format!("open={h}")))
+            .await
+            .unwrap();
+        assert!(!bare.contains("Delete this handle"), "{bare}");
+
+        let wired = Browser::new(&store, Open)
+            .actions(Actions::new(&store, Open).csrf(TOKEN))
+            .render_for(&HeaderMap::new(), &state(&format!("open={h}")))
+            .await
+            .unwrap();
+        assert!(wired.contains("Delete this handle"), "{wired}");
+        assert!(wired.contains(TOKEN), "and it carries the token: {wired}");
+    }
+}
+
+#[tokio::test]
+async fn two_handles_created_moments_apart_are_told_apart_in_the_listing() {
+    // A UUIDv7 leads with a timestamp, so truncating one produces a column where distinct rows look
+    // identical — which is exactly what an 8-character prefix did for two documents uploaded in the
+    // same second. Handles are shown in full; only digests, which are uniformly random, are cut.
+    use crate::authz::Open;
+    use crate::blob::ui::{BrowseState, Browser};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path()).await;
+    let a = store.create(&b"one"[..], PutMeta::new("a.txt"), WriteContext::none()).await.unwrap();
+    let b = store.create(&b"two"[..], PutMeta::new("b.txt"), WriteContext::none()).await.unwrap();
+    assert_eq!(
+        a.to_string()[..8],
+        b.to_string()[..8],
+        "control: their prefixes really do collide, which is the whole point"
+    );
+
+    let html = Browser::new(&store, Open)
+        .render_for(&HeaderMap::new(), &BrowseState::from_uri(&"/x".parse().unwrap()))
+        .await
+        .unwrap();
+    assert!(html.contains(&a.to_string()), "the full handle is shown: {html}");
+    assert!(html.contains(&b.to_string()), "{html}");
 }

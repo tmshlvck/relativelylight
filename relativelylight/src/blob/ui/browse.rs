@@ -6,15 +6,21 @@
 //! (the table cycle — see [`entity::handle`](crate::blob::entity::handle)), so `crud` has nothing to
 //! join on. [`BlobStore::browse`](crate::blob::BlobStore::browse) follows the pointer instead.
 //!
-//! **Gated**, unlike [`Viewer`](super::Viewer): this lists every document in the store regardless of
-//! who owns them, so rendering it *is* a read and the gate is where the check goes.
+//! **Gated**, unlike [`Viewer`](super::Viewer): this lists everything in the store regardless of who
+//! owns it, so rendering it *is* a read and the gate is where the check goes.
+//!
+//! **It speaks the schema, on purpose.** Columns are `handle`, `seq`, `blob`, not "document" and
+//! "file". This is an operator's surface: the person reading it is looking at `blob_handle`,
+//! `blob_version` and `blob`, and wants to map what they see onto those tables — a truncated digest
+//! in a column is how you notice two documents share content. An *end-user* attachment list wants
+//! the opposite vocabulary, and that is what [`Viewer`](super::Viewer) is for.
 
 use std::sync::Arc;
 
 use http::HeaderMap;
 
 use crate::authz::{Authz, Decision, Operation};
-use crate::blob::{BlobBackend, BlobStore, BrowseQuery, HandleId};
+use crate::blob::{BlobBackend, BlobStore, BrowseQuery, HandleId, WriteContext};
 use crate::crud::ui::esc_str;
 
 use super::render::human_size;
@@ -121,6 +127,7 @@ pub struct Browser<'a, B: BlobBackend> {
     gate: Arc<dyn Authz>,
     per_page: u64,
     title: Option<String>,
+    actions: Option<super::Actions<'a, B>>,
     /// `{handle}` / `{version}` placeholders, so the component can link to the app's own routes
     /// without inventing any (§2).
     view_url: Option<String>,
@@ -128,7 +135,7 @@ pub struct Browser<'a, B: BlobBackend> {
 
 impl<'a, B: BlobBackend> Browser<'a, B> {
     pub fn new(store: &'a BlobStore<B>, gate: impl Authz + 'static) -> Self {
-        Self { store, gate: Arc::new(gate), per_page: 25, title: Some("Documents".into()), view_url: None }
+        Self { store, gate: Arc::new(gate), per_page: 25, title: Some("Blob store".into()), view_url: None, actions: None }
     }
 
     pub fn per_page(mut self, n: u64) -> Self {
@@ -136,14 +143,21 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
         self
     }
 
-    /// The heading above the list. Defaults to `"Documents"`; pass `""` for none.
-    ///
-    /// **"Documents", not "Files" or "Blobs"** — a handle *is* a document, and that is the word this
-    /// module uses for it throughout. "Blob" is implementation vocabulary (so is "row"), and "files"
-    /// invites the assumption that one upload is one thing, which the version chain is precisely a
-    /// denial of.
+    /// The heading above the list. Defaults to `"Blob store"`; pass `""` for none.
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
+        self
+    }
+
+    /// Attach the maintenance controls, rendered as a disclosure menu beside the search box.
+    ///
+    /// Shown **only on the list view** — the controls act on the whole store, so offering them while
+    /// a reader is looking at one handle's chain invites the reading that they apply to that handle.
+    ///
+    /// A `<details>` element, not a Bootstrap dropdown: those need Bootstrap's JavaScript bundle,
+    /// and this crate ships none. Same reason `crud::ui` uses `<dialog>` for its editor.
+    pub fn actions(mut self, actions: super::Actions<'a, B>) -> Self {
+        self.actions = Some(actions.title(""));
         self
     }
 
@@ -155,6 +169,56 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
     pub fn view_url(mut self, template: impl Into<String>) -> Self {
         self.view_url = Some(template.into());
         self
+    }
+
+    /// Handle a posted control — the whole panel's one write entry point.
+    ///
+    /// Dispatches on the `op` field: `delete` removes the handle named by `handle`, `check` and
+    /// `collect` go to the attached [`Actions`](super::Actions). One handler for the page, rather
+    /// than the app having to route each control separately and get the gating right three times.
+    ///
+    /// The caller checks CSRF before calling (the rendered forms carry the token given to
+    /// [`csrf`](super::Actions::csrf)).
+    pub async fn submit(
+        &self,
+        headers: &HeaderMap,
+        form: &std::collections::HashMap<String, String>,
+        ctx: WriteContext<'_>,
+    ) -> Result<super::ActionOutcome, Decision> {
+        let op = form.get("op").map(String::as_str).unwrap_or("");
+        if op == "delete" {
+            // Gated separately from the listing: reading the store is not permission to empty it.
+            match self.gate.authorize(Operation::Delete, headers).await {
+                Decision::Allow => {}
+                other => return Err(other),
+            }
+            let Some(handle) = form.get("handle").and_then(|h| h.parse::<HandleId>().ok()) else {
+                return Ok(super::ActionOutcome {
+                    message: "No handle given.".into(),
+                    alarming: true,
+                });
+            };
+            return Ok(match self.store.delete_handle(handle, ctx).await {
+                Ok(()) => super::ActionOutcome {
+                    message: format!(
+                        "Handle {handle} and its versions deleted. Its content is freed by the \
+                         next collection, unless another handle still holds it."
+                    ),
+                    alarming: false,
+                },
+                Err(e) => super::ActionOutcome {
+                    message: format!("Delete failed: {e}"),
+                    alarming: true,
+                },
+            });
+        }
+        match &self.actions {
+            Some(a) => a.submit(headers, op, form.contains_key("deep")).await,
+            None => Ok(super::ActionOutcome {
+                message: format!("Unknown action {op:?}."),
+                alarming: true,
+            }),
+        }
     }
 
     /// Render the list, or one document's versions. `Err(Decision)` is the gate's answer.
@@ -169,11 +233,11 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
         }
         match state.open {
             Some(h) => Ok(self.render_versions(h, state).await),
-            None => Ok(self.render_list(state).await),
+            None => Ok(self.render_list(headers, state).await),
         }
     }
 
-    async fn render_list(&self, state: &BrowseState) -> String {
+    async fn render_list(&self, headers: &HeaderMap, state: &BrowseState) -> String {
         let page = state.page.max(1);
         let q = BrowseQuery {
             search: state.search.as_deref(),
@@ -181,30 +245,28 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
             limit: self.per_page,
         };
         let Ok(found) = self.store.browse(&q).await else {
-            return "<div class=\"alert alert-danger\">Could not list documents.</div>".into();
+            return "<div class=\"alert alert-danger\">Could not list the store.</div>".into();
         };
 
-        let term = state.search.as_deref().unwrap_or("");
-        let mut out = self.heading();
+        let mut out = self.heading(None);
         out.push_str(&format!(
-            "<form method=\"get\" class=\"mb-3 d-flex gap-2\">\
+            "<form method=\"get\" class=\"mb-3 d-flex gap-2 align-items-start\">\
              <input class=\"form-control\" type=\"search\" name=\"q\" value=\"{}\" \
              placeholder=\"Search filenames…\">\
-             <button class=\"btn btn-outline-secondary\" type=\"submit\">Search</button></form>",
-            esc_str(term)
+             <button class=\"btn btn-outline-secondary\" type=\"submit\">Search</button>{}</form>",
+            esc_str(state.search.as_deref().unwrap_or("")),
+            self.actions_menu(headers).await
         ));
 
         if found.documents.is_empty() {
-            out.push_str(
-                "<p class=\"text-body-secondary\">No documents match.</p>",
-            );
+            out.push_str("<p class=\"text-body-secondary\">Nothing matches.</p>");
             return out;
         }
 
         out.push_str(
             "<table class=\"table table-sm align-middle\"><thead><tr>\
-             <th>Document</th><th>Type</th><th class=\"text-end\">Size</th>\
-             <th class=\"text-end\">Versions</th><th>Last change by</th></tr></thead><tbody>",
+             <th>handle</th><th>filename</th><th>type</th><th class=\"text-end\">size</th>\
+             <th class=\"text-end\">versions</th><th>last change by</th></tr></thead><tbody>",
         );
         for d in &found.documents {
             let (name, mime, size, by) = match &d.head {
@@ -214,8 +276,7 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
                     human_size(v.size_bytes()),
                     esc_str(v.created_by.as_deref().unwrap_or("—")),
                 ),
-                // A handle with no versions is drift, not a document. Say so rather than showing a
-                // blank row that looks like a rendering bug.
+                // A handle with no versions is drift, not a row to render blankly.
                 None => (
                     "<em class=\"text-danger\">no versions</em>".to_string(),
                     "—".into(),
@@ -224,10 +285,11 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
                 ),
             };
             out.push_str(&format!(
-                "<tr><td><a href=\"{}\">{name}</a></td><td><small>{mime}</small></td>\
-                 <td class=\"text-end\">{size}</td><td class=\"text-end\">{}</td>\
-                 <td><small>{by}</small></td></tr>",
+                "<tr><td><a href=\"{}\"><code class=\"small\">{}</code></a></td><td>{name}</td>\
+                 <td><small>{mime}</small></td><td class=\"text-end\">{size}</td>\
+                 <td class=\"text-end\">{}</td><td><small>{by}</small></td></tr>",
                 esc_str(&state.href(page, Some(d.handle))),
+                esc_str(&d.handle.to_string()),
                 d.versions
             ));
         }
@@ -238,23 +300,34 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
 
     async fn render_versions(&self, handle: HandleId, state: &BrowseState) -> String {
         let Ok(chain) = self.store.versions(handle).await else {
-            return "<div class=\"alert alert-danger\">No such document.</div>".into();
+            return "<div class=\"alert alert-danger\">No such handle.</div>".into();
         };
         let back = esc_str(&state.href(state.page.max(1), None));
-        let title = chain
-            .last()
-            .map(|v| esc_str(&v.filename))
-            .unwrap_or_else(|| "(no versions)".into());
 
         let mut out = format!(
-            "{}<p class=\"mb-2\"><a href=\"{back}\">&larr; all documents</a></p>\
-             <h2 class=\"h5\">{title}</h2>\
-             <p class=\"text-body-secondary small\">Document {handle}</p>\
-             <table class=\"table table-sm align-middle\"><thead><tr>\
-             <th>#</th><th>Filename</th><th class=\"text-end\">Size</th><th>By</th>\
-             <th>Content</th></tr></thead><tbody>",
-            self.heading()
+            "{}<p class=\"mb-3\"><a href=\"{back}\">&larr; all handles</a></p>",
+            self.heading(Some(&handle.to_string()))
         );
+
+        // Reuse the viewer for the current version, rather than re-implementing a preview. It needs
+        // a URL, which only the app can supply — without one the table below is the whole of it.
+        if let (Some(t), Some(head)) = (&self.view_url, chain.last()) {
+            let url = t
+                .replace("{handle}", &handle.to_string())
+                .replace("{version}", &head.id.to_string());
+            out.push_str(&format!(
+                "<div class=\"mb-3\">{}</div>",
+                super::Viewer::new(head, &url).download_url(format!("{url}?download=1")).render()
+            ));
+        }
+
+        out.push_str(
+            "<table class=\"table table-sm align-middle\"><thead><tr>\
+             <th>seq</th><th>blob</th><th>filename</th><th>declared type</th>\
+             <th class=\"text-end\">size</th><th>created_by</th><th>created_at (UTC)</th>\
+             <th></th></tr></thead><tbody>",
+        );
+        let head_id = chain.last().map(|l| l.id);
         // Newest first: the current version is what a reader is usually looking for.
         for v in chain.iter().rev() {
             let link = match &self.view_url {
@@ -267,34 +340,84 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
                 None => "—".to_string(),
             };
             out.push_str(&format!(
-                "<tr{}><td>{}</td><td>{}</td><td class=\"text-end\">{}</td><td><small>{}</small></td>\
-                 <td>{link}</td></tr>",
-                if v.id == chain.last().map(|l| l.id).unwrap_or(v.id) {
-                    " class=\"table-active\""
-                } else {
-                    ""
-                },
+                "<tr{}><td>{}</td><td><code>{}</code></td><td>{}</td><td><small>{}</small></td>\
+                 <td class=\"text-end\">{}</td><td><small>{}</small></td>\
+                 <td><small>{}</small></td><td>{link}</td></tr>",
+                if Some(v.id) == head_id { " class=\"table-active\"" } else { "" },
                 v.seq,
+                esc_str(&short_digest(v.blob.as_str())),
                 esc_str(&v.filename),
+                esc_str(&v.mime_declared),
                 human_size(v.size_bytes()),
                 esc_str(v.created_by.as_deref().unwrap_or("—")),
+                esc_str(&utc(v.created_at)),
             ));
         }
         out.push_str("</tbody></table>");
+        out.push_str(&self.delete_control(handle));
         out
     }
 
-    fn heading(&self) -> String {
-        match self.title.as_deref().filter(|t| !t.is_empty()) {
-            Some(t) => format!("<h1 class=\"h4 mb-3\">{}</h1>", esc_str(t)),
-            None => String::new(),
+    /// Deleting a handle is the **only** way to remove a document, and there is no other route to it
+    /// in a console: a plain CRUD delete on `blob_handle` fails with a foreign-key violation once
+    /// there are two versions, because the cascade removes them in no order and
+    /// `prev_version_id` is `Restrict`.
+    ///
+    /// Offered on one handle's page rather than the list, so it always names what it will remove.
+    fn delete_control(&self, handle: HandleId) -> String {
+        let Some(csrf) = self.actions.as_ref().and_then(|a| a.csrf_token()) else {
+            // No token means the app has not wired this panel's write path; render nothing rather
+            // than a button that will be refused.
+            return String::new();
+        };
+        format!(
+            "<form method=\"post\" class=\"mt-3\">\
+             <input type=\"hidden\" name=\"_csrf\" value=\"{}\">\
+             <input type=\"hidden\" name=\"op\" value=\"delete\">\
+             <input type=\"hidden\" name=\"handle\" value=\"{}\">\
+             <button class=\"btn btn-sm btn-outline-danger\">Delete this handle and all its versions</button>\
+             <div class=\"form-text\">The content is freed by the next collection, unless another \
+             handle still holds it.</div></form>",
+            esc_str(&csrf),
+            esc_str(&handle.to_string())
+        )
+    }
+
+    /// The maintenance menu, or nothing. A `<details>` disclosure, because a Bootstrap dropdown
+    /// would need Bootstrap's JavaScript and this crate ships none.
+    async fn actions_menu(&self, headers: &HeaderMap) -> String {
+        let Some(actions) = &self.actions else { return String::new() };
+        let Ok(controls) = actions.render_for(headers).await else {
+            // The gate refused the *actions*, not the listing. Show the list without them rather
+            // than failing the page: they are two different permissions.
+            return String::new();
+        };
+        format!(
+            "<details class=\"position-relative ms-auto\">\
+             <summary class=\"btn btn-outline-secondary\">Maintenance</summary>\
+             <div class=\"position-absolute end-0 mt-1 p-3 bg-body border rounded shadow\" \
+             style=\"z-index:20;min-width:30rem\">{controls}</div></details>"
+        )
+    }
+
+
+    fn heading(&self, handle: Option<&str>) -> String {
+        let Some(t) = self.title.as_deref().filter(|t| !t.is_empty()) else { return String::new() };
+        match handle {
+            Some(h) => format!(
+                "<h1 class=\"h4 mb-1\">{}</h1>\
+                 <p class=\"text-body-secondary small mb-2\">handle <code>{}</code></p>",
+                esc_str(t),
+                esc_str(h)
+            ),
+            None => format!("<h1 class=\"h4 mb-3\">{}</h1>", esc_str(t)),
         }
     }
 
     fn pager(&self, state: &BrowseState, page: u64, total: u64) -> String {
         let pages = total.div_ceil(self.per_page).max(1);
         if pages == 1 {
-            return format!("<p class=\"text-body-secondary small\">{total} document(s).</p>");
+            return format!("<p class=\"text-body-secondary small\">{total} handle(s).</p>");
         }
         let mut out = String::from("<nav><ul class=\"pagination pagination-sm\">");
         for p in 1..=pages {
@@ -307,4 +430,20 @@ impl<'a, B: BlobBackend> Browser<'a, B> {
         out.push_str("</ul></nav>");
         out
     }
+}
+
+/// First twelve characters of a **digest** — enough to recognise and to spot two versions sharing
+/// content, short enough to sit in a column.
+///
+/// Only for digests, which are uniformly random. A `HandleId` is a UUIDv7, whose leading bits are a
+/// *timestamp*: two handles created in the same millisecond share their prefix, so truncating one
+/// produces a column where distinct rows look identical. Handles are shown in full.
+fn short_digest(id: &str) -> String {
+    id.chars().take(12).collect()
+}
+
+/// A UTC timestamp an operator can read. The admin surface is deliberately not timezone-aware: an
+/// operator comparing this against a log wants the same clock the store writes with.
+fn utc(epoch: i64) -> String {
+    crate::time::Tz::named("UTC").format(epoch)
 }

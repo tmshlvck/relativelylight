@@ -249,7 +249,7 @@ async fn index(State(app): State<App>, headers: HeaderMap) -> Response {
             t.id, t.id, esc_str(&t.subject)
         ));
     }
-    body.push_str("</div><p class=\"mt-3\"><a href=\"/documents\">All documents</a> · <a href=\"/admin\">Admin console</a></p>");
+    body.push_str("</div><p class=\"mt-3\"><a href=\"/documents\">Blob store</a> · <a href=\"/admin\">Admin console</a></p>");
     page("Tickets", Some(&who), body)
 }
 
@@ -321,7 +321,7 @@ async fn show_ticket(
              <small class=\"text-body-secondary\">owner: {}</small></div>\
              {viewer}\
              <h3 class=\"h6 mt-3\">Versions</h3>{history}\
-             {replace}\\
+             {replace}\
              </div></div>",
             esc_str(&head.filename),
             esc_str(&d.role),
@@ -509,7 +509,7 @@ fn panel(app: &App) -> Admin<'_> {
         .entity("blob_handle")
         .entity("blob_version")
         .entity("blob")
-        .link("Documents", "/documents")
+        .link("Blob store", "/documents")
 }
 
 async fn admin_get(State(app): State<App>, headers: HeaderMap, uri: Uri) -> Response {
@@ -589,7 +589,7 @@ async fn browse_get(State(app): State<App>, headers: HeaderMap, uri: Uri) -> Res
         return Redirect::to(app.auth.login_path()).into_response();
     }
     match render_browser(&app, &headers, &BrowseState::from_uri(&uri), None).await {
-        Ok(html) => page("Documents", who.as_ref(), html),
+        Ok(html) => page("Blob store", who.as_ref(), html),
         Err(Decision::NeedsLogin) => Redirect::to(app.auth.login_path()).into_response(),
         Err(_) => (StatusCode::FORBIDDEN, "admins only").into_response(),
     }
@@ -598,6 +598,7 @@ async fn browse_get(State(app): State<App>, headers: HeaderMap, uri: Uri) -> Res
 async fn browse_post(
     State(app): State<App>,
     headers: HeaderMap,
+    RealIp(ip): RealIp,
     uri: Uri,
     axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>,
 ) -> Response {
@@ -605,12 +606,11 @@ async fn browse_post(
         return (StatusCode::FORBIDDEN, "bad CSRF token").into_response();
     }
     let who = app.auth.identify(&headers).await;
-    let outcome = match actions(&app, &headers)
-        .submit(
-            &headers,
-            form.get("op").map(String::as_str).unwrap_or(""),
-            form.contains_key("deep"),
-        )
+    // One entry point for the whole panel — the browser dispatches `delete`, `check` and `collect`
+    // and gates each, so this handler doesn't have to get that right three times.
+    let gate = relativelylight::auth::GroupReadWrite::new(&app.auth, [ADMIN_GROUP.to_string()]);
+    let outcome = match browser(&app, &headers, gate)
+        .submit(&headers, &form, WriteContext::from(&headers, ip))
         .await
     {
         Ok(o) => o,
@@ -618,14 +618,24 @@ async fn browse_post(
         Err(_) => return (StatusCode::FORBIDDEN, "admins only").into_response(),
     };
     match render_browser(&app, &headers, &BrowseState::from_uri(&uri), Some(outcome)).await {
-        Ok(html) => page("Documents", who.as_ref(), html),
+        Ok(html) => page("Blob store", who.as_ref(), html),
         Err(_) => (StatusCode::FORBIDDEN, "admins only").into_response(),
     }
 }
 
-fn actions<'a>(app: &'a App, headers: &HeaderMap) -> Actions<'a, FsBackend> {
-    let gate = relativelylight::auth::GroupReadWrite::new(&app.auth, [ADMIN_GROUP.to_string()]);
-    Actions::new(&*app.store, gate).csrf(app.auth.csrf().token(headers).unwrap_or_default())
+/// The panel: a browser with the maintenance menu attached, both on the same admin gate.
+fn browser<'a>(
+    app: &'a App,
+    headers: &HeaderMap,
+    gate: relativelylight::auth::GroupReadWrite,
+) -> Browser<'a, FsBackend> {
+    let token = app.auth.csrf().token(headers).unwrap_or_default();
+    let actions_gate =
+        relativelylight::auth::GroupReadWrite::new(&app.auth, [ADMIN_GROUP.to_string()]);
+    Browser::new(&*app.store, gate)
+        // The component links versions at a route *the app* owns; it invents none of its own.
+        .view_url("/documents/{handle}/v/{version}")
+        .actions(Actions::new(&*app.store, actions_gate).csrf(token))
 }
 
 async fn render_browser(
@@ -635,11 +645,7 @@ async fn render_browser(
     outcome: Option<relativelylight::blob::ui::ActionOutcome>,
 ) -> Result<String, Decision> {
     let gate = relativelylight::auth::GroupReadWrite::new(&app.auth, [ADMIN_GROUP.to_string()]);
-    let list = Browser::new(&*app.store, gate)
-        // The component links versions at a route *the app* owns; it invents none of its own.
-        .view_url("/documents/{handle}/v/{version}")
-        .render_for(headers, state)
-        .await?;
+    let panel = browser(app, headers, gate).render_for(headers, state).await?;
 
     let banner = outcome
         .map(|o| {
@@ -650,13 +656,9 @@ async fn render_browser(
             )
         })
         .unwrap_or_default();
-    let maintenance = actions(app, headers).render_for(headers).await.unwrap_or_default();
 
-    // Both components render their own heading, so the page is just the two of them plus a banner.
-    Ok(format!(
-        "{banner}{list}<hr class=\"my-4\">{maintenance}\
-         <p><a href=\"/\">&larr; tickets</a></p>"
-    ))
+    // The panel renders its own heading and its own maintenance menu.
+    Ok(format!("{banner}{panel}<p class=\"mt-3\"><a href=\"/\">&larr; tickets</a></p>"))
 }
 
 // ===================== helpers =====================
