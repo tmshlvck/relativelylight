@@ -683,7 +683,9 @@ and wants no I/O. Takes **no gate** — see §5.1.
 | `application/pdf` | `<embed src="{view_url}">` |
 | everything else | no preview — the filename, the size, and the controls |
 
-Under it always, on one line with the name: `filename (size) · open · download`.
+Under it always, on one line with the name: `filename (size) · open · download`. The **filename**
+truncates when it is long; the controls never do, and wrap to their own line on a narrow screen
+instead — clipping them would lose a control rather than tame a name.
 
 **Links for GET, buttons for POST** — the one rule these components follow. `open` and `download`
 fetch and change nothing, so they are links everywhere, styled the same in a preview row as in a
@@ -711,7 +713,11 @@ else's layout.
 pub struct UploadForm { action: String, accept: Option<String>, max_bytes: Option<u64> }
 ```
 
-A plain `<form method="post" enctype="multipart/form-data">` with a file input and a submit button.
+A plain `<form method="post" enctype="multipart/form-data">`. The picker and its button share a row
+and wrap when there is no space for both — `flex-wrap` plus a flex-basis, so there is no breakpoint
+to choose and nothing to run. The input's `id` is derived from the action, because a page commonly
+carries several of these (a document's "new version" form beside the app's "attach one") and a
+shared id makes a label focus the wrong form's picker.
 Parsing the posted body reuses this crate's internal `multipart` module (already used by CSV import);
 `blob::ui::decode_upload(body: &[u8]) -> Result<(PutMeta, Bytes), BlobError>` is the one new function
 needed there.

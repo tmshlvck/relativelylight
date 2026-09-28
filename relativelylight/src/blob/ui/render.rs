@@ -157,21 +157,31 @@ impl<'a> Viewer<'a> {
         // They sit immediately after the filename rather than being pushed to the far edge of the
         // row: they are *about* that name, and a control a hand-width away from its subject reads
         // as belonging to the layout instead.
-        let mut out = format!(
-            "<div class=\"mt-2 text-truncate\"><a href=\"{url}\">{name}</a> \
-             <small class=\"text-body-secondary\">({size})</small>"
-        );
+        // The **filename** truncates; the controls never do. `text-truncate` on the whole line
+        // clipped `download` to an ellipsis on a narrow screen — losing the control rather than
+        // the long name it was meant to tame. A flex row with a shrinkable name and an
+        // unshrinkable tail wraps instead, so both survive at any width.
+        // No leading space on the tail: a browser trims whitespace at the start of a flex item, so
+        // it collapsed into `(149.8 KiB)· open`. The margin class below is what separates them.
+        let mut tail = String::new();
         if openable {
-            out.push_str(&format!(
-                " · <a href=\"{url}\" target=\"_blank\" rel=\"noopener\">open</a>"
+            tail.push_str(&format!(
+                "· <a href=\"{url}\" target=\"_blank\" rel=\"noopener\">open</a>"
             ));
         }
         if let Some(d) = &self.download_url {
             // `download` is a hint; the route's Content-Disposition is what actually decides.
-            out.push_str(&format!(" · <a href=\"{}\" download>download</a>", esc_str(d)));
+            if !tail.is_empty() {
+                tail.push(' ');
+            }
+            tail.push_str(&format!("· <a href=\"{}\" download>download</a>", esc_str(d)));
         }
-        out.push_str("</div>");
-        out
+        format!(
+            "<div class=\"mt-2 d-flex align-items-baseline flex-wrap\">\
+             <span class=\"text-truncate\"><a href=\"{url}\">{name}</a> \
+             <small class=\"text-body-secondary\">({size})</small></span>\
+             <span class=\"flex-shrink-0 ms-1\">{tail}</span></div>"
+        )
     }
 }
 
@@ -270,14 +280,29 @@ impl UploadForm {
             .map(|t| format!("<input type=\"hidden\" name=\"_csrf\" value=\"{}\">", esc_str(t)))
             .unwrap_or_default();
 
+        // A page can carry several of these — a document's "new version" form beside the app's
+        // "attach something" form — and they had a hardcoded `id`. Duplicate ids are invalid HTML,
+        // and the practical symptom is that clicking the second form's label focuses the *first*
+        // form's file input. Derived from the action, which is what distinguishes them.
+        let id = format!("rl-blob-file-{:x}", {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.action.hash(&mut h);
+            h.finish()
+        });
+
+        // The picker and its button share a row, and `flex-wrap` plus a flex-basis puts the button
+        // on its own line once there isn't room — the responsive behaviour without a breakpoint to
+        // pick or any JavaScript to run.
         format!(
             "<form method=\"post\" enctype=\"multipart/form-data\" action=\"{action}\">\
              {csrf}\
-             <div class=\"mb-2\"><label class=\"form-label\" for=\"rl-blob-file\">{label}</label>\
-             <input class=\"form-control\" type=\"file\" id=\"rl-blob-file\" name=\"file\"{accept} required>\
-             {hint}</div>\
-             <button class=\"btn btn-primary\" type=\"submit\">{submit}</button>\
-             </form>"
+             <label class=\"form-label\" for=\"{id}\">{label}</label>\
+             <div class=\"d-flex gap-2 align-items-center flex-wrap\">\
+             <input class=\"form-control\" style=\"flex:1 1 16rem\" type=\"file\" id=\"{id}\" \
+             name=\"file\"{accept} required>\
+             <button class=\"btn btn-primary\" type=\"submit\">{submit}</button></div>\
+             {hint}</form>"
         )
     }
 }

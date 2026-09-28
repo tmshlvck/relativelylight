@@ -818,3 +818,54 @@ fn every_preview_scales_down_but_never_up() {
         assert!(html.contains("img-fluid"), "an unconstrained image can overflow:\n{html}");
     }
 }
+
+#[test]
+fn the_picker_and_its_button_share_a_row_until_there_is_no_room() {
+    // `flex-wrap` plus a flex-basis: one line when it fits, the button below when it doesn't — the
+    // responsive behaviour with no breakpoint to choose and no JavaScript to run.
+    let html = UploadForm::new("/upload").render();
+    let row = html.find("d-flex gap-2 align-items-center flex-wrap").expect("a flex row");
+    let input = html.find("type=\"file\"").expect("the picker");
+    let button = html.find("type=\"submit\"").expect("the button");
+    assert!(row < input && input < button, "both controls inside the one row:\n{html}");
+    assert!(html.contains("flex:1 1 16rem"), "the picker grows and sets the wrap point:\n{html}");
+}
+
+#[test]
+fn two_upload_forms_on_a_page_do_not_share_an_input_id() {
+    // They did: `id="rl-blob-file"` was hardcoded, so a ticket page with two attachments plus an
+    // "attach something" form had three elements with one id. Clicking the second form's label
+    // focused the first form's picker.
+    let a = UploadForm::new("/ticket/1/attachment/1/replace").render();
+    let b = UploadForm::new("/ticket/1/attachment/2/replace").render();
+    let id_of = |h: &str| {
+        let i = h.find("id=\"rl-blob-file-").expect("an id") + 4; // past `id="`
+        h[i..].split('"').next().unwrap().to_string()
+    };
+    assert_ne!(id_of(&a), id_of(&b), "distinct actions must give distinct ids");
+
+    // …and the label points at its own input, in both.
+    for html in [&a, &b] {
+        let id = id_of(html);
+        assert!(html.contains(&format!("for=\"{id}\"")), "{html}");
+        assert_eq!(html.matches(&format!("\"{id}\"")).count(), 2, "one label, one input:\n{html}");
+    }
+
+    // Stable across renders, so the markup doesn't churn between requests.
+    assert_eq!(id_of(&a), id_of(&UploadForm::new("/ticket/1/attachment/1/replace").render()));
+}
+
+#[test]
+fn a_long_filename_truncates_without_taking_the_controls_with_it() {
+    // `text-truncate` on the whole line clipped `download` to an ellipsis at narrow widths —
+    // losing the control rather than the long name it was there to tame.
+    let info = fake_version(&"a-very-long-scanned-document-name".repeat(4), "image/png");
+    let html = Viewer::new(&info, "/v/1").download_url("/v/1?d=1").render();
+
+    let name_span = html.find("<span class=\"text-truncate\">").expect("the name truncates");
+    let tail_span = html.find("<span class=\"flex-shrink-0 ms-1\">").expect("the controls do not");
+    assert!(name_span < tail_span, "{html}");
+    // Both controls live in the unshrinkable tail, after the truncating span closes.
+    assert!(html[tail_span..].contains(">open</a>"), "{html}");
+    assert!(html[tail_span..].contains(">download</a>"), "{html}");
+}
