@@ -12,6 +12,8 @@
 *.png
 # …except the README screenshots, which are checked in
 !docs/img/*.png
+# …and example assets an example embeds with include_bytes! (a fresh clone must build)
+!examples/*/assets/*.png
 
 # Local test scratch (curl cookie jars, etc.)
 *.cookies
