@@ -24,7 +24,7 @@ use model::{author, post, profile, tag, user};
 use relativelylight::auth::{self, Auth, GroupReadWrite, Identity, UserReadGroupWrite};
 use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::{esc, Admin, Outcome, ViewState, CSS};
+use relativelylight::crud::ui::{esc, Admin, Outcome, Picker, ViewState, CSS, JS};
 use relativelylight::middleware::RealIp;
 use relativelylight::time::{Tz, TzPicker};
 use relativelylight::validate;
@@ -45,8 +45,17 @@ struct Shell {
     title: String,
     user: String, // signed-in username (empty when anonymous) → navbar link to /profile
     body: String,
-    css: &'static str, // the library's few CSS rules (crud::ui::CSS) — no JavaScript anywhere
+    css: &'static str, // the library's few CSS rules (crud::ui::CSS)
+    js: &'static str,  // the relation picker's script (crud::ui::JS)
     tz_picker: String, // the navbar timezone form (time::TzPicker), posting to /tz
+}
+
+/// The page inside the relation picker's dialog: no navbar, the same stylesheet and colour mode.
+#[derive(Template)]
+#[template(path = "bare.html")]
+struct Bare {
+    body: String,
+    css: &'static str,
 }
 
 impl Shell {
@@ -58,6 +67,7 @@ impl Shell {
             user: user.into(),
             body,
             css: CSS,
+            js: JS,
             tz_picker: timezones().render(&Tz::from_headers(headers), back),
         }
     }
@@ -359,6 +369,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // token. Sharing `auth.csrf()` puts the panel's forms and the login/profile forms on one token
     // cookie; the library renders the hidden `_csrf` input itself. See docs/AUTH.md §7.
     crud.csrf(auth.csrf());
+    // A post's author and tags outnumber `picker_threshold` (50), so the form edits them in a dialog
+    // over this route. Its rows are the target's own table, so they answer to the target's gate.
+    crud.picker_path("/pick");
 
     // One shared engine, rendered from *per request*, so write controls hide for users who can't
     // write — and a forged write is refused by the same gate regardless.
@@ -371,6 +384,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // (see `home`). `/` sends you to the first panel.
         .route("/", get(|| async { Redirect::to("/admin/post") }))
         .route("/admin/{entity}", get(home).post(save))
+        .route("/pick", get(pick))
         .route("/tz", post(set_tz))
         .with_state(app);
 
@@ -402,6 +416,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // gates refuse those operations anyway. No middleware, no extractor.
 //
 // The whole of the read side is: parse the URL, render the fragment, wrap it in our shell.
+/// The relation picker's page. No login redirect of its own: it renders inside a dialog, and the
+/// target's gate answers 401/403 for a caller who may not list it.
+async fn pick(headers: HeaderMap, uri: Uri, State(app): State<Arc<App>>) -> Response {
+    let state = ViewState::from_uri(&uri);
+    match Picker::new(&app.engine).render_for(&headers, &state).await {
+        Ok(body) => match (Bare { body, css: CSS }).render() {
+            Ok(html) => Html(html).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        },
+        Err(e) => e.into_response(),
+    }
+}
+
 async fn home(
     headers: HeaderMap,
     uri: Uri,

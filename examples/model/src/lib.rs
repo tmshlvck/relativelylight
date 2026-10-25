@@ -79,16 +79,31 @@ async fn seed(db: &DatabaseConnection) -> Result<(), DbErr> {
         .insert(db)
         .await?;
     }
+    // Fifty more, so `author` is past the default `picker_threshold` (50): a post's author is edited
+    // in the picker dialog. Delete six and it is a plain `<select>` again.
+    let countries = ["CZ", "DE", "FR", "JP", "BR"];
+    for i in 1..=50i32 {
+        author::ActiveModel {
+            id: Set(authors.len() as i32 + i),
+            name: Set(format!("Guest author {i:02}")),
+            country: Set(countries[i as usize % countries.len()].into()),
+            email: Set(None),
+            homepage: Set(None),
+        }
+        .insert(db)
+        .await?;
+    }
 
-    // A biggish tag list (40), past the default picker threshold (20) — which a to-many ignores: its
-    // multi-select lists every tag, since a tag left out of the list would be unlinked by saving.
+    // 56 tags, past the default picker threshold (50) as well: a to-many in the picker, with the
+    // chosen tags as badges.
     let tags = [
         "rust", "systems", "beginner", "async", "web", "database", "testing", "performance",
         "macros", "traits", "lifetimes", "ownership", "borrowing", "concurrency", "wasm", "cli",
         "embedded", "networking", "security", "serialization", "parsing", "graphics", "gamedev",
         "ml", "data-science", "devops", "cloud", "docker", "kubernetes", "ffi", "unsafe", "generics",
         "iterators", "closures", "error-handling", "logging", "tracing", "benchmarking", "tooling",
-        "cargo",
+        "cargo", "http", "json", "sql", "orm", "templates", "auth", "csrf", "sessions", "migrations",
+        "sqlite", "postgres", "mysql", "tokio", "axum", "serde", "regex",
     ];
     for (i, name) in tags.iter().enumerate() {
         tag::ActiveModel {

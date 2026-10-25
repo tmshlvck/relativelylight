@@ -7,8 +7,10 @@
 //! `blankForm()`, `fromRow()`, and a `422` handler that reassembled it from a JSON error body.
 
 use super::state::ViewState;
-use crate::crud::engine::{Cardinality, Column, Engine, FieldDisplay, LogicalType, Result};
+use crate::authz::Operation;
+use crate::crud::engine::{Cardinality, Column, Engine, FieldDisplay, ListQuery, LogicalType, Result};
 use crate::time::Tz;
+use http::HeaderMap;
 use serde_json::Value;
 
 pub(crate) struct FieldV {
@@ -39,10 +41,21 @@ pub(crate) enum Widget {
     DateTime { value: String, zone: String },
     /// A to-many relation: every target row as a multi-select.
     Multi { options: Vec<Opt> },
-    /// A to-one relation whose target has more rows than `picker_threshold`: the id, typed. The
-    /// alternative — shipping thousands of `<option>`s, or a search box that needs a fetch endpoint —
-    /// is what this deliberately doesn't do. `count` is how many rows there are, so the label can say.
-    Reference { value: String, current: String, target: String, count: u64 },
+    /// A relation whose target is too large to list: the selection, read-only, posted back by one
+    /// hidden input per id — and, when the app serves a [`Picker`](super::Picker), a button opening
+    /// it in a dialog at `src`. `crud::ui::JS` does the editing; without it the selection still
+    /// saves unchanged. `note` says why there is no list (empty when there's nothing to say).
+    Picked { chosen: Vec<Opt>, many: bool, src: String, note: String },
+}
+
+/// What a relation input needs beyond its column: whose field it is (the picker's `?pick=` names
+/// it), how many target rows a `<select>` may list, and who is asking — the **target's** gate
+/// decides whether its rows are listed at all, since a form for one table is no licence to read
+/// another.
+pub(crate) struct Relations<'r> {
+    pub slug: &'r str,
+    pub threshold: u64,
+    pub headers: &'r HeaderMap,
 }
 
 /// Build the form's fields for one entity.
@@ -57,13 +70,13 @@ pub(crate) async fn fields(
     row: Option<&Value>,
     state: &ViewState,
     tz: &Tz,
-    threshold: u64,
+    rel: &Relations<'_>,
 ) -> Result<Vec<FieldV>> {
     let mut out = Vec::new();
     for col in cols.iter().filter(|c| writable(c) && rendered(super::render::name_of(c))) {
         let name = super::render::name_of(col).to_string();
         out.push(FieldV {
-            widget: widget(engine, col, row, state, tz, threshold).await?,
+            widget: widget(engine, col, row, state, tz, rel).await?,
             label: super::render::label_of(col),
             required: matches!(col, Column::Field { required: true, .. }),
             help: help_of(col),
@@ -94,7 +107,7 @@ async fn widget(
     row: Option<&Value>,
     state: &ViewState,
     tz: &Tz,
-    threshold: u64,
+    rel: &Relations<'_>,
 ) -> Result<Widget> {
     let name = super::render::name_of(col);
     match col {
@@ -142,20 +155,10 @@ async fn widget(
             })
         }
         Column::Relation { target, cardinality, .. } => {
-            // One terse listing of the target. A to-one's is capped: `total` then says whether a picker
-            // would have been a wall of options. A to-many's is every row (`all` — a `per_page` of 0
-            // is the backend's default page, not "no limit"): a posted multi-select *replaces* the
-            // relation set, so a linked row the list left out would be unlinked by saving.
-            let q = match cardinality {
-                Cardinality::ToMany => crate::crud::engine::ListQuery { all: true, ..Default::default() },
-                Cardinality::ToOne => crate::crud::engine::ListQuery {
-                    per_page: threshold.max(1),
-                    ..Default::default()
-                },
-            };
-            let page = engine.list(target, &q, true).await?;
+            let many = *cardinality == Cardinality::ToMany;
+            let listable = engine.permits(target, Operation::List, rel.headers).await;
             let chosen = relation_values(name, row, state);
-            let opts = |page: &crate::crud::engine::Page| -> Vec<Opt> {
+            let as_options = |page: &crate::crud::engine::Page| -> Vec<Opt> {
                 page.data
                     .iter()
                     .map(|it| {
@@ -164,20 +167,96 @@ async fn widget(
                     })
                     .collect()
             };
-            match cardinality {
-                Cardinality::ToMany => Ok(Widget::Multi { options: opts(&page) }),
-                Cardinality::ToOne if page.total > threshold => Ok(Widget::Reference {
-                    value: chosen.first().cloned().unwrap_or_default(),
-                    current: current_label(name, row),
-                    target: target.clone(),
-                    count: page.total,
+            let query = |all: bool| match all {
+                // Every row: a posted multi-select *replaces* the relation set, so a linked row the
+                // list left out would be unlinked by saving. (`per_page: 0` is the backend's
+                // default page, not "no limit".)
+                true => ListQuery { all: true, ..Default::default() },
+                false => ListQuery { per_page: rel.threshold.max(1), ..Default::default() },
+            };
+            let select = |options: Vec<Opt>| match many {
+                true => Widget::Multi { options },
+                false => Widget::Select { options, blank: true },
+            };
+            // One capped listing answers "is it small?" — `total` counts past the cap.
+            let probe = if listable { Some(engine.list(target, &query(false), true).await?) } else { None };
+            let picker = engine.picker_path();
+            match (&probe, picker) {
+                (Some(page), _) if page.total <= rel.threshold => Ok(select(as_options(page))),
+                // No picker to open: the whole list, however long. A page that errored once its
+                // table grew past a number would be worse than a long menu.
+                (Some(_), None) => Ok(select(as_options(&engine.list(target, &query(true), true).await?))),
+                (Some(page), Some(path)) => Ok(Widget::Picked {
+                    chosen: chosen_options(engine, target, name, row, state, true).await?,
+                    many,
+                    src: format!("{path}?pick={}.{name}", rel.slug),
+                    note: format!("{} {target} rows — too many to list here.", page.total),
                 }),
-                Cardinality::ToOne => {
-                    Ok(Widget::Select { options: opts(&page), blank: true })
-                }
+                // The caller may not list the target: what this row already links to (the row's
+                // own read shows those labels anyway), and no way to browse for more.
+                (None, _) => Ok(Widget::Picked {
+                    chosen: chosen_options(engine, target, name, row, state, false).await?,
+                    many,
+                    src: String::new(),
+                    note: String::new(),
+                }),
             }
         }
     }
+}
+
+/// The current selection of a relation the form doesn't list, with labels: from the row being
+/// edited, or — after a rejected save — looked up for the ids that were posted. Not looked up when
+/// the caller may not list the target (`listable` false): the ids someone posted are no reason to
+/// tell them what those rows are called, so they show as ids.
+async fn chosen_options(
+    engine: &Engine,
+    target: &str,
+    name: &str,
+    row: Option<&Value>,
+    state: &ViewState,
+    listable: bool,
+) -> Result<Vec<Opt>> {
+    let ids = relation_values(name, row, state);
+    let opt = |value: String, label: String| Opt { value, label, selected: true };
+    if state.posted(name).is_none() {
+        let linked = row.and_then(|r| r.get(name));
+        let items: Vec<&Value> = match linked {
+            Some(Value::Array(items)) => items.iter().collect(),
+            Some(Value::Null) | None => Vec::new(),
+            Some(one) => vec![one],
+        };
+        return Ok(items
+            .into_iter()
+            .map(|it| {
+                let id = super::render::text(it.get("id"));
+                let label = super::render::text(it.get("label"));
+                opt(id, label)
+            })
+            .collect());
+    }
+    if ids.is_empty() || !listable {
+        return Ok(ids.into_iter().map(|id| opt(id.clone(), id)).collect());
+    }
+    let q = ListQuery { pk_in: ids.clone(), all: true, ..Default::default() };
+    let found = match engine.list(target, &q, true).await {
+        Ok(page) => page.data,
+        // An id that can't be a key of the target (text for an integer key): the write check
+        // reports it beside the field; here it just shows as typed.
+        Err(crate::crud::engine::Error::BadRequest(_)) => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    Ok(ids
+        .into_iter()
+        .map(|id| {
+            let label = found
+                .iter()
+                .find(|it| super::render::text(Some(&it.id)) == id)
+                .map(|it| it.label.clone())
+                .unwrap_or_else(|| id.clone());
+            opt(id, label)
+        })
+        .collect())
 }
 
 /// A closed option set, with the current value marked.
@@ -227,8 +306,4 @@ fn relation_values(name: &str, row: Option<&Value>, state: &ViewState) -> Vec<St
         Value::Null => Vec::new(),
         one => vec![super::render::text(one.get("id"))],
     }
-}
-
-fn current_label(name: &str, row: Option<&Value>) -> String {
-    super::render::text(row.and_then(|r| r.get(name)).and_then(|v| v.get("label")))
 }

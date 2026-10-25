@@ -80,7 +80,7 @@ impl<'a> Form<'a> {
             saved_message: None,
             cancel_href: None,
             redirect: None,
-            picker_threshold: 20,
+            picker_threshold: 50,
         }
     }
 
@@ -187,7 +187,7 @@ impl<'a> Form<'a> {
             row.as_ref(),
             state,
             &tz,
-            self.picker_threshold,
+            &widgets::Relations { slug: &self.slug, threshold: self.picker_threshold, headers },
         )
         .await?;
         FormTmpl {

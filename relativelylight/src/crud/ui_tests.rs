@@ -19,7 +19,7 @@
 //! - the write path's outcomes: a redirect that lands on the row, and a rejection that comes back with
 //!   the messages *and* the operator's input.
 
-use super::ui::{esc, Admin, Form, Mode, Outcome, Table, ViewState};
+use super::ui::{esc, Admin, Form, Mode, Outcome, Picker, Table, ViewState};
 use crate::authz::{Authz, Decision, Open, Operation};
 use crate::crud::engine::{
     Accessor, Cardinality, Column, Engine, Error, FieldDisplay, ListQuery, LogicalType, Page,
@@ -1570,41 +1570,81 @@ r#"min="0" max="10" step="0.5""#,
 }
 
 #[tokio::test]
-async fn a_relation_is_a_dropdown_until_its_target_outgrows_the_threshold() {
-    let (e, _) = engine();
-    let small = Form::new(&e, "post")
-        .fields(["title", "slug", "author"])
-        .render_for(&no_headers(), &list())
-        .await
-        .unwrap();
-    assert!(small.contains(r#"<option value="3">Ada</option>"#), "two authors fit in a select: {small}");
+async fn a_relation_is_a_select_until_its_target_outgrows_the_threshold_then_a_picker() {
+    let (mut e, _) = engine();
+    let edit = ViewState::from_query("edit=7");
+    let small = render(&Table::new(&e, "post"), &edit).await;
+    assert!(small.contains(r#"<option value="4">Grace</option>"#), "two authors fit in a select: {small}");
+    assert!(!small.contains("rl-picked"), "{small}");
 
-    let big = Form::new(&e, "post")
-        .fields(["title", "slug", "author"])
-        .picker_threshold(1)
-        .render_for(&no_headers(), &list())
-        .await
-        .unwrap();
-    assert!(big.contains(r#"name="author" value="" placeholder="author id""#), "{big}");
-    assert!(big.contains("too many to list"), "and it says why");
+    // Past the threshold with no picker to open: still every row, rather than a page that broke
+    // the day its table grew.
+    let capped = Table::new(&e, "post").picker_threshold(1);
+    let html = render(&capped, &edit).await;
+    assert!(html.contains(r#"<option value="4">Grace</option>"#), "{html}");
+    assert!(!html.contains("rl-picked"), "{html}");
+
+    // With one: the selection, read-only, posted back as hidden inputs, and the dialog's address.
+    e.set_picker_path("/pick");
+    let capped = Table::new(&e, "post").picker_threshold(1);
+    let html = render(&capped, &edit).await;
+    assert!(!html.contains(r#"<option value="4">"#), "no list past the threshold: {html}");
+    for expect in [
+        r#"data-rl-src="/pick?pick=post.author""#,
+        r#"data-rl-many="false""#,
+        r#"data-id="3">Ada</span>"#,
+        r#"<input type="hidden" name="author" value="3">"#,
+        r#"data-rl-src="/pick?pick=post.tag""#,
+        r#"data-rl-many="true""#,
+        r#"<input type="hidden" name="tag" value="1">"#,
+        r#"<input type="hidden" name="tag" value="2">"#,
+        r#"type="button" hidden title="Edit selection" aria-label="Edit selection""#,
+        "2 author rows — too many to list here.",
+    ] {
+        assert!(html.contains(expect), "missing {expect}:\n{html}");
+    }
+
+    // Creating: nothing chosen, and nothing posted for it.
+    let fresh = render(&capped, &ViewState::from_query("new=1")).await;
+    assert!(fresh.contains(r#"data-rl-src="/pick?pick=post.author""#), "{fresh}");
+    assert!(!fresh.contains(r#"type="hidden" name="author""#), "{fresh}");
+
+    // The standalone form takes the same setting.
+    let form = Form::new(&e, "post").fields(["title", "slug", "author"]).picker_threshold(1);
+    let html = form.render_for(&no_headers(), &list()).await.unwrap();
+    assert!(html.contains(r#"data-rl-src="/pick?pick=post.author""#), "{html}");
 }
 
 #[tokio::test]
-async fn a_to_one_naming_no_row_is_a_field_error_before_the_backend() {
-    // The id input takes whatever is typed; the database would make of a wrong one whatever a
-    // dangling foreign key makes. Positive control: `relations_decode_to_ids` (author 3 exists).
-    let (e, log) = engine();
+async fn a_relation_naming_no_row_is_a_field_error_before_the_backend() {
+    // A picker posts its selection as hidden inputs, which are as editable as any typed id; the
+    // database would make of a wrong one whatever a dangling foreign key makes. Positive control:
+    // `relations_decode_to_ids` (author 3 exists).
+    let (mut e, log) = engine();
+    e.set_picker_path("/pick");
     let table = Table::new(&e, "post").picker_threshold(1);
-    for (posted, shown) in [("Ada", "Ada"), ("99", "99")] {
-        let body = format!("_op=create&title=t&slug=s&author={posted}");
+    for (posted, field, message) in [
+        ("author=Ada", "author", "no author matches 'Ada'"),
+        ("author=99", "author", "no author matches '99'"),
+        ("author=3&tag=1&tag=99", "tag", "no tag matches '99'"),
+        ("author=3&tag=98&tag=99", "tag", "no tag matches '98', '99'"),
+    ] {
+        let body = format!("_op=create&title=t&slug=s&{posted}");
         let Outcome::Invalid(state) = table.submit(&no_headers(), IP, body.as_bytes(), &list()).await.unwrap()
         else {
-            panic!("{posted}: no author has that id");
+            panic!("{posted}: refused");
         };
-        let msg = state.field_error("author").unwrap_or_default();
-        assert!(msg.contains(&format!("no author matches '{shown}'")), "{msg}");
+        let msg = state.field_error(field).unwrap_or_default();
+        assert_eq!(msg, message, "{posted}");
+        // The re-rendered field keeps what was posted, labelled where the id is a real row.
         let html = table.render_for(&no_headers(), &state).await.unwrap();
-        assert!(html.contains(&format!(r#"name="author" value="{shown}""#)), "the typed text is kept: {html}");
+        for value in posted.split('&').filter_map(|kv| kv.split_once('=')).filter(|(k, _)| *k == field) {
+            let input = format!(r#"<input type="hidden" name="{field}" value="{}">"#, value.1);
+            assert!(html.contains(&input), "{posted}: kept {input}: {html}");
+        }
+        if posted.contains("tag=1") {
+            assert!(html.contains(r#"data-id="1">rust</span>"#), "a known id keeps its label: {html}");
+        }
     }
     assert_eq!(log.count(), 0, "nothing reached the backend");
 
@@ -1615,6 +1655,133 @@ async fn a_to_one_naming_no_row_is_a_field_error_before_the_backend() {
     };
     let html = table.render_for(&no_headers(), &state).await.unwrap();
     assert!(!html.contains("<script>"), "{html}");
+}
+
+/// `post` open, `author` behind `author_gate`, `tag` open — the target's gate, not the source's,
+/// decides whether a relation's rows are listed.
+fn engine_with_author_gate(author_gate: Arc<dyn Authz>) -> Engine {
+    let mut e = Engine::new();
+    e.add(Arc::new(Mock::new("post", post_columns()).rows(post_rows())), Arc::new(Open));
+    e.add(
+        Arc::new(
+            Mock::new("author", vec![field("id", false, true, None), field("name", true, false, None)])
+                .rows(vec![json!({"id": 3, "name": "Ada"}), json!({"id": 4, "name": "Grace"})]),
+        ),
+        author_gate,
+    );
+    e.add(
+        Arc::new(
+            Mock::new("tag", vec![field("id", false, true, None), field("name", true, false, None)])
+                .rows(vec![json!({"id": 1, "name": "rust"}), json!({"id": 2, "name": "web"})]),
+        ),
+        Arc::new(Open),
+    );
+    e.set_picker_path("/pick");
+    e
+}
+
+#[tokio::test]
+async fn a_relation_lists_its_target_only_if_the_caller_may_list_the_target() {
+    // Positive control: an open target is a select of every author.
+    let open = engine_with_author_gate(Arc::new(Open));
+    let html = render(&Table::new(&open, "post"), &ViewState::from_query("edit=7")).await;
+    assert!(html.contains(r#"<option value="4">Grace</option>"#), "{html}");
+
+    // Denied: what the row already links to (its own read shows that label anyway), and no list
+    // and no picker — a form for posts is no licence to read the author table.
+    let shut = engine_with_author_gate(Arc::new(Always(Decision::Denied)));
+    let table = Table::new(&shut, "post");
+    let html = render(&table, &ViewState::from_query("edit=7")).await;
+    assert!(!html.contains("Grace"), "no author the row doesn't link to: {html}");
+    assert!(html.contains(r#"data-id="3">Ada</span>"#), "{html}");
+    assert!(html.contains(r#"<input type="hidden" name="author" value="3">"#), "saving keeps it: {html}");
+    assert!(!html.contains(r#"data-rl-src="/pick?pick=post.author""#), "and nothing to browse: {html}");
+    assert!(html.contains(r#"<option value="2" selected>web</option>"#), "the open target is unaffected");
+
+    // Nor does posting an id get it named: a rejected save shows the ids as posted.
+    let body = "_op=create&title=t&slug=s&author=4&tag=99";
+    let Outcome::Invalid(state) = table.submit(&no_headers(), IP, body.as_bytes(), &list()).await.unwrap() else {
+        panic!("tag 99 doesn't exist");
+    };
+    let html = table.render_for(&no_headers(), &state).await.unwrap();
+    assert!(html.contains(r#"data-id="4">4</span>"#) && !html.contains("Grace"), "{html}");
+}
+
+#[tokio::test]
+async fn the_picker_is_the_targets_table_with_a_choice_per_row() {
+    let (e, _) = engine();
+    let pick = |q: &str| {
+        let e = &e;
+        let state = ViewState::from_query(q);
+        async move { Picker::new(e).per_page(1).render_for(&no_headers(), &state).await }
+    };
+
+    let many = pick("pick=post.tag").await.unwrap();
+    assert!(many.contains(r#"type="checkbox"
+                     name="rl-pick" value="1" data-label="rust""#), "{many}");
+    assert!(many.contains(r#"<input type="hidden" name="pick" value="post.tag">"#), "search keeps picking: {many}");
+    assert!(many.contains(r#"href="?pick=post.tag&#38;page=2""#), "and so does the pager: {many}");
+    assert!(many.contains(r#"href="?pick=post.tag&#38;sort=name""#), "and the headers: {many}");
+    assert!(!many.contains("_op") && !many.contains("Delete"), "no write controls: {many}");
+
+    let one = pick("pick=post.author").await.unwrap();
+    assert!(one.contains(r#"type="radio"
+                     name="rl-pick" value="3" data-label="Ada""#), "{one}");
+
+    for bad in ["", "pick=post.nope", "pick=post.title", "pick=nope.author"] {
+        assert!(pick(bad).await.is_err(), "{bad:?} names no relation");
+    }
+
+    // The target's gate, not the source's: shut the author table and its picker is refused.
+    let shut = engine_with_author_gate(Arc::new(Always(Decision::Denied)));
+    let state = ViewState::from_query("pick=post.author");
+    let refused = Picker::new(&shut).render_for(&no_headers(), &state).await;
+    assert!(matches!(refused, Err(Error::Forbidden)), "{refused:?}");
+    let state = ViewState::from_query("pick=post.tag");
+    assert!(Picker::new(&shut).render_for(&no_headers(), &state).await.is_ok(), "positive control");
+}
+
+#[tokio::test]
+async fn a_picker_leaves_out_the_targets_to_many_columns() {
+    // Choosing a post for a comment: each post's tags are a stack of badges per row, which says
+    // nothing about which post to choose and makes every row a screen tall.
+    let (mut e, _) = engine();
+    let to_post = Column::Relation {
+        name: "post".into(),
+        target: "post".into(),
+        cardinality: Cardinality::ToOne,
+        fk_column: Some("post_id".into()),
+        read_only: false,
+        label: None,
+        description: None,
+        sortable: false,
+    };
+    e.add(Arc::new(Mock::new("comment", vec![field("id", false, true, None), to_post])), Arc::new(Open));
+    let state = ViewState::from_query("pick=comment.post");
+    let html = Picker::new(&e).render_for(&no_headers(), &state).await.unwrap();
+    assert!(html.contains(">Author<") && html.contains(">Ada<"), "a to-one stays: {html}");
+    assert!(!html.contains("Tags") && !html.contains(">rust<"), "the to-many doesn't: {html}");
+    // Positive control: the post's own table does show its tags.
+    let table = render(&Table::new(&e, "post"), &list()).await;
+    assert!(table.contains("Tags") && table.contains(">rust<"), "{table}");
+}
+
+#[tokio::test]
+async fn a_picker_escapes_what_its_rows_show() {
+    let mut e = Engine::new();
+    e.add(Arc::new(Mock::new("post", post_columns()).rows(vec![])), Arc::new(Open));
+    e.add(Arc::new(Mock::new("author", vec![field("id", false, true, None)]).rows(vec![])), Arc::new(Open));
+    e.add(
+        Arc::new(
+            Mock::new("tag", vec![field("id", false, true, None), field("name", true, false, None)])
+                .rows(vec![json!({"id": 1, "name": "<script>x</script>"})]),
+        ),
+        Arc::new(Open),
+    );
+    let state = ViewState::from_query("pick=post.tag&q=%3Cscript%3E");
+    let html = Picker::new(&e).render_for(&no_headers(), &state).await.unwrap();
+    assert!(!html.contains("<script>"), "{html}");
+    assert!(html.contains(r#"data-label="&#60;script&#62;x&#60;/script&#62;""#), "{html}");
 }
 
 #[tokio::test]

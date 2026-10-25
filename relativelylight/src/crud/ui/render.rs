@@ -23,6 +23,8 @@ pub(crate) enum Cell {
 
 pub(crate) struct RowV {
     pub id: String,
+    /// The row's display label — what a [`Picker`](super::Picker) hands back as the chosen badge.
+    pub label: String,
     pub edit_href: String,
     /// Empty when the table offers no detail view.
     pub show_href: String,
@@ -150,6 +152,7 @@ pub(crate) fn rows(
                         cell(c, &row, fmt, tz)
                     })
                     .collect(),
+                label: item.label.clone(),
                 id,
             }
         })

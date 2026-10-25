@@ -3,8 +3,9 @@
 //! One page per entity (`/{slug}`), the **standalone `Form`** on the app's own pages
 //! (`/post/new`, `/post/{id}/edit`), a table *about one value* at `/author/{id}/posts`, CSV export,
 //! and a create/edit `<dialog>` that opens from the URL. No JavaScript framework, no JSON API: the
-//! only script on the page is Bootstrap's CSS-free `confirm()` on a delete button, which the library
-//! writes as an attribute.
+//! only script is `crud::ui::JS`, the relation picker's — a post's `author` and `tag` have more rows
+//! than `picker_threshold` (50), so the form shows the selection and edits it in a dialog served by
+//! `/pick`. Delete six authors and `author` is a plain `<select>` again.
 //!
 //! The shape to copy is the **two handlers per surface** at the bottom of this file: a `get` that
 //! renders a fragment into the app's shell, and a `post` that hands the body to the library and
@@ -27,7 +28,7 @@ use model::{author, event, post, profile, tag, user};
 use relativelylight::authz::Open;
 use relativelylight::crud::engine::{Engine, Result as CrudResult};
 use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::{esc, Form, Outcome, Table, ViewState, CSS};
+use relativelylight::crud::ui::{esc, Form, Outcome, Picker, Table, ViewState, CSS, JS};
 use relativelylight::middleware::RealIp;
 use relativelylight::time::{Tz, TzPicker};
 use relativelylight::validate;
@@ -44,6 +45,8 @@ struct Shell {
     current: String,
     body: String,
     css: &'static str,
+    /// The relation picker's script (`crud::ui::JS`), once per page that renders a form.
+    js: &'static str,
     /// The navbar timezone form (`time::TzPicker`), posting to our own `/tz`.
     tz_picker: String,
     /// Wrap the body in a card. The table pages want it; a `Form` renders its own card, and two
@@ -181,6 +184,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.register(profile_mm, Open);
     crud.register(tag_mm, Open);
     crud.register(event_mm, Open);
+    // Where the relation picker is served (the `/pick` route below). Without it a relation past
+    // `picker_threshold` stays a `<select>` of every row.
+    crud.picker_path("/pick");
 
     let engine = Arc::new(crud.into_engine());
     let entities = engine.tables();
@@ -196,6 +202,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/post/new", get(new_post).post(save_new_post))
         .route("/post/{id}/edit", get(edit_post).post(save_post))
         .route("/author/{id}/posts", get(author_posts).post(author_posts_write))
+        // The relation picker's page, which the form's dialog loads in an iframe. One GET handler;
+        // static, so it wins over `/{slug}` like the others.
+        .route("/pick", get(pick))
         // The timezone picker's handler — four lines, and the whole of this app's side of the
         // feature. Everything the library renders then follows the cookie.
         .route("/tz", post(set_tz))
@@ -239,6 +248,27 @@ fn table<'a>(engine: &'a Engine, slug: &str) -> Table<'a> {
             .sort(post::Column::Title.as_str());
     }
     t
+}
+
+/// The page inside the picker dialog: the target's own table, with a radio or a checkbox per row.
+/// A **bare** shell — no navbar, it is inside a dialog — with the stylesheet and nothing else: the
+/// page that opened the dialog does the scripting.
+#[derive(Template)]
+#[template(path = "bare.html")]
+struct Bare {
+    body: String,
+    css: &'static str,
+}
+
+async fn pick(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
+    let state = ViewState::from_uri(&uri);
+    match Picker::new(&app.engine).render_for(&headers, &state).await {
+        Ok(body) => match (Bare { body, css: CSS }).render() {
+            Ok(html) => Html(html).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        },
+        Err(e) => e.into_response(),
+    }
 }
 
 async fn home() -> Redirect {
@@ -535,6 +565,7 @@ fn render(app: &App, current: &str, req: Req<'_>, fragment: CrudResult<String>, 
                 current: current.into(),
                 body,
                 css: CSS,
+                js: JS,
                 tz_picker: TzPicker::new().render(&Tz::from_headers(req.headers), back),
                 boxed,
             }

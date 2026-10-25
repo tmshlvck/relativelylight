@@ -43,15 +43,13 @@ it. Everything below is follow-on work; nothing here blocked that release.
 
 ## Web UI follow-ups (post-MPA)
 
-- [ ] **Search-as-you-type for a relation whose target is too large to list.** Above
-  `picker_threshold` the form asks for the target's id, which is honest but poor: an operator has to
-  know the id or open another tab. The fix needs a *fetch endpoint* — the one thing the MPA rewrite
-  deliberately removed — so the options are (a) a zero-JS "browse and pick" sub-dialog that carries
-  the in-progress form values through a GET round trip (real work: the values have to survive in the
-  URL), or (b) one small app-mounted search route the library renders a datalist from, which
-  reintroduces an internal API and needs to be honestly labelled as one. Waiting for a user with a
-  genuinely large target table to say which hurts more. A to-many lists every target row; if that
-  ever gets too big, the same problem applies to it.
+- [ ] **Split `Table` into smaller pieces** — `List`, `Search`, `FilterSelect` and the write actions,
+  with `Table`/`Admin` as thin presets over them. `Table` has two dozen settings and one `submit`
+  branching on `_op`; smaller pieces would let each control own its `<form>` (the filter/search bug
+  came from two controls sharing one) and stop a setting meaning two things.
+- [ ] **Browser scenario tests for the picker.** The dialog's script is checked by hand in a browser
+  (`examples/crud`); `ui_tests.rs` covers the server half. A Playwright suite against the examples
+  would cover OK/Cancel, paging and chip removal on every change.
 - [ ] **Cross-document view transitions.** `@view-transition { navigation: auto }` plus a
   `view-transition-name` on the edited row would make POST→303→GET feel continuous. Cheap to try,
   easy to get subtly wrong (a transition that animates a 422 re-render as a navigation), so it wants

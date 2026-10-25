@@ -506,6 +506,10 @@ pub struct Engine {
     /// Optional CSRF checker; when set, every write must carry a valid token (see [`crate::csrf`]).
     #[cfg(feature = "csrf")]
     csrf: Option<crate::csrf::Csrf>,
+    /// Where the app serves [`crud::ui::Picker`](crate::crud::ui::Picker) — the one absolute URL the
+    /// UI renders. `None`: no picker, so a relation too large for its threshold stays a `<select>`.
+    #[cfg(feature = "ui")]
+    picker_path: Option<String>,
 }
 
 impl Engine {
@@ -518,7 +522,21 @@ impl Engine {
             observer: None,
             #[cfg(feature = "csrf")]
             csrf: None,
+            #[cfg(feature = "ui")]
+            picker_path: None,
         }
+    }
+
+    /// The path the app serves [`crud::ui::Picker`](crate::crud::ui::Picker) on. Usually set via
+    /// `Crud::picker_path`.
+    #[cfg(feature = "ui")]
+    pub fn set_picker_path(&mut self, path: impl Into<String>) {
+        self.picker_path = Some(path.into());
+    }
+
+    #[cfg(feature = "ui")]
+    pub(crate) fn picker_path(&self) -> Option<&str> {
+        self.picker_path.as_deref()
     }
 
     /// Register an audit sink fired after each committed write (create/update/delete). See

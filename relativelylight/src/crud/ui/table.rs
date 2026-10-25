@@ -9,7 +9,7 @@ use super::{
     is_filterable, render_err, renders, Fmt, Outcome, RowClass, Surface,
 };
 use crate::authz::Operation;
-use crate::crud::engine::{Column, Engine, Error, ListQuery, Result};
+use crate::crud::engine::{Cardinality, Column, Engine, Error, ListQuery, Result};
 use crate::time::Tz;
 use askama::Template;
 use http::HeaderMap;
@@ -57,6 +57,19 @@ struct ControlV {
     label: String,
     /// The `<select>`'s options: every value, with the one in force marked.
     options: Vec<Opt>,
+}
+
+/// The [`Picker`](super::Picker)'s page: this table's rows with a radio or a checkbox each.
+#[derive(Template)]
+#[template(path = "picker.html")]
+struct PickTmpl {
+    many: bool,
+    search: bool,
+    q: String,
+    keep: Vec<(String, String)>,
+    heads: Vec<HeadV>,
+    rows: Vec<RowV>,
+    pager: Pager,
 }
 
 #[derive(Template)]
@@ -162,7 +175,7 @@ impl<'a> Table<'a> {
             per_page_max: Self::DEFAULT_PER_PAGE_MAX,
             read_only: false,
             confirm: true,
-            picker_threshold: 20,
+            picker_threshold: 50,
             fields: Vec::new(),
             omit: Vec::new(),
             columns: Vec::new(),
@@ -240,9 +253,11 @@ impl<'a> Table<'a> {
         self.confirm = on;
         self
     }
-    /// How many target rows a to-one relation may list as a `<select>` before the form asks for the
-    /// id instead. Default: 20. A to-many and a [`filter`](Table::filter) control always list every
-    /// row — see `docs/CRUD.md`.
+    /// How many target rows a relation may list as a `<select>` (or multi-select) in the form.
+    /// Default: 50. Past it, the field shows its selection and edits it in a
+    /// [`Picker`](super::Picker) dialog — if the app serves one (`Crud::picker_path`); without one it
+    /// stays a `<select>` of every row. A [`filter`](Table::filter) control always lists every row —
+    /// see `docs/CRUD.md`.
     pub fn picker_threshold(mut self, n: u64) -> Self {
         self.picker_threshold = n;
         self
@@ -388,7 +403,7 @@ impl<'a> Table<'a> {
             (Mode::Show(id), _) => self.detail_dialog(&cols, id, &state, &tz, editable).await?,
             (_, false) => String::new(),
             (Mode::Import, true) => self.import_dialog(&cols, &state, &csrf)?,
-            (mode, true) => self.dialog(&cols, mode, &state, &tz, &csrf).await?,
+            (mode, true) => self.dialog(&cols, mode, &state, headers, &csrf).await?,
         };
         TableTmpl {
             dom_id: self.dom_id.clone().unwrap_or_else(|| format!("rl-{}", self.slug)),
@@ -428,6 +443,37 @@ impl<'a> Table<'a> {
             flash_dismiss: state.href_dismiss(),
             csrf,
             dialog,
+        }
+        .render()
+        .map_err(render_err)
+    }
+
+    /// This table as a [`Picker`](super::Picker) shows it: search, sort and paging, a radio (`many`
+    /// false) or a checkbox per row, and no write controls. Refused, like the table itself, when
+    /// the caller may not list the entity.
+    pub(super) async fn render_pick(
+        &self,
+        headers: &HeaderMap,
+        state: &ViewState,
+        many: bool,
+    ) -> Result<String> {
+        let cols = self.engine.columns(&self.slug)?;
+        authorize(self.engine, Operation::List, &self.slug, headers).await?;
+        let tz = Tz::from_headers(headers);
+        let state = self.effective_state(state, &cols)?;
+        let page = self.engine.list(&self.slug, &self.list_query(&state), false).await?;
+        // A to-many column is a stack of badges per row — every post an author wrote — which says
+        // nothing about which author to choose and makes each row a screen tall.
+        let mut shown = self.shown_columns(&cols)?;
+        shown.retain(|c| !matches!(c, Column::Relation { cardinality: Cardinality::ToMany, .. }));
+        PickTmpl {
+            many,
+            search: self.search,
+            q: state.q.clone(),
+            keep: self.keep(&state),
+            heads: render::heads(&shown, &state),
+            rows: render::rows(&page, &shown, &self.formatters, None, &state, &tz, false),
+            pager: render::pager(&page, &state),
         }
         .render()
         .map_err(render_err)
@@ -538,6 +584,9 @@ impl<'a> Table<'a> {
         let mut out = Vec::new();
         if let Some(e) = &state.entity {
             out.push(("entity".to_string(), e.clone()));
+        }
+        if let Some((slug, relation)) = &state.pick {
+            out.push(("pick".to_string(), format!("{slug}.{relation}")));
         }
         for (name, value) in &state.filters {
             if !rendered.contains(&name.as_str()) {
@@ -710,10 +759,11 @@ impl<'a> Table<'a> {
         cols: &[Column],
         mode: &Mode,
         state: &ViewState,
-        tz: &Tz,
+        headers: &HeaderMap,
         csrf: &str,
     ) -> Result<String> {
         let creating = *mode == Mode::New;
+        let tz = Tz::from_headers(headers);
         check_fields(&self.slug, cols, &self.fields, &self.omit, creating)?;
         let row = match mode {
             Mode::Edit(id) => Some(self.engine.get(&self.slug, id).await?),
@@ -725,8 +775,8 @@ impl<'a> Table<'a> {
             &|name| self.renders(name),
             row.as_ref(),
             state,
-            tz,
-            self.picker_threshold,
+            &tz,
+            &widgets::Relations { slug: &self.slug, threshold: self.picker_threshold, headers },
         )
         .await?;
         let title = self.title.clone().unwrap_or_else(|| self.slug.clone());

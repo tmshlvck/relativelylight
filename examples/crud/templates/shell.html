@@ -6,7 +6,8 @@
   <title>{{ title }} · {{ current }}</title>
   <!-- The app shell provides Bootstrap 5's **stylesheet**. That is all the UI needs: no Alpine, no
        Bootstrap JavaScript bundle, no per-entity script. `crud::ui::CSS` is the handful of rules
-       Bootstrap doesn't cover (mostly `<dialog>`). -->
+       Bootstrap doesn't cover (mostly `<dialog>`); `crud::ui::JS`, at the end of the body, is the
+       relation picker's script. -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>{{ css|safe }}</style>
 </head>
@@ -48,5 +49,6 @@
   <footer class="text-center text-muted small py-3">
     relativelylight — server-rendered, no JavaScript framework
   </footer>
+  <script>{{ js|safe }}</script>
 </body>
 </html>

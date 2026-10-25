@@ -666,9 +666,12 @@ Feature `ui`. Three components, **one implementation**:
   create/edit dialog.
 - [`Form`](#form--a-standalone-createedit-form) — the same form standalone, for your own pages.
 - [`Admin`](#admin--a-whole-admin-in-one-component) — a side panel over many `Table`s.
+- [`Picker`](#picker--choosing-from-a-large-relation) — the page inside the dialog that edits a
+  relation too large for a `<select>`.
 
 All three return **HTML fragments**: your app owns `<html>`, the Bootstrap 5 stylesheet and the
-layout. There is no JavaScript framework, no JSON in between, and no client-side state.
+layout. There is no JavaScript framework and no JSON in between. The one piece of client-side state
+is the [picker](#picker--choosing-from-a-large-relation)'s working selection while its dialog is open.
 
 ```rust
 let html = Table::new(&engine, "post")
@@ -679,12 +682,15 @@ let html = Table::new(&engine, "post")
     .render_for(&headers, &state).await?;
 ```
 
-**What to put in your shell:** Bootstrap 5's CSS, and `crud::ui::CSS` — about forty lines Bootstrap
-doesn't cover (mostly the `<dialog>`, whose own `.modal` assumes Bootstrap's JavaScript):
+**What to put in your shell:** Bootstrap 5's CSS, and `crud::ui::CSS` — a few dozen lines Bootstrap
+doesn't cover (mostly the `<dialog>`, whose own `.modal` assumes Bootstrap's JavaScript). If you serve
+a [picker](#picker--choosing-from-a-large-relation), also `crud::ui::JS`, its script:
 
 ```html
 <link href="…/bootstrap.min.css" rel="stylesheet">
-<style>{{ css|safe }}</style>   <!-- pass relativelylight::crud::ui::CSS -->
+<style>{{ css|safe }}</style>      <!-- pass relativelylight::crud::ui::CSS -->
+…
+<script>{{ js|safe }}</script>     <!-- relativelylight::crud::ui::JS, at the end of <body> -->
 ```
 
 ### How it works
@@ -744,7 +750,7 @@ and in all three examples.
 | `filter(name)` | a filter `<select>` in the toolbar, for a column or a to-one relation |
 | `fixed_filter(name, value)` | a filter **pinned** to one value, with no control — a table *about* that value |
 | `format(col, closure)` | a custom cell renderer, `(value, row) -> HTML` |
-| `picker_threshold(n)` | how many target rows a to-one relation may list as a `<select>` (default 20) |
+| `picker_threshold(n)` | how many target rows a relation may list as a `<select>` / multi-select before it uses the [picker](#picker--choosing-from-a-large-relation) (default 50) |
 | `dom_id(id)` | namespaces the fragment's id, so two tables of one entity can share a page |
 
 **Every filter in force is chipped**, whether the table declared a control for it or not — one
@@ -784,12 +790,18 @@ That is the one place app-supplied HTML enters the page; everything else is esca
 engine, and the escaping is tested against `<script>`-bearing data in every cell, label, chip, option
 and input value (`crud/ui_tests.rs`).
 
-**Relations in the form.** A to-one whose target has at most `picker_threshold` rows renders as a
-`<select>` of labels; above that it renders an id input, because the alternative is shipping thousands
-of `<option>`s or a search box that needs a fetch endpoint this crate no longer has. An id that names
-no row of the target is refused as a field error before the write reaches the backend. A to-many renders
-as a multi-select of **every** target row, whatever the threshold: a posted multi-select replaces the
-relation set, so a linked row the list left out would be unlinked by an unchanged save.
+**Relations in the form.** A relation whose target has at most `picker_threshold` rows (default 50)
+renders as a `<select>` (to-one) or a multi-select (to-many) of every target row. Above that, and if
+the app serves a [picker](#picker--choosing-from-a-large-relation), the field shows its selection as
+badges and edits it in a dialog. Without a picker it stays a `<select>` of every row, however long:
+the threshold depends on data, so failing past it would break a working page the day a table grew.
+A to-many always lists **every** row it lists at all, because a posted multi-select replaces the
+relation set and a linked row the list left out would be unlinked by an unchanged save.
+
+The options are the target's rows, so they answer to the **target's** gate: a caller who may not
+list the target gets the field's current selection, read-only, and nothing to choose from. Any posted
+id that names no row of the target, to-one or to-many, is refused as a field error before the write
+reaches the backend.
 
 **A filter control is always a `<select>` of every value**, whatever the size of its target — the
 threshold doesn't apply. A filter exists only because the app declared it (`Table::filter`,
@@ -917,25 +929,66 @@ whose entity can't honour it is ignored rather than passed to a backend that wou
 listing. So a shared filter narrows every table it means something in, and nothing else. Like `fixed_filter`, it narrows a **view**; scoping who may see what is
 [`authz`](AUTH.md)'s job.
 
+### `Picker` — choosing from a large relation
+
+A relation whose target has more rows than `picker_threshold` can't be a `<select>`: nobody scrolls
+ten thousand options, and the page would ship them all. Instead the field shows the selection as
+badges, with one hidden input per id so the form posts it exactly as a `<select>` would, and a 🔍
+button ("Edit selection") that opens a dialog. The dialog holds an `<iframe>` of the target's own
+table: search, sort and paging, with a radio (to-one) or a checkbox (to-many) per row.
+
+- The dialog edits a **copy** of the selection, shown as removable chips in its header. That is how
+  a row is dropped without finding it again on page 40, and how a to-one is cleared.
+- **OK** writes the copy back into the field's badges and hidden inputs. **Cancel** (or Esc) drops
+  it, so the field is never touched until OK.
+- The copy lives in the page that opened the dialog, so it survives paging and searching inside it.
+- The picker's page is the same origin, so `crud::ui::JS` reads its inputs directly on each load.
+  The picker's page needs no script of its own.
+- **Without JavaScript**, the field still shows its selection and saves it unchanged. The button
+  stays hidden.
+
+The crate adds no route, so you serve the picker's page yourself: one `GET` handler, on a path you
+declare once.
+
+```rust
+crud.picker_path("/pick");               // where Table, Form and Admin point the dialog
+// …
+.route("/pick", get(pick))
+
+async fn pick(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
+    let state = ViewState::from_uri(&uri);
+    match Picker::new(&app.engine).render_for(&headers, &state).await {
+        Ok(html) => Html(bare_shell(&html)).into_response(),   // your own <html>, no navigation
+        Err(e) => e.into_response(),
+    }
+}
+```
+
+The bare shell is your page shell without the navigation: Bootstrap and `crud::ui::CSS`, no script.
+The URL names the **relation** (`/pick?pick=post.tag`), never the target, so only a real relation can
+be browsed. The rows are a `Table` render of the target, refused (`401`/`403`) when the caller may not
+list it. A picker leaves out the target's to-many columns: a stack of badges per row says nothing
+about which row to choose. `Picker::per_page(n)` sets the dialog's page size (default 10). Both
+`examples/crud` and `examples/adminpanel` serve one; their seed has 56 authors and 56 tags.
+
 ### The JavaScript that is left
 
-Eleven inline attributes across the templates, about fifteen lines in total, **all of them
-enhancement** — every one has a working path without it:
+Inline attributes across the templates, about fifteen lines in total, plus `crud::ui::JS` for the
+picker — **all of them enhancement**: every one has a working path without it.
 
 | | Without it |
 |---|---|
 | search: `oninput` debounce (2s), `onkeydown` Enter, `onfocus` caret-to-end | the `<noscript>` **Apply** button submits the form |
-| the same pair on a large-target filter input | as above |
 | `onchange="this.form.submit()"` on a filter `<select>` | as above |
+| `crud::ui::JS`: the picker dialog | the field shows its selection and saves it unchanged; it can't be changed |
 | `onclick="return confirm(…)"` on destructive buttons | the POST still goes, and the server still asks the gate (`confirm(false)` removes it) |
 | `onclick` on the select-all checkbox | tick the rows individually |
 | `oninput` on a range slider's read-out | the slider still posts its value |
 
-There is no script file, no framework, and nothing generated per entity. The **Apply** button exists
-only inside `<noscript>`, because with scripting the search submits itself and an always-visible
-Apply is a button nobody presses; without it, a form whose only other controls are text inputs has
-no way to submit (a browser submits on Enter only when there is exactly one text field, and a
-large-target filter makes two).
+There is one script file (the picker's, about 130 lines), no framework, and nothing generated per
+entity. The **Apply** button exists only inside `<noscript>`, because with scripting the search
+submits itself and an always-visible Apply is a button nobody presses; without it, a filter
+`<select>` (which submits itself from `onchange`) would have no way to submit.
 
 ## Composing with your app
 

@@ -7,10 +7,12 @@
 //! - [`Form`] — the same form standalone, for an app's own pages.
 //! - [`Admin`] — a side panel over many `Table`s.
 //!
-//! All three are **fragments**: the app owns `<html>`, the Bootstrap 5 stylesheet, and the layout.
-//! There is no JavaScript framework, no JSON in between, and no client-side state — the URL is the
-//! state ([`ViewState`]), writes are `POST` → `303` → `GET`, and the dialog is a native
-//! `<dialog open>`. Include [`CSS`] once per page for the few rules Bootstrap doesn't cover.
+//! Plus [`Picker`], the page inside the dialog that edits a relation too large for a `<select>`.
+//!
+//! All of them are **fragments**: the app owns `<html>`, the Bootstrap 5 stylesheet, and the layout.
+//! There is no JavaScript framework and no JSON in between — the URL is the state ([`ViewState`]),
+//! writes are `POST` → `303` → `GET`, and the dialog is a native `<dialog open>`. Include [`CSS`]
+//! once per page for the few rules Bootstrap doesn't cover, and [`JS`] where a picker is served.
 //!
 //! # Two handlers per surface
 //!
@@ -51,6 +53,7 @@ mod admin;
 mod checks;
 mod decode;
 mod form;
+mod picker;
 mod render;
 mod state;
 mod table;
@@ -59,6 +62,7 @@ mod write;
 
 pub use admin::Admin;
 pub use form::Form;
+pub use picker::Picker;
 pub use state::{Done, Mode, ViewState};
 pub use table::Table;
 
@@ -73,6 +77,12 @@ use std::sync::Arc;
 /// The stylesheet the components need beyond Bootstrap 5 (about thirty lines, mostly `<dialog>`).
 /// Inline it once in your shell: `<style>{{ relativelylight::crud::ui::CSS }}</style>`.
 pub const CSS: &str = include_str!("../../../assets/rl.css");
+
+/// The relation picker's script — the one script the components ship. Include it once per page
+/// that renders a form, as `<script>{{ relativelylight::crud::ui::JS }}</script>` or served from a
+/// file of your own (a strict CSP). It is needed only once `Crud::picker_path` is set; without it a
+/// large relation still shows its selection and saves it unchanged, it just can't be edited.
+pub const JS: &str = include_str!("../../../assets/rl.js");
 
 /// A custom cell renderer: `(value, row) -> HTML`, as [`Table::format`] stores it. Its output is
 /// inserted **verbatim**, so escape anything that came from the database with [`esc`].

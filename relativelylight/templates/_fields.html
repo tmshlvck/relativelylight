@@ -50,13 +50,25 @@
           name="{{ f.name }}" multiple size="6">
     {%- for o in options %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
   </select>
-  {%- when Widget::Reference with { value, current, target, count } %}
-  <input class="form-control{% if !f.error.is_empty() %} is-invalid{% endif %}" id="f-{{ f.name }}"
-         type="text" name="{{ f.name }}" value="{{ value }}" placeholder="{{ target }} id">
-  <div class="form-text">
-    {%- if !current.is_empty() %}Currently <strong>{{ current }}</strong>. {% endif -%}
-    {{ count }} {{ target }} rows — too many to list, so this takes the id.
+  {%- when Widget::Picked with { chosen, many, src, note } %}
+  {#- Too many target rows to list. The selection is shown, not edited here: the hidden inputs post it
+      exactly as a `<select>` would, so a save without scripting keeps it unchanged. The button
+      (hidden until `crud::ui::JS` runs) opens the picker at `src`, and only its OK rewrites the
+      badges and the inputs. -#}
+  <div class="rl-picked d-flex gap-2 align-items-start" data-rl-src="{{ src }}"
+       data-rl-many="{{ many }}" data-rl-name="{{ f.name }}" data-rl-title="{{ f.label }}">
+    <div class="rl-picked-list form-control{% if !f.error.is_empty() %} is-invalid{% endif %}" id="f-{{ f.name }}">
+      {%- for o in chosen %}<span class="badge text-bg-secondary" data-id="{{ o.value }}">{{ o.label }}</span>{% endfor %}
+      {%- if chosen.is_empty() %}<span class="text-muted">None</span>{% endif %}
+    </div>
+    {%- for o in chosen %}<input type="hidden" name="{{ f.name }}" value="{{ o.value }}">{% endfor %}
+    {%- if !src.is_empty() %}
+    <button class="btn btn-outline-secondary rl-pick" type="button" hidden title="Edit selection" aria-label="Edit selection">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M11.74 10.33a6.5 6.5 0 1 0-1.41 1.41l3.85 3.85a1 1 0 0 0 1.41-1.41zM6.5 11a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9"/></svg>
+    </button>
+    {%- endif %}
   </div>
+  {%- if !note.is_empty() %}<div class="form-text">{{ note }}</div>{% endif %}
   {%- endmatch %}
   {%- if !f.error.is_empty() %}<div class="invalid-feedback d-block">{{ f.error }}</div>{% endif %}
   {%- if !f.help.is_empty() %}<div class="form-text">{{ f.help }}</div>{% endif %}

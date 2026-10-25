@@ -1,0 +1,72 @@
+{#- The picker's page, inside the dialog's iframe: the target's own rows, with a radio or a checkbox
+    each. There is no script here. The page that opened the dialog is the same origin, so on every
+    load it reads these inputs, ticks the ones in its working selection and listens for changes —
+    which is why the selection survives paging and searching, and why OK and Cancel live out there
+    rather than in here. Every link is relative and carries `pick`, so it moves the iframe only. -#}
+<section class="rl-table rl-pickrows">
+  {%- if search %}
+  <form method="get" class="mb-2">
+    {%- for h in keep %}<input type="hidden" name="{{ h.0 }}" value="{{ h.1 }}">{% endfor %}
+    <input type="search" class="form-control form-control-sm" name="q" value="{{ q }}"
+           placeholder="Search…" aria-label="Search"{% if !q.is_empty() %} autofocus{% endif %}
+           onfocus="this.setSelectionRange(this.value.length, this.value.length)"
+           oninput="clearTimeout(this.t); this.t = setTimeout(() => this.form.submit(), 1000)"
+           onsearch="clearTimeout(this.t); this.form.submit()">
+  </form>
+  {%- endif %}
+  <div class="table-responsive">
+    <table class="table table-sm table-hover align-middle">
+      <thead>
+        <tr>
+          <th style="width:1%"><span class="visually-hidden">Choose</span></th>
+          {%- for h in heads %}
+          <th aria-sort="{{ h.aria }}">
+            {%- match h.sort_href %}
+            {%- when Some with (href) %}<a class="text-body text-decoration-none" href="{{ href }}">{{ h.label }}{{ h.mark }}</a>
+            {%- when None %}{{ h.label }}
+            {%- endmatch %}
+          </th>
+          {%- endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {%- for r in rows %}
+        <tr>
+          <td><input class="form-check-input rl-pick-row" type="{% if many %}checkbox{% else %}radio{% endif %}"
+                     name="rl-pick" value="{{ r.id }}" data-label="{{ r.label }}" id="pick-{{ r.id }}"
+                     aria-label="Choose {{ r.label }}"></td>
+          {%- for c in r.cells %}
+          <td>
+            {%- match c %}
+            {%- when Cell::Text with (s) %}<label class="d-block" for="pick-{{ r.id }}">{{ s }}</label>
+            {%- when Cell::Bool with (Some(true)) %}<span class="badge text-bg-success">Yes</span>
+            {%- when Cell::Bool with (Some(false)) %}<span class="badge text-bg-danger">No</span>
+            {%- when Cell::Bool with (None) %}<span class="text-muted">—</span>
+            {%- when Cell::Badges with (labels) %}{% for l in labels %}<span class="badge text-bg-secondary">{{ l }}</span> {% endfor %}
+            {%- when Cell::Raw with (html) %}{{ html|safe }}
+            {%- endmatch %}
+          </td>
+          {%- endfor %}
+        </tr>
+        {%- endfor %}
+        {%- if rows.is_empty() %}
+        <tr><td colspan="{{ heads.len() + 1 }}" class="text-center text-muted py-3">No rows</td></tr>
+        {%- endif %}
+      </tbody>
+    </table>
+  </div>
+  <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <small class="text-muted">Total: {{ pager.total }}{% if pager.pages > 1 %} · Page {{ pager.page }} / {{ pager.pages }}{% endif %}</small>
+    {%- if !pager.links.is_empty() %}
+    <nav aria-label="Pagination">
+      <ul class="pagination pagination-sm mb-0">
+        {%- for l in pager.links %}
+        <li class="page-item{% if l.active %} active{% endif %}{% if l.disabled %} disabled{% endif %}">
+          <a class="page-link" href="{{ l.href }}">{{ l.label }}</a>
+        </li>
+        {%- endfor %}
+      </ul>
+    </nav>
+    {%- endif %}
+  </div>
+</section>

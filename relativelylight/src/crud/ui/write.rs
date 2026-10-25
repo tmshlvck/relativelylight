@@ -159,10 +159,10 @@ pub(crate) async fn apply(
     Ok(Outcome::Done(target))
 }
 
-/// A to-one value that names no row of its target, as a field error rather than whatever the
+/// A relation value that names no row of its target, as a field error rather than whatever the
 /// database makes of a dangling foreign key — which, without foreign-key enforcement (SQLite's
-/// default), is a row pointing at nothing. The id input takes whatever is typed, so this is an
-/// ordinary mistake, not only a crafted one.
+/// default), is a row pointing at nothing. A picker posts its selection as hidden inputs, and those
+/// are as editable as any typed id, so both cardinalities are checked.
 async fn unknown_references(
     engine: &Engine,
     cols: &[Column],
@@ -171,18 +171,37 @@ async fn unknown_references(
 ) -> Result<ValidationErrors> {
     let mut errors = ValidationErrors::new();
     for col in cols {
-        let Column::Relation { name, target, cardinality: Cardinality::ToOne, .. } = col else {
-            continue;
-        };
-        let Some(id) = body.get(name).filter(|v| !v.is_null()) else { continue };
-        match engine.get(target, &render::text(Some(id))).await {
-            Ok(_) => {}
-            // `BadRequest`: an id that can't even be a key of the target (text for an integer key).
-            Err(Error::NotFound | Error::BadRequest(_)) => {
-                let typed = posted.one(name).unwrap_or("").trim();
-                errors.field(name, format!("no {target} matches '{typed}'"));
+        let Column::Relation { name, target, cardinality, .. } = col else { continue };
+        let ids: Vec<String> = match (cardinality, body.get(name)) {
+            (_, None | Some(Value::Null)) => continue,
+            (Cardinality::ToMany, Some(Value::Array(items))) => {
+                items.iter().map(|v| render::text(Some(v))).collect()
             }
+            (_, Some(one)) => vec![render::text(Some(one))],
+        };
+        if ids.is_empty() {
+            continue;
+        }
+        // One lookup for the lot: `pk_in` is an exact primary-key match, so this reads at most as
+        // many rows as were posted.
+        let q = ListQuery { pk_in: ids.clone(), all: true, ..Default::default() };
+        let found: Vec<String> = match engine.list(target, &q, true).await {
+            Ok(page) => page.data.iter().map(|it| render::text(Some(&it.id))).collect(),
+            // `BadRequest`: an id that can't even be a key of the target (text for an integer key).
+            Err(Error::BadRequest(_)) => Vec::new(),
             Err(e) => return Err(e),
+        };
+        let missing: Vec<&String> = ids.iter().filter(|id| !found.contains(id)).collect();
+        if let Some(first) = missing.first() {
+            // A to-one says what was typed; a to-many names the ids, since nothing was typed.
+            let shown = match cardinality {
+                Cardinality::ToOne => posted.one(name).unwrap_or("").trim().to_string(),
+                Cardinality::ToMany if missing.len() == 1 => first.to_string(),
+                Cardinality::ToMany => {
+                    missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("', '")
+                }
+            };
+            errors.field(name, format!("no {target} matches '{shown}'"));
         }
     }
     Ok(errors)

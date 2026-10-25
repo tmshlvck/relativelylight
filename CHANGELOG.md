@@ -11,7 +11,27 @@ is easy to miss in a diff.
 
 ## Unreleased
 
+### Added
+
+- **`crud::ui::Picker` — a relation too large for a `<select>` is edited in a dialog.** Past
+  `picker_threshold`, a relation field shows its selection as badges, posted back as hidden inputs, and
+  a 🔍 button opening a dialog over the target's own table (search, sort, paging; a radio or a
+  checkbox per row). The dialog edits a copy: OK writes it into the field, Cancel leaves the field
+  as it was. It covers to-one **and** to-many. To enable it, set `Crud::picker_path("/pick")`, serve
+  `Picker::render_for` from one `GET` handler on that path in a bare shell, and include the new
+  `crud::ui::JS` in your page shell. See `docs/CRUD.md` → Picker. Without JavaScript the field still
+  saves its selection unchanged.
+
 ### Changed
+
+- **`picker_threshold` defaults to 50 (was 20) and now covers to-many relations.** Past it, either
+  relation uses the picker if the app serves one, and otherwise stays a `<select>` / multi-select of
+  every row. **The typed-id input a to-one used to fall back to is gone.** Upgrade: nothing breaks;
+  set `picker_path` to get the picker.
+- **A relation's options answer to the target's gate.** The form lists target rows only if the
+  caller may `List` the target; otherwise the field shows its current selection, read-only. Before,
+  any caller who could open the form saw every target row's label. Upgrade: none, unless a form's
+  users relied on picking from a table they may not read — grant that read.
 
 - **"Delete all N matching" moved into a ⋮ "Table operations" menu**, with Export/Import CSV (the
   toolbar's former "CSV" button, renamed and widened). "Delete selected" stays under the rows. The
@@ -31,9 +51,9 @@ is easy to miss in a diff.
   now always a `<select>` of every value (it is declared by the app, so a menu too long to use is the
   app's to fix: drop it or `fixed_filter` it). `picker_threshold` now governs only a to-one
   relation's input in the form.
-- **A to-one value naming no row of its target is a field error**, before the write reaches the
-  backend — instead of a database error or, without foreign-key enforcement (SQLite's default), a
-  row pointing at nothing. The id input takes whatever is typed, so this was an ordinary mistake.
+- **A relation value naming no row of its target is a field error**, to-one and to-many, before the
+  write reaches the backend — instead of a database error or, without foreign-key enforcement
+  (SQLite's default), a row pointing at nothing.
 
 ## [0.3.2] — 2026-09-28
 

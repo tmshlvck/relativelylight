@@ -110,6 +110,10 @@ pub struct ViewState {
     /// It rides in the URL because a `303` is all there is between the write and the page that
     /// reports it, and a flash kept in the session would be wrong the moment a second tab exists.
     pub done: Option<Done>,
+    /// `?pick=post.tag` — the relation a [`Picker`](super::Picker) is choosing for: the source
+    /// entity and the relation's name. It rides in every link the picker renders, so paging and
+    /// searching inside the dialog keep choosing for the same field.
+    pub pick: Option<(String, String)>,
     /// Set by `submit` when a write was rejected: the messages, and what the operator had typed, so
     /// the dialog can re-render with both in place instead of losing the input.
     pub(crate) rejected: Option<ValidationErrors>,
@@ -143,6 +147,9 @@ impl ViewState {
                     "format" => s.csv = value == "csv",
                     "saved" => s.saved = true,
                     "done" => s.done = Done::parse(&value),
+                    "pick" => {
+                        s.pick = value.split_once('.').map(|(a, b)| (a.to_string(), b.to_string()))
+                    }
                     _ => {}
                 },
             }
@@ -166,6 +173,9 @@ impl ViewState {
         let mut out = Vec::new();
         if let Some(e) = &self.entity {
             out.push(("entity".into(), e.clone()));
+        }
+        if let Some((slug, relation)) = &self.pick {
+            out.push(("pick".into(), format!("{slug}.{relation}")));
         }
         for (name, value) in &self.filters {
             out.push((format!("filter[{name}]"), value.clone()));
@@ -495,6 +505,16 @@ mod tests {
         // this one's, so propagating a greedy number would put it in every link on the page.
         let greedy = ViewState::from_query("per_page=100000000&page=4&q=x");
         assert_eq!(greedy.href_entity(Some("/admin"), "tag", |_| false), "/admin/tag");
+    }
+
+    #[test]
+    fn a_pick_names_its_relation_and_travels_in_every_link() {
+        let s = ViewState::from_query("pick=post.tag&q=ru&page=2");
+        assert_eq!(s.pick, Some(("post".to_string(), "tag".to_string())));
+        for href in [s.href_page(3), s.href_sort("name", false), s.href_list()] {
+            assert!(href.contains("pick=post.tag"), "paging inside the dialog keeps picking: {href}");
+        }
+        assert_eq!(ViewState::from_query("pick=post").pick, None, "no relation, no pick");
     }
 
     #[test]

@@ -123,6 +123,7 @@ One askama template, one function, every page. The library never emits `<html>`.
     </div>
   </nav>
   <main class="container-fluid my-4">{{ body|safe }}</main>
+  <script>{{ js|safe }}</script>         {# relativelylight::crud::ui::JS — the relation picker #}
 </body>
 </html>
 ```
@@ -516,7 +517,9 @@ Before a deployment goes out:
       `auth_user` form's validator ([AUTH.md §5g](AUTH.md)).
 - [ ] A `WriteObserver` is registered if you need an audit trail, and its rows are retained somewhere
       you can read them.
-- [ ] Your shell loads Bootstrap 5's stylesheet **and** `crud::ui::CSS`.
+- [ ] Your shell loads Bootstrap 5's stylesheet **and** `crud::ui::CSS` (and `crud::ui::JS`, with a
+      `/pick` route and `Crud::picker_path`, if any relation outgrows `picker_threshold` —
+      [CRUD.md → Picker](CRUD.md#picker--choosing-from-a-large-relation)).
 
 ## See also
 

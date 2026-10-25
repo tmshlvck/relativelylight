@@ -94,7 +94,10 @@ match panel(&engine).submit(&headers, ip, &body, &state).await? {
 `Table` renders one entity (search, **sortable headers**, **filters**, pager, create/edit `<dialog>`,
 relation pickers, bulk delete, CSV export + a multipart **upload**/paste import dialog, one-shot
 "17 records deleted." alerts, Rust cell renderers); `Admin` composes many `Table`s behind a side
-panel and renders **one** of them per request (`?entity=post`). Include `crud::ui::CSS` once in the
+panel and renders **one** of them per request (`?entity=post`). A relation with more rows than
+`picker_threshold` (50) is edited in a dialog over the target's own table — `crud::ui::Picker`,
+served from one `GET` route the app mounts at `Crud::picker_path`, plus `crud::ui::JS` in the shell.
+Include `crud::ui::CSS` once in the
 shell — about forty lines Bootstrap doesn't cover. `render_for` is the **read** enforcement point, not
 just a way to hide buttons: with no API behind the UI, a caller who may not list an entity gets
 `401`/`403` instead of its rows.
@@ -284,7 +287,8 @@ both, over the one `RealIp` that makes them agree about who was here.
 
 ```bash
 cargo run -p crud-example         # :3000  compose it yourself: per-entity pages, standalone Form (/post/new), /dashboard,
-                                  #         a pinned filter at /author/{id}/posts, CSV, the timezone cookie + DST rows (/event) — no auth
+                                  #         a pinned filter at /author/{id}/posts, CSV, the timezone cookie + DST rows (/event),
+                                  #         the relation picker (/pick) for a post's author and tags — no auth
 cargo run -p adminpanel-example   # :3000  crud::ui::Admin, login-gated, inline accounts + 2FA, timezone cookie (admin/password, editor/password)
 cargo run -p auth-example         # :3000  auth up close: login, /secret, /profile + 2FA, re-auth demo, SSO wiring,
                                   #         and /admin — the accounts panel users are provisioned from (admin/password)

@@ -109,7 +109,8 @@ consumes: the backend returns finished rows; the engine forwards them.
 **Requirement:** a customizable admin UI generated from the model, with no hand-written forms.
 Rendering is **entirely server-side**: columns and rows go from the engine into HTML in one pass, with
 a Rust `match` per cell and per input. The app supplies the shell (Bootstrap 5's stylesheet plus
-`crud::ui::CSS`) and drops the fragment in; there is no JavaScript framework and no client-side state.
+`crud::ui::CSS`) and drops the fragment in; there is no JavaScript framework, and the only client-side
+state is a picker dialog's working selection while it is open.
 
 The **URL is the view** — page, sort, filters, search, active entity, open dialog — so every screen is
 linkable; writes are `POST` → `303` → `GET` from the app's own route, via `submit`.
@@ -123,9 +124,12 @@ the bulk delete as well as the listing, so no control can act on a wider set tha
 All three are **one implementation**, so the requirement above — *no hand-written forms* — is met once
 and `Admin` stays a composition of the parts rather than a fourth thing to maintain.
 
-**Roadmap / deferred:** search-as-you-type on relations whose target is too large to list (it needs a
-fetch endpoint, deliberately absent — an id input is the current answer); multipart CSRF so CSV import
-can take a file rather than a paste; optional cross-document view transitions.
+A relation whose target is too large for a `<select>` is edited in a **picker** dialog over the
+target's own table (`Picker`, one app-mounted `GET` route, and the crate's one script); it answers to
+the target's gate, and without JavaScript the field still saves its selection unchanged.
+
+**Roadmap / deferred:** multipart CSRF so CSV import can take a file rather than a paste; optional
+cross-document view transitions; splitting `Table` into smaller pieces ([TODO.md](TODO.md)).
 
 ## 3. `auth` — authentication & authorization 🟡
 

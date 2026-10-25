@@ -181,7 +181,8 @@ Four runnable examples, all over one seeded in-memory SQLite model (`examples/mo
 
 ```bash
 cargo run -p crud-example          # :3000  compose the UI yourself: per-entity pages, a standalone Form at /post/new,
-                                   #         a /dashboard of your own, a pinned filter, CSV, timezones + DST — no auth
+                                   #         a /dashboard of your own, a pinned filter, CSV, timezones + DST,
+                                   #         the relation picker (/pick) for a post's author and tags — no auth
 cargo run -p adminpanel-example    # :3000  the same behind auth: crud::ui::Admin, 2FA, lockout panels (admin / password)
 cargo run -p auth-example          # :3000  auth up close: login, SSO, 2FA, re-auth on your own route, and the
                                    #         accounts panel an operator provisions users from (admin / password)

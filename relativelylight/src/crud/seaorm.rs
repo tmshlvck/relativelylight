@@ -1621,6 +1621,15 @@ impl Crud {
         self
     }
 
+    /// Where the app serves [`crud::ui::Picker`](crate::crud::ui::Picker): the dialog that edits a
+    /// relation too large for a `<select>`. The crate adds no route — mount one `GET` handler on this
+    /// path (see `docs/CRUD.md`). Without it, every relation stays a `<select>` however large it is.
+    #[cfg(feature = "ui")]
+    pub fn picker_path(&mut self, path: impl Into<String>) -> &mut Self {
+        self.engine.set_picker_path(path);
+        self
+    }
+
     /// The underlying backend-agnostic engine — what the UI components render from, and what an app
     /// publishing its own JSON API would call.
     pub fn engine(&self) -> &Engine {
