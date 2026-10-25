@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 relativelylight = { path = "../../relativelylight", features = ["ui", "csv"] }
 model = { path = "../model" }
+sea-orm = { workspace = true }
 axum = "0.8"
 askama = "0.13"
 serde_json = { workspace = true }

@@ -31,6 +31,7 @@ use relativelylight::crud::ui::{esc, Form, Outcome, Table, ViewState, CSS};
 use relativelylight::middleware::RealIp;
 use relativelylight::time::{Tz, TzPicker};
 use relativelylight::validate;
+use sea_orm::IdenStatic; // `post::Column::Title.as_str()` — a column name the compiler checks
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -79,38 +80,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a closure, `post` can be sorted by its `author` column: the engine turns `?sort=author` into an
     // ORDER BY on `author.name`, so the order matches the labels on screen. A model whose label isn't
     // a single column simply reports the relation as unsortable instead of guessing.
-    author_mm.label_column("name");
+    author_mm.label_column(author::Column::Name.as_str());
 
     // Per-field presentation config (labels / help text / create defaults).
-    post_mm.field("title").label = Some("Title".into());
-    post_mm.field("title").description = Some("The post headline (required).".into());
-    post_mm.field("body").description = Some("Full text of the post.".into());
+    post_mm.field(post::Column::Title.as_str()).label = Some("Title".into());
+    post_mm.field(post::Column::Title.as_str()).description =
+        Some("The post headline (required).".into());
+    post_mm.field(post::Column::Body.as_str()).description = Some("Full text of the post.".into());
     // **Per-field widget overrides.** The default input is derived from the column type; these pick a
     // different one where the type alone can't know better. Cells are unaffected — a table row is no
     // place for a slider.
-    post_mm.field("body").textarea(8); // prose wants more than a one-line input
-    post_mm.field("views").default = Some(serde_json::json!(0));
-    post_mm.field("views").range(0.0, 500.0, 1.0);
-    post_mm.field("views").description = Some("View counter — defaults to 0 on create.".into());
+    post_mm.field(post::Column::Body.as_str()).textarea(8); // prose wants more than a one-line input
+    post_mm.field(post::Column::Views.as_str()).default = Some(serde_json::json!(0));
+    post_mm.field(post::Column::Views.as_str()).range(0.0, 500.0, 1.0);
+    post_mm.field(post::Column::Views.as_str()).description =
+        Some("View counter — defaults to 0 on create.".into());
     // A **closed set of values**. `status` is a plain text column in SQLite, so the allowed values are
     // declared here — which turns the form input into a dropdown and makes anything else a validation
     // error instead of a stored typo. A Postgres/MySQL enum column needs none of this: the variants
     // are introspected from `ColumnType::Enum`.
-    post_mm.field("status").options =
+    post_mm.field(post::Column::Status.as_str()).options =
         vec!["draft".into(), "review".into(), "published".into(), "archived".into()];
-    post_mm.field("status").description = Some("Editorial state — a closed set.".into());
+    post_mm.field(post::Column::Status.as_str()).description =
+        Some("Editorial state — a closed set.".into());
     // The same closed set as a **radio group** rather than a dropdown: four choices worth seeing at
     // once. (`radio` needs `options`, so it's set above — reversing these two lines is a render-time
     // error naming the field.)
-    post_mm.field("status").radio();
-    post_mm.field("published").label = Some("Published".into());
-    post_mm.field("published").default = Some(serde_json::json!(true));
+    post_mm.field(post::Column::Status.as_str()).radio();
+    post_mm.field(post::Column::Published.as_str()).label = Some("Published".into());
+    post_mm.field(post::Column::Published.as_str()).default = Some(serde_json::json!(true));
     // An int column holding **Unix seconds** → a datetime picker in the form and a readable cell in
     // the table, storage staying integer UTC. Both are rendered **server-side** in the caller's zone;
     // this example sets no timezone cookie, so that zone is UTC (see `examples/time`).
-    post_mm.field("published_at").datetime();
-    post_mm.field("published_at").label = Some("Published at".into());
-    post_mm.field("published_at").description = Some("When it went live.".into());
+    post_mm.field(post::Column::PublishedAt.as_str()).datetime();
+    post_mm.field(post::Column::PublishedAt.as_str()).label = Some("Published at".into());
+    post_mm.field(post::Column::PublishedAt.as_str()).description =
+        Some("When it went live.".into());
     post_mm.relation("author").label = Some("Author".into());
     post_mm.relation("tag").label = Some("Tags".into());
 
@@ -118,24 +123,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `validate_str` / `validate_int` sugar (see docs/DATAINPUT.md). The same predicates are callable
     // from a hand-written endpoint; here they plug into the auto-CRUD write path, and a failure comes
     // back in the dialog beside the field that caused it.
-    post_mm.field("title").validate_str(validate::all_of(vec![
+    post_mm.field(post::Column::Title.as_str()).validate_str(validate::all_of(vec![
         Box::new(validate::non_empty),
         Box::new(validate::length(1, 80)),
     ]));
-    post_mm.field("views").validate_int(validate::int_min(0)); // a view count is never negative
+    // A view count is never negative.
+    post_mm.field(post::Column::Views.as_str()).validate_int(validate::int_min(0));
 
     // A normalizer (on_write transform) + a validator on the author: trim the name, require a
     // 2-letter ISO country code.
-    author_mm.field("name").on_write = Some(validate::field::str_transform(validate::normalize::trim));
-    author_mm.field("name").validate_str(validate::non_empty);
-    author_mm.field("country").description = Some("ISO 3166-1 alpha-2 country code, e.g. \"US\".".into());
-    author_mm.field("country").validate_str(validate::length(2, 2));
+    author_mm.field(author::Column::Name.as_str()).on_write =
+        Some(validate::field::str_transform(validate::normalize::trim));
+    author_mm.field(author::Column::Name.as_str()).validate_str(validate::non_empty);
+    author_mm.field(author::Column::Country.as_str()).description =
+        Some("ISO 3166-1 alpha-2 country code, e.g. \"US\".".into());
+    author_mm.field(author::Column::Country.as_str()).validate_str(validate::length(2, 2));
     // `email`/`url` widgets: the browser's own check plus the right mobile keyboard. That check is a
     // convenience, not the control — the validator beside each one is what actually runs.
-    author_mm.field("email").email();
-    author_mm.field("email").validate_str(validate::optional(Box::new(validate::email)));
-    author_mm.field("homepage").url();
-    author_mm.field("homepage").validate_str(validate::optional(Box::new(validate::url)));
+    author_mm.field(author::Column::Email.as_str()).email();
+    author_mm
+        .field(author::Column::Email.as_str())
+        .validate_str(validate::optional(Box::new(validate::email)));
+    author_mm.field(author::Column::Homepage.as_str()).url();
+    author_mm
+        .field(author::Column::Homepage.as_str())
+        .validate_str(validate::optional(Box::new(validate::url)));
 
     // A cross-field row validator → the dialog's banner rather than one field's message.
     post_mm.validate_row = Some(Box::new(|fields| {
@@ -155,11 +167,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // configuration — the cell, the form input and the CSV cell are then rendered in the caller's
     // zone, server-side (see docs/TIME.md).
     let mut event_mm = MetaModel::new(event::Entity);
-    event_mm.field("name").label = Some("Event".into());
-    event_mm.field("happens_at").label = Some("Happens at".into());
-    event_mm.field("happens_at").description =
+    event_mm.field(event::Column::Name.as_str()).label = Some("Event".into());
+    event_mm.field(event::Column::HappensAt.as_str()).label = Some("Happens at".into());
+    event_mm.field(event::Column::HappensAt.as_str()).description =
         Some("Type a wall-clock time in the selected zone; it is stored as integer UTC seconds.".into());
-    event_mm.field("happens_at").datetime();
+    event_mm.field(event::Column::HappensAt.as_str()).datetime();
 
     // Ungated demo: every model takes the `Open` gate (no auth). See `adminpanel` for a gated app.
     let mut crud = Crud::new(db);
@@ -217,14 +229,14 @@ fn table<'a>(engine: &'a Engine, slug: &str) -> Table<'a> {
         t = t
             // Custom cell renderer: link each title to its own edit page. Escaping is the app's job
             // and `esc` is how — the closure's output is inserted verbatim.
-            .format("title", |v, row| {
+            .format(post::Column::Title.as_str(), |v, row| {
                 format!(r#"<a href="/post/{}/edit">{}</a>"#, esc(&row["id"]), esc(v))
             })
             // A filter on a *relation*: the toolbar gets an author picker, and choosing one narrows
             // the listing, the CSV export and "delete all matching" alike. Sorting by `author` orders
             // by the name shown in the cell rather than the foreign key.
             .filter("author")
-            .sort("title");
+            .sort(post::Column::Title.as_str());
     }
     t
 }
@@ -275,10 +287,15 @@ async fn dashboard(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) ->
         .search(false)
         .pagination(false)
         .per_page(5)
-        .sort_desc("published_at")
+        .sort_desc(post::Column::PublishedAt.as_str())
         // A dashboard wants five columns, not twenty — `columns` picks them and orders them, and
         // is the table's own business: the admin's dialog still edits every writable field.
-        .columns(["title", "author", "status", "published_at"])
+        .columns([
+            post::Column::Title.as_str(),
+            "author",
+            post::Column::Status.as_str(),
+            post::Column::PublishedAt.as_str(),
+        ])
         // …and a row can say something no column does. Both are Rust closures, so they are checked
         // and testable, where the old design took a string of JavaScript.
         .row_class(|row| match row["status"].as_str() {
@@ -286,7 +303,7 @@ async fn dashboard(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) ->
             Some("archived") => "text-body-secondary".into(),
             _ => String::new(),
         })
-        .format("title", |v, row| {
+        .format(post::Column::Title.as_str(), |v, row| {
             format!(r#"<a href="/post/{}/edit">{}</a>"#, esc(&row["id"]), esc(v))
         })
         .render_for(&headers, &state)
@@ -370,7 +387,7 @@ fn pinned<'a>(engine: &'a Engine, author_id: &str) -> Table<'a> {
     Table::new(engine, "post")
         .title("Posts")
         .fixed_filter("author", author_id)
-        .sort("title")
+        .sort(post::Column::Title.as_str())
         .per_page(5)
 }
 
@@ -422,7 +439,16 @@ fn new_form(engine: &Engine) -> Form<'_> {
     Form::new(engine, "post")
         .title("New post")
         .description("The same form the admin table opens in a dialog — on a page of your own.")
-        .fields(["title", "body", "status", "views", "published", "published_at", "author", "tag"])
+        .fields([
+            post::Column::Title.as_str(),
+            post::Column::Body.as_str(),
+            post::Column::Status.as_str(),
+            post::Column::Views.as_str(),
+            post::Column::Published.as_str(),
+            post::Column::PublishedAt.as_str(),
+            "author", // relations have no column enum: their names stay strings
+            "tag",
+        ])
         .submit_label("Create post")
         .cancel("/post")
         .redirect("/post/{id}/edit")

@@ -16,6 +16,7 @@ dependencies = [
  "axum",
  "model",
  "relativelylight",
+ "sea-orm",
  "serde_json",
  "tokio",
 ]
@@ -648,6 +649,7 @@ dependencies = [
  "axum",
  "model",
  "relativelylight",
+ "sea-orm",
  "serde_json",
  "tokio",
 ]

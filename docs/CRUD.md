@@ -164,6 +164,38 @@ The third form still labels rows perfectly; relations pointing at it just report
 400 an attempt to order by them, rather than quietly sorting by one part of a label. `label_column`
 panics on an unknown column, like `field`.
 
+### Column names the compiler checks
+
+Every setting that names a column takes a string. That includes `field`, `label_column`, and the UI's
+`columns`, `fields`, `format`, `sort`, `filter` and `fixed_filter`. A field's name *is* SeaORM's
+column name, so the `Column` enum that `DeriveEntityModel` generates can supply it.
+`IdenStatic::as_str` returns exactly the string the crate uses, and a misspelt variant fails to compile:
+
+```rust
+use sea_orm::IdenStatic;
+
+post_mm.field(post::Column::Title.as_str()).label = Some("Title".into());
+author_mm.label_column(author::Column::Name.as_str());
+Form::new(engine, "post").fields([
+    post::Column::Title.as_str(),
+    post::Column::PublishedAt.as_str(),
+    "author", // a relation: no column enum, so its name stays a string
+    "tag",
+]);
+```
+
+This covers **columns only**. A relation is named after its `Relation` variant, lowercased
+(`Relation::Author` → `author`), and an N:M relation after the target's slug (`tag`). Neither has a
+generated name to borrow, so relation names stay strings. They are still checked, just later. An unknown
+name passed to `field`/`label_column` panics at startup. An unknown name passed to a `Table`/`Form`
+setting fails the render, naming it. Both are strings of the same type, so one array can mix them, as
+above.
+
+There is no `impl Into<ColumnName>` that would let you drop the `.as_str()`. Rust can't accept both
+`&str` and every `ColumnTrait` through one trait (the two impls could overlap if SeaORM ever implemented
+`ColumnTrait` for `&str`). A wrapper type would add a second spelling for the same thing, and
+`.as_str()` already does the job. The examples use it throughout.
+
 ### `MetaField`
 
 ```rust

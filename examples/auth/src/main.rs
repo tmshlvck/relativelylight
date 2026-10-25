@@ -37,7 +37,9 @@ use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::crud::ui::{Admin, Outcome, ViewState, CSS};
 use relativelylight::validate;
-use sea_orm::{ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait, QueryFilter};
+use sea_orm::{
+    ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait, IdenStatic, QueryFilter,
+};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -404,6 +406,8 @@ async fn rotate_api_token(
 /// thing a logged-in stranger should be able to enumerate, and `render_for` is where that is
 /// enforced — a non-admin gets 403, not a page with the buttons greyed out.
 fn accounts_engine(db: DatabaseConnection, auth: &Auth) -> Arc<Engine> {
+    use auth::lockout::{ip_entity::Column as IpCol, username_entity::Column as NameCol};
+    use auth::{group::Column as GroupCol, user::Column as UserCol};
     let mut user = MetaModel::new(auth::user::Entity);
     let mut group = MetaModel::new(auth::group::Entity);
 
@@ -411,8 +415,8 @@ fn accounts_engine(db: DatabaseConnection, auth: &Auth) -> Arc<Engine> {
     // the form, a hash in the column, never returned in a read. Blank on create = an account with no
     // password (login by password disabled — how you pre-create an SSO-only user); blank on edit =
     // keep the current one, which is what `validate::optional` below preserves.
-    user.field("password_hash").password();
-    user.field("password_hash").description = Some(
+    user.field(UserCol::PasswordHash.as_str()).password();
+    user.field(UserCol::PasswordHash.as_str()).description = Some(
         "Blank on create = no password (SSO-only account). Blank on edit = keep the current one. \
          At least 12 characters, and not a common one."
             .into(),
@@ -420,23 +424,31 @@ fn accounts_engine(db: DatabaseConnection, auth: &Auth) -> Arc<Engine> {
     // The *same* policy `Auth` applies to /profile, applied to this form too. Wire only one of the
     // two and the other becomes the way around it. (`examples/adminpanel` drives both from a single
     // configurable level; this one takes the recommended default.)
-    user.field("password_hash")
+    user.field(UserCol::PasswordHash.as_str())
         .validate_str(validate::optional(Box::new(validate::password(
             validate::PasswordPolicy::recommended(),
         ))));
     // Secrets and machinery: the 2FA columns are managed from /profile, never from a form. Note
     // `totp_last_step` is not a secret but is still hidden — it is the replay guard, and an operator
     // editing it either lets a code be replayed or locks the user out of their own authenticator.
-    for f in ["totp_secret", "totp_pending", "totp_last_step"] {
+    for f in [
+        UserCol::TotpSecret.as_str(),
+        UserCol::TotpPending.as_str(),
+        UserCol::TotpLastStep.as_str(),
+    ] {
         user.field(f).hidden = true;
     }
     // Lifecycle stamps are the library's to write: show them, formatted in the caller's zone.
-    for f in ["created_at", "updated_at", "last_login_at"] {
+    for f in [
+        UserCol::CreatedAt.as_str(),
+        UserCol::UpdatedAt.as_str(),
+        UserCol::LastLoginAt.as_str(),
+    ] {
         user.field(f).read_only = true;
         user.field(f).datetime();
     }
-    user.field("is_active").default = Some(serde_json::json!(true));
-    for f in ["created_at", "updated_at"] {
+    user.field(UserCol::IsActive.as_str()).default = Some(serde_json::json!(true));
+    for f in [GroupCol::CreatedAt.as_str(), GroupCol::UpdatedAt.as_str()] {
         group.field(f).read_only = true;
         group.field(f).datetime();
     }
@@ -445,28 +457,34 @@ fn accounts_engine(db: DatabaseConnection, auth: &Auth) -> Arc<Engine> {
     // that can create a user but not put them in a group can't finish the job. `auth_user_group` is
     // a junction table and is never registered as a model of its own — declaring the relation is how
     // it is reached.
-    user.label_column("username");
-    group.label_column("name");
+    user.label_column(UserCol::Username.as_str());
+    group.label_column(GroupCol::Name.as_str());
     user.relate(&group);
     group.relate(&user);
     user.relation("auth_group").label = Some("Groups".into());
     group.relation("auth_user").label = Some("Members".into());
-    user.field("username").label = Some("Username".into());
-    user.field("is_active").label = Some("Active".into());
-    user.field("is_active").description =
+    user.field(UserCol::Username.as_str()).label = Some("Username".into());
+    user.field(UserCol::IsActive.as_str()).label = Some("Active".into());
+    user.field(UserCol::IsActive.as_str()).description =
         Some("Unticked = refused at the door, password or SSO alike, session or not.".into());
-    user.field("last_login_at").label = Some("Last login".into());
-    group.field("name").label = Some("Group".into());
+    user.field(UserCol::LastLoginAt.as_str()).label = Some("Last login".into());
+    group.field(GroupCol::Name.as_str()).label = Some("Group".into());
 
     // The lockout counters. Everything about them is the library's to maintain, so they are
     // read-only — and the unlock is *deleting the row*, which needs no button of its own: it is an
     // ordinary gated, CSRF-checked, audited DELETE.
     let mut locked_names = MetaModel::new(auth::lockout::username_entity::Entity);
     let mut locked_ips = MetaModel::new(auth::lockout::ip_entity::Entity);
-    for f in [&mut locked_names.field("failures"), &mut locked_ips.field("failures")] {
+    for f in [
+        &mut locked_names.field(NameCol::Failures.as_str()),
+        &mut locked_ips.field(IpCol::Failures.as_str()),
+    ] {
         f.read_only = true;
     }
-    for f in [&mut locked_names.field("last_failure_at"), &mut locked_ips.field("last_failure_at")] {
+    for f in [
+        &mut locked_names.field(NameCol::LastFailureAt.as_str()),
+        &mut locked_ips.field(IpCol::LastFailureAt.as_str()),
+    ] {
         f.read_only = true;
         f.datetime();
     }
@@ -493,9 +511,19 @@ fn accounts(engine: &Engine) -> Admin<'_> {
         // `columns` trims the *table*; the dialog still edits every writable column — which is how
         // the write-only password stays out of a list where its cell could only ever be blank.
         .entity_with("auth_user", |t| {
-            t.title("Users").columns(["id", "username", "is_active", "auth_group", "last_login_at"])
+            t.title("Users").columns([
+                auth::user::Column::Id.as_str(),
+                auth::user::Column::Username.as_str(),
+                auth::user::Column::IsActive.as_str(),
+                "auth_group", // a relation: no column enum, so the name stays a string
+                auth::user::Column::LastLoginAt.as_str(),
+            ])
         })
-        .entity_with("auth_group", |t| t.title("Groups").columns(["id", "name", "auth_user"]))
+        .entity_with("auth_group", |t| t.title("Groups").columns([
+                auth::group::Column::Id.as_str(),
+                auth::group::Column::Name.as_str(),
+                "auth_user",
+            ]))
         .separator()
         .group("Locked out")
         .entity_with("auth_username_lockout", |t| t.title("By account"))

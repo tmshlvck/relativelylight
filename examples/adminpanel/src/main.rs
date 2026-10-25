@@ -28,6 +28,8 @@ use relativelylight::crud::ui::{esc, Admin, Outcome, ViewState, CSS};
 use relativelylight::middleware::RealIp;
 use relativelylight::time::{Tz, TzPicker};
 use relativelylight::validate;
+use relativelylight::auth::{group::Column as GroupCol, user::Column as UserCol};
+use sea_orm::IdenStatic; // `post::Column::Title.as_str()` — a column name the compiler checks
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -101,7 +103,7 @@ fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
         .entity_with("post", |t| {
             // A cell renderer is a Rust closure now, and escaping is what `esc` is for: this link
             // opens the row's own edit dialog, which is just a URL.
-            t.per_page(10).format("title", |v, row| {
+            t.per_page(10).format(post::Column::Title.as_str(), |v, row| {
                 format!(r#"<a href="?entity=post&amp;edit={}">{}</a>"#, esc(&row["id"]), esc(v))
             })
         })
@@ -118,7 +120,7 @@ fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
             // Login accounts: create/edit inline (password is the write-only field above); the id
             // links to /profile/{id} for a dedicated password reset. Password never shows in reads.
             .entity_with("auth_user", |t| {
-                t.title("Login accounts").format("id", |v, _row| {
+                t.title("Login accounts").format(UserCol::Id.as_str(), |v, _row| {
                     format!(r#"<a href="/profile/{}" title="Reset password">{}</a>"#, esc(v), esc(v))
                 })
             })
@@ -235,13 +237,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Declaring the label column makes `post`'s `author` header sortable: the engine can turn
     // "order by the label in the cell" into `ORDER BY author.name`. Without it the relation would
     // still render, just without a clickable header.
-    author_mm.label_column("name");
+    author_mm.label_column(author::Column::Name.as_str());
     let user_mm = MetaModel::new(user::Entity);
     let profile_mm = MetaModel::new(profile::Entity);
     let mut post_mm = MetaModel::new(post::Entity);
     // A closed set of values on a text column → a dropdown in the form, `enum` in the schema, and a 422
     // for anything else. (An enum column on Postgres/MySQL is introspected and needs no declaration.)
-    post_mm.field("status").options =
+    post_mm.field(post::Column::Status.as_str()).options =
         vec!["draft".into(), "review".into(), "published".into(), "archived".into()];
     let mut tag_mm = MetaModel::new(tag::Entity);
     post_mm.relate(&tag_mm);
@@ -252,8 +254,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the column, never returned in reads. An empty password stores an empty hash — no password can
     // verify against it, so password login is disabled (e.g. for future SSO / PassKey users).
     let mut auth_user_mm = MetaModel::new(auth::user::Entity);
-    auth_user_mm.field("password_hash").password();
-    auth_user_mm.field("password_hash").description = Some(
+    auth_user_mm.field(UserCol::PasswordHash.as_str()).password();
+    auth_user_mm.field(UserCol::PasswordHash.as_str()).description = Some(
         "Optional. Leave blank to create an account with no password (password login disabled). \
          On edit, blank keeps the current password. At least 12 characters, and not a common one."
             .into(),
@@ -265,51 +267,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // blank to keep the current password" would become a validation error.
     if let Some(policy) = password_policy.clone() {
         auth_user_mm
-            .field("password_hash")
+            .field(UserCol::PasswordHash.as_str())
             .validate_str(validate::optional(Box::new(validate::password(policy))));
     }
     // The TOTP secret columns are secrets — never expose them in reads/writes/metadata. (2FA is
     // managed from the profile page, not the crud form.)
-    auth_user_mm.field("totp_secret").hidden = true;
-    auth_user_mm.field("totp_pending").hidden = true;
+    auth_user_mm.field(UserCol::TotpSecret.as_str()).hidden = true;
+    auth_user_mm.field(UserCol::TotpPending.as_str()).hidden = true;
     // `totp_last_step` is the replay guard (the last 30s step accepted for this account). Not a secret,
     // but nothing an operator should see or edit — the library maintains it, and hand-editing it either
     // lets a code be replayed or locks the user out of their own authenticator for a while.
-    auth_user_mm.field("totp_last_step").hidden = true;
+    auth_user_mm.field(UserCol::TotpLastStep.as_str()).hidden = true;
     // Note what is *not* registered: `auth::recovery::entity` (the TOTP recovery codes). Every row is a
     // hash of a credential, and there is nothing an operator can usefully do to one — a user who needs a
     // fresh set generates it from /profile, and a user who has lost their authenticator is helped by the
     // "Disable 2FA" button on their manage page, which clears the codes with it. Contrast the two lockout
     // tables below, which *are* registered, because deleting one of those rows is the whole unlock.
     // New accounts are active by default (so a freshly created user with a password can log in).
-    auth_user_mm.field("is_active").default = Some(serde_json::json!(true));
+    auth_user_mm.field(UserCol::IsActive.as_str()).default = Some(serde_json::json!(true));
     // Lifecycle timestamps are maintained by the library (hooks / login flow) — show, don't edit.
     // Lifecycle stamps: read-only + rendered as timezone-aware datetimes (see .datetime() + the
     // $store.tz picker wired into the shell). They follow the picker's zone; storage stays UTC.
-    for f in ["created_at", "updated_at", "last_login_at"] {
+    for f in [
+        UserCol::CreatedAt.as_str(),
+        UserCol::UpdatedAt.as_str(),
+        UserCol::LastLoginAt.as_str(),
+    ] {
         auth_user_mm.field(f).read_only = true;
         auth_user_mm.field(f).datetime();
     }
     let mut auth_group_mm = MetaModel::new(auth::group::Entity);
-    for f in ["created_at", "updated_at"] {
+    for f in [GroupCol::CreatedAt.as_str(), GroupCol::UpdatedAt.as_str()] {
         auth_group_mm.field(f).read_only = true;
         auth_group_mm.field(f).datetime();
     }
 
     // Per-field presentation + validation (drives the labels / help / defaults / errors in the form).
-    post_mm.field("title").label = Some("Title".into());
-    post_mm.field("title").description = Some("The post headline (required).".into());
-    post_mm.field("views").default = Some(serde_json::json!(0));
-    post_mm.field("published").label = Some("Published".into());
-    post_mm.field("published").default = Some(serde_json::json!(true));
+    post_mm.field(post::Column::Title.as_str()).label = Some("Title".into());
+    post_mm.field(post::Column::Title.as_str()).description =
+        Some("The post headline (required).".into());
+    post_mm.field(post::Column::Views.as_str()).default = Some(serde_json::json!(0));
+    post_mm.field(post::Column::Published.as_str()).label = Some("Published".into());
+    post_mm.field(post::Column::Published.as_str()).default = Some(serde_json::json!(true));
     // Editable datetime → the form renders a timezone-aware <datetime-local> picker (edited in the
     // selected zone, stored as integer Unix-seconds UTC). Empty = unpublished.
-    post_mm.field("published_at").label = Some("Published at".into());
-    post_mm.field("published_at").description = Some("When the post went live (blank = draft).".into());
-    post_mm.field("published_at").datetime();
+    post_mm.field(post::Column::PublishedAt.as_str()).label = Some("Published at".into());
+    post_mm.field(post::Column::PublishedAt.as_str()).description =
+        Some("When the post went live (blank = draft).".into());
+    post_mm.field(post::Column::PublishedAt.as_str()).datetime();
     post_mm.relation("author").label = Some("Author".into());
     post_mm.relation("tag").label = Some("Tags".into());
-    post_mm.field("title").validate = Some(Box::new(|v| {
+    post_mm.field(post::Column::Title.as_str()).validate = Some(Box::new(|v| {
         if v.as_str().unwrap_or("").trim().is_empty() {
             Err("Title cannot be empty".into())
         } else {

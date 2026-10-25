@@ -84,6 +84,7 @@ use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::crud::ui::{Admin, Outcome, ViewState, CSS};
 use relativelylight::middleware::{resolve_real_ip, RealIp, TrustProxy};
 use relativelylight::observe::{WriteEvent, WriteObserver};
+use sea_orm::IdenStatic; // `post::Column::Title.as_str()` — a column name the compiler checks
 use serde_json::Value;
 use std::sync::{Arc, OnceLock};
 
@@ -128,10 +129,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // write; the gate is checked per request, and a refused write emits no event because it never
     // happened.
     let mut author = MetaModel::new(model::author::Entity);
-    author.label_column("name");
+    author.label_column(model::author::Column::Name.as_str());
     let mut post = MetaModel::new(model::post::Entity);
     post.relation("author").label = Some("Author".into());
-    post.field("published_at").datetime(); // a timestamp an operator can read, in their own zone
+    // A timestamp an operator can read, in their own zone.
+    post.field(model::post::Column::PublishedAt.as_str()).datetime();
     let gate = Arc::new(UserReadWrite::new(&auth));
     let mut crud = Crud::new(db);
     crud.register(author, gate.clone());
