@@ -80,8 +80,8 @@ async fn seed(db: &DatabaseConnection) -> Result<(), DbErr> {
         .await?;
     }
 
-    // A biggish tag list (40) so the N:M form widget crosses the default picker threshold (20)
-    // and demonstrates the live search→select combobox.
+    // A biggish tag list (40), past the default picker threshold (20) — which a to-many ignores: its
+    // multi-select lists every tag, since a tag left out of the list would be unlinked by saving.
     let tags = [
         "rust", "systems", "beginner", "async", "web", "database", "testing", "performance",
         "macros", "traits", "lifetimes", "ownership", "borrowing", "concurrency", "wasm", "cli",

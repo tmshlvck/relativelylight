@@ -142,11 +142,16 @@ async fn widget(
             })
         }
         Column::Relation { target, cardinality, .. } => {
-            // One terse listing of the target, capped: `total` then says whether a picker would have
-            // been a wall of options.
-            let q = crate::crud::engine::ListQuery {
-                per_page: threshold.max(1),
-                ..Default::default()
+            // One terse listing of the target. A to-one's is capped: `total` then says whether a picker
+            // would have been a wall of options. A to-many's is every row (`all` — a `per_page` of 0
+            // is the backend's default page, not "no limit"): a posted multi-select *replaces* the
+            // relation set, so a linked row the list left out would be unlinked by saving.
+            let q = match cardinality {
+                Cardinality::ToMany => crate::crud::engine::ListQuery { all: true, ..Default::default() },
+                Cardinality::ToOne => crate::crud::engine::ListQuery {
+                    per_page: threshold.max(1),
+                    ..Default::default()
+                },
             };
             let page = engine.list(target, &q, true).await?;
             let chosen = relation_values(name, row, state);

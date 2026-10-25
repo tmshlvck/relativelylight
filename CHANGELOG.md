@@ -9,6 +9,32 @@ Work that has landed on `main` but isn't tagged yet lives under **Unreleased**; 
 heading to the version + date and adds a compare link. Per-entry commit hashes are given where a change
 is easy to miss in a diff.
 
+## Unreleased
+
+### Changed
+
+- **"Delete all N matching" moved into a ⋮ "Table operations" menu**, with Export/Import CSV (the
+  toolbar's former "CSV" button, renamed and widened). "Delete selected" stays under the rows. The
+  rows' form now has an id, `{dom_id}-rows` (`rl-post-rows`), which the menu's button names. No
+  upgrade step, unless your own CSS or tests looked for the old button or the "CSV" summary.
+
+### Fixed
+
+- **Saving a form could silently unlink a to-many relation.** `crud::ui`'s multi-select listed only
+  the first `picker_threshold` (default 20) rows of the target, and a posted multi-select *replaces*
+  the relation set — so a linked row past the cap rendered unselected, because it wasn't rendered at
+  all, and an unchanged save removed the link. A to-many now lists **every** target row. No upgrade
+  step, but a very large to-many target now costs one full terse listing per form render.
+- **Searching a table with a large filter returned nothing.** Past `picker_threshold` a filter
+  control became a typed-id text box; left empty, in the same GET form as the search box, it posted
+  `filter[author]=` — which means "rows with *no* author" — with every search. A filter control is
+  now always a `<select>` of every value (it is declared by the app, so a menu too long to use is the
+  app's to fix: drop it or `fixed_filter` it). `picker_threshold` now governs only a to-one
+  relation's input in the form.
+- **A to-one value naming no row of its target is a field error**, before the write reaches the
+  backend — instead of a database error or, without foreign-key enforcement (SQLite's default), a
+  row pointing at nothing. The id input takes whatever is typed, so this was an ordinary mistake.
+
 ## [0.3.2] — 2026-09-28
 
 ### Added

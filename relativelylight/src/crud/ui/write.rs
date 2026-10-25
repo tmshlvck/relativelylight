@@ -6,7 +6,7 @@ use super::render;
 use super::state::{Done, Mode, ViewState};
 use super::Outcome;
 use crate::authz::{Decision, Operation};
-use crate::crud::engine::{Column, Engine, Error, ListQuery, Result, ValidationErrors};
+use crate::crud::engine::{Cardinality, Column, Engine, Error, ListQuery, Result, ValidationErrors};
 use crate::time::Tz;
 use http::HeaderMap;
 use serde_json::Value;
@@ -54,6 +54,10 @@ pub(crate) async fn apply(
             } else {
                 Mode::Edit(id.clone())
             };
+            let unknown = unknown_references(s.engine, cols, &write_body, &posted).await?;
+            if !unknown.is_empty() {
+                return Ok(Outcome::Invalid(state.with_rejection(unknown, posted.values(), mode)));
+            }
             let outcome = match &op {
                 Op::Create => s.engine.create(s.slug, &write_body).await.map(|row| (None, row)),
                 _ => {
@@ -153,6 +157,35 @@ pub(crate) async fn apply(
         target.push_str(&format!("#row-{anchor}"));
     }
     Ok(Outcome::Done(target))
+}
+
+/// A to-one value that names no row of its target, as a field error rather than whatever the
+/// database makes of a dangling foreign key — which, without foreign-key enforcement (SQLite's
+/// default), is a row pointing at nothing. The id input takes whatever is typed, so this is an
+/// ordinary mistake, not only a crafted one.
+async fn unknown_references(
+    engine: &Engine,
+    cols: &[Column],
+    body: &Value,
+    posted: &Posted,
+) -> Result<ValidationErrors> {
+    let mut errors = ValidationErrors::new();
+    for col in cols {
+        let Column::Relation { name, target, cardinality: Cardinality::ToOne, .. } = col else {
+            continue;
+        };
+        let Some(id) = body.get(name).filter(|v| !v.is_null()) else { continue };
+        match engine.get(target, &render::text(Some(id))).await {
+            Ok(_) => {}
+            // `BadRequest`: an id that can't even be a key of the target (text for an integer key).
+            Err(Error::NotFound | Error::BadRequest(_)) => {
+                let typed = posted.one(name).unwrap_or("").trim();
+                errors.field(name, format!("no {target} matches '{typed}'"));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(errors)
 }
 
 /// An uploaded file's bytes as CSV text: a UTF-8 BOM (what a spreadsheet writes) is dropped, and

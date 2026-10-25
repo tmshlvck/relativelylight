@@ -378,8 +378,10 @@ UI knows which headers to make links without guessing.
 
 **Bulk delete** runs one set-based `DELETE … WHERE` in the backend (plus a subquery to clear N:M
 junctions) — not a per-row loop, so it scales. It refuses to wipe the whole unfiltered table unless
-`ListQuery::all` is set, which is what the table's "Delete all N matching" button does and its "Delete
-selected" does not. A `filter[…]` counts as narrowing it.
+`ListQuery::all` is set, which is what the table's "Delete all N matching" does and its "Delete
+selected" does not. A `filter[…]` counts as narrowing it. In the UI, "Delete selected" sits under the
+rows it acts on, and "Delete all N matching" is in the **⋮ Table operations** menu with the CSV export
+and import — the things that act on the table as a whole, not on the rows you ticked.
 
 ### Errors
 
@@ -710,7 +712,7 @@ and in all three examples.
 | `filter(name)` | a filter `<select>` in the toolbar, for a column or a to-one relation |
 | `fixed_filter(name, value)` | a filter **pinned** to one value, with no control — a table *about* that value |
 | `format(col, closure)` | a custom cell renderer, `(value, row) -> HTML` |
-| `picker_threshold(n)` | how many target rows a relation may list as a `<select>` (default 20) |
+| `picker_threshold(n)` | how many target rows a to-one relation may list as a `<select>` (default 20) |
 | `dom_id(id)` | namespaces the fragment's id, so two tables of one entity can share a page |
 
 **Every filter in force is chipped**, whether the table declared a control for it or not — one
@@ -752,15 +754,19 @@ and input value (`crud/ui_tests.rs`).
 
 **Relations in the form.** A to-one whose target has at most `picker_threshold` rows renders as a
 `<select>` of labels; above that it renders an id input, because the alternative is shipping thousands
-of `<option>`s or a search box that needs a fetch endpoint this crate no longer has. A to-many renders
-as a multi-select.
+of `<option>`s or a search box that needs a fetch endpoint this crate no longer has. An id that names
+no row of the target is refused as a field error before the write reaches the backend. A to-many renders
+as a multi-select of **every** target row, whatever the threshold: a posted multi-select replaces the
+relation set, so a linked row the list left out would be unlinked by an unchanged save.
 
-**A filter control does the same, for the same reason and one more.** Under the threshold it is a
-`<select>`; above it, a text input that says how many values there are. A truncated menu would not
-just hide most of them — with the value in force missing from the list, no `<option>` would be
-selected and the browser would display the first one, so the control would confidently name a filter
-the table isn't using. A chip always shows the target's **label** (`Author: Ada Lovelace`), resolved
-by an exact id lookup, rather than the id the URL carries.
+**A filter control is always a `<select>` of every value**, whatever the size of its target — the
+threshold doesn't apply. A filter exists only because the app declared it (`Table::filter`,
+`Admin::filter`), so a menu too long to use is the app's to fix: drop the control, or pin the value
+with `fixed_filter`. Its "all" option posts `*`, because an empty `filter[x]=` already means "rows with
+none". A value in force that the list lacks — a stale id in a link — is still added and selected:
+with nothing selected the browser would show "all", and the control would name a filter the table
+isn't using. A chip always shows the target's **label** (`Author: Ada Lovelace`), resolved by an
+exact id lookup, rather than the id the URL carries.
 
 **The read-only row.** Every table offers a **View** action per row, opening `?show=<pk>` — a dialog
 listing *every* published column, not just the writable ones. It is the only way to see a generated

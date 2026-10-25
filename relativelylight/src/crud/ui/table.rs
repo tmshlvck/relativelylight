@@ -55,14 +55,8 @@ struct TableTmpl {
 struct ControlV {
     name: String,
     label: String,
-    /// The `<select>`'s options — empty when the target has more rows than we will list, in which
-    /// case the control is a text input instead.
+    /// The `<select>`'s options: every value, with the one in force marked.
     options: Vec<Opt>,
-    /// The value in force (for the text input), and what it stands for.
-    chosen: String,
-    chosen_label: String,
-    /// How many rows the target has, when that is more than this control can list. `0` otherwise.
-    too_many: u64,
 }
 
 #[derive(Template)]
@@ -247,8 +241,8 @@ impl<'a> Table<'a> {
         self
     }
     /// How many target rows a to-one relation may list as a `<select>` before the form asks for the
-    /// id instead. Default: 20. (There is no search-as-you-type picker: that needs a fetch endpoint,
-    /// and this crate no longer has one — see `docs/MIGRATION-0.3.md` §A6.4.)
+    /// id instead. Default: 20. A to-many and a [`filter`](Table::filter) control always list every
+    /// row — see `docs/CRUD.md`.
     pub fn picker_threshold(mut self, n: u64) -> Self {
         self.picker_threshold = n;
         self
@@ -657,45 +651,37 @@ impl<'a> Table<'a> {
                 continue; // pinned: a chip, and no control to change it with
             }
 
-            let (options, too_many) = match col {
+            let mut options: Vec<Opt> = match col {
+                // Every row of the target, however many: the app declared this control, so a menu
+                // too long to use is its to fix (drop the filter, or pin it). The alternative was a
+                // typed-id box — which, empty, posted `filter[x]=` ("rows with none") on every search.
                 Some(Column::Relation { target, .. }) => {
-                    // One page of the target, capped: `total` then says whether listing them all
-                    // would be a wall of options — or, worse, a list quietly missing the one in
-                    // force, which would leave the control showing a value that isn't the filter.
-                    let q = ListQuery {
-                        per_page: self.picker_threshold.max(1),
-                        ..Default::default()
-                    };
-                    let page = self.engine.list(target, &q, true).await?;
-                    if page.total > self.picker_threshold {
-                        (Vec::new(), page.total)
-                    } else {
-                        let options = page
-                            .data
-                            .iter()
-                            .map(|it| {
-                                let value = render::text(Some(&it.id));
-                                Opt { selected: value == chosen, label: it.label.clone(), value }
-                            })
-                            .collect();
-                        (options, 0)
-                    }
-                }
-                Some(Column::Field { options, .. }) => (
-                    options
+                    let q = ListQuery { all: true, ..Default::default() };
+                    self.engine
+                        .list(target, &q, true)
+                        .await?
+                        .data
                         .iter()
-                        .map(|o| Opt {
-                            value: o.clone(),
-                            label: o.clone(),
-                            selected: *o == chosen,
+                        .map(|it| {
+                            let value = render::text(Some(&it.id));
+                            Opt { selected: value == chosen, label: it.label.clone(), value }
                         })
-                        .collect(),
-                    0,
-                ),
-                _ => (Vec::new(), 0),
+                        .collect()
+                }
+                Some(Column::Field { options, .. }) => options
+                    .iter()
+                    .map(|o| Opt { value: o.clone(), label: o.clone(), selected: *o == chosen })
+                    .collect(),
+                _ => Vec::new(),
             };
+            // A value in force that the list doesn't have (a stale id in a link) is still offered,
+            // selected: with nothing selected the browser shows "all", and the control would claim
+            // a filter the table isn't using.
+            if !chosen.is_empty() && !options.iter().any(|o| o.selected) {
+                options.push(Opt { value: chosen.clone(), label: chosen_label.clone(), selected: true });
+            }
 
-            controls.push(ControlV { name: f.name, label, options, chosen, chosen_label, too_many });
+            controls.push(ControlV { name: f.name, label, options });
         }
         Ok((controls, chips))
     }

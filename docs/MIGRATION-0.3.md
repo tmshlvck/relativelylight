@@ -339,7 +339,7 @@ These compile silently. Check them.
 - **The create/edit modal is a `<dialog>`** opened by `?new=1` / `?edit={id}`, not by a button that
   toggles a div. You can link straight to a row's editor.
 - **`per_page` defaults to 30** in `Table` (25 in a hand-built `ListQuery`), as before.
-- **Relations above `picker_threshold`** render an id input rather than a search-as-you-type combobox
+- **To-one relations above `picker_threshold`** render an id input rather than a search-as-you-type combobox
   (that needed the fetch endpoint this release removes). Raise the threshold if your target lists are
   moderate — a `<select>` of a few hundred options is fine.
 

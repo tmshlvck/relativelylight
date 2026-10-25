@@ -139,9 +139,10 @@ impl Accessor for Mock {
     fn columns(&self) -> Vec<Column> {
         self.cols.clone()
     }
-    /// Honours `pk_in` and `per_page` — the two the UI leans on (an exact id lookup for a filter's
-    /// label, and the cap that decides whether a relation can be listed at all). Search, filters
-    /// and sort are a real backend's job and `list_tests` covers them there.
+    /// Honours `pk_in`, `per_page` and `all` — what the UI leans on (an exact id lookup for a
+    /// filter's label, the cap that decides whether a relation can be listed at all, and the uncapped
+    /// listing a to-many needs). Search, filters and sort are a real backend's job and `list_tests`
+    /// covers them there.
     async fn list(&self, q: &ListQuery, terse: bool) -> Result<Page> {
         let key = |r: &Value| match r.get("id") {
             Some(Value::String(s)) => s.clone(),
@@ -156,7 +157,7 @@ impl Accessor for Mock {
         let per_page = if q.per_page == 0 { 30 } else { q.per_page };
         let data = matching
             .iter()
-            .take(per_page as usize)
+            .take(if q.all { usize::MAX } else { per_page as usize })
             .map(|r| {
                 let id = r.get("id").cloned().unwrap_or(Value::Null);
                 let label = crate::crud::engine::default_label(r);
@@ -582,24 +583,28 @@ async fn nothing_that_reaches_the_page_can_carry_markup() {
     e.add(Arc::new(Mock::new("author", vec![field("id", false, true, None)]).rows(vec![json!({"id": NASTY})])), Arc::new(Open));
     e.add(Arc::new(Mock::new("tag", vec![field("id", false, true, None)]).rows(vec![])), Arc::new(Open));
 
-    let table = Table::new(&e, "post")
-        .title(NASTY)
-        .description(NASTY)
-        .filter("mood");
-    for state in [
-        ViewState::from_query(&format!("q={NASTY}&filter[mood]={NASTY}")),
-        ViewState::from_query("edit=%3Cscript%3Ealert(1)%3C%2Fscript%3E"),
-    ] {
-        let html = table.render_for(&no_headers(), &state).await.expect("renders");
-        assert!(
-            !html.contains("<script>"),
-            "unescaped markup reached the page from {:?}:\n{html}",
-            state.mode
-        );
-        assert!(
-            html.contains("&#60;script") || html.contains("&lt;script"),
-            "…and it should still be *shown*, escaped: {html}"
-        );
+    // Twice: the author as a `<select>`, then as the id input with the current label beside it.
+    for picker in [20, 0] {
+        let table = Table::new(&e, "post")
+            .title(NASTY)
+            .description(NASTY)
+            .filter("mood")
+            .picker_threshold(picker);
+        for state in [
+            ViewState::from_query(&format!("q={NASTY}&filter[mood]={NASTY}")),
+            ViewState::from_query("edit=%3Cscript%3Ealert(1)%3C%2Fscript%3E"),
+        ] {
+            let html = table.render_for(&no_headers(), &state).await.expect("renders");
+            assert!(
+                !html.contains("<script>"),
+                "unescaped markup reached the page from {:?}:\n{html}",
+                state.mode
+            );
+            assert!(
+                html.contains("&#60;script") || html.contains("&lt;script"),
+                "…and it should still be *shown*, escaped: {html}"
+            );
+        }
     }
 }
 
@@ -708,10 +713,10 @@ async fn choosing_all_clears_the_filter_rather_than_asking_for_the_orphans() {
 }
 
 #[tokio::test]
-async fn a_filter_whose_target_is_too_large_says_so_instead_of_listing_a_fifth_of_it() {
-    // A `<select>` capped at `picker_threshold` hides most of the values *and* misreports the one
-    // in force: with nothing selected the browser shows the first option, so the control would
-    // claim a filter the table isn't using.
+async fn a_filter_is_a_menu_of_every_value_however_large_its_target() {
+    // It used to become a typed-id box past `picker_threshold`, which — empty, in the same GET form
+    // as the search — posted `filter[author]=` ("rows with no author") with every search. A declared
+    // filter is the app's choice, so it lists everything; one too long to use is the app's to fix.
     let rows: Vec<Value> = (1..=50).map(|i| json!({"id": i, "name": format!("author {i}")})).collect();
     let mut e = Engine::new();
     e.add(Arc::new(Mock::new("post", post_columns()).rows(post_rows())), Arc::new(Open));
@@ -725,23 +730,21 @@ async fn a_filter_whose_target_is_too_large_says_so_instead_of_listing_a_fifth_o
     e.add(Arc::new(Mock::new("tag", vec![field("id", false, true, None)]).rows(vec![])), Arc::new(Open));
 
     let table = Table::new(&e, "post").filter("author").picker_threshold(20);
-    let html = table
-        .render_for(&no_headers(), &ViewState::from_query("filter[author]=42"))
-        .await
-        .unwrap();
-    assert!(!html.contains(r#"<select class="form-select form-select-sm w-auto" name="filter[author]""#),
-            "no truncated menu for the filter: {html}");
-    assert!(html.contains(r#"value="42""#), "the filter in force is what the control shows");
-    assert!(html.contains("any of 50"), "and it says how many there are: {html}");
+    let html = render(&table, &ViewState::from_query("filter[author]=42")).await;
+    assert!(html.contains(r#"<option value="*">Author: all</option>"#), "{html}");
+    assert!(html.contains(r#"<option value="42" selected>author 42</option>"#), "{html}");
+    assert!(html.contains(r#"<option value="50">author 50</option>"#), "every value, past the cap: {html}");
+    assert!(!html.contains(r#"<input type="text" class="form-control form-control-sm" style="width:11rem""#),
+            "no typed-id box: {html}");
     assert!(html.contains("<strong>author 42</strong>"), "the chip resolves its label: {html}");
 
-    // Under the threshold it is a menu again, with the right option marked.
-    let small = Table::new(&e, "post").filter("author").picker_threshold(100);
-    let html = small
-        .render_for(&no_headers(), &ViewState::from_query("filter[author]=42"))
-        .await
-        .unwrap();
-    assert!(html.contains(r#"<option value="42" selected>author 42</option>"#), "{html}");
+    // Unfiltered, the menu says "all" — so searching posts `*`, never the empty "rows with none".
+    let html = render(&table, &ViewState::from_query("q=rust")).await;
+    assert!(!html.contains(" selected>author"), "{html}");
+
+    // A value the target doesn't have (a stale link) is still the one shown, not a silent "all".
+    let html = render(&table, &ViewState::from_query("filter[author]=999")).await;
+    assert!(html.contains(r#"<option value="999" selected>"#), "{html}");
 }
 
 #[tokio::test]
@@ -1373,6 +1376,25 @@ async fn a_row_class_cannot_break_out_of_its_attribute() {
 
 // ---------- CSV: the menu, the dialog, the two ways in ----------
 
+#[tokio::test]
+async fn delete_all_is_a_table_operation_in_the_menu_posting_the_rows_form() {
+    let (e, _) = engine();
+    let html = render(&Table::new(&e, "post"), &list()).await;
+    let menu = html.split(r#"<details class="rl-menu">"#).nth(1).expect("a menu").split("</details>").next().unwrap();
+    assert!(menu.contains(r#"aria-label="Table operations""#), "{menu}");
+    assert!(menu.contains(r#"value="delete_all""#) && menu.contains("Delete all 1 matching"), "{menu}");
+    // It lives outside the rows' form, so it must name it — or it would post nothing, CSRF included.
+    assert!(menu.contains(r#"form="rl-post-rows""#), "{menu}");
+    assert!(html.contains(r#"<form method="post" id="rl-post-rows">"#), "{html}");
+    assert_eq!(html.matches(r#"value="delete_all""#).count(), 1, "and only there: {html}");
+    assert!(!menu.contains("delete_selected"), "Delete selected stays by the checkboxes it acts on");
+
+    // A reader has nothing to delete with; neither does an empty table.
+    let (e, _) = engine_with(Arc::new(ReadOnlyGate));
+    let html = render(&Table::new(&e, "post"), &list()).await;
+    assert!(!html.contains("delete_all"), "{html}");
+}
+
 #[cfg(feature = "csv")]
 #[tokio::test]
 async fn csv_lives_in_a_menu_that_needs_no_javascript_to_open() {
@@ -1565,6 +1587,58 @@ async fn a_relation_is_a_dropdown_until_its_target_outgrows_the_threshold() {
         .unwrap();
     assert!(big.contains(r#"name="author" value="" placeholder="author id""#), "{big}");
     assert!(big.contains("too many to list"), "and it says why");
+}
+
+#[tokio::test]
+async fn a_to_one_naming_no_row_is_a_field_error_before_the_backend() {
+    // The id input takes whatever is typed; the database would make of a wrong one whatever a
+    // dangling foreign key makes. Positive control: `relations_decode_to_ids` (author 3 exists).
+    let (e, log) = engine();
+    let table = Table::new(&e, "post").picker_threshold(1);
+    for (posted, shown) in [("Ada", "Ada"), ("99", "99")] {
+        let body = format!("_op=create&title=t&slug=s&author={posted}");
+        let Outcome::Invalid(state) = table.submit(&no_headers(), IP, body.as_bytes(), &list()).await.unwrap()
+        else {
+            panic!("{posted}: no author has that id");
+        };
+        let msg = state.field_error("author").unwrap_or_default();
+        assert!(msg.contains(&format!("no author matches '{shown}'")), "{msg}");
+        let html = table.render_for(&no_headers(), &state).await.unwrap();
+        assert!(html.contains(&format!(r#"name="author" value="{shown}""#)), "the typed text is kept: {html}");
+    }
+    assert_eq!(log.count(), 0, "nothing reached the backend");
+
+    // The message quotes the operator's text, so it is escaped like everything else.
+    let body = "_op=create&title=t&slug=s&author=%3Cscript%3E";
+    let Outcome::Invalid(state) = table.submit(&no_headers(), IP, body.as_bytes(), &list()).await.unwrap() else {
+        panic!("refused");
+    };
+    let html = table.render_for(&no_headers(), &state).await.unwrap();
+    assert!(!html.contains("<script>"), "{html}");
+}
+
+#[tokio::test]
+async fn a_to_many_lists_every_target_row_so_saving_cannot_unlink_one() {
+    // A posted multi-select *replaces* the relation set. Capped at `picker_threshold`, the form left
+    // out a linked tag past the cap — unselected because absent — and an unchanged save unlinked it.
+    let tags: Vec<Value> = (1..=50).map(|i| json!({"id": i, "name": format!("tag {i}")})).collect();
+    let mut row = post_rows().remove(0);
+    row["tag"] = json!([{ "id": 2, "label": "tag 2" }, { "id": 45, "label": "tag 45" }]);
+    let mut e = Engine::new();
+    e.add(Arc::new(Mock::new("post", post_columns()).rows(vec![row])), Arc::new(Open));
+    e.add(Arc::new(Mock::new("author", vec![field("id", false, true, None)]).rows(vec![])), Arc::new(Open));
+    e.add(
+        Arc::new(
+            Mock::new("tag", vec![field("id", false, true, None), field("name", true, false, None)])
+                .rows(tags),
+        ),
+        Arc::new(Open),
+    );
+
+    let html = render(&Table::new(&e, "post").picker_threshold(20), &ViewState::from_query("edit=7")).await;
+    assert!(html.contains(r#"<option value="2" selected>tag 2</option>"#), "{html}");
+    assert!(html.contains(r#"<option value="45" selected>tag 45</option>"#), "linked past the cap: {html}");
+    assert!(html.contains(r#"<option value="50">tag 50</option>"#), "and every row can be added: {html}");
 }
 
 #[tokio::test]

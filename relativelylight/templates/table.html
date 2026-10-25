@@ -16,7 +16,6 @@
       <form method="get" class="d-flex gap-2 align-items-center">
         {%- for h in keep %}<input type="hidden" name="{{ h.0 }}" value="{{ h.1 }}">{% endfor %}
         {%- for c in controls %}
-        {%- if c.too_many == 0 %}
         {#- "all" submits `*`, not an empty value: an empty one already means "rows that have none".
             (A `<select>` always submits something, so the choice needs a value of its own.) -#}
         <select class="form-select form-select-sm w-auto" name="filter[{{ c.name }}]"
@@ -26,22 +25,6 @@
           <option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>
           {%- endfor %}
         </select>
-        {%- else %}
-        {#- Too many to list. A truncated menu would be worse than no menu: it would hide most of the
-            values *and* misreport the one in force, since the browser shows the first option when
-            none is selected. So: type the id, and say how many there are. -#}
-        <input type="text" class="form-control form-control-sm" style="width:11rem"
-               name="filter[{{ c.name }}]" value="{{ c.chosen }}"
-               aria-label="Filter by {{ c.label }}"
-               placeholder="{{ c.label }}: any of {{ c.too_many }}"
-               oninput="clearTimeout(this.t); this.t = setTimeout(() => this.form.submit(), 2000)"
-               onkeydown="if (event.key === 'Enter') { clearTimeout(this.t); this.form.submit(); }"
-               {%- if c.chosen_label.is_empty() %}
-               title="{{ c.too_many }} {{ c.name }} rows — too many to list; enter one id, or clear this to see all"
-               {%- else %}
-               title="{{ c.label }}: {{ c.chosen_label }} — clear this to see all {{ c.too_many }}"
-               {%- endif %}>
-        {%- endif %}
         {%- endfor %}
         {%- if search %}
         {#- Enter submits at once; otherwise the form goes two seconds after the typing stops. A
@@ -61,21 +44,32 @@
                onsearch="clearTimeout(this.t); this.form.submit()"
                onkeydown="if (event.key === 'Enter') { clearTimeout(this.t); this.form.submit(); }">
         {%- endif %}
-        {#- The one control the form still needs without scripting: with no submit button, a browser
-            only submits on Enter when there is exactly one text field, and a large-target filter
-            makes two. -#}
+        {#- The one control the form still needs without scripting: a filter `<select>` submits itself
+            from `onchange`, which without JavaScript never fires. -#}
         <noscript><button class="btn btn-outline-secondary btn-sm" type="submit">Apply</button></noscript>
       </form>
       {%- endif %}
-      {#- CSV lives in a disclosure rather than two more buttons. `<details>` is the dropdown: it
-          opens and closes itself, so the toolbar needs no JavaScript to have a menu. -#}
-      {%- if csv %}
+      {#- What acts on the table as a whole lives in one menu rather than a row of buttons: CSV, and
+          "Delete all N matching". `<details>` is the dropdown: it opens and closes itself, so the
+          toolbar needs no JavaScript to have a menu. The delete sits outside the rows' form, so it
+          names that form (`form=`) — its CSRF token and the view's filters are what it posts. -#}
+      {%- let wipe = editable && !rows.is_empty() %}
+      {%- if csv || wipe %}
       <details class="rl-menu">
-        <summary class="btn btn-outline-secondary btn-sm">CSV</summary>
+        <summary class="btn btn-outline-secondary btn-sm" title="Table operations"
+                 aria-label="Table operations">&#8942;</summary>
         <div class="rl-menu-items card shadow-sm">
+          {%- if csv %}
           <a class="dropdown-item py-1 px-3" href="{{ csv_href }}">Export CSV</a>
           {%- if editable %}
           <a class="dropdown-item py-1 px-3" href="{{ import_href }}">Import CSV…</a>
+          {%- endif %}
+          {%- endif %}
+          {%- if wipe %}
+          {%- if csv %}<hr class="dropdown-divider my-1">{% endif %}
+          <button class="dropdown-item text-danger py-1 px-3" type="submit" form="{{ dom_id }}-rows"
+                  name="_op" value="delete_all"
+                  {% if confirm %}onclick="return confirm('Delete every row this view matches?')"{% endif %}>Delete all {{ pager.total }} matching</button>
           {%- endif %}
         </div>
       </details>
@@ -104,7 +98,7 @@
   </p>
   {%- endif %}
 
-  <form method="post">
+  <form method="post" id="{{ dom_id }}-rows">
     {%- if !csrf.is_empty() %}<input type="hidden" name="_csrf" value="{{ csrf }}">{% endif %}
     <div class="table-responsive">
       <table class="table table-sm table-hover align-middle">
@@ -169,8 +163,6 @@
     <div class="d-flex gap-2 mb-2">
       <button class="btn btn-outline-danger btn-sm" type="submit" name="_op" value="delete_selected"
               {% if confirm %}onclick="return confirm('Delete the selected rows?')"{% endif %}>Delete selected</button>
-      <button class="btn btn-outline-danger btn-sm" type="submit" name="_op" value="delete_all"
-              {% if confirm %}onclick="return confirm('Delete every row this view matches?')"{% endif %}>Delete all {{ pager.total }} matching</button>
     </div>
     {%- endif %}
   </form>

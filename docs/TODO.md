@@ -50,7 +50,8 @@ it. Everything below is follow-on work; nothing here blocked that release.
   the in-progress form values through a GET round trip (real work: the values have to survive in the
   URL), or (b) one small app-mounted search route the library renders a datalist from, which
   reintroduces an internal API and needs to be honestly labelled as one. Waiting for a user with a
-  genuinely large target table to say which hurts more.
+  genuinely large target table to say which hurts more. A to-many lists every target row; if that
+  ever gets too big, the same problem applies to it.
 - [ ] **Cross-document view transitions.** `@view-transition { navigation: auto }` plus a
   `view-transition-name` on the edited row would make POST→303→GET feel continuous. Cheap to try,
   easy to get subtly wrong (a transition that animates a 422 re-render as a navigation), so it wants
