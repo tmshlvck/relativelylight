@@ -66,15 +66,7 @@ pub(crate) struct Pager {
     pub links: Vec<PageLink>,
 }
 
-/// A JSON scalar as display text. `null` is blank rather than "null": an empty cell reads as "nothing
-/// here", which is what it means.
-pub(crate) fn text(v: Option<&Value>) -> String {
-    match v {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-    }
-}
+pub(crate) use crate::crud::text::text;
 
 /// One cell of one row.
 pub(crate) fn cell(col: &Column, row: &Value, fmt: Option<&Fmt>, tz: &Tz) -> Cell {

@@ -555,7 +555,7 @@ async fn a_datetime_cell_and_input_follow_the_callers_zone() {
 #[tokio::test]
 async fn a_format_closure_replaces_the_cell_and_escaping_is_its_job() {
     let (e, _) = engine();
-    let table = Table::new(&e, "post").format("title", |v, row| {
+    let table = Table::new(&e, "post").format_cell("title", |v, row| {
         format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v))
     });
     let html = render(&table, &list()).await;
@@ -898,7 +898,9 @@ async fn decoded(body: &str) -> Value {
 #[tokio::test]
 async fn empty_means_null_or_nothing_depending_on_the_column() {
     let body = decoded("_op=create&title=t&slug=s&body=&views=&published_at=&status=").await;
-    assert_eq!(body["body"], Value::Null, "a nullable text column takes null");
+    // `""`, which the engine stores as NULL unless the field's `blank_is_null` is off — the form
+    // leaves that call to the engine (see `transform_tests` for the stored result both ways).
+    assert_eq!(body["body"], json!(""), "a nullable text column sends the empty string");
     assert_eq!(body["status"], Value::Null, "so does a nullable enum");
     assert!(
         !body.as_object().unwrap().contains_key("views"),
@@ -1300,31 +1302,26 @@ async fn cell_and_detail(table: impl Fn(&Engine) -> Table<'_>, body: &str) -> (S
 }
 
 #[tokio::test]
-async fn format_renders_both_places_and_cell_or_detail_overrides_one() {
+async fn format_cell_and_format_view_each_render_one_place() {
     let mark = |tag: &'static str| move |v: &Value, _: &Value| format!("[{tag}:{}]", esc(v));
 
-    // `format` alone: the cell and the dialog, from the one closure.
-    let (cell, dd) = cell_and_detail(|e| Table::new(e, "thing").format("body", mark("both")), "x").await;
-    assert_eq!((cell.as_str(), dd.as_str()), ("[both:x]", "[both:x]"));
+    // Neither: the default rendering in both places (the control for the cases below).
+    let (cell, dd) = cell_and_detail(|e| Table::new(e, "thing"), "x").await;
+    assert_eq!((cell.as_str(), dd.as_str()), ("x", "x"));
 
-    // An override applies where it says, whichever order it was declared in; the other place
-    // inherits `format`.
-    let (cell, dd) = cell_and_detail(
-        |e| Table::new(e, "thing").format_cell("body", mark("cell")).format("body", mark("both")),
-        "x",
-    )
-    .await;
-    assert_eq!((cell.as_str(), dd.as_str()), ("[cell:x]", "[both:x]"));
-    let (cell, dd) = cell_and_detail(
-        |e| Table::new(e, "thing").format("body", mark("both")).format_detail("body", mark("view")),
-        "x",
-    )
-    .await;
-    assert_eq!((cell.as_str(), dd.as_str()), ("[both:x]", "[view:x]"));
-
-    // An override with no `format` behind it: the other place keeps the default rendering.
+    // Each applies where it says and nowhere else — no inheritance either way.
     let (cell, dd) = cell_and_detail(|e| Table::new(e, "thing").format_cell("body", mark("cell")), "x").await;
     assert_eq!((cell.as_str(), dd.as_str()), ("[cell:x]", "x"));
+    let (cell, dd) = cell_and_detail(|e| Table::new(e, "thing").format_view("body", mark("view")), "x").await;
+    assert_eq!((cell.as_str(), dd.as_str()), ("x", "[view:x]"));
+
+    // Both, in either order.
+    let (cell, dd) = cell_and_detail(
+        |e| Table::new(e, "thing").format_view("body", mark("view")).format_cell("body", mark("cell")),
+        "x",
+    )
+    .await;
+    assert_eq!((cell.as_str(), dd.as_str()), ("[cell:x]", "[view:x]"));
 }
 
 #[tokio::test]

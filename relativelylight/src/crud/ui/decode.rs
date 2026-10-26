@@ -4,9 +4,11 @@
 //! the ones a browser form makes unavoidable, and each of them used to be duplicated between the JS
 //! that built the payload and the server that validated it:
 //!
-//! - **empty is not always the same as nothing.** On a nullable column an empty input means `null`; on
-//!   a NOT NULL text column it means the empty string; on a number it means "don't send this field at
-//!   all", so the database default applies instead of a type error.
+//! - **empty is not always the same as nothing.** On a text column an empty input is `""`, which the
+//!   engine stores as `NULL` on a nullable column (unless `blank_is_null` is off); on a nullable number
+//!   it is `null`; on a NOT NULL number it means "don't send this field at all", so the database
+//!   default applies instead of a type error. (These are [`crate::crud::text`]'s rules, shared with
+//!   CSV import.)
 //! - **an unchecked checkbox sends nothing**, so a rendered `Bool` that is absent is `false` — which is
 //!   why the decoder walks the *columns* and consults the body, never the other way round.
 //! - **a write-only column left blank keeps its current value** (that is how "leave blank to keep the
@@ -21,6 +23,7 @@
 //! it was.
 
 use crate::crud::engine::{Cardinality, Column, Error, LogicalType};
+use crate::crud::text;
 use crate::time::Tz;
 use crate::urlform;
 use serde_json::{json, Map, Value};
@@ -98,6 +101,9 @@ impl Posted {
 }
 
 /// Build the create/update body. `rendered` is the form's field predicate.
+///
+/// What a typed value means is [`crate::crud::text`]'s, shared with CSV import; what is particular
+/// to a form is here — only rendered columns, a checkbox's presence, a multi-select's repeated key.
 pub(crate) fn to_write_body(
     cols: &[Column],
     rendered: &(dyn Fn(&str) -> bool + Send + Sync),
@@ -110,68 +116,19 @@ pub(crate) fn to_write_body(
         if !rendered(name) {
             continue;
         }
-        match col {
-            Column::Relation { cardinality: Cardinality::ToMany, .. } => {
-                let ids: Vec<Value> =
-                    posted.all(name).into_iter().filter(|s| !s.is_empty()).map(id_value).collect();
-                body.insert(name.to_string(), Value::Array(ids));
-            }
-            Column::Relation { .. } => {
-                let raw = posted.one(name).unwrap_or("").trim();
-                body.insert(
-                    name.to_string(),
-                    if raw.is_empty() { Value::Null } else { id_value(raw) },
-                );
-            }
-            Column::Field { logical_type: LogicalType::Bool, .. } => {
-                // Absent = unchecked. (A nullable Bool is edited as two states, not three: a
-                // switch that could also be "unset" is a control nobody reads correctly.)
-                body.insert(name.to_string(), json!(posted.has(name)));
-            }
-            Column::Field { logical_type, nullable, write_only, display, .. } => {
-                let raw = posted.one(name).unwrap_or("");
-                if *write_only && raw.is_empty() {
-                    continue; // keep the stored value
-                }
-                let datetime = matches!(display, Some(d) if d.is_datetime());
-                if raw.trim().is_empty() {
-                    match (nullable, logical_type, datetime) {
-                        (true, ..) => body.insert(name.to_string(), Value::Null),
-                        // Not nullable and no value typed: let the column's own default decide,
-                        // rather than sending `0` or `""` and calling it the operator's choice.
-                        (false, LogicalType::Int | LogicalType::Float, _) | (false, _, true) => {
-                            continue
-                        }
-                        (false, ..) => body.insert(name.to_string(), json!("")),
-                    };
-                    continue;
-                }
-                let value = match (datetime, logical_type) {
-                    // A datetime-local reading is wall-clock time in the caller's zone.
-                    (true, _) => tz.parse(raw).map(|s| json!(s)).unwrap_or_else(|| json!(raw)),
-                    (_, LogicalType::Int) => {
-                        raw.trim().parse::<i64>().map(|n| json!(n)).unwrap_or_else(|_| json!(raw))
-                    }
-                    (_, LogicalType::Float) => {
-                        raw.trim().parse::<f64>().map(|n| json!(n)).unwrap_or_else(|_| json!(raw))
-                    }
-                    (_, LogicalType::Json) => {
-                        serde_json::from_str(raw).unwrap_or_else(|_| json!(raw))
-                    }
-                    _ => json!(raw),
-                };
-                body.insert(name.to_string(), value);
-            }
+        let value = match col {
+            Column::Relation { cardinality: Cardinality::ToMany, .. } => Some(Value::Array(
+                posted.all(name).into_iter().filter(|s| !s.trim().is_empty()).map(text::id_value).collect(),
+            )),
+            Column::Relation { .. } => Some(text::to_one(posted.one(name).unwrap_or(""))),
+            // Absent = unchecked. (A nullable Bool is edited as two states, not three: a switch that
+            // could also be "unset" is a control nobody reads correctly.)
+            Column::Field { logical_type: LogicalType::Bool, .. } => Some(json!(posted.has(name))),
+            Column::Field { .. } => text::field_value(col, posted.one(name).unwrap_or(""), tz),
+        };
+        if let Some(v) = value {
+            body.insert(name.to_string(), v);
         }
     }
     Value::Object(body)
-}
-
-/// A relation target id: numeric when it looks numeric (the common case), else the string — a slug or
-/// UUID primary key travels unchanged.
-fn id_value(s: &str) -> Value {
-    match s.trim().parse::<i64>() {
-        Ok(n) => json!(n),
-        Err(_) => json!(s.trim()),
-    }
 }

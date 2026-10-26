@@ -18,6 +18,11 @@ mod gate_tests;
 #[cfg(all(test, feature = "ui"))]
 mod list_tests;
 
+/// A column's transforms end to end over a real database: typed text, `blank_is_null`, and
+/// `on_read`/`on_write` as an inverse pair (form and CSV).
+#[cfg(all(test, feature = "ui"))]
+mod transform_tests;
+
 #[cfg(feature = "ui")]
 pub mod ui;
 
@@ -27,6 +32,10 @@ mod ui_tests;
 
 #[cfg(feature = "csv")]
 pub mod csv_io;
+
+/// Typed text ↔ value, shared by the form decoder and CSV — one reading of an empty cell.
+#[cfg(any(feature = "ui", feature = "csv"))]
+mod text;
 
 pub use engine::{
     coerce, default_label, slugify, Accessor, BatchApplied, Cardinality, Column, Engine, Error,

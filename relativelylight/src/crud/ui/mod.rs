@@ -86,18 +86,20 @@ pub const CSS: &str = include_str!("../../../assets/rl.css");
 /// large relation still shows its selection and saves it unchanged, it just can't be edited.
 pub const JS: &str = include_str!("../../../assets/rl.js");
 
-/// A custom cell renderer: `(value, row) -> HTML`, as [`Table::format`] stores it. Its output is
+/// A custom renderer: `(value, row) -> HTML`, as [`Table::format_cell`] and [`Table::format_view`]
+/// store it. Its output is
 /// inserted **verbatim**, so escape anything that came from the database with [`esc`].
 ///
-/// `pub(crate)`: `format` takes an `impl Fn`, so no public signature names this, and an exported
+/// `pub(crate)`: the builders take an `impl Fn`, so no public signature names this, and an exported
 /// alias nobody can need is API kept forever for nothing.
 pub(crate) type Fmt = Arc<dyn Fn(&Value, &Value) -> String + Send + Sync>;
 
-/// Escape a JSON scalar for inclusion in HTML — what a [`Table::format`] closure wraps its values in.
+/// Escape a JSON scalar for inclusion in HTML — what a [`Table::format_cell`] or
+/// [`Table::format_view`] closure wraps its values in.
 /// A `String` loses its quotes; anything else prints as JSON.
 ///
 /// ```ignore
-/// .format("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))
+/// .format_cell("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))
 /// ```
 pub fn esc(value: &Value) -> String {
     esc_str(&render::text(Some(value)))

@@ -17,10 +17,11 @@
 //! - On import, a row carrying a primary-key value **updates** that row; a blank/absent PK
 //!   **creates** one. Read-only columns (the PK aside, inverse relations) are ignored.
 
-use crate::crud::engine::{Cardinality, Column, Engine, Error, ListQuery, LogicalType, Result};
+use crate::crud::engine::{Cardinality, Column, Engine, Error, ListQuery, Result};
+use crate::crud::text;
 use crate::time::Tz;
 use serde::Serialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 /// Summary of an import run. All-or-nothing: either every row applied, or `errors` says why none did.
 #[derive(Debug, Default, Serialize)]
@@ -86,22 +87,11 @@ fn cell(row: &Value, col: &Column, tz: &Tz) -> String {
     match col {
         Column::Relation { cardinality: Cardinality::ToMany, .. } => raw
             .and_then(Value::as_array)
-            .map(|items| {
-                items.iter().filter_map(|i| i.get("id")).map(scalar).collect::<Vec<_>>().join("|")
-            })
+            .map(|items| items.iter().map(|i| text::text(i.get("id"))).collect::<Vec<_>>().join("|"))
             .unwrap_or_default(),
-        Column::Relation { .. } => raw.and_then(|r| r.get("id")).map(scalar).unwrap_or_default(),
+        Column::Relation { .. } => text::text(raw.and_then(|r| r.get("id"))),
         _ if is_datetime(col) => raw.and_then(Value::as_i64).map(|s| tz.format(s)).unwrap_or_default(),
-        _ => raw.map(scalar).unwrap_or_default(),
-    }
-}
-
-/// A JSON scalar as a cell (`null` → empty, a string without its quotes).
-fn scalar(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
+        _ => text::text(raw),
     }
 }
 
@@ -176,56 +166,20 @@ fn body(
         match col {
             Column::Relation { read_only: true, .. } | Column::Field { read_only: true, .. } => {}
             Column::Relation { cardinality: Cardinality::ToMany, .. } => {
-                let ids: Vec<Value> = raw
-                    .split('|')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(id_value)
-                    .collect();
+                let ids = raw.split('|').filter(|s| !s.trim().is_empty()).map(text::id_value).collect();
                 out.insert(header.to_string(), Value::Array(ids));
             }
             Column::Relation { .. } => {
-                out.insert(
-                    header.to_string(),
-                    if raw.is_empty() { Value::Null } else { id_value(raw) },
-                );
+                out.insert(header.to_string(), text::to_one(raw));
             }
-            Column::Field { logical_type, .. } => {
-                if let Some(v) = scalar_value(*logical_type, is_datetime(col), raw.trim(), tz) {
+            // The same reading of a typed value as a form's: an empty cell means what an empty
+            // input does.
+            Column::Field { .. } => {
+                if let Some(v) = text::field_value(col, raw, tz) {
                     out.insert(header.to_string(), v);
                 }
             }
         }
     }
     (key, Value::Object(out))
-}
-
-/// Coerce a cell by its column's logical type. `None` = omit the field (an empty numeric cell, where
-/// sending `0` would be inventing a value).
-fn scalar_value(lt: LogicalType, datetime: bool, cell: &str, tz: &Tz) -> Option<Value> {
-    if datetime {
-        // Written in the caller's zone by `export`, so read back in it too.
-        return match cell.is_empty() {
-            true => Some(Value::Null),
-            false => Some(tz.parse(cell).map(|s| json!(s)).unwrap_or_else(|| json!(cell))),
-        };
-    }
-    match lt {
-        LogicalType::Int => (!cell.is_empty())
-            .then(|| cell.parse::<i64>().map(|n| json!(n)).unwrap_or_else(|_| json!(cell))),
-        LogicalType::Float => (!cell.is_empty())
-            .then(|| cell.parse::<f64>().map(|n| json!(n)).unwrap_or_else(|_| json!(cell))),
-        LogicalType::Bool => (!cell.is_empty())
-            .then(|| json!(matches!(cell.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y" | "t"))),
-        // Text / Uuid / Date / … — the string as-is (including "") so field validators can run.
-        _ => Some(json!(cell)),
-    }
-}
-
-/// A relation target id: numeric when possible (our PKs), else the raw string.
-fn id_value(s: &str) -> Value {
-    match s.trim().parse::<i64>() {
-        Ok(n) => json!(n),
-        Err(_) => json!(s.trim()),
-    }
 }

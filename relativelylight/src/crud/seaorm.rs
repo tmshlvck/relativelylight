@@ -102,7 +102,22 @@ pub struct MetaField {
     pub blank_is_null: bool,
     // Optional user hooks:
     pub validate: Option<Validator>,
+    /// The **storage codec**, inbound: the value a write carries → the value stored. Runs last on
+    /// every surface (form, CSV, your own `Engine` calls), after coercion, `blank_is_null` and
+    /// `validate`, so it sees the column's logical type — `MetaField::password` hashes here.
+    ///
+    /// Paired with [`on_read`](Self::on_read): if one is set, the other must undo it (a hash is the
+    /// exception — a write-only column is never read back). See `on_read` for why.
     pub on_write: Option<WriteTransform>,
+    /// The **storage codec**, outbound: the stored value → the value every read returns — the table,
+    /// the View dialog, CSV export, your own `Engine::get`, **and the edit form**, which is filled
+    /// from it. So it must be what [`on_write`](Self::on_write) accepts back: saving an untouched
+    /// form writes `on_write(on_read(stored))`, and anything else silently rewrites the row.
+    ///
+    /// Which is why it is **not a display hook.** Masking a phone number here puts the mask in the
+    /// edit form, and the next save stores it. Shape a value for the page with
+    /// `Table::format_cell` / `format_view` (which no form sees); keep a secret out of reads
+    /// altogether with [`write_only`](Self::write_only) or [`hidden`](Self::hidden).
     pub on_read: Option<ReadTransform>,
 }
 

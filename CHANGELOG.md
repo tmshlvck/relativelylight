@@ -29,14 +29,29 @@ is easy to miss in a diff.
     `.on_conflict(OnConflict::…do_nothing())`. The result is the same `TryInsert`.
   - `TableRef::Table` is `(TableName, Option<alias>)`, the schema/alias variants are gone, and
     `Iden::unquoted()` returns `&str` — only if you build `RelationDef`s or inspect `TableRef`s.
+- **`Table::format` is gone: `format_cell` and `format_view` replace it, one per place.** `format`
+  rendered both the cells and the View dialog. The two are now independent — neither falls back to the
+  other — so a column can be shortened in the listing and shown whole in View. Upgrade:
+  `.format(c, f)` → `.format_cell(c, f)`, plus `.format_view(c, f)` where you want it in the dialog
+  too (pass the same function to both). The dialog now shows a column without `format_view` by its
+  default rendering.
+- **Form and CSV read typed values one way; blank cells and blank inputs now agree.** What
+  changed, by surface:
+  - *Form*: a blank **nullable text** input is sent as `""` (was `null`), so the engine's
+    `blank_is_null` decides — it is still stored as `NULL` by default. A blank NOT NULL database enum is now
+    omitted (was `""`, which failed the options check).
+  - *CSV import*: a blank cell in a **nullable number, bool, enum or JSON** column clears it to
+    `NULL` (was: left unchanged), as a blank input does; a JSON cell is parsed (was stored as a
+    string); text cells are taken as written (were trimmed).
+  Upgrade: nothing, unless a CSV workflow relied on blank cells leaving values alone — fill them in.
 
 ### Added
 
-- **`Table::format_cell` / `format_detail` — render a column differently in the table and in View.**
-  `format` still renders both places (unchanged); either override replaces it in one, so a long text
-  can be shortened in the listing and shown whole in the dialog. New `crud::ui::truncate(n)` is that
-  renderer: `.format_cell("body", truncate(60))` — the first `n` characters plus `…`, the whole value
-  in the tooltip, escaped. See `docs/CRUD.md` → `format`.
+- **`crud::ui::truncate(n)` — a renderer that shortens a long text in the listing.**
+  `.format_cell("body", truncate(60))`: the first `n` characters plus `…`, the whole value in the
+  tooltip, escaped; View still shows all of it. See `docs/CRUD.md` → `format_cell`.
+- **docs/CRUD.md → "A column's way in and out"** — the storage codec (`on_read`/`on_write`), the typed
+  text the form and CSV share, and display (`format_cell`/`format_view`), with which to use when.
 - **`Table::detail_href("/post/{id}")` — View opens a page of your own.** Each row's View links to an
   app route (`{id}` replaced, percent-encoded) instead of the built-in dialog, for a row laid out with
   your own template; `?show=` then opens nothing on that table. Per entity in `Admin` via
@@ -78,6 +93,12 @@ is easy to miss in a diff.
 
 ### Fixed
 
+- **`MetaField::blank_is_null = false` had no effect through a form.** The form decoder sent `null` for
+  any blank nullable input, so the engine never saw the `""` the setting keeps. It now sends `""` and
+  the engine decides, as it did for every other caller.
+- **`on_read`/`on_write` were documented as a place to redact.** `on_read` fills the edit form too,
+  so a masked value was saved back masked. They are now documented as a storage codec — an inverse
+  pair — with masking pointed at `format_cell`/`format_view` and secrets at `write_only`.
 - **`Table::detail(false)` now closes the dialog, not just the button.** A `?show=<id>` typed into
   the URL used to open the read-only dialog on a table that had declined it (still gated — `Read`
   was checked — but not "off"). It now renders the plain listing and doesn't read the row.

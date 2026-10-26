@@ -112,8 +112,8 @@ fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
         .group("Content")
         .entity_with("post", |t| {
             // A cell renderer is a Rust closure now, and escaping is what `esc` is for: this link
-            // opens the row's own edit dialog, which is just a URL. `format_cell`, not `format`: in
-            // the View dialog — which has an Edit button of its own — the title stays plain text.
+            // opens the row's own edit dialog, which is just a URL. Cells only: in the View dialog —
+            // which has an Edit button of its own — the title stays plain text.
             t.per_page(10)
                 .format_cell(post::Column::Title.as_str(), |v, row| {
                     format!(r#"<a href="?entity=post&amp;edit={}">{}</a>"#, esc(&row["id"]), esc(v))
@@ -134,9 +134,10 @@ fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
             // Login accounts: create/edit inline (password is the write-only field above); the id
             // links to /profile/{id} for a dedicated password reset. Password never shows in reads.
             .entity_with("auth_user", |t| {
-                t.title("Login accounts").format(UserCol::Id.as_str(), |v, _row| {
-                    format!(r#"<a href="/profile/{}" title="Reset password">{}</a>"#, esc(v), esc(v))
-                })
+                // Wanted in the cells *and* the View dialog: the two are independent, so one
+                // function, passed to both.
+                let id = UserCol::Id.as_str();
+                t.title("Login accounts").format_cell(id, reset_link).format_view(id, reset_link)
             })
             .entity_with("auth_group", |t| t.title("Groups"))
             .entity_with("auth_username_lockout", |t| {
@@ -541,4 +542,9 @@ fn profile_shell(fragment: &str, who: &Identity) -> String {
     Shell::page("Profile", who.username.clone(), body, &HeaderMap::new(), "/profile")
         .render()
         .unwrap_or_default()
+}
+
+/// An account id as a link to its password-reset page — the auth_user table's id, in both places.
+fn reset_link(v: &serde_json::Value, _row: &serde_json::Value) -> String {
+    format!(r#"<a href="/profile/{}" title="Reset password">{}</a>"#, esc(v), esc(v))
 }

@@ -250,7 +250,7 @@ fn panel<'a>(app: &'a App, who: &Identity) -> Admin<'a> {
         .base("/admin")                                  // /admin/post, /admin/tag — see CRUD.md
         .filter("zone")                                  // one control across every table that has it
         .group("Content")
-        .entity_with("post", |t| t.per_page(25).format("title", |v, row| {
+        .entity_with("post", |t| t.per_page(25).format_cell("title", |v, row| {
             format!(r#"<a href="?entity=post&amp;edit={}">{}</a>"#, esc(&row["id"]), esc(v))
         }))
         .entity("tag");

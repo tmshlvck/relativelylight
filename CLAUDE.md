@@ -135,10 +135,12 @@ for its value to be sent.
 **Per-field widget overrides** pick the input where the column type can't: `field("body").textarea(8)`,
 `.radio()` (over `options`), `.range(min, max, step)`, `.email()`, `.url()`, `.datetime()`. Only the form
 input changes, not the cell; a widget that can't fit its column is a render-time error naming the field.
-`Table::format(col, closure)` is a Rust cell renderer — `(value, row) -> HTML`, the one place app HTML
-enters a page, so wrap values in `crud::ui::esc`. It renders the cells *and* the View dialog;
-`format_cell` / `format_detail` override one of them (`.format_cell("body", crud::ui::truncate(60))`),
-and `Table::detail_href("/post/{id}")` swaps the dialog for a page of the app's own.
+`Table::format_cell(col, closure)` / `format_view(col, closure)` are Rust renderers — `(value, row) ->
+HTML` for the cells / the View dialog, independent of each other, the one place app HTML enters a page,
+so wrap values in `crud::ui::esc` (`.format_cell("body", crud::ui::truncate(60))` shortens the listing
+only). `Table::detail_href("/post/{id}")` swaps the dialog for a page of the app's own. They're
+display only: `MetaField::on_read`/`on_write` are a **storage codec**, an inverse pair that also fills
+the edit form — never a place to mask a value ([docs/CRUD.md → A column's way in and out](docs/CRUD.md#a-columns-way-in-and-out)).
 Full reference: [docs/CRUD.md → Web UI](docs/CRUD.md#web-ui-ui) and
 [§ Widget overrides](docs/CRUD.md#widget-overrides--picking-the-form-input-per-field).
 

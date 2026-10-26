@@ -239,7 +239,7 @@ fn table<'a>(engine: &'a Engine, slug: &str) -> Table<'a> {
         t = t
             // Custom cell renderer: link each title to its own edit page. Escaping is the app's job
             // and `esc` is how — the closure's output is inserted verbatim.
-            .format(post::Column::Title.as_str(), |v, row| {
+            .format_cell(post::Column::Title.as_str(), |v, row| {
                 format!(r#"<a href="/post/{}/edit">{}</a>"#, esc(&row["id"]), esc(v))
             })
             // A filter on a *relation*: the toolbar gets an author picker, and choosing one narrows
@@ -337,7 +337,7 @@ async fn dashboard(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) ->
             Some("archived") => "text-body-secondary".into(),
             _ => String::new(),
         })
-        .format(post::Column::Title.as_str(), |v, row| {
+        .format_cell(post::Column::Title.as_str(), |v, row| {
             format!(r#"<a href="/post/{}/edit">{}</a>"#, esc(&row["id"]), esc(v))
         })
         .render_for(&headers, &state)

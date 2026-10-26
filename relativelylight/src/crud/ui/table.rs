@@ -52,12 +52,11 @@ struct TableTmpl {
     flash_dismiss: String,
 }
 
-/// Where a [`Table::format`]-family renderer applies.
+/// Where a renderer applies: [`Table::format_cell`] or [`Table::format_view`].
 #[derive(Clone, Copy, PartialEq)]
 enum Scope {
-    Both,
     Cell,
-    Detail,
+    View,
 }
 
 struct ControlV {
@@ -390,30 +389,17 @@ impl<'a> Table<'a> {
         });
         self
     }
-    /// Custom cell renderer for a column: `(value, row) -> HTML`, called during render. The output is
-    /// inserted verbatim, so wrap database values in [`esc`](super::esc):
+    /// A renderer for the column's **table cells**: `(value, row) -> HTML`, called during render. The
+    /// output is inserted verbatim, so wrap database values in [`esc`](super::esc):
     ///
     /// ```ignore
-    /// .format("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))
+    /// .format_cell("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))
+    /// .format_cell("body", truncate(60))   // a corner of it in the table — View still shows it all
     /// ```
     ///
-    /// It renders the column in both places a row is shown — the table's cells and the View dialog.
-    /// [`format_cell`](Table::format_cell) and [`format_detail`](Table::format_detail) override it
-    /// for one of them.
-    pub fn format<F>(mut self, column: impl Into<String>, render: F) -> Self
-    where
-        F: Fn(&Value, &Value) -> String + Send + Sync + 'static,
-    {
-        self.formatters.push((column.into(), Scope::Both, Arc::new(render)));
-        self
-    }
-    /// A renderer for the column's **table cells** only, overriding [`format`](Table::format) there;
-    /// the View dialog keeps `format`, or the default. The shape for a value the listing should
-    /// shorten and the dialog show whole — [`truncate`](super::truncate) is that renderer:
-    ///
-    /// ```ignore
-    /// .format_cell("body", truncate(60))   // a corner of it in the table, all of it in View
-    /// ```
+    /// Cells only: the View dialog renders the column by default unless it has a
+    /// [`format_view`](Table::format_view) of its own. The two are independent — for the same
+    /// rendering in both, pass the same function to each.
     pub fn format_cell<F>(mut self, column: impl Into<String>, render: F) -> Self
     where
         F: Fn(&Value, &Value) -> String + Send + Sync + 'static,
@@ -421,25 +407,25 @@ impl<'a> Table<'a> {
         self.formatters.push((column.into(), Scope::Cell, Arc::new(render)));
         self
     }
-    /// A renderer for the column in the **View dialog** only, overriding [`format`](Table::format)
-    /// there; the table's cells keep `format`, or the default. E.g. a multi-line text kept as typed:
-    /// `|v, _| format!("<pre>{}</pre>", esc(v))`. (Nothing to override with
-    /// [`detail_href`](Table::detail_href): the view is then the app's page.)
-    pub fn format_detail<F>(mut self, column: impl Into<String>, render: F) -> Self
+    /// A renderer for the column in the **View dialog**, as [`format_cell`](Table::format_cell) is for
+    /// the cells, and independent of it. E.g. a multi-line text kept as typed:
+    /// `|v, _| format!("<pre>{}</pre>", esc(v))`. (With [`detail_href`](Table::detail_href) the view
+    /// is the app's own page, and this is never called.)
+    pub fn format_view<F>(mut self, column: impl Into<String>, render: F) -> Self
     where
         F: Fn(&Value, &Value) -> String + Send + Sync + 'static,
     {
-        self.formatters.push((column.into(), Scope::Detail, Arc::new(render)));
+        self.formatters.push((column.into(), Scope::View, Arc::new(render)));
         self
     }
 
-    /// The renderers in force where `scope` shows a row: that place's own first, then the shared
-    /// ones, so a lookup by column name finds the override before `format`.
+    /// The renderers for one place a row is shown, by column name.
     fn formatters_for(&self, scope: Scope) -> Vec<(String, Fmt)> {
-        let pick = |want: Scope| {
-            self.formatters.iter().filter(move |(_, s, _)| *s == want).map(|(n, _, f)| (n.clone(), f.clone()))
-        };
-        pick(scope).chain(pick(Scope::Both)).collect()
+        self.formatters
+            .iter()
+            .filter(|(_, s, _)| *s == scope)
+            .map(|(n, _, f)| (n.clone(), f.clone()))
+            .collect()
     }
     /// Namespaces the fragment's DOM id, so two tables for the same entity can share a page.
     pub fn dom_id(mut self, id: impl Into<String>) -> Self {
@@ -891,7 +877,7 @@ impl<'a> Table<'a> {
         // `render_for` has already authorized `Read` for this caller (every non-list mode does),
         // with their real headers — there is nothing left to check here.
         let row = self.engine.get(&self.slug, id).await?;
-        let fmts = self.formatters_for(Scope::Detail);
+        let fmts = self.formatters_for(Scope::View);
         let fields = cols
             .iter()
             // A write-only column has nothing to show — the backend never returns one — so it

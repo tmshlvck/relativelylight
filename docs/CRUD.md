@@ -167,7 +167,7 @@ panics on an unknown column, like `field`.
 ### Column names the compiler checks
 
 Every setting that names a column takes a string. That includes `field`, `label_column`, and the UI's
-`columns`, `fields`, `format`, `sort`, `filter` and `fixed_filter`. A field's name *is* SeaORM's
+`columns`, `fields`, `format_cell`, `format_view`, `sort`, `filter` and `fixed_filter`. A field's name *is* SeaORM's
 column name, so the `Column` enum that `DeriveEntityModel` generates can supply it.
 `IdenStatic::as_str` returns exactly the string the crate uses, and a misspelt variant fails to compile:
 
@@ -220,14 +220,16 @@ pub struct MetaField {
     pub required:  bool,        // NOT NULL + no default + not the PK → a create must carry it
     pub options: Vec<String>,   // allowed values; introspected from an enum column, or set by hand
     pub blank_is_null: bool,    // nullable + empty string submitted → store NULL (default true)
-    pub on_write:  Option<Box<dyn Fn(Value) -> Value + ...>>,   // inbound  (e.g. hash)
-    pub on_read:   Option<Box<dyn Fn(&Value) -> Value + ...>>,  // outbound (e.g. redact)
+    pub on_write:  Option<Box<dyn Fn(Value) -> Value + ...>>,   // storage codec, inbound  (e.g. hash)
+    pub on_read:   Option<Box<dyn Fn(&Value) -> Value + ...>>,  // storage codec, outbound: on_write's inverse
 }
 ```
 
 Defaults tie behavior to structure: **PK → `read_only`**, **FK → `hidden`** (represented by its
-relation). The three visibility flags cover both directions — a redacted-but-writable field uses
-`on_read`; a write-only secret uses `write_only = true` + `on_write = hash`.
+relation). The three visibility flags cover both directions — a write-only secret uses
+`write_only = true` + `on_write = hash`. `on_read`/`on_write` are a **storage codec**, an inverse pair,
+not a display hook: the edit form is filled from `on_read`, so a value masked there is saved back
+masked. See [A column's way in and out](#a-columns-way-in-and-out).
 
 **Password helper (feature `auth`).** For the common password case, `MetaField::password()` does that
 whole write-only-secret setup in one call — write-only, labelled `"Password"`, argon2id-hashed on
@@ -456,6 +458,31 @@ Create/update pipeline (hooks optional):
 
 Order is **coerce → validate → transform**.
 
+### A column's way in and out
+
+A value passes through up to three layers, and only the outer two take your code:
+
+| Layer | Stored → page | Typed → stored | Configured on |
+|---|---|---|---|
+| **Storage codec** — every surface: UI, CSV, your own `Engine` calls | `on_read` | coercion, `blank_is_null`, `validate`, then `on_write` | the model (`MetaField`) |
+| **Typed text** — the form and CSV, one shared reading | built in by type: a datetime in the caller's zone, a relation as its id(s), else the value as text | built in by type: numbers and JSON parsed, a datetime read in the caller's zone, the blank rules below | the model (`display`: `.datetime()`, `.textarea()`, …) |
+| **Display** — the table's cells and the View dialog only | built in by type (a bool badge, a relation's label), or `Table::format_cell` / `format_view` | — | the table |
+
+- **The codec is an inverse pair.** `on_read`'s output is what *every* read returns, the edit form
+  included, so saving an untouched form writes `on_write(on_read(stored))`. A phone stored as digits
+  and shown as `+420 123 456 789` is a codec (`on_write` strips the formatting); a masked phone is
+  display and belongs in a formatter, which no form sees. Both run *after* coercion, so they work in
+  the column's logical type — a codec can't turn an integer column into text.
+- **The form and CSV read typed text the same way**, so a blank input and a blank cell mean the same
+  thing: on a text column `""` (stored as `NULL` on a nullable one unless `blank_is_null` is off), on
+  anything else `NULL` when nullable and otherwise "not sent" (the default on create, unchanged on
+  update); a write-only column left blank keeps its value. The input itself is chosen by `display`
+  and the type, and it round-trips with the reading — which is why there is no per-form transform
+  hook: a pair of app closures that weren't exact inverses would corrupt the row on every save.
+- **Display is one-way.** `format_cell` and `format_view` are HTML for a page and never reach a form
+  or a file; `display` is the setting that changes every surface at once (an integer column shown,
+  typed and exported as a datetime).
+
 ```rust
 post.field("title").validate = Some(Box::new(|v| {
     if v.as_str().unwrap_or("").trim().is_empty() { Err("Title cannot be empty".into()) }
@@ -473,8 +500,8 @@ Field errors render under the field; `errors[]` are cross-field/banner errors.
 ### Nullable columns: `""` vs `NULL`
 
 Nullability is read from the entity (`ColumnDef::is_null()`) into `MetaField::nullable`, reported in the
-column description (`Column::Field { nullable: true, .. }`), which is how the form knows an empty
-input means `null` here and `""` elsewhere.
+column description (`Column::Field { nullable: true, .. }`), which is how the form knows a blank
+number means `null` here and "leave it alone" elsewhere.
 It also decides what an **empty** submitted string means:
 
 | Column | Submitted `""` | Stored |
@@ -752,8 +779,8 @@ and in all three examples.
 | `sort(col)` / `sort_desc(col)` | the default sort, used until the URL says otherwise |
 | `filter(name)` | a filter `<select>` in the toolbar, for a column or a to-one relation |
 | `fixed_filter(name, value)` | a filter **pinned** to one value, with no control — a table *about* that value |
-| `format(col, closure)` | a custom renderer, `(value, row) -> HTML`, for the cells **and** the View dialog |
-| `format_cell` / `format_detail(col, closure)` | the same, for the cells only / the View dialog only — overriding `format` there |
+| `format_cell(col, closure)` | a custom renderer for the column's cells, `(value, row) -> HTML` |
+| `format_view(col, closure)` | the same for the View dialog — independent of `format_cell` |
 | `picker_threshold(n)` | how many target rows a relation may list as a `<select>` / multi-select before it uses the [picker](#picker--choosing-from-a-large-relation) (default 50) |
 | `dom_id(id)` | namespaces the fragment's id, so two tables of one entity can share a page |
 
@@ -783,29 +810,28 @@ Table::new(&engine, "invoice")
 Both are checked: a name `columns` doesn't recognise is a render-time error naming it, and the class
 is escaped like any other attribute.
 
-**`format` is a Rust closure** whose output is inserted verbatim, so wrap database values in
+**`format_cell` is a Rust closure** whose output is inserted verbatim, so wrap database values in
 `crud::ui::esc`:
 
 ```rust
-.format("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))
+.format_cell("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))
 ```
 
-It renders the column wherever a row is shown — the table's cells and the View dialog. To render
-them differently, override one place: `format_cell(col, closure)` for the cells, `format_detail(col,
-closure)` for the dialog. Each place uses its own override, else `format`, else the default, so the
-order they're declared in doesn't matter. The usual case is a long text the listing shortens and View
-shows whole; `crud::ui::truncate(n)` is that renderer — the first `n` characters and `…`, the whole
-value in the tooltip, escaped:
+It renders the column's **cells**; `format_view(col, closure)` renders it in the **View dialog**.
+They are independent — neither falls back to the other — so a long text can be shortened in the
+listing and shown whole in View, and for the same rendering in both you pass the same function to
+each (`examples/adminpanel` does, for the accounts table's id). `crud::ui::truncate(n)` is the
+shortening renderer: the first `n` characters and `…`, the whole value in the tooltip, escaped:
 
 ```rust
-.format_cell("body", truncate(60))                            // a corner in the table, all of it in View
-.format_detail("notes", |v, _| format!("<pre>{}</pre>", esc(v))) // keep the line breaks it was typed with
+.format_cell("body", truncate(60))                              // a corner in the table, all of it in View
+.format_view("notes", |v, _| format!("<pre>{}</pre>", esc(v)))   // keep the line breaks it was typed with
 ```
 
-The dialog shows text with ordinary HTML whitespace, so line breaks collapse; a `format_detail`
+The dialog shows text with ordinary HTML whitespace, so line breaks collapse; a `format_view`
 choosing `<pre>` (or turning `\n` into `<br>`) is how a pre-formatted column keeps them.
 
-That is the one place (well, three closures of one shape) app-supplied HTML enters the page; everything else is escaped by the template
+That is the one place (two closures of one shape) app-supplied HTML enters the page; everything else is escaped by the template
 engine, and the escaping is tested against `<script>`-bearing data in every cell, label, chip, option
 and input value (`crud/ui_tests.rs`).
 
@@ -835,7 +861,7 @@ exact id lookup, rather than the id the URL carries.
 listing *every* published column, not just the writable ones. It is the only way to see a generated
 id, a hook-stamped `created_at`, or a column `columns([…])` leaves out of the listing, and the only
 row view a caller who may not write gets at all. Values come from the same renderer as the cells, so
-relations show labels, datetimes are in the caller's zone, and a `format` closure applies.
+relations show labels and datetimes are in the caller's zone; a `format_view` closure replaces that.
 Write-only columns are left out — the backend never returns one, so the row would be blank beside
 "Password". `detail(false)` removes it: the button, and the dialog — a `?show=7` typed into the URL
 renders the plain listing without reading the row.
