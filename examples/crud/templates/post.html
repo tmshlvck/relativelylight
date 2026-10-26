@@ -1,0 +1,14 @@
+{#- What the post table's View opens (`Table::detail_href("/post/{id}")`): one row, laid out by the
+    app. Every value is escaped by askama; nothing here is the library's. -#}
+<article>
+  <h2>{{ title }}</h2>
+  <p class="text-muted">
+    by {{ author }}{% if !published.is_empty() %} · {{ published }}{% endif %}
+    {%- for t in tags %} <span class="badge text-bg-secondary">{{ t }}</span>{% endfor %}
+  </p>
+  {%- for p in paragraphs %}
+  <p>{{ p }}</p>
+  {%- endfor %}
+  <a class="btn btn-primary" href="/post/{{ id }}/edit">Edit</a>
+  <a class="btn btn-secondary" href="/post">Back to posts</a>
+</article>

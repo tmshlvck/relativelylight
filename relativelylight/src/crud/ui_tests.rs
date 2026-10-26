@@ -1248,6 +1248,44 @@ async fn a_table_can_decline_the_detail_view() {
     assert!(html.contains("First post"), "but still shows its rows");
 }
 
+#[tokio::test]
+async fn a_declined_detail_view_does_not_open_from_the_url_either() {
+    let (e, _) = engine();
+    let shown = ViewState::from_query("show=7");
+    // Positive control: the same URL opens the dialog on a table that offers it.
+    let html = render(&Table::new(&e, "post"), &shown).await;
+    assert!(html.contains("<dialog open") && html.contains("post #7"), "{html}");
+
+    let html = render(&Table::new(&e, "post").detail(false), &shown).await;
+    assert!(!html.contains("<dialog"), "a typed ?show= opens nothing: {html}");
+    assert!(!html.contains("post #7"), "and the row is not shown: {html}");
+    assert!(html.contains("First post"), "the listing renders as usual");
+}
+
+#[tokio::test]
+async fn view_can_link_to_a_page_of_the_apps_own() {
+    let (e, _) = engine();
+    let table = Table::new(&e, "post").detail_href("/post/{id}");
+    let html = render(&table, &list()).await;
+    assert!(html.contains(r#"href="/post/7">View</a>"#), "{html}");
+    assert!(!html.contains("show=7"), "no link to the built-in dialog: {html}");
+
+    let html = render(&table, &ViewState::from_query("show=7")).await;
+    assert!(!html.contains("<dialog"), "the view lives elsewhere, so ?show= opens nothing: {html}");
+
+    // `detail(false)` still wins, in either order.
+    let html = render(&Table::new(&e, "post").detail_href("/post/{id}").detail(false), &list()).await;
+    assert!(!html.contains(">View</a>"), "{html}");
+
+    // The id goes into a path, so it is percent-encoded — a space as %20, not a query's `+`.
+    let cols = vec![field("id", false, true, None), field("title", true, false, None)];
+    let mut e = Engine::new();
+    let rows = vec![json!({"id": "a b/\"c", "title": "odd"})];
+    e.add(Arc::new(Mock::new("thing", cols).rows(rows)), Arc::new(Open));
+    let html = render(&Table::new(&e, "thing").detail_href("/thing/{id}"), &list()).await;
+    assert!(html.contains(r#"href="/thing/a%20b%2F%22c">View</a>"#), "{html}");
+}
+
 // ---------- how many rows a page shows ----------
 
 #[tokio::test]

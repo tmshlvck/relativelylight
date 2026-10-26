@@ -146,6 +146,7 @@ pub struct Table<'a> {
     formatters: Vec<(String, Fmt)>,
     row_class: Option<RowClass>,
     detail: bool,
+    detail_href: Option<String>,
     pub(super) filters: Vec<FilterSpec>,
     sort: Vec<(String, bool)>,
 }
@@ -182,6 +183,7 @@ impl<'a> Table<'a> {
             formatters: Vec::new(),
             row_class: None,
             detail: true,
+            detail_href: None,
             filters: Vec::new(),
             sort: Vec::new(),
         }
@@ -240,11 +242,40 @@ impl<'a> Table<'a> {
     /// published column. Default: on.
     ///
     /// It is the only way to see what a form doesn't: a generated id, a hook-stamped `created_at`,
-    /// a long text column the table shows a corner of — and the only row view a caller who may not
-    /// write gets at all. Turn it off for a table that already shows everything it has.
+    /// a column [`columns`](Table::columns) leaves out of the listing — and the only row view a
+    /// caller who may not write gets at all. Turn it off for a table that already shows everything
+    /// it has: the button goes, and so does the dialog — a `?show=7` typed into the URL renders the
+    /// plain listing, without reading the row.
     pub fn detail(mut self, on: bool) -> Self {
         self.detail = on;
         self
+    }
+    /// Point each row's **View** at a page of the app's own instead of the built-in dialog —
+    /// `"/post/{id}"`, `{id}` replaced with the row's id (percent-encoded). The page renders the row
+    /// however it likes, with its own template and whatever else it looks up; the crate draws only
+    /// the link. `?show=` then opens nothing here, as with [`detail(false)`](Table::detail), which
+    /// still wins: it removes the button too.
+    ///
+    /// The page is the app's route, so its gate is the app's check: `Engine` is ungated, so ask
+    /// `Engine::decide(slug, Operation::Read, &headers)` before `Engine::get`, exactly as this
+    /// table does before its own dialog.
+    pub fn detail_href(mut self, template: impl Into<String>) -> Self {
+        self.detail_href = Some(template.into());
+        self
+    }
+
+    /// Whether `?show=` opens the built-in dialog here.
+    fn detail_dialog_on(&self) -> bool {
+        self.detail && self.detail_href.is_none()
+    }
+
+    /// Each row's View link, or empty when the table offers none.
+    fn show_href(&self, state: &ViewState, id: &str) -> String {
+        match (&self.detail_href, self.detail) {
+            (_, false) => String::new(),
+            (Some(t), true) => t.replace("{id}", &crate::urlform::encode(id).replace('+', "%20")),
+            (None, true) => state.href_show(id),
+        }
     }
 
     /// Ask for confirmation before a delete (an `onsubmit` confirm — the one bit of inline script,
@@ -400,7 +431,11 @@ impl<'a> Table<'a> {
         let dialog = match (state.mode(), editable) {
             (Mode::List, _) => String::new(),
             // A read-only row is a *read*: a caller who may not write still gets it.
-            (Mode::Show(id), _) => self.detail_dialog(&cols, id, &state, &tz, editable).await?,
+            (Mode::Show(id), _) if self.detail_dialog_on() => {
+                self.detail_dialog(&cols, id, &state, &tz, editable).await?
+            }
+            // Declined, or the view is a page of the app's: a typed `?show=` opens nothing.
+            (Mode::Show(_), _) => String::new(),
             (_, false) => String::new(),
             (Mode::Import, true) => self.import_dialog(&cols, &state, &csrf)?,
             (mode, true) => self.dialog(&cols, mode, &state, headers, &csrf).await?,
@@ -428,7 +463,7 @@ impl<'a> Table<'a> {
                 self.row_class.as_ref(),
                 &state,
                 &tz,
-                self.detail,
+                Some(&|id: &str| self.show_href(&state, id)),
             ),
             detail: self.detail,
             pager: if self.pagination {
@@ -472,7 +507,7 @@ impl<'a> Table<'a> {
             q: state.q.clone(),
             keep: self.keep(&state),
             heads: render::heads(&shown, &state),
-            rows: render::rows(&page, &shown, &self.formatters, None, &state, &tz, false),
+            rows: render::rows(&page, &shown, &self.formatters, None, &state, &tz, None),
             pager: render::pager(&page, &state),
         }
         .render()

@@ -32,6 +32,11 @@ is easy to miss in a diff.
 
 ### Added
 
+- **`Table::detail_href("/post/{id}")` — View opens a page of your own.** Each row's View links to an
+  app route (`{id}` replaced, percent-encoded) instead of the built-in dialog, for a row laid out with
+  your own template; `?show=` then opens nothing on that table. Per entity in `Admin` via
+  `entity_with`. The page's gate is the app's (`Engine::decide(.., Operation::Read, ..)` before
+  `Engine::get`). See `docs/CRUD.md` → the read-only row; example: `crud`'s `/post/{id}`.
 - **`crud::ui::RelationField` — the relation input, for a form of your own.** The input `Form`,
   `Table` and `Admin` render for a relation — a `<select>` up to `picker_threshold`, the picker
   dialog past it — as a fragment for a hand-written `<form>`: a bulk action, a filter, anything that
@@ -68,6 +73,9 @@ is easy to miss in a diff.
 
 ### Fixed
 
+- **`Table::detail(false)` now closes the dialog, not just the button.** A `?show=<id>` typed into
+  the URL used to open the read-only dialog on a table that had declined it (still gated — `Read`
+  was checked — but not "off"). It now renders the plain listing and doesn't read the row.
 - **Saving a form could silently unlink a to-many relation.** `crud::ui`'s multi-select listed only
   the first `picker_threshold` (default 20) rows of the target, and a posted multi-select *replaces*
   the relation set — so a linked row past the cap rendered unselected, because it wasn't rendered at

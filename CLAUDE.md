@@ -289,6 +289,7 @@ both, over the one `RealIp` that makes them agree about who was here.
 
 ```bash
 cargo run -p crud-example         # :3000  compose it yourself: per-entity pages, standalone Form (/post/new), /dashboard,
+                                  #         a post's own View page (/post/{id}, Table::detail_href),
                                   #         a pinned filter at /author/{id}/posts, CSV, the timezone cookie + DST rows (/event),
                                   #         the relation picker (/pick) for a post's author and tags — no auth
 cargo run -p relationfield-example # :3000  a hand-written form with the admin's relation input in it (RelationField):

@@ -1,7 +1,7 @@
 //! crud example — the server-rendered UI, ungated.
 //!
 //! One page per entity (`/{slug}`), the **standalone `Form`** on the app's own pages
-//! (`/post/new`, `/post/{id}/edit`), a table *about one value* at `/author/{id}/posts`, CSV export,
+//! (`/post/new`, `/post/{id}/edit`), a row's own page behind View (`/post/{id}`), a table *about one value* at `/author/{id}/posts`, CSV export,
 //! and a create/edit `<dialog>` that opens from the URL. No JavaScript framework, no JSON API: the
 //! only script is `crud::ui::JS`, the relation picker's — a post's `author` and `tag` have more rows
 //! than `picker_threshold` (50), so the form shows the selection and edits it in a dialog served by
@@ -25,8 +25,8 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use model::{author, event, post, profile, tag, user};
-use relativelylight::authz::Open;
-use relativelylight::crud::engine::{Engine, Result as CrudResult};
+use relativelylight::authz::{Decision, Open, Operation};
+use relativelylight::crud::engine::{Engine, Error, Result as CrudResult};
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::crud::ui::{esc, Form, Outcome, Picker, Table, ViewState, CSS, JS};
 use relativelylight::middleware::RealIp;
@@ -200,6 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // (/dashboard, /post/new, /tz) are static and win over the parameter, so they still route.
         .route("/{slug}", get(entity_page).post(entity_write))
         .route("/post/new", get(new_post).post(save_new_post))
+        .route("/post/{id}", get(post_page))
         .route("/post/{id}/edit", get(edit_post).post(save_post))
         .route("/author/{id}/posts", get(author_posts).post(author_posts_write))
         // The relation picker's page, which the form's dialog loads in an iframe. One GET handler;
@@ -245,7 +246,10 @@ fn table<'a>(engine: &'a Engine, slug: &str) -> Table<'a> {
             // the listing, the CSV export and "delete all matching" alike. Sorting by `author` orders
             // by the name shown in the cell rather than the foreign key.
             .filter("author")
-            .sort(post::Column::Title.as_str());
+            .sort(post::Column::Title.as_str())
+            // View opens this app's own page for the row (`post_page` below, its own template)
+            // rather than the built-in dialog — and `?show=` no longer opens that dialog here.
+            .detail_href("/post/{id}");
     }
     t
 }
@@ -548,6 +552,55 @@ async fn save_post(
         }
         Err(e) => e.into_response(),
     }
+}
+
+// ---- a row's own page: what the post table's View opens (`Table::detail_href`) ----
+
+/// One post, laid out by this app's template rather than the built-in dialog's label/value list.
+#[derive(Template)]
+#[template(path = "post.html")]
+struct PostPage {
+    id: String,
+    title: String,
+    author: String,
+    tags: Vec<String>,
+    published: String,
+    paragraphs: Vec<String>,
+}
+
+async fn post_page(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(id): Path<String>,
+) -> Response {
+    // `Engine` is ungated; the table asks the gate before its own dialog, so this page does too.
+    // (`Open` here, so it always allows; a gated app gets 401/403.)
+    let html = match app.engine.decide("post", Operation::Read, &headers).await {
+        Decision::Allow => post_html(&app.engine, &id, &Tz::from_headers(&headers)).await,
+        Decision::NeedsLogin => Err(Error::Unauthorized),
+        Decision::Denied => Err(Error::Forbidden),
+    };
+    render(&app, "post", Req { headers: &headers, uri: &uri }, html, true)
+}
+
+async fn post_html(engine: &Engine, id: &str, tz: &Tz) -> CrudResult<String> {
+    // The finished row: relations already resolved to `{id, label}`, as in the table's cells.
+    let row = engine.get("post", id).await?;
+    let text = |k: &str| row[k].as_str().unwrap_or_default().to_string();
+    PostPage {
+        id: id.to_string(),
+        title: text("title"),
+        author: row["author"]["label"].as_str().unwrap_or_default().to_string(),
+        tags: row["tag"]
+            .as_array()
+            .map(|t| t.iter().filter_map(|t| t["label"].as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
+        published: row["published_at"].as_i64().map(|s| tz.format(s)).unwrap_or_default(),
+        paragraphs: text("body").split("\n\n").map(str::to_string).collect(),
+    }
+    .render()
+    .map_err(|e| Error::Backend(e.to_string()))
 }
 
 // ---- the shell ----

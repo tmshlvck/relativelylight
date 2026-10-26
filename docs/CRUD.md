@@ -743,6 +743,7 @@ and in all three examples.
 | `per_page_choices([…])` | the sizes the toolbar offers (default `[10, 30, 100, 250]`; empty hides the control) |
 | `per_page_max(n)` | the largest page this table will fetch, however large a `?per_page=` asks for (default **10,000**) |
 | `detail(bool)` | the per-row **View** action and its read-only dialog (default on) |
+| `detail_href("/post/{id}")` | point **View** at a page of the app's own instead of the dialog |
 | `read_only(bool)` | no Create/Edit/Delete and no dialog, for anyone |
 | `confirm(bool)` | an `onclick` confirm on destructive buttons (default on) |
 | `columns([…])` | which columns the **table** shows, and in what order (default: all of them) |
@@ -816,11 +817,21 @@ exact id lookup, rather than the id the URL carries.
 
 **The read-only row.** Every table offers a **View** action per row, opening `?show=<pk>` — a dialog
 listing *every* published column, not just the writable ones. It is the only way to see a generated
-id, a hook-stamped `created_at`, or the whole of a long text column the table shows a corner of, and
-the only row view a caller who may not write gets at all. Values come from the same renderer as the
-cells, so relations show labels, datetimes are in the caller's zone, and a `format` closure applies.
+id, a hook-stamped `created_at`, or a column `columns([…])` leaves out of the listing, and the only
+row view a caller who may not write gets at all. Values come from the same renderer as the cells, so
+relations show labels, datetimes are in the caller's zone, and a `format` closure applies.
 Write-only columns are left out — the backend never returns one, so the row would be blank beside
-"Password". `detail(false)` removes it.
+"Password". `detail(false)` removes it: the button, and the dialog — a `?show=7` typed into the URL
+renders the plain listing without reading the row.
+
+**Your own view page.** The dialog's layout is fixed (a label/value list). For a row laid out your
+way — your own template, related rows, anything async — point View at a route of the app's with
+`detail_href("/post/{id}")`; `{id}` is replaced with the row's id, percent-encoded. The table then
+draws only the link, and `?show=` opens nothing (`detail(false)` still wins and removes the button).
+The page is yours, and so is its gate: `Engine` is ungated, so ask
+`engine.decide("post", Operation::Read, &headers)` before `engine.get("post", &id)` — the check the
+table makes before its own dialog. In `Admin` it is per entity:
+`.entity_with("post", |t| t.detail_href("/post/{id}"))`. (Example: `crud`'s `/post/{id}`.)
 
 **Searching.** Typing submits the view two seconds after you stop; Enter submits at once. A submit
 is a page load, so it waits for a pause rather than chasing keystrokes — and the input takes focus

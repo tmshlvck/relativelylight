@@ -126,7 +126,7 @@ pub(crate) fn sortable(col: &Column) -> bool {
     }
 }
 
-/// Every row of the page, with its edit link.
+/// Every row of the page, with its edit link — and its View link from `show`, if it has one.
 pub(crate) fn rows(
     page: &Page,
     cols: &[Column],
@@ -134,7 +134,7 @@ pub(crate) fn rows(
     row_class: Option<&super::RowClass>,
     state: &ViewState,
     tz: &Tz,
-    detail: bool,
+    show: Option<&dyn Fn(&str) -> String>,
 ) -> Vec<RowV> {
     page.data
         .iter()
@@ -143,7 +143,7 @@ pub(crate) fn rows(
             let row = item.row.clone().unwrap_or(Value::Null);
             RowV {
                 edit_href: state.href_edit(&id),
-                show_href: if detail { state.href_show(&id) } else { String::new() },
+                show_href: show.map(|f| f(&id)).unwrap_or_default(),
                 class: row_class.map(|f| f(&row)).unwrap_or_default(),
                 cells: cols
                     .iter()
