@@ -32,6 +32,11 @@ is easy to miss in a diff.
 
 ### Added
 
+- **`Table::format_cell` / `format_detail` — render a column differently in the table and in View.**
+  `format` still renders both places (unchanged); either override replaces it in one, so a long text
+  can be shortened in the listing and shown whole in the dialog. New `crud::ui::truncate(n)` is that
+  renderer: `.format_cell("body", truncate(60))` — the first `n` characters plus `…`, the whole value
+  in the tooltip, escaped. See `docs/CRUD.md` → `format`.
 - **`Table::detail_href("/post/{id}")` — View opens a page of your own.** Each row's View links to an
   app route (`{id}` replaced, percent-encoded) instead of the built-in dialog, for a row laid out with
   your own template; `?show=` then opens nothing on that table. Per entity in `Admin` via

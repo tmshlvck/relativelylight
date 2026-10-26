@@ -136,7 +136,9 @@ for its value to be sent.
 `.radio()` (over `options`), `.range(min, max, step)`, `.email()`, `.url()`, `.datetime()`. Only the form
 input changes, not the cell; a widget that can't fit its column is a render-time error naming the field.
 `Table::format(col, closure)` is a Rust cell renderer — `(value, row) -> HTML`, the one place app HTML
-enters a page, so wrap values in `crud::ui::esc`.
+enters a page, so wrap values in `crud::ui::esc`. It renders the cells *and* the View dialog;
+`format_cell` / `format_detail` override one of them (`.format_cell("body", crud::ui::truncate(60))`),
+and `Table::detail_href("/post/{id}")` swaps the dialog for a page of the app's own.
 Full reference: [docs/CRUD.md → Web UI](docs/CRUD.md#web-ui-ui) and
 [§ Widget overrides](docs/CRUD.md#widget-overrides--picking-the-form-input-per-field).
 

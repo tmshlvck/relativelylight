@@ -103,6 +103,25 @@ pub fn esc(value: &Value) -> String {
     esc_str(&render::text(Some(value)))
 }
 
+/// A ready-made renderer that shortens a value to its first `chars` characters plus `…`, with the
+/// whole of it in the `title` tooltip — for [`Table::format_cell`], so the listing shows a corner of
+/// a long text and the View dialog all of it. Escapes the value; a value that fits is shown as is.
+///
+/// ```ignore
+/// Table::new(&engine, "post").format_cell("body", truncate(60))
+/// ```
+pub fn truncate(chars: usize) -> impl Fn(&Value, &Value) -> String + Send + Sync + 'static {
+    move |v, _| {
+        let s = render::text(Some(v));
+        match s.char_indices().nth(chars) {
+            None => esc_str(&s),
+            Some((cut, _)) => {
+                format!(r#"<span title="{}">{}…</span>"#, esc_str(&s), esc_str(s[..cut].trim_end()))
+            }
+        }
+    }
+}
+
 /// Escape a string for inclusion in HTML text or a quoted attribute.
 pub fn esc_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len());

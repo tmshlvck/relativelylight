@@ -19,7 +19,7 @@
 //! - the write path's outcomes: a redirect that lands on the row, and a rejection that comes back with
 //!   the messages *and* the operator's input.
 
-use super::ui::{esc, Admin, Form, Mode, Outcome, Picker, RelationField, Table, ViewState};
+use super::ui::{esc, truncate, Admin, Form, Mode, Outcome, Picker, RelationField, Table, ViewState};
 use crate::authz::{Authz, Decision, Open, Operation};
 use crate::crud::engine::{
     Accessor, Cardinality, Column, Engine, Error, FieldDisplay, ListQuery, LogicalType, Page,
@@ -1284,6 +1284,66 @@ async fn view_can_link_to_a_page_of_the_apps_own() {
     e.add(Arc::new(Mock::new("thing", cols).rows(rows)), Arc::new(Open));
     let html = render(&Table::new(&e, "thing").detail_href("/thing/{id}"), &list()).await;
     assert!(html.contains(r#"href="/thing/a%20b%2F%22c">View</a>"#), "{html}");
+}
+
+/// One `thing` with a `body`, for the renderers below: (the listing's cell, the View dialog's value).
+async fn cell_and_detail(table: impl Fn(&Engine) -> Table<'_>, body: &str) -> (String, String) {
+    let cols = vec![field("id", false, true, None), field("body", true, false, None)];
+    let mut e = Engine::new();
+    e.add(Arc::new(Mock::new("thing", cols).rows(vec![json!({"id": 1, "body": body})])), Arc::new(Open));
+    let html = render(&table(&e), &ViewState::from_query("show=1")).await;
+    let (listing, dialog) = html.split_once("<dialog").expect("the dialog");
+    // The cells: the selection checkbox, `id`, `body`.
+    let cell = listing.split("<td>").nth(3).expect("the body cell").split("</td>").next().unwrap();
+    let dd = dialog.split("<dd class=\"col-sm-8\">").nth(2).expect("the body value").split("</dd>").next().unwrap();
+    (cell.trim().to_string(), dd.trim().to_string())
+}
+
+#[tokio::test]
+async fn format_renders_both_places_and_cell_or_detail_overrides_one() {
+    let mark = |tag: &'static str| move |v: &Value, _: &Value| format!("[{tag}:{}]", esc(v));
+
+    // `format` alone: the cell and the dialog, from the one closure.
+    let (cell, dd) = cell_and_detail(|e| Table::new(e, "thing").format("body", mark("both")), "x").await;
+    assert_eq!((cell.as_str(), dd.as_str()), ("[both:x]", "[both:x]"));
+
+    // An override applies where it says, whichever order it was declared in; the other place
+    // inherits `format`.
+    let (cell, dd) = cell_and_detail(
+        |e| Table::new(e, "thing").format_cell("body", mark("cell")).format("body", mark("both")),
+        "x",
+    )
+    .await;
+    assert_eq!((cell.as_str(), dd.as_str()), ("[cell:x]", "[both:x]"));
+    let (cell, dd) = cell_and_detail(
+        |e| Table::new(e, "thing").format("body", mark("both")).format_detail("body", mark("view")),
+        "x",
+    )
+    .await;
+    assert_eq!((cell.as_str(), dd.as_str()), ("[both:x]", "[view:x]"));
+
+    // An override with no `format` behind it: the other place keeps the default rendering.
+    let (cell, dd) = cell_and_detail(|e| Table::new(e, "thing").format_cell("body", mark("cell")), "x").await;
+    assert_eq!((cell.as_str(), dd.as_str()), ("[cell:x]", "x"));
+}
+
+#[tokio::test]
+async fn truncate_shortens_the_cell_and_leaves_the_view_whole() {
+    let long = "Ünïcödé <script>alert(1)</script> and a good deal more after it";
+    let (cell, dd) = cell_and_detail(|e| Table::new(e, "thing").format_cell("body", truncate(10)), long).await;
+    // Cut at ten *characters* (not bytes — the accents are two each), trailing space dropped, the
+    // whole value in the tooltip; everything escaped, in the text and in the attribute.
+    assert_eq!(
+        cell,
+        r#"<span title="Ünïcödé &lt;script&gt;alert(1)&lt;/script&gt; and a good deal more after it">Ünïcödé &lt;s…</span>"#
+    );
+    assert!(!cell.contains("<script"), "{cell}");
+    // (askama's escaping, so `&#60;` rather than `&lt;`.)
+    assert_eq!(dd, "Ünïcödé &#60;script&#62;alert(1)&#60;/script&#62; and a good deal more after it", "the view: all of it");
+
+    // A value that fits is shown as is — no ellipsis, no tooltip.
+    let (cell, _) = cell_and_detail(|e| Table::new(e, "thing").format_cell("body", truncate(10)), "<b>short").await;
+    assert_eq!(cell, "&lt;b&gt;short");
 }
 
 // ---------- how many rows a page shows ----------

@@ -752,7 +752,8 @@ and in all three examples.
 | `sort(col)` / `sort_desc(col)` | the default sort, used until the URL says otherwise |
 | `filter(name)` | a filter `<select>` in the toolbar, for a column or a to-one relation |
 | `fixed_filter(name, value)` | a filter **pinned** to one value, with no control — a table *about* that value |
-| `format(col, closure)` | a custom cell renderer, `(value, row) -> HTML` |
+| `format(col, closure)` | a custom renderer, `(value, row) -> HTML`, for the cells **and** the View dialog |
+| `format_cell` / `format_detail(col, closure)` | the same, for the cells only / the View dialog only — overriding `format` there |
 | `picker_threshold(n)` | how many target rows a relation may list as a `<select>` / multi-select before it uses the [picker](#picker--choosing-from-a-large-relation) (default 50) |
 | `dom_id(id)` | namespaces the fragment's id, so two tables of one entity can share a page |
 
@@ -789,7 +790,22 @@ is escaped like any other attribute.
 .format("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))
 ```
 
-That is the one place app-supplied HTML enters the page; everything else is escaped by the template
+It renders the column wherever a row is shown — the table's cells and the View dialog. To render
+them differently, override one place: `format_cell(col, closure)` for the cells, `format_detail(col,
+closure)` for the dialog. Each place uses its own override, else `format`, else the default, so the
+order they're declared in doesn't matter. The usual case is a long text the listing shortens and View
+shows whole; `crud::ui::truncate(n)` is that renderer — the first `n` characters and `…`, the whole
+value in the tooltip, escaped:
+
+```rust
+.format_cell("body", truncate(60))                            // a corner in the table, all of it in View
+.format_detail("notes", |v, _| format!("<pre>{}</pre>", esc(v))) // keep the line breaks it was typed with
+```
+
+The dialog shows text with ordinary HTML whitespace, so line breaks collapse; a `format_detail`
+choosing `<pre>` (or turning `\n` into `<br>`) is how a pre-formatted column keeps them.
+
+That is the one place (well, three closures of one shape) app-supplied HTML enters the page; everything else is escaped by the template
 engine, and the escaping is tested against `<script>`-bearing data in every cell, label, chip, option
 and input value (`crud/ui_tests.rs`).
 

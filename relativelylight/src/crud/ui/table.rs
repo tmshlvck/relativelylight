@@ -52,6 +52,14 @@ struct TableTmpl {
     flash_dismiss: String,
 }
 
+/// Where a [`Table::format`]-family renderer applies.
+#[derive(Clone, Copy, PartialEq)]
+enum Scope {
+    Both,
+    Cell,
+    Detail,
+}
+
 struct ControlV {
     name: String,
     label: String,
@@ -143,7 +151,7 @@ pub struct Table<'a> {
     fields: Vec<String>,
     omit: Vec<String>,
     columns: Vec<String>,
-    formatters: Vec<(String, Fmt)>,
+    formatters: Vec<(String, Scope, Fmt)>,
     row_class: Option<RowClass>,
     detail: bool,
     detail_href: Option<String>,
@@ -388,12 +396,50 @@ impl<'a> Table<'a> {
     /// ```ignore
     /// .format("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))
     /// ```
+    ///
+    /// It renders the column in both places a row is shown — the table's cells and the View dialog.
+    /// [`format_cell`](Table::format_cell) and [`format_detail`](Table::format_detail) override it
+    /// for one of them.
     pub fn format<F>(mut self, column: impl Into<String>, render: F) -> Self
     where
         F: Fn(&Value, &Value) -> String + Send + Sync + 'static,
     {
-        self.formatters.push((column.into(), Arc::new(render)));
+        self.formatters.push((column.into(), Scope::Both, Arc::new(render)));
         self
+    }
+    /// A renderer for the column's **table cells** only, overriding [`format`](Table::format) there;
+    /// the View dialog keeps `format`, or the default. The shape for a value the listing should
+    /// shorten and the dialog show whole — [`truncate`](super::truncate) is that renderer:
+    ///
+    /// ```ignore
+    /// .format_cell("body", truncate(60))   // a corner of it in the table, all of it in View
+    /// ```
+    pub fn format_cell<F>(mut self, column: impl Into<String>, render: F) -> Self
+    where
+        F: Fn(&Value, &Value) -> String + Send + Sync + 'static,
+    {
+        self.formatters.push((column.into(), Scope::Cell, Arc::new(render)));
+        self
+    }
+    /// A renderer for the column in the **View dialog** only, overriding [`format`](Table::format)
+    /// there; the table's cells keep `format`, or the default. E.g. a multi-line text kept as typed:
+    /// `|v, _| format!("<pre>{}</pre>", esc(v))`. (Nothing to override with
+    /// [`detail_href`](Table::detail_href): the view is then the app's page.)
+    pub fn format_detail<F>(mut self, column: impl Into<String>, render: F) -> Self
+    where
+        F: Fn(&Value, &Value) -> String + Send + Sync + 'static,
+    {
+        self.formatters.push((column.into(), Scope::Detail, Arc::new(render)));
+        self
+    }
+
+    /// The renderers in force where `scope` shows a row: that place's own first, then the shared
+    /// ones, so a lookup by column name finds the override before `format`.
+    fn formatters_for(&self, scope: Scope) -> Vec<(String, Fmt)> {
+        let pick = |want: Scope| {
+            self.formatters.iter().filter(move |(_, s, _)| *s == want).map(|(n, _, f)| (n.clone(), f.clone()))
+        };
+        pick(scope).chain(pick(Scope::Both)).collect()
     }
     /// Namespaces the fragment's DOM id, so two tables for the same entity can share a page.
     pub fn dom_id(mut self, id: impl Into<String>) -> Self {
@@ -459,7 +505,7 @@ impl<'a> Table<'a> {
             rows: render::rows(
                 &page,
                 &shown,
-                &self.formatters,
+                &self.formatters_for(Scope::Cell),
                 self.row_class.as_ref(),
                 &state,
                 &tz,
@@ -507,7 +553,7 @@ impl<'a> Table<'a> {
             q: state.q.clone(),
             keep: self.keep(&state),
             heads: render::heads(&shown, &state),
-            rows: render::rows(&page, &shown, &self.formatters, None, &state, &tz, None),
+            rows: render::rows(&page, &shown, &self.formatters_for(Scope::Cell), None, &state, &tz, None),
             pager: render::pager(&page, &state),
         }
         .render()
@@ -845,6 +891,7 @@ impl<'a> Table<'a> {
         // `render_for` has already authorized `Read` for this caller (every non-list mode does),
         // with their real headers — there is nothing left to check here.
         let row = self.engine.get(&self.slug, id).await?;
+        let fmts = self.formatters_for(Scope::Detail);
         let fields = cols
             .iter()
             // A write-only column has nothing to show — the backend never returns one — so it
@@ -855,7 +902,7 @@ impl<'a> Table<'a> {
                 value: render::cell(
                     c,
                     &row,
-                    self.formatters.iter().find(|(n, _)| n == render::name_of(c)).map(|(_, f)| f),
+                    fmts.iter().find(|(n, _)| n == render::name_of(c)).map(|(_, f)| f),
                     tz,
                 ),
             })

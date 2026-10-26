@@ -24,7 +24,7 @@ use model::{author, post, profile, tag, user};
 use relativelylight::auth::{self, Auth, GroupReadWrite, Identity, UserReadGroupWrite};
 use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::{esc, Admin, Outcome, Picker, ViewState, CSS, JS};
+use relativelylight::crud::ui::{esc, truncate, Admin, Outcome, Picker, ViewState, CSS, JS};
 use relativelylight::middleware::RealIp;
 use relativelylight::time::{Tz, TzPicker};
 use relativelylight::validate;
@@ -112,10 +112,14 @@ fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
         .group("Content")
         .entity_with("post", |t| {
             // A cell renderer is a Rust closure now, and escaping is what `esc` is for: this link
-            // opens the row's own edit dialog, which is just a URL.
-            t.per_page(10).format(post::Column::Title.as_str(), |v, row| {
-                format!(r#"<a href="?entity=post&amp;edit={}">{}</a>"#, esc(&row["id"]), esc(v))
-            })
+            // opens the row's own edit dialog, which is just a URL. `format_cell`, not `format`: in
+            // the View dialog — which has an Edit button of its own — the title stays plain text.
+            t.per_page(10)
+                .format_cell(post::Column::Title.as_str(), |v, row| {
+                    format!(r#"<a href="?entity=post&amp;edit={}">{}</a>"#, esc(&row["id"]), esc(v))
+                })
+                // The listing shows the start of the body (whole in the tooltip); View shows it all.
+                .format_cell(post::Column::Body.as_str(), truncate(20))
         })
         .entity("tag")
         .separator()
