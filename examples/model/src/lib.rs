@@ -54,7 +54,7 @@ pub async fn setup() -> Result<DatabaseConnection, DbErr> {
 async fn create_table<E: EntityTrait>(db: &DatabaseConnection, e: E) -> Result<(), DbErr> {
     let backend = db.get_database_backend();
     let stmt = Schema::new(backend).create_table_from_entity(e);
-    db.execute(backend.build(&stmt)).await?;
+    db.execute(&stmt).await?;
     Ok(())
 }
 

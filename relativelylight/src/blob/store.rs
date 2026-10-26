@@ -3,7 +3,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, QuerySelect, Set, TransactionTrait,
@@ -1117,8 +1116,7 @@ async fn upsert_content<C: sea_orm::ConnectionTrait>(
     })
     // Already there means the identical bytes are already there — a write that turns out to be a
     // no-op is not an error.
-    .on_conflict(OnConflict::column(content::Column::Id).do_nothing().to_owned())
-    .do_nothing()
+    .on_conflict_do_nothing()
     .exec(db)
     .await?;
     Ok(())

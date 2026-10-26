@@ -79,7 +79,7 @@ The core is backend-agnostic; SeaORM is one backend behind a small `Accessor` se
 # Cargo.toml
 [dependencies]
 relativelylight = { version = "0.3", features = ["ui", "csv"] }
-sea-orm = { version = "1.1", features = ["macros", "with-json"] }
+sea-orm = { version = "2.0", features = ["macros", "with-json"] }
 ```
 
 ```rust

@@ -129,7 +129,7 @@ pub async fn migrate(db: &DatabaseConnection) -> Result<(), DbErr> {
     let backend = db.get_database_backend();
     for mut stmt in table_create_statements(backend) {
         stmt.if_not_exists();
-        db.execute(backend.build(&stmt)).await?;
+        db.execute(&stmt).await?;
     }
     Ok(())
 }

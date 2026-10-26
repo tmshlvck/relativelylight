@@ -92,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let schema = Schema::new(backend);
     let mut stmt = schema.create_table_from_entity(picture::Entity);
     stmt.if_not_exists();
-    db.execute(backend.build(&stmt)).await?;
+    db.execute(&stmt).await?;
 
     let root = std::env::temp_dir().join(format!("rl-thumb-example-{}", std::process::id()));
     let fs = FsBackend::new(&root);

@@ -96,7 +96,7 @@ pub async fn migrate(db: &DatabaseConnection) -> Result<(), DbErr> {
     ] {
         let mut stmt = entity_stmt;
         stmt.if_not_exists();
-        db.execute(backend.build(&stmt)).await?;
+        db.execute(&stmt).await?;
     }
     Ok(())
 }

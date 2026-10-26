@@ -20,7 +20,7 @@ for the roadmap, **[docs/PRD.md](docs/PRD.md)**.
 ```toml
 [dependencies]
 relativelylight = { version = "0.3", features = ["ui", "csv", "auth"] }
-sea-orm = { version = "1.1", features = ["macros", "with-json"] }
+sea-orm = { version = "2.0", features = ["macros", "with-json"] }
 ```
 
 | Feature | Default | Gives you |
@@ -360,7 +360,7 @@ cargo build --workspace      # and the examples, which pin their own narrow feat
 
 **Check the warnings, not only the exit status.** A helper used by one feature and compiled into
 another is dead code *there* — `--all-features` never shows it, and an app that enables only `auth`
-gets a wall of `never used` from a library it didn't write. Five of those were found this way. Deps: SeaORM 1.1, axum 0.8, askama 0.13, jiff 0.2, totp-rs 5.7.
+gets a wall of `never used` from a library it didn't write. Five of those were found this way. Deps: SeaORM 2.0, axum 0.8, askama 0.13, jiff 0.2, totp-rs 5.7.
 
 **Security behavior is tested by rejection.** `auth/security_tests.rs` and `crud/gate_tests.rs` assert
 the *negative* cases over in-memory SQLite — bad password, bogus/expired/half-authenticated session,

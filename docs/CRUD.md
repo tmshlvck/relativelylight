@@ -34,7 +34,7 @@ pages); this document is the reference for the parts. Coming from 0.2.x?
 ```toml
 [dependencies]
 relativelylight = { version = "0.3", features = ["ui", "csv"] }
-sea-orm = { version = "1.1", features = ["macros", "with-json"] }
+sea-orm = { version = "2.0", features = ["macros", "with-json"] }
 ```
 
 | Feature | Default | Pulls | Gives you |

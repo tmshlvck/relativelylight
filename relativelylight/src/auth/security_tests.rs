@@ -3210,7 +3210,7 @@ async fn downgrade_schema_to_pre_cascade(db: &DatabaseConnection) {
              FOREIGN KEY ("user_id") REFERENCES "auth_user" ("id"),
              FOREIGN KEY ("group_id") REFERENCES "auth_group" ("id") )"#,
     ] {
-        db.execute(sea_orm::Statement::from_string(db.get_database_backend(), sql.to_string()))
+        db.execute_raw(sea_orm::Statement::from_string(db.get_database_backend(), sql.to_string()))
             .await
             .expect("rebuild the pre-cascade schema");
     }

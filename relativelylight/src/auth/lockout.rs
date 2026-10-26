@@ -26,7 +26,6 @@
 //! on the next failure), so pruning is the app's housekeeping call — see [`crate::auth::prune`](crate::auth::prune).
 
 use ipnet::IpNet;
-use sea_orm::sea_query::OnConflict;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, IntoActiveModel,
@@ -226,8 +225,7 @@ impl UsernameLockout {
                 // A concurrent first failure may have inserted it already; both then agree on 1, which
                 // under-counts by one at most — the safe direction.
                 let _ = username_entity::Entity::insert(am)
-                    .on_conflict(OnConflict::new().do_nothing().to_owned())
-                    .do_nothing()
+                    .on_conflict_do_nothing()
                     .exec(&self.db)
                     .await;
                 1
@@ -324,8 +322,7 @@ impl IpLockout {
                     last_failure_at: Set(now),
                 };
                 let _ = ip_entity::Entity::insert(am)
-                    .on_conflict(OnConflict::new().do_nothing().to_owned())
-                    .do_nothing()
+                    .on_conflict_do_nothing()
                     .exec(&self.db)
                     .await;
                 1

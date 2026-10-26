@@ -324,28 +324,16 @@ fn logical_type(ct: &ColumnType) -> LogicalType {
 }
 
 fn iden_name(d: &DynIden) -> String {
-    let mut s = String::new();
-    d.unquoted(&mut s);
-    s
+    d.to_string()
 }
 
 fn first_identity_col(id: &Identity) -> String {
-    match id {
-        Identity::Unary(a) => iden_name(a),
-        Identity::Binary(a, _) => iden_name(a),
-        Identity::Ternary(a, _, _) => iden_name(a),
-        _ => String::new(),
-    }
+    id.iter().next().map(iden_name).unwrap_or_default()
 }
 
 fn table_ref_name(t: &TableRef) -> String {
     match t {
-        TableRef::Table(a) => iden_name(a),
-        TableRef::SchemaTable(_, b) => iden_name(b),
-        TableRef::DatabaseSchemaTable(_, _, c) => iden_name(c),
-        TableRef::TableAlias(a, _) => iden_name(a),
-        TableRef::SchemaTableAlias(_, b, _) => iden_name(b),
-        TableRef::DatabaseSchemaTableAlias(_, _, c, _) => iden_name(c),
+        TableRef::Table(name, _) => name.1.to_string(),
         _ => String::new(),
     }
 }
@@ -1175,20 +1163,20 @@ where
         let Some(nm) = self.model.nm.get(rel) else {
             return Ok(());
         };
-        let backend = db.get_database_backend();
+        use sea_orm::sea_query::ExprTrait; // Expr's comparisons; scoped so it can't shadow serde_json's is_null
         let src = key_to_db(&json_key(source_pk));
         let del = Query::delete()
             .from_table(Alias::new(&nm.junction))
             .and_where(Expr::col(Alias::new(&nm.source_col)).eq(src.clone()))
             .to_owned();
-        db.execute(backend.build(&del)).await?;
+        db.execute(&del).await?;
         for id in ids {
             let ins = Query::insert()
                 .into_table(Alias::new(&nm.junction))
                 .columns([Alias::new(&nm.source_col), Alias::new(&nm.target_col)])
                 .values_panic([src.clone().into(), key_to_db(id).into()])
                 .to_owned();
-            db.execute(backend.build(&ins)).await?;
+            db.execute(&ins).await?;
         }
         Ok(())
     }
@@ -1354,11 +1342,12 @@ where
                     JoinType::LeftJoin,
                     RelationDef {
                         rel_type: RelationType::HasOne,
-                        from_tbl: TableRef::Table(Alias::new(self.model.table.clone()).into_iden()),
-                        to_tbl: TableRef::Table(target.clone().into_iden()),
+                        from_tbl: TableRef::Table(Alias::new(self.model.table.clone()).into_iden().into(), None),
+                        to_tbl: TableRef::Table(target.clone().into_iden().into(), None),
                         from_col: Identity::Unary(Alias::new(rel.from_col.clone()).into_iden()),
                         to_col: Identity::Unary(Alias::new(rel.to_col.clone()).into_iden()),
                         is_owner: false,
+                        skip_fk: false,
                         on_delete: None,
                         on_update: None,
                         on_condition: None,
@@ -1474,14 +1463,14 @@ where
 
         // Then delete atomically: clear N:M junction rows, then the row itself.
         let txn = self.db.begin().await?;
-        let backend = txn.get_database_backend();
+        use sea_orm::sea_query::ExprTrait; // Expr's comparisons; scoped so it can't shadow serde_json's is_null
         let src = key_to_db(&json_key(pk));
         for nm in self.model.nm.values() {
             let del = Query::delete()
                 .from_table(Alias::new(&nm.junction))
                 .and_where(Expr::col(Alias::new(&nm.source_col)).eq(src.clone()))
                 .to_owned();
-            txn.execute(backend.build(&del)).await?;
+            txn.execute(&del).await?;
         }
         let res = E::delete_many().filter(pk_condition::<E>(pk)?).exec(&txn).await?;
         txn.commit().await?;
@@ -1507,7 +1496,7 @@ where
         }
 
         let txn = self.db.begin().await?;
-        let backend = txn.get_database_backend();
+        use sea_orm::sea_query::ExprTrait; // Expr's comparisons; scoped so it can't shadow serde_json's is_null
         // Clear N:M junction rows for the matching source rows (subquery) BEFORE deleting parents.
         for nm in self.model.nm.values() {
             let sub = E::find()
@@ -1519,7 +1508,7 @@ where
                 .from_table(Alias::new(&nm.junction))
                 .and_where(Expr::col(Alias::new(&nm.source_col)).in_subquery(sub))
                 .to_owned();
-            txn.execute(backend.build(&del)).await?;
+            txn.execute(&del).await?;
         }
         E::delete_many().filter(self.build_condition(q)?).exec(&txn).await?;
         txn.commit().await?;
@@ -1874,7 +1863,7 @@ mod nullable_tests {
         let db = Database::connect("sqlite::memory:").await.expect("sqlite");
         let schema = Schema::new(db.get_database_backend());
         let stmt = schema.create_table_from_entity(stamped::Entity);
-        db.execute(db.get_database_backend().build(&stmt)).await.expect("create table");
+        db.execute(&stmt).await.expect("create table");
 
         let mut crud = Crud::new(db.clone());
         crud.register(mm, Open);
@@ -1917,7 +1906,7 @@ mod nullable_tests {
         let db = Database::connect("sqlite::memory:").await.expect("sqlite");
         let schema = Schema::new(db.get_database_backend());
         let stmt = schema.create_table_from_entity(stamped::Entity);
-        db.execute(db.get_database_backend().build(&stmt)).await.expect("create table");
+        db.execute(&stmt).await.expect("create table");
         let mut mm = MetaModel::new(stamped::Entity);
         mm.field("created_at").read_only = true;
         let mut crud = Crud::new(db.clone());

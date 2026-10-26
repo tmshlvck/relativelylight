@@ -11,6 +11,25 @@ is easy to miss in a diff.
 
 ## Unreleased
 
+### Breaking
+
+- **SeaORM 2.0 (was 1.1).** Your entities and `DatabaseConnection` pass straight into `MetaModel::new`
+  / `Crud::new` / `Auth::new`, so the app must move with the crate: one SeaORM in the build, not two.
+  Upgrade: set `sea-orm = { version = "2.0", features = ["macros", "with-json"] }`. 1.x-style
+  `DeriveEntityModel` entities compile unchanged (none of the examples' entities changed). Your own
+  SeaORM code meets 2.0's breaks; the ones this crate hit, and their fixes:
+  - `db.execute(backend.build(&stmt))` → `db.execute(&stmt)`; a hand-built `Statement` →
+    `db.execute_raw(stmt)`.
+  - `Expr`'s `.eq()` / `.in_subquery()` / … moved to the `sea_query::ExprTrait` trait. **Import it in
+    the narrowest scope that needs it**: it's implemented for everything `Into<Expr>`, including
+    `serde_json::Value`, so a module-wide import makes `value.is_null()` resolve to the trait's
+    by-value method and return an `Expr` instead of a `bool`.
+  - `Insert::do_nothing()` is deprecated → `.on_conflict_do_nothing()` (conflict on the primary
+    key; also emits MySQL's polyfill) or `.on_conflict_do_nothing_on([cols])`, replacing the explicit
+    `.on_conflict(OnConflict::…do_nothing())`. The result is the same `TryInsert`.
+  - `TableRef::Table` is `(TableName, Option<alias>)`, the schema/alias variants are gone, and
+    `Iden::unquoted()` returns `&str` — only if you build `RelationDef`s or inspect `TableRef`s.
+
 ### Added
 
 - **`crud::ui::Picker` — a relation too large for a `<select>` is edited in a dialog.** Past
