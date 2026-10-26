@@ -155,90 +155,114 @@ async fn widget(
             })
         }
         Column::Relation { target, cardinality, .. } => {
+            // Rejected input is ids only; the edited row embeds `{id, label}`, so its labels are free.
+            let linked = match state.posted(name) {
+                Some(_) => None,
+                None => Some(linked_options(name, row)),
+            };
             let many = *cardinality == Cardinality::ToMany;
-            let listable = engine.permits(target, Operation::List, rel.headers).await;
-            let chosen = relation_values(name, row, state);
-            let as_options = |page: &crate::crud::engine::Page| -> Vec<Opt> {
-                page.data
-                    .iter()
-                    .map(|it| {
-                        let value = super::render::text(Some(&it.id));
-                        Opt { selected: chosen.contains(&value), label: it.label.clone(), value }
-                    })
-                    .collect()
-            };
-            let query = |all: bool| match all {
-                // Every row: a posted multi-select *replaces* the relation set, so a linked row the
-                // list left out would be unlinked by saving. (`per_page: 0` is the backend's
-                // default page, not "no limit".)
-                true => ListQuery { all: true, ..Default::default() },
-                false => ListQuery { per_page: rel.threshold.max(1), ..Default::default() },
-            };
-            let select = |options: Vec<Opt>| match many {
-                true => Widget::Multi { options },
-                false => Widget::Select { options, blank: true },
-            };
-            // One capped listing answers "is it small?" — `total` counts past the cap.
-            let probe = if listable { Some(engine.list(target, &query(false), true).await?) } else { None };
-            let picker = engine.picker_path();
-            match (&probe, picker) {
-                (Some(page), _) if page.total <= rel.threshold => Ok(select(as_options(page))),
-                // No picker to open: the whole list, however long. A page that errored once its
-                // table grew past a number would be worse than a long menu.
-                (Some(_), None) => Ok(select(as_options(&engine.list(target, &query(true), true).await?))),
-                (Some(page), Some(path)) => Ok(Widget::Picked {
-                    chosen: chosen_options(engine, target, name, row, state, true).await?,
-                    many,
-                    src: format!("{path}?pick={}.{name}", rel.slug),
-                    note: format!("{} {target} rows — too many to list here.", page.total),
-                }),
-                // The caller may not list the target: what this row already links to (the row's
-                // own read shows those labels anyway), and no way to browse for more.
-                (None, _) => Ok(Widget::Picked {
-                    chosen: chosen_options(engine, target, name, row, state, false).await?,
-                    many,
-                    src: String::new(),
-                    note: String::new(),
-                }),
-            }
+            relation(engine, rel, name, target, many, relation_values(name, row, state), linked).await
         }
     }
 }
 
-/// The current selection of a relation the form doesn't list, with labels: from the row being
-/// edited, or — after a rejected save — looked up for the ids that were posted. Not looked up when
-/// the caller may not list the target (`listable` false): the ids someone posted are no reason to
-/// tell them what those rows are called, so they show as ids.
+/// A relation's input — a `<select>` while the target is small, else the selection with a button
+/// opening the [`Picker`](super::Picker). The **one** place that decision is made: [`fields`] calls it
+/// for `Form`/`Table`/`Admin`, and [`RelationField`](super::RelationField) for an app's own form.
+///
+/// `relation` is the relation's name on `rel.slug` (what the picker's `?pick=` names); `ids` the
+/// current selection, and `linked` the same selection with labels when they're already in hand.
+pub(crate) async fn relation(
+    engine: &Engine,
+    rel: &Relations<'_>,
+    relation: &str,
+    target: &str,
+    many: bool,
+    ids: Vec<String>,
+    linked: Option<Vec<Opt>>,
+) -> Result<Widget> {
+    let listable = engine.permits(target, Operation::List, rel.headers).await;
+    let as_options = |page: &crate::crud::engine::Page| -> Vec<Opt> {
+        page.data
+            .iter()
+            .map(|it| {
+                let value = super::render::text(Some(&it.id));
+                Opt { selected: ids.contains(&value), label: it.label.clone(), value }
+            })
+            .collect()
+    };
+    let query = |all: bool| match all {
+        // Every row: a posted multi-select *replaces* the relation set, so a linked row the
+        // list left out would be unlinked by saving. (`per_page: 0` is the backend's
+        // default page, not "no limit".)
+        true => ListQuery { all: true, ..Default::default() },
+        false => ListQuery { per_page: rel.threshold.max(1), ..Default::default() },
+    };
+    let select = |options: Vec<Opt>| match many {
+        true => Widget::Multi { options },
+        false => Widget::Select { options, blank: true },
+    };
+    // One capped listing answers "is it small?" — `total` counts past the cap.
+    let probe = if listable { Some(engine.list(target, &query(false), true).await?) } else { None };
+    let picker = engine.picker_path();
+    match (&probe, picker) {
+        (Some(page), _) if page.total <= rel.threshold => Ok(select(as_options(page))),
+        // No picker to open: the whole list, however long. A page that errored once its
+        // table grew past a number would be worse than a long menu.
+        (Some(_), None) => Ok(select(as_options(&engine.list(target, &query(true), true).await?))),
+        (Some(page), Some(path)) => Ok(Widget::Picked {
+            chosen: chosen_options(engine, target, &ids, linked, true).await?,
+            many,
+            src: format!("{path}?pick={}.{relation}", rel.slug),
+            note: format!("{} {target} rows — too many to list here.", page.total),
+        }),
+        // The caller may not list the target: what this row already links to (the row's
+        // own read shows those labels anyway), and no way to browse for more.
+        (None, _) => Ok(Widget::Picked {
+            chosen: chosen_options(engine, target, &ids, linked, false).await?,
+            many,
+            src: String::new(),
+            note: String::new(),
+        }),
+    }
+}
+
+/// The `{id, label}` pairs an edited row embeds for a relation.
+fn linked_options(name: &str, row: Option<&Value>) -> Vec<Opt> {
+    let items: Vec<&Value> = match row.and_then(|r| r.get(name)) {
+        Some(Value::Array(items)) => items.iter().collect(),
+        Some(Value::Null) | None => Vec::new(),
+        Some(one) => vec![one],
+    };
+    items
+        .into_iter()
+        .map(|it| Opt {
+            value: super::render::text(it.get("id")),
+            label: super::render::text(it.get("label")),
+            selected: true,
+        })
+        .collect()
+}
+
+/// The current selection of a relation the form doesn't list, with labels: `linked` when the caller
+/// already has them (the row being edited), else looked up for `ids` (a rejected save, or an app's
+/// own form). Not looked up when the caller may not list the target (`listable` false): the ids
+/// someone posted are no reason to tell them what those rows are called, so they show as ids.
 async fn chosen_options(
     engine: &Engine,
     target: &str,
-    name: &str,
-    row: Option<&Value>,
-    state: &ViewState,
+    ids: &[String],
+    linked: Option<Vec<Opt>>,
     listable: bool,
 ) -> Result<Vec<Opt>> {
-    let ids = relation_values(name, row, state);
+    if let Some(linked) = linked {
+        return Ok(linked);
+    }
     let opt = |value: String, label: String| Opt { value, label, selected: true };
-    if state.posted(name).is_none() {
-        let linked = row.and_then(|r| r.get(name));
-        let items: Vec<&Value> = match linked {
-            Some(Value::Array(items)) => items.iter().collect(),
-            Some(Value::Null) | None => Vec::new(),
-            Some(one) => vec![one],
-        };
-        return Ok(items
-            .into_iter()
-            .map(|it| {
-                let id = super::render::text(it.get("id"));
-                let label = super::render::text(it.get("label"));
-                opt(id, label)
-            })
-            .collect());
-    }
     if ids.is_empty() || !listable {
-        return Ok(ids.into_iter().map(|id| opt(id.clone(), id)).collect());
+        return Ok(ids.iter().map(|id| opt(id.clone(), id.clone())).collect());
     }
-    let q = ListQuery { pk_in: ids.clone(), all: true, ..Default::default() };
+    let q = ListQuery { pk_in: ids.to_vec(), all: true, ..Default::default() };
     let found = match engine.list(target, &q, true).await {
         Ok(page) => page.data,
         // An id that can't be a key of the target (text for an integer key): the write check
@@ -247,14 +271,14 @@ async fn chosen_options(
         Err(e) => return Err(e),
     };
     Ok(ids
-        .into_iter()
+        .iter()
         .map(|id| {
             let label = found
                 .iter()
-                .find(|it| super::render::text(Some(&it.id)) == id)
+                .find(|it| super::render::text(Some(&it.id)) == *id)
                 .map(|it| it.label.clone())
                 .unwrap_or_else(|| id.clone());
-            opt(id, label)
+            opt(id.clone(), label)
         })
         .collect())
 }

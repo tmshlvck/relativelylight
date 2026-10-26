@@ -668,6 +668,8 @@ Feature `ui`. Three components, **one implementation**:
 - [`Admin`](#admin--a-whole-admin-in-one-component) — a side panel over many `Table`s.
 - [`Picker`](#picker--choosing-from-a-large-relation) — the page inside the dialog that edits a
   relation too large for a `<select>`.
+- [`RelationField`](#relationfield--the-relation-input-in-a-form-of-your-own) — one relation's input
+  (a `<select>`, or the picker past the threshold) for a `<form>` you write yourself.
 
 All three return **HTML fragments**: your app owns `<html>`, the Bootstrap 5 stylesheet and the
 layout. There is no JavaScript framework and no JSON in between. The one piece of client-side state
@@ -970,6 +972,56 @@ be browsed. The rows are a `Table` render of the target, refused (`401`/`403`) w
 list it. A picker leaves out the target's to-many columns: a stack of badges per row says nothing
 about which row to choose. `Picker::per_page(n)` sets the dialog's page size (default 10). Both
 `examples/crud` and `examples/adminpanel` serve one; their seed has 56 authors and 56 tags.
+
+### `RelationField` — the relation input in a form of your own
+
+`Form` edits one row of one entity. A form that isn't that — a bulk action, a filter, a wizard step —
+is hand-written, and `RelationField` puts one relation input into it: **the same input** `Form`,
+`Table` and `Admin` render for that relation, from the same function and the same template. So it is
+a `<select>` (a multi-select for a to-many) up to `picker_threshold` target rows (default 50), and the
+picker past it; the picker needs exactly what it needs for a `Form` — `picker_path`, the `/pick`
+route, `crud::ui::JS` in the shell.
+
+It is named by a **relation** of a registered entity, because that is what the picker browses — the
+form around it needn't be about that entity. It writes nothing; define it once and use it in both
+handlers:
+
+```rust
+fn tags(engine: &Engine) -> RelationField<'_> {
+    RelationField::new(engine, "post", "tag")   // offers `tag` rows, browses /pick?pick=post.tag
+        .name("tags")                            // the input's name; default: the relation's
+        .label("Tags")                           // default: the relation's label (and help)
+}
+
+// GET — a fragment for the inside of your <form>
+let html = tags(&engine).selected(&ids).error(message).render_for(&headers).await?;
+
+// POST — the posted ids, each checked to be a row of the target
+match tags(&engine).read(&headers, &body).await {
+    Ok(ids) => { /* your write */ }
+    Err(Error::Validation(v)) => { /* re-render: .selected(tags(&engine).posted(&headers, &body)?)
+                                      .error(v.fields["tags"].clone()) */ }
+    Err(e) => return e.into_response(),
+}
+```
+
+- **`read`** drops blanks (a `<select>`'s "—"), keeps at most one id for a to-one, and refuses an id
+  that names no row — `Err(Error::Validation)`, the message ("no tag matches '99'") under the input's
+  name. The picker posts hidden inputs, as editable as a typed id, and nothing below the UI checks a
+  relation id exists (SQLite enforces no foreign key by default), so this is the check a `Form` save
+  makes, not an extra one.
+- **`posted`** is the same ids *unchecked*, for re-showing a rejected form with the operator's choice
+  still in it. Never write those.
+- **The gate.** The target's `List` decides whether its rows are offered; a caller who may not list
+  it sees the selection as ids, with nothing to browse, as in a `Form`. Rendering and reading change
+  nothing, so they ask no other gate — **your write does**: `Engine` is ungated, so a handler writing
+  through it asks `engine.decide(slug, Operation::Update, &headers)` first.
+- Other builders: `.help(..)`, `.required(true)` (the label's `*` only), `.picker_threshold(n)`.
+  `render_for` is `400` naming the problem when the entity has no relation by that name (`404` for
+  an unknown entity).
+
+`examples/relationfield` is a whole page of it: "give these tags to every post by this author", two
+fields in a plain form, one `Engine::write_batch`, and a pinned read-only `Table` of the result.
 
 ### The JavaScript that is left
 

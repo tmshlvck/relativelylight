@@ -19,7 +19,7 @@
 //! - the write path's outcomes: a redirect that lands on the row, and a rejection that comes back with
 //!   the messages *and* the operator's input.
 
-use super::ui::{esc, Admin, Form, Mode, Outcome, Picker, Table, ViewState};
+use super::ui::{esc, Admin, Form, Mode, Outcome, Picker, RelationField, Table, ViewState};
 use crate::authz::{Authz, Decision, Open, Operation};
 use crate::crud::engine::{
     Accessor, Cardinality, Column, Engine, Error, FieldDisplay, ListQuery, LogicalType, Page,
@@ -1782,6 +1782,192 @@ async fn a_picker_escapes_what_its_rows_show() {
     let html = Picker::new(&e).render_for(&no_headers(), &state).await.unwrap();
     assert!(!html.contains("<script>"), "{html}");
     assert!(html.contains(r#"data-label="&#60;script&#62;x&#60;/script&#62;""#), "{html}");
+}
+
+/// The field `Form` renders for `relation` — the `<div class="mb-3">` holding `name="{relation}"`.
+fn form_field(html: &str, relation: &str) -> String {
+    let at = html.find(&format!(r#"for="f-{relation}""#)).expect("the form has the field");
+    let start = html[..at].rfind(r#"<div class="mb-3">"#).unwrap();
+    // To the `</div>` that closes it: count the nesting.
+    let (mut depth, mut i) = (0usize, start);
+    loop {
+        let (open, close) = (html[i..].find("<div"), html[i..].find("</div>").unwrap());
+        match open {
+            Some(o) if o < close => (depth, i) = (depth + 1, i + o + 4),
+            _ => {
+                (depth, i) = (depth - 1, i + close + 6);
+                if depth == 0 {
+                    return html[start..i].to_string();
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_relation_field_is_the_forms_own_field_select_or_picker() {
+    // One decision, one template: the fragment an app embeds is the field `Form` renders for the
+    // same relation and selection, byte for byte — small target, large target, to-one and to-many.
+    let (mut e, _) = engine();
+    for picker in [false, true] {
+        if picker {
+            e.set_picker_path("/pick");
+        }
+        for threshold in [50, 1] {
+            let row = e.get("post", "7").await.unwrap();
+            let form = Form::new(&e, "post").edit("7").fields(["author", "tag"]).picker_threshold(threshold);
+            let form = form.render_for(&no_headers(), &list()).await.unwrap();
+            for (relation, ids) in [("author", vec!["3"]), ("tag", vec!["1", "2"])] {
+                let field = RelationField::new(&e, "post", relation)
+                    .selected(&ids)
+                    .picker_threshold(threshold)
+                    .render_for(&no_headers())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    field.trim(),
+                    form_field(&form, relation),
+                    "{relation}, threshold {threshold}, picker {picker}, row {row}"
+                );
+            }
+        }
+    }
+    // And it is the picker past the threshold: the selection (labels looked up) and the dialog.
+    let html = RelationField::new(&e, "post", "tag").selected([1, 2]).picker_threshold(1);
+    let html = html.render_for(&no_headers()).await.unwrap();
+    for expect in [
+        r#"data-rl-src="/pick?pick=post.tag""#,
+        r#"data-id="1">rust</span>"#,
+        r#"<input type="hidden" name="tag" value="2">"#,
+    ] {
+        assert!(html.contains(expect), "missing {expect}:\n{html}");
+    }
+}
+
+#[tokio::test]
+async fn a_relation_field_takes_its_own_name_label_and_error() {
+    let (mut e, _) = engine();
+    e.set_picker_path("/pick");
+    let field = RelationField::new(&e, "post", "tag")
+        .name("add_tags")
+        .label("Tags to add")
+        .help("Added to every post.")
+        .required(true)
+        .error("choose at least one")
+        .picker_threshold(1)
+        .selected(["2"]);
+    let html = field.render_for(&no_headers()).await.unwrap();
+    for expect in [
+        r#"for="f-add_tags">Tags to add <span class="text-danger""#,
+        r#"data-rl-name="add_tags" data-rl-title="Tags to add""#,
+        r#"<input type="hidden" name="add_tags" value="2">"#,
+        // The picker still browses the relation, whatever the input is called.
+        r#"data-rl-src="/pick?pick=post.tag""#,
+        r#"is-invalid"#,
+        r#"<div class="invalid-feedback d-block">choose at least one</div>"#,
+        r#"<div class="form-text">Added to every post.</div>"#,
+    ] {
+        assert!(html.contains(expect), "missing {expect}:\n{html}");
+    }
+    // A to-one shows one, however many it's given.
+    let one = RelationField::new(&e, "post", "author").selected([3, 4]).picker_threshold(1);
+    let one = one.render_for(&no_headers()).await.unwrap();
+    assert!(one.contains(r#"value="3">"#) && !one.contains(r#"value="4">"#), "{one}");
+}
+
+#[tokio::test]
+async fn a_relation_field_reads_back_what_its_form_posted() {
+    let (e, log) = engine();
+    let tags = RelationField::new(&e, "post", "tag").name("add_tags");
+    let body = b"title=x&add_tags=1&add_tags=&add_tags=2&tag=9";
+    assert_eq!(tags.read(&no_headers(), body).await.unwrap(), ["1", "2"], "its own name, blanks dropped");
+    let author = RelationField::new(&e, "post", "author");
+    assert_eq!(author.read(&no_headers(), b"author=").await.unwrap(), Vec::<String>::new(), "the blank");
+    assert_eq!(author.read(&no_headers(), b"author=3&author=4").await.unwrap(), ["3"], "a to-one is one");
+
+    let mut multipart = HeaderMap::new();
+    multipart.insert(http::header::CONTENT_TYPE, "multipart/form-data; boundary=XX".parse().unwrap());
+    let body = b"--XX\r\nContent-Disposition: form-data; name=\"add_tags\"\r\n\r\n2\r\n--XX--\r\n";
+    assert_eq!(tags.read(&multipart, body).await.unwrap(), ["2"], "multipart too");
+    assert!(tags.read(&multipart, b"garbage").await.is_err(), "an unparseable body is refused, not empty");
+    assert_eq!(log.count(), 0, "reading writes nothing");
+}
+
+#[tokio::test]
+async fn a_relation_field_refuses_an_id_that_names_no_row() {
+    // The picker's hidden inputs are as editable as a typed id, and nothing below the UI checks a
+    // relation id exists (SQLite enforces no foreign key by default). Positive control: the test above.
+    let (e, _) = engine();
+    let tags = RelationField::new(&e, "post", "tag").name("add_tags");
+    // `posted` is the unchecked view, for re-rendering: it keeps what `read` refuses.
+    assert_eq!(tags.posted(&no_headers(), b"add_tags=1&add_tags=99").unwrap(), ["1", "99"]);
+    for (body, message) in [
+        ("add_tags=1&add_tags=99", "no tag matches '99'"),
+        ("add_tags=98&add_tags=2&add_tags=99", "no tag matches '98', '99'"),
+        ("add_tags=rust", "no tag matches 'rust'"),
+    ] {
+        match tags.read(&no_headers(), body.as_bytes()).await {
+            Err(Error::Validation(v)) => assert_eq!(v.fields.get("add_tags").map(String::as_str), Some(message)),
+            other => panic!("{body}: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_relation_field_names_a_real_relation_or_refuses() {
+    let (e, _) = engine();
+    for (slug, relation) in [("post", "nope"), ("post", "title"), ("nope", "author")] {
+        let r = RelationField::new(&e, slug, relation).render_for(&no_headers()).await;
+        assert!(matches!(r, Err(Error::BadRequest(_)) | Err(Error::NotFound)), "{slug}.{relation}: {r:?}");
+    }
+    assert!(RelationField::new(&e, "post", "author").render_for(&no_headers()).await.is_ok(), "positive control");
+}
+
+#[tokio::test]
+async fn a_relation_field_lists_its_target_only_if_the_caller_may_list_the_target() {
+    // Positive control: open, a select of every author.
+    let open = engine_with_author_gate(Arc::new(Open));
+    let html = RelationField::new(&open, "post", "author").selected([3]).render_for(&no_headers()).await.unwrap();
+    assert!(html.contains(r#"<option value="4">Grace</option>"#), "{html}");
+
+    // Shut: the selection as posted ids — not even its label, since an id an app (or an attacker's
+    // query string) supplies is no reason to say what that row is called — and nothing to browse.
+    let shut = engine_with_author_gate(Arc::new(Always(Decision::Denied)));
+    let html = RelationField::new(&shut, "post", "author").selected([4]).render_for(&no_headers()).await.unwrap();
+    assert!(!html.contains("Grace") && !html.contains("Ada"), "{html}");
+    assert!(html.contains(r#"data-id="4">4</span>"#), "{html}");
+    assert!(!html.contains("data-rl-src=\"/pick"), "{html}");
+}
+
+#[tokio::test]
+async fn a_relation_field_escapes_labels_names_and_messages() {
+    let mut e = Engine::new();
+    e.add(Arc::new(Mock::new("post", post_columns()).rows(vec![])), Arc::new(Open));
+    e.add(Arc::new(Mock::new("author", vec![field("id", false, true, None)]).rows(vec![])), Arc::new(Open));
+    e.add(
+        Arc::new(
+            Mock::new("tag", vec![field("id", false, true, None), field("name", true, false, None)])
+                .rows(vec![json!({"id": 1, "name": "<script>x</script>"})]),
+        ),
+        Arc::new(Open),
+    );
+    for threshold in [50, 0] {
+        if threshold == 0 {
+            e.set_picker_path("/pick");
+        }
+        let html = RelationField::new(&e, "post", "tag")
+            .name("t\"><script>")
+            .label("<script>l</script>")
+            .help("<script>h</script>")
+            .error("<script>e</script>")
+            .selected(["1", "<script>"])
+            .picker_threshold(threshold)
+            .render_for(&no_headers())
+            .await
+            .unwrap();
+        assert!(!html.contains("<script>"), "threshold {threshold}: {html}");
+        assert!(html.contains("&#60;script&#62;x&#60;/script&#62;"), "the label, escaped: {html}");
+    }
 }
 
 #[tokio::test]

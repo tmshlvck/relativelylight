@@ -126,7 +126,9 @@ and `Admin` stays a composition of the parts rather than a fourth thing to maint
 
 A relation whose target is too large for a `<select>` is edited in a **picker** dialog over the
 target's own table (`Picker`, one app-mounted `GET` route, and the crate's one script); it answers to
-the target's gate, and without JavaScript the field still saves its selection unchanged.
+the target's gate, and without JavaScript the field still saves its selection unchanged. The same
+input is available on its own (`RelationField`) for a form the app writes, from the same code — so it
+cannot drift from the crate's forms — reading back ids checked to exist.
 
 **Roadmap / deferred:** multipart CSRF so CSV import can take a file rather than a paste; optional
 cross-document view transitions; splitting `Table` into smaller pieces ([TODO.md](TODO.md)).

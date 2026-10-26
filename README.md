@@ -177,12 +177,14 @@ Enable only what you use — an unused feature pulls no dependencies.
 
 ## Examples
 
-Four runnable examples, all over one seeded in-memory SQLite model (`examples/model`):
+Runnable examples, all over one seeded in-memory SQLite model (`examples/model`):
 
 ```bash
 cargo run -p crud-example          # :3000  compose the UI yourself: per-entity pages, a standalone Form at /post/new,
                                    #         a /dashboard of your own, a pinned filter, CSV, timezones + DST,
                                    #         the relation picker (/pick) for a post's author and tags — no auth
+cargo run -p relationfield-example # :3000  a form of your own with the admin's relation input in it: select, or the
+                                   #         picker dialog past 50 rows (crud::ui::RelationField) — no auth
 cargo run -p adminpanel-example    # :3000  the same behind auth: crud::ui::Admin, 2FA, lockout panels (admin / password)
 cargo run -p auth-example          # :3000  auth up close: login, SSO, 2FA, re-auth on your own route, and the
                                    #         accounts panel an operator provisions users from (admin / password)

@@ -19,7 +19,8 @@ decision about layout. This document is the worked example of that division, usi
 - [9. Checklist](#9-checklist)
 
 Runnable versions of §§2–6 are `examples/adminpanel` (gated: login, 2FA, lockout panels) and
-`examples/crud` (open: per-entity pages, a standalone form, a dashboard, timezones).
+`examples/crud` (open: per-entity pages, a standalone form, a dashboard, timezones), and
+`examples/relationfield` (a hand-written form with the relation picker in it).
 
 ---
 
@@ -434,6 +435,11 @@ Two things to carry over from the library's own forms, because they are easy to 
 - **Re-authentication before anything sensitive.** A live session is not evidence its owner is
   present: `auth.reauthenticate(&who, password, code).await` before rotating a credential, changing a
   payout account, or deleting an installation. See [AUTH.md §5h](AUTH.md).
+
+A relation in such a form needn't be a hand-rolled `<select>` of every row:
+[`crud::ui::RelationField`](CRUD.md#relationfield--the-relation-input-in-a-form-of-your-own) renders
+the admin's own input for it — a `<select>`, or the picker dialog once the target is large — and reads
+the chosen ids back, checked to exist. `examples/relationfield` is the worked page.
 
 And if you want the write to appear in the same audit trail as the admin's, call your
 `WriteObserver` yourself with a `WriteEvent` naming your own `source`. (If your sink also maintains

@@ -52,6 +52,7 @@
 mod admin;
 mod checks;
 mod decode;
+mod field;
 mod form;
 mod picker;
 mod render;
@@ -61,6 +62,7 @@ mod widgets;
 mod write;
 
 pub use admin::Admin;
+pub use field::RelationField;
 pub use form::Form;
 pub use picker::Picker;
 pub use state::{Done, Mode, ViewState};

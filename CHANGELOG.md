@@ -32,6 +32,15 @@ is easy to miss in a diff.
 
 ### Added
 
+- **`crud::ui::RelationField` — the relation input, for a form of your own.** The input `Form`,
+  `Table` and `Admin` render for a relation — a `<select>` up to `picker_threshold`, the picker
+  dialog past it — as a fragment for a hand-written `<form>`: a bulk action, a filter, anything that
+  isn't one row of one entity. `RelationField::new(engine, "post", "tag")`, `.selected(ids)`,
+  `.render_for(&headers)`; on POST, `.read(&headers, &body)` returns the posted ids, each checked to
+  be a row of the target (`Error::Validation` naming the field otherwise), and `.posted(..)` the same
+  ids unchecked for re-showing a rejected form. It's the same function and template the crate's forms
+  use (`templates/_field.html`), so it can't drift from them. New `examples/relationfield`; see
+  `docs/CRUD.md` → RelationField.
 - **`crud::ui::Picker` — a relation too large for a `<select>` is edited in a dialog.** Past
   `picker_threshold`, a relation field shows its selection as badges, posted back as hidden inputs, and
   a 🔍 button opening a dialog over the target's own table (search, sort, paging; a radio or a

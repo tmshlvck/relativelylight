@@ -182,29 +182,34 @@ async fn unknown_references(
         if ids.is_empty() {
             continue;
         }
-        // One lookup for the lot: `pk_in` is an exact primary-key match, so this reads at most as
-        // many rows as were posted.
-        let q = ListQuery { pk_in: ids.clone(), all: true, ..Default::default() };
-        let found: Vec<String> = match engine.list(target, &q, true).await {
-            Ok(page) => page.data.iter().map(|it| render::text(Some(&it.id))).collect(),
-            // `BadRequest`: an id that can't even be a key of the target (text for an integer key).
-            Err(Error::BadRequest(_)) => Vec::new(),
-            Err(e) => return Err(e),
-        };
-        let missing: Vec<&String> = ids.iter().filter(|id| !found.contains(id)).collect();
-        if let Some(first) = missing.first() {
+        let missing = missing_ids(engine, target, &ids).await?;
+        if !missing.is_empty() {
             // A to-one says what was typed; a to-many names the ids, since nothing was typed.
             let shown = match cardinality {
                 Cardinality::ToOne => posted.one(name).unwrap_or("").trim().to_string(),
-                Cardinality::ToMany if missing.len() == 1 => first.to_string(),
-                Cardinality::ToMany => {
-                    missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("', '")
-                }
+                Cardinality::ToMany => missing.join("', '"),
             };
             errors.field(name, format!("no {target} matches '{shown}'"));
         }
     }
     Ok(errors)
+}
+
+/// Those of `ids` that name no row of `target`, in order — the check behind "no tag matches '99'",
+/// shared with [`RelationField::read`](super::RelationField::read). One lookup for the lot: `pk_in`
+/// is an exact primary-key match, so this reads at most as many rows as were posted.
+pub(crate) async fn missing_ids(engine: &Engine, target: &str, ids: &[String]) -> Result<Vec<String>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let q = ListQuery { pk_in: ids.to_vec(), all: true, ..Default::default() };
+    let found: Vec<String> = match engine.list(target, &q, true).await {
+        Ok(page) => page.data.iter().map(|it| render::text(Some(&it.id))).collect(),
+        // `BadRequest`: an id that can't even be a key of the target (text for an integer key).
+        Err(Error::BadRequest(_)) => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    Ok(ids.iter().filter(|id| !found.contains(id)).cloned().collect())
 }
 
 /// An uploaded file's bytes as CSV text: a UTF-8 BOM (what a spreadsheet writes) is dropped, and
