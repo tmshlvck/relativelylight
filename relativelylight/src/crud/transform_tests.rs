@@ -39,6 +39,33 @@ mod contact {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// A row that must belong to a contact: a NOT NULL to-one.
+mod note {
+    use sea_orm::entity::prelude::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "note")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i32,
+        pub text: String,
+        pub contact_id: i32,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(belongs_to = "super::contact::Entity", from = "Column::ContactId", to = "super::contact::Column::Id")]
+        Contact,
+    }
+    impl Related<super::contact::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Contact.def()
+        }
+    }
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 async fn db() -> DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     for stmt in [
@@ -159,4 +186,35 @@ async fn a_csv_cell_means_what_a_form_input_does() {
     let e = engine(&db, phone_codec);
     save(&e, "name=Ada&nickname=&rank=&phone=420123456789").await;
     assert_eq!(stored(&db).await, json!({"nickname": null, "rank": null, "phone": "420123456789"}));
+}
+
+#[tokio::test]
+async fn a_blank_required_relation_is_a_field_error_not_a_panic() {
+    let db = db().await;
+    for stmt in [
+        "CREATE TABLE note (id INTEGER PRIMARY KEY, text TEXT NOT NULL, contact_id INTEGER NOT NULL)",
+        "INSERT INTO note (id, text, contact_id) VALUES (1, 'hi', 1)",
+    ] {
+        db.execute_unprepared(stmt).await.unwrap();
+    }
+    let mut crud = Crud::new(db.clone());
+    crud.register(MetaModel::new(contact::Entity), Open);
+    crud.register(MetaModel::new(note::Entity), Open);
+    let e = crud.into_engine();
+    let submit = |body: &'static str| {
+        let e = &e;
+        async move {
+            Form::new(e, "note").submit(&HeaderMap::new(), IP, body.as_bytes(), &ViewState::default()).await
+        }
+    };
+
+    // SeaORM 2.0's `ActiveModel::set` panics on a null for an `i32` column; these used to reach it.
+    for body in ["_op=create&text=t&contact=", "_op=create&text=t", "_op=update&_id=1&text=t&contact="] {
+        match submit(body).await {
+            Ok(Outcome::Invalid(s)) => assert_eq!(s.field_error("contact"), Some("required"), "{body}"),
+            other => panic!("{body}: expected a field error, got {other:?}"),
+        }
+    }
+    // Positive control: given, it saves.
+    assert!(matches!(submit("_op=create&text=t&contact=1").await, Ok(Outcome::Done(_))));
 }

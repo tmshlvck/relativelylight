@@ -874,8 +874,20 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
             if r.read_only || r.hidden {
                 continue;
             }
-            let Some(v) = obj.get(&r.name) else { continue };
+            // A to-one over a NOT NULL foreign key must be given on create and can't be unlinked —
+            // the same rule as a required scalar, named by the relation the form shows.
+            let fk_field = r.fk_column.as_ref().and_then(|fk| self.fields.iter().find(|f| &f.name == fk));
+            let Some(v) = obj.get(&r.name) else {
+                if is_create && r.owns_fk && fk_field.is_some_and(|f| f.required) {
+                    errs.field(&r.name, "required");
+                }
+                continue;
+            };
             if r.owns_fk {
+                if v.is_null() && fk_field.is_some_and(|f| !f.nullable) {
+                    errs.field(&r.name, "required");
+                    continue;
+                }
                 if let Some(fk) = &r.fk_column {
                     to_one.push((fk.clone(), v.clone()));
                 }
@@ -1251,8 +1263,8 @@ where
     ) -> Result<Value> {
         let (scalars, to_one, nm_ops) = prepared;
         let mut am = <E::ActiveModel as Default>::default();
-        set_columns::<E>(&mut am, &scalars);
-        set_columns::<E>(&mut am, &to_one);
+        set_columns::<E>(&mut am, &scalars)?;
+        set_columns::<E>(&mut am, &to_one)?;
         let model: E::Model = am.insert(txn).await?;
         let full = serde_json::to_value(&model).unwrap();
         let pk = pk_string(&self.model.pk, &full);
@@ -1275,8 +1287,8 @@ where
             return Ok(None);
         };
         let mut am = model.into_active_model();
-        set_columns::<E>(&mut am, &scalars);
-        set_columns::<E>(&mut am, &to_one);
+        set_columns::<E>(&mut am, &scalars)?;
+        set_columns::<E>(&mut am, &to_one)?;
         let model: E::Model = am.update(txn).await?;
         let full = serde_json::to_value(&model).unwrap();
         let pks = pk_string(&self.model.pk, &full);
@@ -1531,15 +1543,21 @@ where
     }
 }
 
-fn set_columns<E: EntityTrait>(am: &mut E::ActiveModel, cols: &[(String, Value)])
+/// `try_set`, not `set`: SeaORM 2.0's `set` panics on a value its column can't hold, and these values
+/// come from a request.
+fn set_columns<E: EntityTrait>(am: &mut E::ActiveModel, cols: &[(String, Value)]) -> Result<()>
 where
     E::ActiveModel: ActiveModelTrait<Entity = E>,
 {
+    let mut errs = ValidationErrors::new();
     for (name, jv) in cols {
         if let Some(c) = column::<E>(name) {
-            am.set(c, json_to_db(c.def().get_column_type(), jv));
+            if am.try_set(c, json_to_db(c.def().get_column_type(), jv)).is_err() {
+                errs.field(name, "invalid value");
+            }
         }
     }
+    if errs.is_empty() { Ok(()) } else { Err(Error::Validation(errs)) }
 }
 
 fn json_key(s: &str) -> Value {

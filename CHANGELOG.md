@@ -99,6 +99,11 @@ is easy to miss in a diff.
 
 ### Fixed
 
+- **Saving a row with a required to-one left blank panicked the request** (SeaORM 2.0's
+  `ActiveModel::set` panics on a `NULL` for a NOT NULL column, where 1.x let the database refuse it).
+  A blank or missing to-one over a NOT NULL foreign key is now a `required` error beside the field, on
+  create and update, and every request value is set with `try_set`, so a mismatch is a field error
+  rather than a panic.
 - **`auth`, `csrf` and `time` escape HTML with the same function as `crud::ui`**, which also escapes
   `'` (as `&#39;`). Visible only to a test matching rendered text such as "didn't".
 - **`MetaField::blank_is_null = false` had no effect through a form.** The form decoder sent `null` for
