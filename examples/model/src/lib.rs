@@ -124,7 +124,15 @@ async fn seed(db: &DatabaseConnection) -> Result<(), DbErr> {
         post::ActiveModel {
             id: Set(i),
             title: Set(format!("{topic} deep dive #{i}")),
-            body: Set(format!("Notes about {} — part {i}.", topic.to_lowercase())),
+            // Two paragraphs, long enough that a table showing only the start of it has to cut.
+            body: Set(format!(
+                "Notes about {} — part {i}. What came up while working through it, the code that \
+                 answered each question, and what is still open.\n\n\
+                 The follow-ups from review are collected here, so part {} can start where this \
+                 one stops.",
+                topic.to_lowercase(),
+                i + 1
+            )),
             views: Set((i * 37) % 500),
             published: Set(i % 4 != 0), // a mix of published / draft for the Yes/No badge
             // Spread publish times across ~45 hours from a fixed base (2023-11-14T22:13:20Z), and

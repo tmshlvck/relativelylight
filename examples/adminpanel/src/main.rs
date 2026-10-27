@@ -107,7 +107,7 @@ fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
         // One control in the side-panel, applied to every listed table that has an `author` column —
         // here just `post`, but this is the shape that pays off when an admin lists many tables of the
         // same kind (fifteen per-type DNS record tables, say) and an operator works inside one of them
-        // at a time. The choice is remembered and travels in the URL fragment, so it can be linked.
+        // at a time. The choice travels in the query string, so it can be linked.
         .filter("author")
         .group("Content")
         .entity_with("post", |t| {
@@ -119,7 +119,7 @@ fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
                     format!(r#"<a href="?entity=post&amp;edit={}">{}</a>"#, esc(&row["id"]), esc(v))
                 })
                 // The listing shows the start of the body (whole in the tooltip); View shows it all.
-                .format_cell(post::Column::Body.as_str(), truncate(20))
+                .format_cell(post::Column::Body.as_str(), truncate(60))
         })
         .entity("tag")
         .separator()

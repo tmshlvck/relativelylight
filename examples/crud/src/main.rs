@@ -28,7 +28,7 @@ use model::{author, event, post, profile, tag, user};
 use relativelylight::authz::{Decision, Open, Operation};
 use relativelylight::crud::engine::{Engine, Error, Result as CrudResult};
 use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::{esc, Form, Outcome, Picker, Table, ViewState, CSS, JS};
+use relativelylight::crud::ui::{esc, truncate, Form, Outcome, Picker, Table, ViewState, CSS, JS};
 use relativelylight::middleware::RealIp;
 use relativelylight::time::{Tz, TzPicker};
 use relativelylight::validate;
@@ -242,6 +242,9 @@ fn table<'a>(engine: &'a Engine, slug: &str) -> Table<'a> {
             .format_cell(post::Column::Title.as_str(), |v, row| {
                 format!(r#"<a href="/post/{}/edit">{}</a>"#, esc(&row["id"]), esc(v))
             })
+            // The listing shows the start of the body (whole in the tooltip); the post's own page
+            // below shows all of it.
+            .format_cell(post::Column::Body.as_str(), truncate(60))
             // A filter on a *relation*: the toolbar gets an author picker, and choosing one narrows
             // the listing, the CSV export and "delete all matching" alike. Sorting by `author` orders
             // by the name shown in the cell rather than the foreign key.
