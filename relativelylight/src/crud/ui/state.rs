@@ -1,14 +1,9 @@
 //! The **URL is the state**: page, sort keys, filters, the search term, which entity is active and
 //! which row is being edited all live in the query string, and nowhere else.
 //!
-//! One consequence is worth stating: every view is linkable. A filtered, sorted, paginated table is a
-//! URL you can bookmark, mail to a colleague, or put in a runbook. The previous design kept the same
-//! information in three places (Alpine component fields, `localStorage`, and a URL fragment), which is
-//! three chances to disagree.
-//!
-//! The vocabulary is the one the old JSON API parsed, so an app's existing links keep meaning what they
-//! meant: `page`, `per_page`, `q`, `filter[name]`, `sort=a,b:desc`, `ids`, `all` — plus `entity`, `new`
-//! and `edit` for the UI's own navigation, and `format=csv`.
+//! So every view is a link. The vocabulary: `page`, `per_page`, `q`, `filter[name]`, `sort=a,b:desc`,
+//! `ids`, `all`, plus `entity`, `new`, `edit`, `show` and `import` for the UI's own navigation, and
+//! `format=csv`.
 
 use crate::crud::engine::{ListQuery, ValidationErrors};
 use crate::urlform;

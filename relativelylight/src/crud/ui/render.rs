@@ -1,9 +1,8 @@
 //! Turning `Vec<Column>` × [`Page`] into the pieces a template prints: cells, rows, sortable headers,
 //! filter chips and a pager.
 //!
-//! All of this used to be JavaScript dispatching on strings (`c.kind === "relation"`,
-//! `c.type === "Bool"`). Here it is one `match` per cell over a Rust enum, so a new [`Column`] variant
-//! or [`LogicalType`] is a compile error in exactly the places that must handle it.
+//! One `match` per cell over [`Column`], so a new variant or [`LogicalType`] is a compile error in
+//! exactly the places that must handle it.
 
 use super::state::ViewState;
 use super::Fmt;

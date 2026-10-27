@@ -59,6 +59,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use crate::html::esc;
 use crate::authz::{Authz, Decision, Operation};
 use crate::middleware::RealIp;
 use rand_core::OsRng;
@@ -866,14 +867,9 @@ impl Auth {
         self
     }
 
-    /// Append an app-rendered section below the password/2FA fragment on the **self** profile page
-    /// (`GET /profile` and after a profile POST) — API tokens, notification preferences, a
-    /// "download my data" button: the things that belong beside "change my password" and are the
-    /// app's, not this crate's.
-    ///
-    /// The hook is handed a [`ProfileSection`] — the caller's identity **and the CSRF token this
-    /// request's forms must carry** — and returns an HTML fragment. Everything is owned, so the
-    /// returned future can be `'static`.
+    /// Append an app-rendered section below the password/2FA fragment on the caller's **own** profile
+    /// page (API tokens, preferences). The hook gets a [`ProfileSection`] — the identity and the CSRF
+    /// token this request's forms must carry — and returns an HTML fragment.
     ///
     /// ```ignore
     /// let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
@@ -885,11 +881,8 @@ impl Auth {
     /// });
     /// ```
     ///
-    /// The section is **self-profile only**: the manager `/profile/{id}` pages don't include it, since
-    /// a manager resetting someone's password has no business with that person's API tokens. For a
-    /// sensitive action inside your section, gate the *handler* with
-    /// [`reauthenticate`](Auth::reauthenticate) — the token in the form proves the request came from
-    /// your page, not that its owner is present.
+    /// A manager's `/profile/{id}` doesn't include it. Gate a sensitive action's *handler* with
+    /// [`reauthenticate`](Auth::reauthenticate).
     pub fn profile_extra<F, Fut>(mut self, hook: F) -> Self
     where
         F: Fn(ProfileSection) -> Fut + Send + Sync + 'static,
@@ -970,9 +963,7 @@ impl Auth {
     /// around the rule).
     ///
     /// **On by default**, at [`PasswordPolicy::recommended`](crate::validate::PasswordPolicy::recommended)
-    /// — ≥ 12 characters, screened against common values and trivial patterns, and (here, where the
-    /// account is known) against the **username**. Two ways out, because a library shouldn't dictate
-    /// this:
+    /// (≥ 12 characters, common values, patterns, the username):
     ///
     /// ```ignore
     /// use relativelylight::validate::PasswordPolicy;
@@ -983,12 +974,9 @@ impl Auth {
     /// auth.password_check(|pw, user| my_own_rules(pw, user))       // your own predicate
     /// ```
     ///
-    /// It governs **typed input, not code**: `create_user` / `set_password` / `make_admin` /
-    /// `reset_admin_access` are unaffected, so a seeder or a break-glass CLI still sets whatever the
-    /// operator says. Wire the same policy into the admin UI / JSON API separately — that's a `crud`
-    /// field validator, `user.field("password_hash").validate_str(validate::optional(Box::new(
-    /// validate::password(policy))))`, as `examples/adminpanel` does. Both surfaces need it, or
-    /// whichever one you skip becomes the way around the other.
+    /// It governs **typed input only**: `create_user` / `set_password` / `make_admin` /
+    /// `reset_admin_access` are unaffected. Wire the same policy into an admin form separately
+    /// (`validate::password`, as `examples/adminpanel` does), or that form is the way around it.
     pub fn password_policy(mut self, policy: impl Into<Option<crate::validate::PasswordPolicy>>) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().password_check = policy.into().map(policy_check);
         self
@@ -1096,12 +1084,8 @@ impl Auth {
     /// `password` and `totp_code` (empty strings for "not supplied"). `Ok(())` if either proves the
     /// account holder is present; `Err(message)` is fit to render back into your form.
     ///
-    /// A live session is not evidence that its owner is at the keyboard — a stolen cookie *is* a live
-    /// session, and the idle window (§5f) bounds how long it lasts but not what it can do inside that
-    /// time. So the actions that would let an intruder entrench (turning off 2FA, enrolling their own
-    /// authenticator, resetting someone else's password) ask for a factor again. This module already
-    /// applies it to its own such routes; use this for yours — deleting an account, rotating an API
-    /// token, exporting a dataset:
+    /// A live session isn't evidence its owner is present. This module asks for a factor again before
+    /// its own sensitive changes; use this for yours (deleting an account, rotating an API token):
     ///
     /// ```ignore
     /// let Some(who) = auth.identify(&headers).await else { return redirect_to_login() };
@@ -1111,29 +1095,17 @@ impl Auth {
     /// delete_everything(&who).await;
     /// ```
     ///
-    /// A **fresh TOTP code is preferred** to a password when the account has 2FA: it proves presence,
-    /// where a password may have been filled in by the browser for whoever is sitting there. A code
-    /// accepted here is **spent** (§5a), so it can't be reused to log in or to wave through a second
-    /// action.
-    ///
-    /// **An account with no local factor passes.** An SSO account has neither password nor local 2FA, so
-    /// there is nothing to ask it for; refusing instead would lock every SSO administrator out of the
-    /// manager pages permanently. Their assurance is whatever the identity provider gave them — re-auth
-    /// through the IdP (an OIDC `prompt=login` round-trip) is the real answer and isn't built yet, so
-    /// this is a documented limit, not an oversight. The same applies to a local account whose password
-    /// is blank (login already disabled).
-    ///
-    /// Not lockout-limited, deliberately, for the reason §5e gives: the caller is already authenticated,
-    /// so counting failures here would let a stolen session lock the real user out of logging in. Nor is
-    /// it needed — guessing a password is no easier here than at `/login`, and a 6-digit code would need
-    /// ~10⁶ requests inside its 90-second window.
+    /// A TOTP code accepted here is **spent** (§5a). An account with no local factor (SSO, or a blank
+    /// password) passes: there is nothing to ask it for, and re-auth through the IdP isn't built
+    /// (AUTH.md §5h). Not lockout-limited — the caller is authenticated, and counting would let a stolen
+    /// session lock the real user out (§5e).
     pub async fn reauthenticate(
         &self,
         who: &Identity,
         password: &str,
         totp_code: &str,
     ) -> Result<(), String> {
-        let Some(user) = current_user(&self.inner, who).await else {
+        let Some(user) = target_user(&self.inner, &who.id).await else {
             return Err("Your session is no longer valid — sign in again.".into());
         };
         self.inner.reauth(&user, password, totp_code).await
@@ -1143,7 +1115,7 @@ impl Auth {
     /// a local password or 2FA. `false` for an SSO account (nothing to ask for, so re-auth passes), which
     /// is what to key a "you'll be asked to confirm" hint off in your own UI.
     pub async fn can_reauthenticate(&self, who: &Identity) -> bool {
-        match current_user(&self.inner, who).await {
+        match target_user(&self.inner, &who.id).await {
             Some(u) => !u.password_hash.is_empty() || u.has_totp(),
             None => false,
         }
@@ -1591,10 +1563,7 @@ async fn profile_form(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Response {
-    let Some(who) = identity_of(&inner, &headers).await else {
-        return Redirect::to(&inner.login_path).into_response();
-    };
-    let Some(user) = current_user(&inner, &who).await else {
+    let Some((who, user)) = signed_in(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
     let (token, jar) = csrf_token(&inner, &headers, jar);
@@ -1619,14 +1588,7 @@ async fn profile_submit(
         return csrf_rejected(&inner);
     }
     let csrf = inner.csrf().token(&headers).unwrap_or_default();
-    let Some(who) = identity_of(&inner, &headers).await else {
-        return Redirect::to(&inner.login_path).into_response();
-    };
-    let user = match who.id.parse::<i32>() {
-        Ok(id) => user_by_id(&inner.db, id).await,
-        Err(_) => None,
-    };
-    let Some(user) = user else {
+    let Some((who, user)) = signed_in(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
     if user.is_sso() {
@@ -1711,7 +1673,7 @@ async fn manage_form(
     let (token, jar) = csrf_token(&inner, &headers, jar);
     // The manager's own 2FA state decides whether the confirm-it's-you block offers a code field.
     let manager_totp_on =
-        current_user(&inner, &who).await.map(|m| m.has_totp()).unwrap_or(false);
+        target_user(&inner, &who.id).await.map(|m| m.has_totp()).unwrap_or(false);
     // Don't offer a reset form for an account whose password lives at the identity provider — the POST
     // refuses it, so a form here would only ever produce an error.
     let frag = match target.sso_key() {
@@ -1758,7 +1720,7 @@ async fn manage_submit(
     // Re-authenticate the **manager** (§5h) with their own factor. This route sets a password without
     // knowing the old one — which is the point of it, and also what makes it the most valuable thing a
     // stolen manager session can reach: every account it can reset is an account it can then log in as.
-    let Some(manager) = current_user(&inner, &who).await else {
+    let Some(manager) = target_user(&inner, &who.id).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
     let manager_totp_on = manager.has_totp(); // whether to offer *them* the code field
@@ -1847,10 +1809,7 @@ async fn totp_setup_form(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Response {
-    let Some(who) = identity_of(&inner, &headers).await else {
-        return Redirect::to(&inner.login_path).into_response();
-    };
-    let Some(user) = current_user(&inner, &who).await else {
+    let Some((who, user)) = signed_in(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
     if user.is_sso() {
@@ -1880,10 +1839,7 @@ async fn totp_setup_submit(
         return csrf_rejected(&inner);
     }
     let csrf = inner.csrf().token(&headers).unwrap_or_default();
-    let Some(who) = identity_of(&inner, &headers).await else {
-        return Redirect::to(&inner.login_path).into_response();
-    };
-    let Some(user) = current_user(&inner, &who).await else {
+    let Some((who, user)) = signed_in(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
     if user.is_sso() {
@@ -1965,10 +1921,7 @@ async fn recovery_regenerate(
         return csrf_rejected(&inner);
     }
     let csrf = inner.csrf().token(&headers).unwrap_or_default();
-    let Some(who) = identity_of(&inner, &headers).await else {
-        return Redirect::to(&inner.login_path).into_response();
-    };
-    let Some(user) = current_user(&inner, &who).await else {
+    let Some((who, user)) = signed_in(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
     if !user.has_totp() {
@@ -2024,10 +1977,7 @@ async fn sessions_revoke(
         return csrf_rejected(&inner);
     }
     let csrf = inner.csrf().token(&headers).unwrap_or_default();
-    let Some(who) = identity_of(&inner, &headers).await else {
-        return Redirect::to(&inner.login_path).into_response();
-    };
-    let Some(user) = current_user(&inner, &who).await else {
+    let Some((who, user)) = signed_in(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
     // Spare the caller's own session — identified by the cookie they just used, so a race with their own
@@ -2067,10 +2017,7 @@ async fn totp_self_disable(
         return csrf_rejected(&inner);
     }
     let csrf = inner.csrf().token(&headers).unwrap_or_default();
-    let Some(who) = identity_of(&inner, &headers).await else {
-        return Redirect::to(&inner.login_path).into_response();
-    };
-    let Some(user) = current_user(&inner, &who).await else {
+    let Some((who, user)) = signed_in(&inner, &headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
     if let Err(msg) = inner.reauth(&user, &form.current_password, &form.totp_code).await {
@@ -2109,7 +2056,7 @@ async fn totp_manage_disable(
     };
     // Re-authenticate the **manager**, with their own factor — stripping a victim's second factor is
     // most of what a stolen manager session is worth.
-    let Some(manager) = current_user(&inner, &who).await else {
+    let Some(manager) = target_user(&inner, &who.id).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
     let manager_totp_on = manager.has_totp();
@@ -2154,9 +2101,11 @@ async fn profile_fragment(
 }
 
 /// The caller's own user row.
-async fn current_user(inner: &Inner, who: &Identity) -> Option<user::Model> {
-    let id = who.id.parse::<i32>().ok()?;
-    user_by_id(&inner.db, id).await
+/// The signed-in caller and their account row; `None` sends them to the login page.
+async fn signed_in(inner: &Inner, headers: &HeaderMap) -> Option<(Identity, user::Model)> {
+    let who = identity_of(inner, headers).await?;
+    let user = target_user(inner, &who.id).await?;
+    Some((who, user))
 }
 
 /// Clear both the active and pending TOTP secrets on a user, the replay guard, and any recovery codes
@@ -2197,7 +2146,6 @@ async fn target_user(inner: &Inner, id: &str) -> Option<user::Model> {
     user_by_id(&inner.db, uid).await
 }
 
-/// Shared validation for the new/confirm password pair.
 /// Adapt a [`PasswordPolicy`](crate::validate::PasswordPolicy) into the stored check, passing the
 /// account's username as context so a password containing it is refused.
 fn policy_check(policy: crate::validate::PasswordPolicy) -> PasswordCheck {
@@ -2319,11 +2267,6 @@ fn login_form_html(error: Option<&str>, csrf: &str) -> String {
 /// Default page wrapper when the app doesn't provide one: a minimal, unstyled document.
 fn default_login_shell(form: &str) -> String {
     format!(r#"<!doctype html><meta charset="utf-8"><title>Log in</title><main>{form}</main>"#)
-}
-
-/// Escape text for interpolation into HTML.
-fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 /// A Bootstrap alert for a form error (danger) or success message — empty when neither is set.

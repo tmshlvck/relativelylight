@@ -7,7 +7,7 @@ timezone database.
 
 - [1. Storage model](#1-storage-model)
 - [2. The zone for one request: `Tz`](#2-the-zone-for-one-request-tz)
-- [3. The picker, and its four-line handler](#3-the-picker-and-its-four-line-handler)
+- [3. The picker and its handler](#3-the-picker-and-its-handler)
 - [4. What follows the zone](#4-what-follows-the-zone)
 - [5. DST, and why the server does this](#5-dst-and-why-the-server-does-this)
 - [6. Choosing a policy](#6-choosing-a-policy)
@@ -53,7 +53,7 @@ labelled UTC**, so there is no guessing and no partial failure.
 The `crud::ui` components do this for you — `render_for` takes the headers, so cells and inputs are
 already in the caller's zone. You need `Tz` directly only on your own pages.
 
-## 3. The picker, and its four-line handler
+## 3. The picker and its handler
 
 [`TzPicker`] renders a `<select>` of zones in a plain form that posts `tz` and `back` to a route of
 yours. Setting a cookie needs a *response*, which a fragment renderer never gets to write — so this
@@ -65,13 +65,12 @@ let picker = TzPicker::new().render(&Tz::from_headers(&headers), current_url);
 
 // the route it posts to:
 async fn set_tz(Form(fields): Form<HashMap<String, String>>) -> Response {
-    let tz = Tz::named(fields.get("tz").map(String::as_str).unwrap_or("UTC"));
-    let back = fields.get("back").cloned().unwrap_or_else(|| "/".into());
-    ([(header::SET_COOKIE, tz.cookie())], Redirect::to(&back)).into_response()
+    let (cookie, back) = TzPicker::submitted(fields.get("tz"), fields.get("back"));
+    ([(header::SET_COOKIE, cookie)], Redirect::to(&back)).into_response()
 }
 ```
 
-`back` is the page the user was on, so setting a zone doesn't lose the table they were looking at, and
+`back` is the page the user was on, so setting a zone doesn't lose the table they were looking at (only a local path is followed — anything else returns to `/`), and
 `action(path)` changes where the form posts (default `/tz`).
 
 **Where you put it is entirely yours**, because it is a fragment and nothing about it is positional:
@@ -183,7 +182,7 @@ The cookie is the mechanism; the policy is yours.
 
 - **Nothing at all.** Don't render a picker. Everything is UTC, labelled UTC. Correct, and right for an
   operations console whose logs are UTC too.
-- **Let the user choose** (the usual). Render `TzPicker` and the four-line handler. The choice persists
+- **Let the user choose** (the usual). Render `TzPicker` and the three-line handler. The choice persists
   for a year and costs no storage.
 - **Seed it from the browser once.** If you want a first-visit default without asking, three lines of
   JavaScript can set the cookie from `Intl.DateTimeFormat().resolvedOptions().timeZone` and reload.
@@ -194,10 +193,6 @@ The cookie is the mechanism; the policy is yours.
   at login so the library's components agree. The crate keeps no per-user state of its own.
 - **Follow the server's zone.** `Tz::named(&std::env::var("TZ")?)`, if matching syslog matters more than
   matching the operator.
-
-Note what is *not* here any more: `window.RL_TZ`, `window.RLTime`, the Alpine `$store.tz` store, and
-the `time::JS` bundle. A policy that used to be four JavaScript options is now which `Tz` your handler
-passes.
 
 ## 7. Reference: the flow for one datetime column
 

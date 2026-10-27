@@ -1,231 +1,66 @@
 # TODO
 
-Backlog for `relativelylight`, highest-impact first. See [PRD.md](PRD.md) for the product
-roadmap and [AUTH.md](AUTH.md) for the auth design these expand on. Keep this list current:
-tick/remove items as they ship, and add new ones with a one-line rationale.
+The backlog, highest impact first. `- [ ]` is work to do; a plain `-` is a **decision** (rejected or
+bounded on purpose), kept so it isn't re-derived. Shipped work goes to [CHANGELOG.md](../CHANGELOG.md),
+not here.
 
-> **Convention:** `- [ ]` is work still to do. A plain `-` bullet is a **recorded decision** — considered
-> and rejected, or bounded on purpose — kept so the reasoning isn't re-derived when the idea resurfaces.
-> An item whose only content is "this shipped" belongs in [CHANGELOG.md](../CHANGELOG.md), not here.
+## crud / crud::ui
 
-## Next
+- [ ] **Batch relation reads.** A page of `N` rows with `R` relation columns costs about `N × R`
+  queries, which is what holds `Table::DEFAULT_PER_PAGE_MAX` at 500. Keep it inside the SeaORM
+  backend; a new `Accessor` method would break implementors.
+- [ ] **Split `Table` into smaller pieces** (`List`, `Search`, `FilterSelect`, the write actions) with
+  `Table`/`Admin` as presets over them, so each control owns its `<form>`.
+- [ ] **Browser tests for the picker** (Playwright against `examples/crud`); `ui_tests.rs` covers the
+  server half only.
+- [ ] **Filter operators** (`filter[ttl][gt]=300`, `[in]`, `[is_null]`). The URL grammar already
+  nests; wait for a real need.
+- [ ] **Cross-document view transitions** for POST → 303 → GET. Cheap to try, easy to get wrong (a 422
+  re-render animated as a navigation).
+- [ ] **Render `auth`'s pages with Askama**, as `crud::ui` does: one escaping story. It touches every
+  security-tested page, so do it on its own with the negative-path suite as the guard.
+- **Per-column search in the URL — removed.** `ListQuery::search` still carries it for app code.
+- **Timezone abbreviations — absent.** The zone is named once per page; a per-cell `CEST` asks the
+  reader to know the offset.
+- **A type-changing codec — not until needed.** `on_read`/`on_write` run on the column's own type, so
+  cents shown as `12.34` is a formatter plus a validated input.
+- **Charts — dropped.** A server-rendered SVG module was specified (`git show 8a02dfb`) and dropped:
+  tooltips need a client runtime and SVG can't measure text. Use Chart.js on a read-only page.
 
-**0.3.0 — the MPA rewrite — is tagged** (2026-09-21): the UI renders server-side, and the JSON +
-metadata API and the OpenAPI generator are gone. See [MIGRATION-0.3.md](MIGRATION-0.3.md) for the
-upgrade and, in its appendix, why. 0.2.0 (security defaults) and 0.2.1 (sorting + filtering) precede
-it. Everything below is follow-on work; nothing here blocked that release.
+## auth
 
-- **A server-rendered SVG chart module — specified, then dropped.** Bar/line/scatter with nice ticks,
-  `Tz`-formatted time axes and a legend, written up as `docs/CHARTS.md` against teleddns-server's
-  dashboard and deleted once that dashboard answered the question by switching to Chart.js from a
-  CDN. Two things killed it, and both are structural rather than matters of effort: **tooltips** are
-  what people actually want from a chart and cannot exist without a client runtime, and **SVG cannot
-  measure text**, so axis margins are estimates and the design had to cope by *refusing* charts it
-  could not prove would fit. Against that, ~600–900 lines in a crate whose pitch is being small, and
-  a bottomless backlog behind it (log scales, stacking, annotations, thresholds). The spec is in git
-  history — `git show 8a02dfb` — if the idea returns; read its §8 first, which argues both ways.
-  What the downstream app does instead is the recommendation: Chart.js from a CDN, pinned and
-  SRI-checked, treated as a *viewer* on one read-only page like Swagger UI on `/docs`, with the data
-  baked into the page so no JSON endpoint comes back with it.
+- [ ] **Re-authenticate SSO accounts through the IdP** (`prompt=login`), which needs somewhere to park
+  the pending action across the redirect. Until then AUTH.md §5h states the limit.
+- [ ] **Breached-password screening** (HIBP range API or a local corpus). Possible today through
+  `Auth::password_check`; the question is whether a helper earns a feature flag.
+- [ ] **Name the actor of a self-service password change in its `WriteEvent`.** The session rotates
+  before the event fires, so `Auth::identify` finds nobody. Additive fix: `WriteEvent::actor`.
+- [ ] **SSO leftovers:** refresh tokens, `userinfo`, RP-initiated logout, a real-IdP smoke test at
+  release.
+- [ ] **PassKeys / WebAuthn**, when an app faces real-time phishing. Likely adds a field to `Identity`.
+- [ ] **Configurable `SameSite=Lax`** for the session and CSRF cookies. `None` stays unsupported.
+- **No username whitelist for lockout.** An account that can't be locked out can be guessed at forever.
+- **No recovery-code backfill.** Codes are issued with enrolment; `recovery::issue` exists for an app.
+- **The SSO transaction cookie stays unsigned.** Anyone can get a validly signed one from
+  `/sso/{key}/login`; the real fix would be server-side state.
+- **API tokens are the app's.** The gate gets the raw headers, so an app verifies its own tokens.
+- **Request logging is the app's** (`examples/audit`). The crate writes nothing to stdout or stderr.
+- **CORS is documented, not wrapped** (AUTH.md §4): allow `x-csrf-token`.
 
-**`blob` has shipped** — storage, the handle + version chain, `blob-ui`'s components, and
-`examples/blob`. [BLOBSTORE.md](BLOBSTORE.md) is the guide; the CHANGELOG has what landed.
-**Remaining:**
+## blob
 
-- [ ] **CSRF on `crud::ui`'s CSV import.** `blob-ui` closed this for uploads by requiring the token
-  *before* the file part — which a streaming parser can enforce and a buffered one cannot. The CSV
-  import still takes a buffered `Bytes` body and still has the original gap; the same trick works if
-  it moves to `multer`, already a dependency in any `blob-ui` build.
-- [ ] **`crud::ui`'s CSV import is under axum's 2 MB `DefaultBodyLimit`**, because it uses a
-  buffering extractor. Nothing currently says so; it wants a line in the docs at least.
-- **The blob read path assumes re-reading is cheap** (BLOBSTORE.md §4.3, §12) — true of a
-  filesystem, false of an object store. Revisit when a second backend exists, not before.
+- **The read path assumes re-reading is cheap** (BLOBSTORE.md §4.3) — true of a filesystem. Revisit
+  with a second backend.
 
-## Web UI follow-ups (post-MPA)
+## Deferred: changes to a published interface
 
-- [ ] **Split `Table` into smaller pieces** — `List`, `Search`, `FilterSelect` and the write actions,
-  with `Table`/`Admin` as thin presets over them. `Table` has two dozen settings and one `submit`
-  branching on `_op`; smaller pieces would let each control own its `<form>` (the filter/search bug
-  came from two controls sharing one) and stop a setting meaning two things.
-- [ ] **Browser scenario tests for the picker.** The dialog's script is checked by hand in a browser
-  (`examples/crud`); `ui_tests.rs` covers the server half. A Playwright suite against the examples
-  would cover OK/Cancel, paging and chip removal on every change.
-- [ ] **Cross-document view transitions.** `@view-transition { navigation: auto }` plus a
-  `view-transition-name` on the edited row would make POST→303→GET feel continuous. Cheap to try,
-  easy to get subtly wrong (a transition that animates a 422 re-render as a navigation), so it wants
-  a careful look rather than a line of CSS.
-- [ ] **Render `auth`'s pages with Askama too.** `auth/mod.rs` builds its HTML with `format!` + `esc`
-  (2,700 lines, from before there was a template engine in the dependency tree); `crud::ui` now uses
-  Askama, which auto-escapes. Converting would shorten `auth` and put both surfaces on one escaping
-  story — but it touches every security-tested page, so it is a change to make on its own, with the
-  negative-path suite as the guard.
-- **Per-column search in the URL is gone, on purpose.** The old API parsed `search[col]=term`; the UI
-  never rendered a control for it, so it was surface with no user. `ListQuery::search` still carries
-  it for app code calling the engine directly, which is where a per-column search belongs.
+Each reshapes a contract rather than adding to it, so each waits for a concrete requirement and a
+minor bump.
 
-## Security hardening (auth)
-
-Highest priority first.
-
-- [ ] **Re-authenticate an SSO account through its identity provider.** Re-auth ships for local accounts
-  (AUTH.md §5h: password or a fresh TOTP code, on the four sensitive routes, plus
-  `Auth::reauthenticate` for app-owned ones). An account with **no local factor** — every SSO login —
-  passes unchallenged, because there is nothing to ask it for and refusing would lock SSO administrators
-  out of the manager pages for good. The real answer is an OIDC round-trip with `prompt=login` (or
-  `max_age=0`) that returns to the pending action, which needs somewhere to park that action across the
-  redirect — the first piece of server-side state this module would keep for a half-finished request, so
-  it wants designing rather than bolting on. Until then §5h states the limit plainly.
-  (A time-boxed "you confirmed recently" window was also considered and rejected: it needs an
-  `auth_session` column *and* reopens a period in which a stolen session is dangerous again. These
-  actions are rare enough to confirm every time.)
-- [ ] **Breached-password screening.** The policy ships (`validate::PasswordPolicy`, AUTH.md §5g), but its
-  common-value list is deliberately a **floor** — a few dozen perennial values plus keyboard walks, matched
-  whole. The control NIST actually asks for is a check against **breach data**, which means either a local
-  corpus (tens of MB: a data file or a feature-gated download, not a `const`) or an online lookup (HIBP's
-  k-anonymity range API — a network call per password change, and a dependency an app may not want). Both
-  are app-level calls, which is why `Auth::password_check(closure)` exists; the open question is only
-  whether a *helper* for the HIBP form earns a feature flag, given it needs an HTTP client and a caching
-  story.
-- **No *username* whitelist for lockout.** Addresses can be exempted (`Lockout::ip_whitelist`); accounts
-  can't, on purpose. An account that can never be locked out is an account whose password can be guessed
-  at forever. If one is ever wanted it needs a better story than "skip the counter" — a raised limit, say.
-- **Recovery-code backfill — not needed.** Codes are issued *with* the enrolment (AUTH.md §5i), so only an
-  account that enrolled under an earlier version lacks a set, and no deployment has one. An auto-issue path
-  would buy surprises (a set appearing mid-login, or a nag that only reaches people who visit their
-  profile); an app that ever needs one calls `recovery::issue` itself. The profile page already says
-  "None left" loudly.
-- **SSO transaction cookie — deferred with cause; revisit only if the assumption stops holding.**
-  `state`/`nonce`/PKCE ride in an unsigned cookie (AUTH.md §5b), so anyone able to *write* a cookie for the
-  host can plant a transaction and produce a login CSRF (the victim signed in as the attacker). Signing was
-  considered and rejected: `/sso/{key}/login` hands a genuine transaction to anyone who asks, so an attacker
-  plants a validly signed one instead and nothing changes. It rests on the same assumption as the
-  double-submit CSRF token. If a deployment ever *can't* hold that assumption (a shared registrable domain,
-  http), the fix isn't a signature — it's binding the transaction to something server-side, which means
-  state this module doesn't currently keep.
-
-## middleware / cookies
-
-- [ ] **Configurable cookie `SameSite`** — the real feature behind the CORS question. Session and CSRF
-  cookies are hardcoded `Strict`, which is the right default and blocks two legitimate cases: a top-level
-  cross-site GET landing on a logged-in page (wants `Lax`), and a cross-origin SPA using cookies (wants
-  `None; Secure`, and would then lean entirely on the CSRF token). `Lax` is a small, safe addition and the
-  whole of what's wanted here. `None` should stay **unsupported**: it trades away the defence AUTH.md §7
-  calls defence-in-depth, and the case for it — a cross-origin client — is better served by that client
-  sending an app-issued token, which needs no cookie at all.
-- **Request logging — decided: not ours at all.** `access_log` was removed before the 0.2.0 tag and lives
-  in `examples/audit`. The crate now writes **nothing** to stdout or stderr, which is a better thing
-  for a back-office library to be than "ships an opinionated log line", and it retires the
-  `tracing`-vs-`log`-dependency question before it is asked. The middleware was a dozen lines every app
-  wants slightly differently — structured event or stderr line, path or path+query, and a **level**, which
-  a hardcoded `eprintln!` cannot have. `resolve_real_ip` stays because it is the opposite case: mandatory,
-  security-relevant, and coupled to `auth`.
-  A **principal** in that line is the app's call too, and the example shows both ways: a handler writing an
-  `Actor` into the response extensions (free, opt-in per route) or the layer calling `Auth::identify`
-  (names every session-authenticated request, costs a lookup on each). Neither can name an **API token**
-  caller — that credential is verified *inside* the handler, so a request that **fails** auth, the one most
-  worth naming, never gets far enough to contribute anything. For those the two-line pattern is strictly
-  more informative: the access line says a request arrived, the handler's line says who it was and whether
-  it succeeded. They need no correlation id, because the handler extracts [`RealIp`] and prints the *same
-  canonical address*.
-- **CORS — no wrapper; document it instead.** `tower_http::cors::CorsLayer` is self-contained (it answers
-  preflight `OPTIONS` and sets the `Access-Control-*` headers); wrapping it would add a dependency and a
-  layer of our opinions over zero logic. AUTH.md §4 carries the guidance, including the two things only
-  this crate can tell you: allow **`x-csrf-token`** or every admin-UI write fails its preflight, and a
-  cross-origin *browser* client can't use the session cookie at all (it's `SameSite=Strict`), so
-  `allow_credentials` is beside the point and such a client wants a token.
-
-## Auth features
-
-- [ ] **An audit event for a self-service password change can't name its actor.** `POST /profile`
-  rotates the caller's session id and *then* fires the `WriteEvent`, so a sink calling
-  `Auth::identify(ev.headers)` finds nobody — the cookie on that request is already spent. Visible in
-  `examples/audit` as `-@127.0.0.1` on exactly one event kind (a manager's reset, `auth-admin`, names
-  the manager fine). Two ways out: emit before the rotation, or give `WriteEvent` an
-  `actor: Option<String>` the emitter fills when it already knows (it does, on every `auth` path) and
-  leaves `None` for `crud`, where the engine never resolves an identity. The second is additive —
-  `WriteEvent` is `#[non_exhaustive]` — and is the one to take if an app asks for it; the first is
-  smaller but reorders a security-sensitive handler.
-- **App-issued API tokens — decided: the app's, not ours.** Dropped rather than deferred. An API-first
-  service (`teleddns-server`: the API is the product, the admin panel a convenience this crate throws in)
-  needs tokens shaped its own way — per-machine or per-person, scoped or not, its own table or not, its own
-  rotation. A built-in would have to choose, and every app that chose differently would then carry two
-  systems. Nothing blocks them: `Authz::authorize` gets the **raw headers**, so an app-written gate reads
-  `Authorization`, verifies however it likes, and returns the same `Allow`/`NeedsLogin`/`Denied` the cookie
-  presets do — gating the same generated CRUD routes — and `Authorization`-bearing requests are already
-  CSRF-exempt (AUTH.md §7). This crate owns the **web** door: `auth_user`/`auth_group`, sessions, 2FA, SSO.
-  A web-only app never issues a token; an API-first app issues its own and still gets the admin panel.
-  (This also closes the `SameSite=None` question below and the access-log principal above.)
-- [ ] **SSO / OIDC leftovers** (none urgent). Base OIDC ships with cached discovery and fake-IdP coverage
-  of the rejection paths (AUTH.md §5b, §10a). Left: refresh-token handling and `userinfo` (we read claims
-  from the ID token only, which covers username + groups), RP-initiated logout at the provider
-  (`end_session_endpoint`), and a smoke test against a real IdP as a *release* step rather than a CI one.
-- [ ] **PassKeys / WebAuthn** as an additional second factor / passwordless — **milestone 0.3+**, not
-  before. Deliberately parked: the enterprise apps driving this crate authenticate against passwords +
-  TOTP (or their IdP via `sso`), so nothing needs it today, and it's a large surface — a `webauthn-rs`
-  dependency, a credentials table, registration/assertion ceremonies with browser JS, and an assurance
-  level on the session that a gate could require. That last part is why it wants its own milestone rather
-  than a spare afternoon: `Identity` would likely gain a field, which is a source break. It stays the
-  right answer to real-time phishing, which neither TOTP nor its replay guard addresses (AUTH.md §5a) —
-  revisit when an app actually faces that threat.
-
-## crud / engine
-
-> **Adding to `MetaField` is free** (it's `#[non_exhaustive]`); adding to `Column::Field` is a source
-> break for an out-of-crate `Accessor` or an exhaustive `match`. That is now *accepted* rather than
-> avoided — `Accessor` is documented as a type-erasure seam, not a stability promise (there is one
-> implementor, in this crate) — but it is still worth batching such additions into one release.
-
-- [ ] Batch relation reads (avoid N+1 on relation resolution). Keep it inside the SeaORM backend — the
-  resolution already happens behind `Accessor::list`, so this can be **purely internal**; a new
-  `Accessor` method would be a break for anyone implementing the seam. This is what holds
-  `Table::DEFAULT_PER_PAGE_MAX` down at 500: a page of `N` rows with `R` relation columns costs on
-  the order of `N × R` queries, so the honest page ceiling is set by the query count, not by memory.
-  Batching would let that default rise.
-- [ ] Filter **operators** — `filter[ttl][gt]=300`, `filter[name][in]=a,b`, `filter[zone][is_null]=true`.
-  The bracket grammar was chosen to nest, so this is additive in the URL; the work is in `ListQuery`
-  (today's `eq: Vec<(String, String)>` would need a comparison alongside the value), in
-  `build_condition`, and in `ViewState`'s parser. Wait for a real need — an exact match plus `q` covers
-  what the console asks for so far.
-
-## crud::ui / time
-
-- **Remembering a table's sort — moot.** This asked for the sort to survive a reload the way a
-  `localStorage`-backed filter did. Both now live in the query string, so *everything* survives a
-  reload, a bookmark and a link, and the asymmetry is gone along with the storage.
-- **Per-field widget overrides — shipped** (CRUD.md § Widget overrides), and they needed **no** new
-  `MetaField`/`Column::Field` field after all: `display: Option<FieldDisplay>` already existed as the
-  presentation override, so the widgets became variants of *that* — `Textarea { rows }`, `Radio`,
-  `Range { min, max, step }`, `Email`, `Url` — and the `Accessor` seam is untouched. Worth remembering the
-  next time something looks like it needs a new published field: an existing `Option<enum>` may already be
-  the right home, and an enum variant is free where a struct field isn't.
-- **Timezone abbreviations — deliberately absent.** Rendering is now `YYYY-MM-DD HH:MM` plus the zone
-  *name* stated once ("Times are Europe/Prague."), rather than an abbreviation per cell: an
-  abbreviation asks the reader to know which of `CEST`/`CET` means +2, and a table of our own would be
-  ours to keep correct forever. DST itself comes from `jiff` and the host's IANA database, with both
-  transition instants covered by unit tests — see [docs/TIME.md §5](docs/TIME.md).
-
-## Transformative — deferred until there is real demand
-
-Not scheduled, and not "someday" items either: each one **reshapes a published interface** rather than
-adding to it, so it changes the crate's contract with every existing user. None is worth starting on
-spec — only when a concrete requirement arrives that can't be met any other way, and then deliberately,
-timed with a minor bump. The reasoning is recorded here so it doesn't have to be re-derived each time
-one of them looks tempting.
-
-- **Row-level authorization** — per-row read checks / list filters, i.e. the gate seeing the row or the
-  query rather than just the headers. Wanted often enough to keep re-proposing itself, but `Authz` is the
-  one trait apps implement by hand, so the shape matters more than the feature: it must arrive as
-  **additional** methods carrying default impls, never a changed `authorize` signature, and `Decision`
-  must stay fieldless (it's `Copy`, and a variant with a payload would remove that as well as breaking
-  exhaustive matches). The list-filter half also reaches into `ListQuery` and probably `Accessor`, which
-  is what makes it transformative rather than additive. Meanwhile an app that needs per-row rules can
-  enforce them in its own handler, as `/profile/{id}`'s self-or-manager check already does.
-- **Composite-PK URL token + a `row_key` escape hatch.** Every entity today has a single-column PK, and
-  the seam is built on it: `Accessor::pk() -> String`, the `/{entity}/{id}` URL shape, and `RowItem.id`.
-  Widening `pk()` breaks every `Accessor` implementation, including any an app wrote itself. Revisit only
-  when a real composite-PK table needs exposing through auto-CRUD; a `row_key` hatch *could* arrive
-  additively (a new trait method with a default impl) if the requirement turns out to be narrower than
-  full composite-key support. Junction tables don't count — they're never registered.
-- **A second backend behind the `Accessor` seam** would very likely force changes to that trait, which is
-  public and documented as the extension point. Worth doing partly *because* it would flush out the gaps
-  — but it should be timed with a minor bump, not slipped into a patch.
+- **Row-level authorization.** Must arrive as new `Authz` methods with default impls; `Decision`
+  stays fieldless.
+- **Composite primary keys.** `Accessor::pk() -> String`, the URL shape and `RowItem.id` assume one
+  column. A `row_key` hook could be additive if the need is narrower.
+- **A second `Accessor` backend** would very likely change the trait.
+- Adding to `MetaField` is free (`#[non_exhaustive]`); adding to `Column::Field` breaks an exhaustive
+  `match`, so batch those.

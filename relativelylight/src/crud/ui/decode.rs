@@ -1,8 +1,6 @@
 //! A posted form body → the JSON write body the engine takes.
 //!
-//! This is `payload()` from `_form_core.html`, in Rust and now in one place. The rules it encodes are
-//! the ones a browser form makes unavoidable, and each of them used to be duplicated between the JS
-//! that built the payload and the server that validated it:
+//! The rules a browser form makes unavoidable:
 //!
 //! - **empty is not always the same as nothing.** On a text column an empty input is `""`, which the
 //!   engine stores as `NULL` on a nullable column (unless `blank_is_null` is off); on a nullable number

@@ -613,7 +613,7 @@ could become an XSS hole is closed by construction rather than by convention (§
 
 | Component | For |
 |---|---|
-| [`Portal`](#52-portal) | **one document** on an app page: current version, optional history, optional upload |
+| [`Portal`](#52-portal--one-document) | **one document** on an app page: current version, optional history, optional upload |
 | `Viewer` | the primitive `Portal` is built from — render one version you already hold |
 | `UploadForm` | the form; `as_new_version()` for adding to a document, plain for creating one |
 | `Receiver` | streams a posted upload into the store (§5.3) |
@@ -796,7 +796,7 @@ after something else. A label and the actions beneath it should not be able to d
 **Maintenance is a `<details>` menu beside the search**, shown only on the list: the controls act on
 the whole store, and offering them while a reader is looking at one handle invites the reading that
 they apply to it. A disclosure element rather than a Bootstrap dropdown, because those need
-Bootstrap's JavaScript and this crate ships none — the same reason `crud::ui` uses `<dialog>`.
+Bootstrap's JavaScript, which the crate doesn't assume — the same reason `crud::ui` uses `<dialog>`.
 
 **`Browser::submit` is the panel's one write entry point**, dispatching `delete` / `check` /
 `collect` and gating each, so an app writes one POST handler rather than getting the gating right

@@ -47,6 +47,12 @@ is easy to miss in a diff.
 
 ### Added
 
+- **`TzPicker::submitted(tz, back)` — the timezone route's whole body.** Returns the `Set-Cookie` value
+  and the path to redirect to, following `back` only when it is a local path (`/…`, not `//…`). The
+  handler the docs and examples used to show redirected to any posted `back` — an open redirect.
+  Upgrade: replace your handler's body with the three lines in `docs/TIME.md` §3.
+- **docs/MIGRATION-0.4.md** — the 0.3 → 0.4 upgrade guide. `MIGRATION-0.3.md` and the
+  `SORTFILTER.md` design record are removed (both remain at the `v0.3.2` tag).
 - **`crud::ui::truncate(n)` — a renderer that shortens a long text in the listing.**
   `.format_cell("body", truncate(60))`: the first `n` characters plus `…`, the whole value in the
   tooltip, escaped; View still shows all of it. See `docs/CRUD.md` → `format_cell`.
@@ -93,6 +99,8 @@ is easy to miss in a diff.
 
 ### Fixed
 
+- **`auth`, `csrf` and `time` escape HTML with the same function as `crud::ui`**, which also escapes
+  `'` (as `&#39;`). Visible only to a test matching rendered text such as "didn't".
 - **`MetaField::blank_is_null = false` had no effect through a form.** The form decoder sent `null` for
   any blank nullable input, so the engine never saw the `""` the setting keeps. It now sends `""` and
   the engine decides, as it did for every other caller.
@@ -266,7 +274,7 @@ a contract that could not be honoured as written. Judgement call, recorded here 
 ## [0.3.0] — 2026-09-21
 
 The web UI is **re-homed in Rust**: `crud::ui` renders plain server-side HTML, and the JSON/metadata
-API it used to talk to is gone with it. See [docs/MIGRATION-0.3.md](docs/MIGRATION-0.3.md) for the
+API it used to talk to is gone with it. See [docs/MIGRATION-0.3.md](https://github.com/tmshlvck/relativelylight/blob/v0.3.2/docs/MIGRATION-0.3.md) for the
 upgrade path and, in its appendix, the reasoning.
 
 Measured, rather than estimated: the crate's non-test source is **281 lines shorter**, and that
@@ -377,7 +385,7 @@ because a request renders one table instead of nine.
 
 ### Added
 
-- **Two new documents.** [`docs/MIGRATION-0.3.md`](docs/MIGRATION-0.3.md) is the 0.2.x → 0.3.0 upgrade guide —
+- **Two new documents.** [`docs/MIGRATION-0.3.md`](https://github.com/tmshlvck/relativelylight/blob/v0.3.2/docs/MIGRATION-0.3.md) is the 0.2.x → 0.3.0 upgrade guide —
   every changed symbol, a compile-error cheat sheet, a full before/after, and what to do if you were
   publishing the JSON API. [`docs/APP.md`](docs/APP.md) is the cookbook the library was missing:
   page shell and nav bar, the login page, the admin's two handlers, dashboards, hand-written forms,
@@ -525,8 +533,8 @@ because a request renders one table instead of nine.
   registration page, how to write one anyway, and the four load-bearing lines of an accounts panel.
   The policy was implicit in the API before; now it is written down.
 - **The documents moved out of the project root.** `TODO.md` → [`docs/TODO.md`](docs/TODO.md),
-  `SORTFILTER.md` → [`docs/SORTFILTER.md`](docs/SORTFILTER.md), and `MPA_MIGRATION.md` →
-  [`docs/MIGRATION-0.3.md`](docs/MIGRATION-0.3.md), which absorbed the `MPA.md` plan as its appendix
+  `SORTFILTER.md` → [`docs/SORTFILTER.md`](https://github.com/tmshlvck/relativelylight/blob/v0.3.2/docs/SORTFILTER.md), and `MPA_MIGRATION.md` →
+  [`docs/MIGRATION-0.3.md`](https://github.com/tmshlvck/relativelylight/blob/v0.3.2/docs/MIGRATION-0.3.md), which absorbed the `MPA.md` plan as its appendix
   — the reasoning for the rewrite, the recorded decisions, and the seven places the result differs
   from what was planned. The root now holds `README.md`, `CHANGELOG.md`, `CLAUDE.md`/`AGENTS.md` and
   the licence. Nothing in the crate's API is affected; external links to the old paths are not.

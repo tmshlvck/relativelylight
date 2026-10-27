@@ -140,21 +140,17 @@ impl Tz {
 }
 
 /// A zone picker: a `<select>` and a submit button in a plain `<form>` that posts `tz` and `back` to
-/// a route of yours. The handler is four lines — set [`Tz::cookie`] and redirect to `back`:
+/// a route of yours, whose handler sets the cookie and redirects ([`TzPicker::submitted`]):
 ///
 /// ```ignore
 /// async fn set_tz(Form(f): Form<HashMap<String, String>>) -> Response {
-///     let tz = Tz::named(f.get("tz").map(String::as_str).unwrap_or("UTC"));
-///     let back = f.get("back").cloned().unwrap_or_else(|| "/".into());
-///     ([(header::SET_COOKIE, tz.cookie())], Redirect::to(&back)).into_response()
+///     let (cookie, back) = TzPicker::submitted(f.get("tz"), f.get("back"));
+///     ([(header::SET_COOKIE, cookie)], Redirect::to(&back)).into_response()
 /// }
 /// ```
 ///
-/// It stays the app's route on purpose: this crate contributes no roots, and a cookie has to be set
-/// by a response, which a fragment renderer never gets to write.
-///
 /// The zone list is deliberately short — one representative per common offset — and replaceable with
-/// [`zones`](TzPicker::zones). A 400-entry IANA list is a worse picker, not a better one.
+/// [`zones`](TzPicker::zones).
 pub struct TzPicker {
     zones: Vec<String>,
     unknown: Vec<String>,
@@ -370,6 +366,16 @@ impl TzPicker {
         self
     }
 
+    /// What a posted picker asks for: the `Set-Cookie` value for `tz` and the path to redirect to.
+    /// `back` is kept only when it is a local path (`/…`, not `//…`), so the route can't be used to
+    /// redirect elsewhere; anything else returns to `/`.
+    pub fn submitted(tz: Option<impl AsRef<str>>, back: Option<impl AsRef<str>>) -> (String, String) {
+        let tz = Tz::named(tz.as_ref().map(AsRef::as_ref).unwrap_or("UTC"));
+        let back = back.as_ref().map(AsRef::as_ref).unwrap_or("/");
+        let local = back.starts_with('/') && !back.starts_with("//") && !back.starts_with("/\\");
+        (tz.cookie(), if local { back } else { "/" }.to_string())
+    }
+
     /// Render the picker with `current` preselected, returning to `back` (the page the user is on)
     /// after the cookie is set.
     pub fn render(&self, current: &Tz, back: &str) -> String {
@@ -386,7 +392,7 @@ impl TzPicker {
             .iter()
             .map(|z| {
                 let sel = if *z == current.name() { " selected" } else { "" };
-                let z = html_escape(z);
+                let z = crate::html::esc(z);
                 format!(r#"<option value="{z}"{sel}>{z}</option>"#)
             })
             .collect();
@@ -396,9 +402,9 @@ impl TzPicker {
 <select class="form-select form-select-sm w-auto" name="tz" aria-label="{label}">{options}</select>
 <button class="btn btn-outline-secondary btn-sm" type="submit">Set</button>
 </form>"#,
-            action = html_escape(&self.action),
-            back = html_escape(back),
-            label = html_escape(&self.label),
+            action = crate::html::esc(&self.action),
+            back = crate::html::esc(back),
+            label = crate::html::esc(&self.label),
         )
     }
 }
@@ -409,18 +415,20 @@ impl Default for TzPicker {
     }
 }
 
-/// Minimal text/attribute escaping — the module renders its own small fragment, so it can't lean on
-/// the template engine's autoescaping the way [`crud::ui`](crate::crud::ui) does.
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_posted_picker_returns_only_to_a_local_path() {
+        let (cookie, back) = TzPicker::submitted(Some("Asia/Tokyo"), Some("/admin?entity=post"));
+        assert!(cookie.starts_with("rl_tz=Asia%2FTokyo;"), "{cookie}");
+        assert_eq!(back, "/admin?entity=post");
+        for evil in ["https://evil.example/", "//evil.example/", "/\\evil.example", "evil"] {
+            assert_eq!(TzPicker::submitted(Some("UTC"), Some(evil)).1, "/", "{evil}");
+        }
+        assert_eq!(TzPicker::submitted(None::<&str>, None::<&str>).1, "/");
+    }
 
     #[test]
     fn utc_is_the_fallback_for_anything_unrecognised() {

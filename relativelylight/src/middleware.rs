@@ -2,11 +2,8 @@
 //! the caller is. Feature `axum`.
 //!
 //! **It is mandatory for any app using this crate.** It resolves the caller's address **once**, at the
-//! edge, and puts it in a request extension as [`RealIp`](crate::middleware::RealIp); everything downstream — the `auth` lockout,
-//! your own handlers, the audit events, your request log — reads that one value. Before it existed, each
-//! of those resolved the address itself, and they disagreed: the lockout counted the forwarded hop while
-//! the request log printed the socket peer, so a log line and the thing it described named different
-//! clients.
+//! edge, into a [`RealIp`](crate::middleware::RealIp) request extension, so the `auth` lockout, the
+//! audit events, your handlers and your request log all name the same client.
 //!
 //! ```ignore
 //! use axum::middleware::from_fn_with_state;
@@ -23,15 +20,9 @@
 //! **Order matters**: `Router::layer` wraps, so the layer added *last* is outermost and runs *first*.
 //! `resolve_real_ip` must be outermost, or the layers inside it won't see a `RealIp`.
 //!
-//! **This crate does not log.** It writes nothing to stdout or stderr — it returns responses and errors,
-//! and what happens to them is the app's business. There is deliberately no `access_log` here: a request
-//! log is a dozen lines that read [`RealIp`](crate::middleware::RealIp), and every app wants different ones (a structured `tracing`
-//! event vs. a line on stderr; the query string or not; a level it can turn down on a high-volume
-//! endpoint). Shipping one shape would have forced a logging dependency on every user of this crate to
-//! decide none of that. **`examples/audit`** is a runnable one, in two variants — including naming
-//! the signed-in user, which a library layer structurally cannot do (it would owe an `Auth::identify` on
-//! every request, and a token-authenticated caller isn't verified until it is already inside the
-//! handler).
+//! **This crate does not log**: it writes nothing to stdout or stderr. A request log is a dozen lines
+//! over [`RealIp`](crate::middleware::RealIp) that every app wants differently; `examples/audit` has
+//! one, in two variants.
 //!
 //! **If your topology is stranger than one proxy**, don't look for a hook — there isn't one, on purpose.
 //! Write your own middleware that inserts a `RealIp` extension however your CDN reports the client, put
@@ -113,12 +104,9 @@ pub struct TrustProxy(pub bool);
 /// 2. `X-Real-IP`, for a proxy configured to set that instead (nginx's `realip` module convention).
 /// 3. the socket peer, if neither header is present or parseable.
 ///
-/// **Only those two headers, deliberately.** Not `CF-Connecting-IP`, `True-Client-IP` or RFC 7239
-/// `Forwarded`. Reading more headers *weakens* the check rather than widening it: nginx, Caddy and HAProxy
-/// set and sanitize the two above but pass a client's `CF-Connecting-IP` straight through, so trusting
-/// that header would let anyone behind such a proxy forge an address and have it beat their proxy's honest
-/// `X-Forwarded-For`. Behind a CDN, insert [`RealIp`] from your own middleware instead — see the module
-/// docs.
+/// **Only those two headers, deliberately.** Common proxies pass a client's `CF-Connecting-IP` (and
+/// similar) straight through, so trusting one would let a caller forge their address. Behind a CDN,
+/// insert [`RealIp`] from your own middleware instead.
 ///
 /// IPv4-mapped IPv6 (`::ffff:a.b.c.d`) is normalized to plain IPv4, so a dual-stack listener and a proxy
 /// reporting plain IPv4 agree on one address for one client.

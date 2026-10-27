@@ -1,401 +1,89 @@
 # relativelylight
 
-A web back-office toolkit for Rust. From your SeaORM entities it auto-generates a **server-rendered
-CRUD admin** and **authentication/authorization** (sessions, login, TOTP 2FA, a per-model gate) —
-**with no per-model code**. It's a library you compose *into* your app: you keep your own axum router
-and page shell; `relativelylight` contributes HTML fragments and the write path behind them.
+A web back-office toolkit for Rust. From SeaORM entities it generates a **server-rendered CRUD
+admin** and **authentication/authorization**, with no per-model code. It is a library composed *into*
+an app: the app keeps its axum router and page shell; the crate contributes HTML fragments and the
+write path behind them. There is no JSON API and no JavaScript framework — rendering is Rust matching
+on typed columns, writes are posted forms (`POST` → `303` → `GET`).
 
-There is **no JSON API and no JavaScript framework** (0.3 removed both — see [docs/MIGRATION-0.3.md](docs/MIGRATION-0.3.md) and
-`CHANGELOG.md`). Rendering is Rust matching on typed columns; writes are posted forms, `POST` → `303`
-→ `GET`. An app that needs a JSON API writes those handlers over the typed `Engine`.
+Start with [README.md](README.md) (features, quick start, examples) and [docs/APP.md](docs/APP.md)
+(a whole app). The reference guides are [docs/CRUD.md](docs/CRUD.md), [docs/AUTH.md](docs/AUTH.md),
+[docs/TIME.md](docs/TIME.md), [docs/DATAINPUT.md](docs/DATAINPUT.md) and
+[docs/BLOBSTORE.md](docs/BLOBSTORE.md); upgrading is [docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md);
+the roadmap is [docs/PRD.md](docs/PRD.md) and [docs/TODO.md](docs/TODO.md).
 
-This file is a using-it orientation. To **build an app** with it, follow **[docs/APP.md](docs/APP.md)**
-(shell, nav, login, admin, your own pages). For the complete guides see
-**[docs/CRUD.md](docs/CRUD.md)**, **[docs/AUTH.md](docs/AUTH.md)**, and
-**[docs/TIME.md](docs/TIME.md)**; upgrading from 0.2.x is **[docs/MIGRATION-0.3.md](docs/MIGRATION-0.3.md)**;
-for the roadmap, **[docs/PRD.md](docs/PRD.md)**.
+## Things that are easy to get wrong
 
-## Install & features
+- **`middleware::resolve_real_ip` is mandatory and outermost** (the last `.layer`). The login routes
+  and the crud write handlers answer `500` without the `RealIp` it inserts. Behind a CDN, write your
+  own middleware inserting `RealIp`; there is no hook, on purpose.
+- **`render_for` / `submit` are the enforcement points**, not decoration: `Engine` itself is ungated,
+  so a handler that calls `Engine::get` directly must call `Engine::decide` first.
+- **The URL is the state.** `ViewState` parses page, sort, filters, search, entity and the open
+  dialog; every href the crate renders is relative (`?page=2`), so it needs no route of its own.
+- **Display vs storage.** `Table::format_cell` / `format_view` are display only (their output is
+  inserted verbatim — escape with `crud::ui::esc`). `MetaField::on_read` / `on_write` are a storage
+  codec, an inverse pair that also fills the edit form — never a place to mask a value
+  ([CRUD.md → A column's way in and out](docs/CRUD.md#a-columns-way-in-and-out)).
+- **The form and CSV read typed text through one function** (`crud::text`); the engine then applies
+  `blank_is_null`, `required`, `options`, validators and `on_write` on every surface.
+- **The password policy covers typed input only.** Wire the same policy into an admin form's password
+  field too, or that form is the way around it (`examples/adminpanel`).
+- **Never register `auth_totp_recovery` in an admin panel** (every row is a credential hash), and hide
+  `auth_user.totp_last_step`.
+- **Lockout counters are shared**: an app checking credentials itself uses `auth.username_lockout()` /
+  `auth.ip_lockout()`, not a second limiter. Pruning (`auth.prune()`) is scheduled by the app; the
+  crate spawns no tasks and writes nothing to stdout or stderr.
+- **Configure `Auth` fully before `Sso::new(&auth)`** clones it.
+- Entities need a single-column primary key and single-column to-one FKs; N:M junction tables are
+  never registered (`post.relate(&tag)` declares N:M).
 
-```toml
-[dependencies]
-relativelylight = { version = "0.3", features = ["ui", "csv", "auth"] }
-sea-orm = { version = "2.0", features = ["macros", "with-json"] }
-```
+## Working on the library
 
-| Feature | Default | Gives you |
-|---|---|---|
-| `crud` | ✅ | the CRUD engine + SeaORM backend (the `crud` module) |
-| `axum` | ✅ | the request plumbing + the `middleware` module (`resolve_real_ip`, **required**) |
-| `ui` | | the server-rendered UI components (`crud::ui::Table`, `Form`, `Admin`); implies `axum` + `tz` |
-| `csv` | | CSV import/export for the UI; implies `tz` |
-| `tz` | | server-side timezone rendering of integer-UTC timestamps (the `time` module) |
-| `auth` | | sessions, login, **TOTP 2FA**, profile/password pages, and the identity-resolving gate presets |
-| `csrf` | | the **double-submit CSRF token** (`csrf` module) — always on for `auth`'s forms, opt-in for the API; implied by `auth` |
-| `sso` | | **OIDC single sign-on** (Google / Okta / corporate) + group mapping (implies `auth`) |
-| `blob` | | content-addressed **file storage** + a stable handle and version chain (`blob` module); needs neither `crud` nor `auth` |
-| `blob-ui` | | the blob components: streaming upload, viewer, document browser, maintenance, response builder; implies `blob` + `ui` |
-
-Enable only what you use — an unused feature pulls no dependencies. `auth` works **without** `crud`
-(gate any axum app on its own). The always-on `authz` module (the gate trait + `Open`) is compiled in
-every build.
-
-**Entity requirements:** derive `Serialize`/`Deserialize` (SeaORM's `with-json`), a **single-column
-primary key**, and **single-column to-one FKs** (any URL-safe scalar — int, UUID, slug). N:M junction
-tables are never registered.
-
-## CRUD + admin UI in a few lines
-
-```rust
-use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::authz::Open;                 // per-model gate; Open = ungated
-
-let author = MetaModel::new(author::Entity);      // fully auto: fields, PK, FK relations
-let tag    = MetaModel::new(tag::Entity);
-let mut post = MetaModel::new(post::Entity);
-post.relate(&tag);                                // the only hand-declaration: N:M
-
-let mut crud = Crud::new(db);
-crud.register(author, Open);
-crud.register(post, Open);
-crud.register(tag, Open);
-
-let engine = Arc::new(crud.into_engine());        // render from it; publish your own API from it
-```
-
-Tweak a model before registering — labels, visibility, defaults, validators, hooks:
-
-```rust
-post.field("title").label = Some("Title".into());
-post.field("views").default = Some(serde_json::json!(0));
-post.field("title").validate = Some(Box::new(|v|
-    if v.as_str().unwrap_or("").trim().is_empty() { Err("required".into()) } else { Ok(()) }));
-```
-
-Admin UI (feature `ui`) — Bootstrap 5 HTML fragments you drop into your shell, with **two handlers per
-surface**: a `get` that renders, a `post` that writes back to the same path.
-
-```rust
-fn panel(engine: &Engine) -> Admin<'_> {          // one definition, both handlers
-    Admin::new(engine).title("Admin").entity_with("post", |t| t.per_page(10)).entity("tag")
-}
-
-// GET /admin
-let state = ViewState::from_uri(&uri);            // page, sort, filters, search, ?edit=…
-let html = panel(&engine).render_for(&headers, &state).await?;   // 401/403 straight from the gate
-
-// POST /admin  (body is axum::body::Bytes — the CSV import dialog uploads a file)
-match panel(&engine).submit(&headers, ip, &body, &state).await? {
-    Outcome::Done(to) => Redirect::to(&to).into_response(),      // relative: "?page=2#row-7"
-    Outcome::Invalid(state) => /* re-render: messages and typed values already in place */,
-}
-```
-
-`Table` renders one entity (search, **sortable headers**, **filters**, pager, create/edit `<dialog>`,
-relation pickers, bulk delete, CSV export + a multipart **upload**/paste import dialog, one-shot
-"17 records deleted." alerts, Rust cell renderers); `Admin` composes many `Table`s behind a side
-panel and renders **one** of them per request (`?entity=post`). A relation with more rows than
-`picker_threshold` (50) is edited in a dialog over the target's own table — `crud::ui::Picker`,
-served from one `GET` route the app mounts at `Crud::picker_path`, plus `crud::ui::JS` in the shell.
-`crud::ui::RelationField` is that same relation input (select or picker, one implementation) for a
-`<form>` the app writes itself, with `read` returning the posted ids checked to exist.
-Include `crud::ui::CSS` once in the
-shell — about forty lines Bootstrap doesn't cover. `render_for` is the **read** enforcement point, not
-just a way to hide buttons: with no API behind the UI, a caller who may not list an entity gets
-`401`/`403` instead of its rows.
-
-**The URL is the state.** `ViewState` parses page, sort keys, filters, the search term, the active
-entity and the open dialog out of the query string — so every view is a link, and the library needs no
-route of its own (every href it renders is relative, `?page=2`).
-
-**Sorting and filtering** work on relations, not just columns. `?sort=author` orders by the label the
-cell *shows* (a join onto the target's label column — declare it with `MetaModel::label_column`, or keep
-your `row_label` closure, which is probed at registration); `?filter[author]=7` is an exact match on the
-FK behind the relation name. In the UI: `Table::sort` / `filter` / `fixed_filter`, and
-`Admin::filter("zone")` for one filter across *every* listed table that has that column — the shape that
-matters when an admin lists many tables of the same kind. A filter applies to the listing, the CSV
-export and "delete all matching" alike, so no button acts on a wider set than the one on screen.
-
-**`Form` is the same form standalone**, for your app's *own* pages rather than the admin — the building
-block `Table` and `Admin` are assembled from (all three are one implementation, so a fix lands in all
-three by construction):
-
-```rust
-let html = relativelylight::crud::ui::Form::new(engine, "ticket")
-    .title("New ticket")
-    .fields(["subject", "body", "priority"])   // subset *and* order; default is every writable column
-    .redirect("/tickets/{id}")                 // where its own submit points, else a saved message
-    .render_for(&headers, &state).await?;      // 401/403 instead of a form that can't submit
-```
-
-It refuses to render a form that couldn't work (unknown / read-only / required-but-unrendered column),
-naming it — note a column `default` pre-fills the *input*, so a required field still has to be rendered
-for its value to be sent.
-
-**Per-field widget overrides** pick the input where the column type can't: `field("body").textarea(8)`,
-`.radio()` (over `options`), `.range(min, max, step)`, `.email()`, `.url()`, `.datetime()`. Only the form
-input changes, not the cell; a widget that can't fit its column is a render-time error naming the field.
-`Table::format_cell(col, closure)` / `format_view(col, closure)` are Rust renderers — `(value, row) ->
-HTML` for the cells / the View dialog, independent of each other, the one place app HTML enters a page,
-so wrap values in `crud::ui::esc` (`.format_cell("body", crud::ui::truncate(60))` shortens the listing
-only). `Table::detail_href("/post/{id}")` swaps the dialog for a page of the app's own. They're
-display only: `MetaField::on_read`/`on_write` are a **storage codec**, an inverse pair that also fills
-the edit form — never a place to mask a value ([docs/CRUD.md → A column's way in and out](docs/CRUD.md#a-columns-way-in-and-out)).
-Full reference: [docs/CRUD.md → Web UI](docs/CRUD.md#web-ui-ui) and
-[§ Widget overrides](docs/CRUD.md#widget-overrides--picking-the-form-input-per-field).
-
-## Auth (feature `auth`)
-
-Sessions + login with an on-demand identity lookup — **no middleware, nothing injected into the
-request**:
-
-```rust
-use relativelylight::auth::{Auth, UserReadGroupWrite, GroupReadWrite};
-
-let auth = Auth::new(db.clone())
-    .admin_group("admin")
-    .secure_cookies(true)          // false for local http
-    .totp_issuer("My App")         // label authenticator apps show for 2FA
-    .login_shell(|form| /* wrap the login fragment in your page */ todo!())
-    .profile_shell(|frag, who| /* wrap the profile/2FA fragment; `who` is the caller */ todo!());
-
-let app = axum::Router::new()
-    .merge(auth.routes())          // /login, /login/totp, /logout, /profile (+ password & 2FA)
-    .merge(engine.router());       // your gated crud API
-
-// A page handler resolves the caller itself — this is the whole of page-level auth:
-let who = auth.identify(&headers).await;   // Option<Identity>; None → redirect to auth.login_path()
-```
-
-- **Gate presets** (per model, passed to `Crud::register(model, gate)`) name the read/write audience
-  (Public → User → Group): `authz::Open` (public R+W, ungated), `UserReadWrite::new(&auth)` (any
-  logged-in user R+W), `UserReadGroupWrite::new(&auth, ["editors"])` (logged-in read, group write),
-  `PublicReadGroupWrite::new(&auth, ["editors"])` (public read, group write),
-  `GroupReadWrite::new(&auth, ["admin"])` (group-only, read *and* write). Or implement `authz::Authz`
-  yourself. The engine maps a gate's `Decision` to `200`/`401`/`403`.
-- **Where accounts come from — there is no registration page** (`docs/AUTH.md` §5j, deliberate). An
-  account is created by an operator (`auth::create_user`, or an **accounts panel**: `auth`'s own
-  tables registered as ordinary models — see `examples/auth`'s `/admin`, and note the
-  `user.relate(&group)` line, without which the panel can create accounts it can't give any
-  permissions to), by **SSO auto-registration** on first login, by the boot seeder
-  (`auth::make_admin`), or by break-glass (`auth::reset_admin_access` behind a CLI flag). Public
-  signup is an app decision — who may join and what is verified first — so an app that wants one
-  writes that page over the same calls.
-- **Profile / password**: `/profile` lets any user change their own password; a manager (a
-  profile-manager group, default `[admin_group]`) resets others at `/profile/{id}`. Both screen the new
-  password against a **`validate::PasswordPolicy`** — on by default at `recommended()` (≥ 12 chars,
-  common-value + pattern + username screening, **no** composition rules, per NIST SP 800-63B). Opt out
-  with `Auth::password_policy(None)` / another preset / `from_level(n)`, or replace it with
-  `Auth::password_check(closure)`. It governs **typed input only** — `create_user`/`set_password`/
-  `make_admin` are exempt, so a seeder or break-glass CLI still works. Wire the *same* policy into the
-  admin form separately (`field("password_hash").validate_str(validate::optional(Box::new(
-  validate::password(policy))))`) or that surface becomes the way around it — `examples/adminpanel`
-  drives both from one `PASSWORD_LEVEL` value. See [docs/AUTH.md §5g](docs/AUTH.md).
-- **TOTP 2FA**: users enrol from `/profile` (QR + `otpauth://` URL, verify-before-activate); once on,
-  login requires the code at `/login/totp`. Self-disable, plus manager disable for others. A code is
-  single-use (`auth_user.totp_last_step` records the step it spent — RFC 6238 §5.2; hide the column in an
-  admin panel). Expose a
-  password column as a hashed, write-only field with `MetaField::password()`.
-- **Recovery codes** (`auth::recovery`, `docs/AUTH.md` §5i): ten single-use codes issued **with** the 2FA
-  enrolment and shown once; spent in the `recovery_code` field at `/login/totp` (which then lands on
-  `/profile`); regenerable there under re-auth; destroyed when 2FA is turned off. Hashed with **SHA-256,
-  not argon2** — they're machine-generated high-entropy secrets, so a slow hash buys nothing and would put
-  ten verifications on the unauthenticated login path. Table `auth_totp_recovery`; **don't** register it in
-  an admin panel (every row is a credential hash).
-- **Lockout** (`auth::lockout`): the **unauthenticated** credential checks (`POST /login`, `POST
-  /login/totp`) are braked by two DB-backed counters — by account name and by source address —
-  configured *mandatorily* on `Auth::new(db, Lockout::default().accounts(..).addresses(..))`. Authenticated checks (`/profile`
-  password, 2FA enrolment) are deliberately **not** limited: that's session theft, not brute force.
-  An app that checks credentials itself must use the same counters, not a second limiter —
-  `auth.username_lockout()` / `auth.ip_lockout()` (`locked` / `record_failure` / `clear`), so one
-  account has one budget everywhere. The unlock is **deleting the row** in the admin panel (register
-  `lockout::username_entity` / `ip_entity`), which is gated, CSRF-checked and audited for free.
-  The per-address half takes the address from `middleware::RealIp` — resolved once, at the edge, by the
-  **mandatory** `middleware::resolve_real_ip` layer, so the lockout, the audit events and whatever the app
-  logs can't disagree about who called. One trusted hop is the **final** design — no CIDR list, no RFC 7239, no
-  CDN headers, and no resolver hook: a stranger topology writes its own middleware inserting the same
-  `RealIp`.
-  `Lockout::ip_whitelist` (CIDRs via `net::parse_nets`) exempts addresses from locking on every surface;
-  there is no username equivalent by design. Pruning
-  expired rows — and dead sessions — is `auth.prune()`, which **the app schedules**;
-  the crate spawns no tasks. Worked examples: `examples/auth`'s `GET /api/whoami` + prune loop,
-  `examples/adminpanel`'s lockout panels.
-- **Re-auth before sensitive changes** (`docs/AUTH.md` §5h): disabling 2FA, enrolling 2FA, a manager's
-  password reset and a manager's 2FA disable all require a **password or a fresh TOTP code** in the same
-  request (a code is spent when used). A live session isn't evidence its owner is present. Gate your own
-  sensitive routes the same way with `auth.reauthenticate(&who, pw, code)` — `examples/auth`'s
-  `POST /api-token/rotate` is the worked pattern. Accounts with no local factor (SSO) pass unchallenged;
-  `Auth::can_reauthenticate` reports that.
-- **Sessions** (`docs/AUTH.md` §5f): two clocks — `session_ttl_secs` (absolute, 7 days) and
-  `session_idle_secs` (idle, 8 hours; `0` disables), both enforced by `identify`, the idle stamp
-  refreshed lazily so a read stays a read. The session id **rotates** when the second factor completes
-  (a planted half-authenticated cookie can't be elevated), a **password change or manager reset revokes
-  the user's other sessions**, and `/profile` carries a "Sign out other sessions" button
-  (`Auth::revoke_sessions` / `revoke_other_sessions` for your own code).
-- **CSRF**: every form `auth` renders carries a hidden `_csrf` token checked on POST; turn it on for the
-  admin UI's writes with `crud.csrf(auth.csrf())` (its forms then carry the same hidden input, and
-  `submit` checks it before the gate). For **your own** unsafe routes use the layer —
-  `.layer(from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce))` — which takes the header or a
-  `_csrf` field (URL-encoded bodies under 64 KiB; multipart isn't parsed) and hands the body on intact.
-  `Auth::csrf_rejection(closure)` renders the 403 in your own shell, covering the library's forms and the
-  layer at once. `Authorization`-bearing requests are exempt. See [docs/AUTH.md §7](docs/AUTH.md).
-- **SSO / OIDC** (feature `sso`): `auth::sso::Sso` adds Google / Okta / corporate sign-in
-  (`/sso/{provider}/login` + `/callback`). Local groups come from a **union** of a global
-  username-regexp table and a per-provider claim table, reconciled onto the user each login. Optional
-  per-provider auto-registration; SSO accounts have no local password/2FA — and no local *reset* either,
-  self-service or manager. Configure `Auth` **fully before** cloning it into `Sso::new(&auth)`.
-  The username claim is matched **case-insensitively** (a provider that changes case must not acquire a
-  second account); a **disabled** account is refused, as on the password door; provider discovery is cached
-  for an hour. The callback's rejection paths are tested against a **fake IdP** (`auth/sso_tests.rs`) — a
-  live provider can't be asked for an expired token or one signed by the wrong key.
-
-Full design + wiring: **[docs/AUTH.md](docs/AUTH.md)**.
-
-## Composing with your app — you own the roots
-
-**One layer is mandatory.** `middleware::resolve_real_ip` resolves the caller's address once, at the
-outermost layer, into a `RealIp` request extension; `auth`'s login routes and the `crud` write handlers
-read it, and answer `500` naming the layer if it isn't there. Everything that needs to know who called —
-the lockout, the audit events, your own handlers, your request log — reads that one value, which is what
-stops them disagreeing:
-
-```rust
-use axum::middleware::{from_fn, from_fn_with_state};
-use relativelylight::middleware::{resolve_real_ip, TrustProxy};
-
-let app = app
-    .layer(from_fn(my_access_log))                                  // inner: yours, if any
-    .layer(from_fn_with_state(TrustProxy(cfg.trust_proxy), resolve_real_ip)); // OUTERMOST
-
-axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
-```
-
-`Router::layer` wraps, so the **last** layer added runs **first** — `resolve_real_ip` must be last.
-Behind a CDN, write your own middleware inserting a `RealIp` instead; there is no hook, on purpose.
-
-**Logging and auditing are the app's.** This crate writes nothing to stdout or stderr — no
-`access_log`, deliberately (a request log is a dozen lines, every app wants different ones, and one
-shape would have cost a logging dependency here) — and it persists no audit row, only firing a
-`WriteEvent` per committed write (`observe`) for a sink you register. Copy `examples/audit`, which is
-both, over the one `RealIp` that makes them agree about who was here.
-
-`relativelylight` is always *part of* a larger app:
-
-- **Router** — `crud` adds **no routes**: you write `get(show).post(save)` on a path of your own and
-  call `render_for` / `submit` from them. Merge `Auth::routes()` (login/logout/profile) into your
-  `Router` as before.
-- **Page shell** — `ui::Form`/`Table`/`Admin` and the auth login/profile pages return **HTML fragments**,
-  never full pages. Your app owns the `<html>`, the Bootstrap stylesheet + `crud::ui::CSS`, and layout.
-- **Your own JSON API, if you want one** — write the handlers over `Engine::list` / `get` / `create` /
-  `update` / `delete` / `columns`. The crate publishes none, so its shape and versioning are yours.
-
-## Run the examples
+A Cargo workspace: the crate is `relativelylight/` (`crud/` with `ui/` as the renderer, `auth/`,
+`blob/`, `authz.rs`, `observe.rs`, `time.rs`, `validate.rs`; Askama templates in `templates/`; CSS and
+the picker's script in `assets/`), with runnable examples in `examples/` sharing `examples/model`.
+Deps: SeaORM 2.0, axum 0.8, askama 0.13, jiff 0.2, totp-rs 5.7.
 
 ```bash
-cargo run -p crud-example         # :3000  compose it yourself: per-entity pages, standalone Form (/post/new), /dashboard,
-                                  #         a post's own View page (/post/{id}, Table::detail_href),
-                                  #         a pinned filter at /author/{id}/posts, CSV, the timezone cookie + DST rows (/event),
-                                  #         the relation picker (/pick) for a post's author and tags — no auth
-cargo run -p relationfield-example # :3000  a hand-written form with the admin's relation input in it (RelationField):
-                                  #         "retag an author's posts" — select or picker, one write_batch, no auth
-cargo run -p adminpanel-example   # :3000  crud::ui::Admin, login-gated, inline accounts + 2FA, timezone cookie (admin/password, editor/password)
-cargo run -p auth-example         # :3000  auth up close: login, /secret, /profile + 2FA, re-auth demo, SSO wiring,
-                                  #         and /admin — the accounts panel users are provisioned from (admin/password)
-cargo run -p audit-example        # :3000  who called + what they changed: the request log (two ways) and the
-                                  #         write observer, one line per committed write, both over one RealIp
-cargo run -p blob-example         # :3000  file storage with a version chain: streaming uploads, the viewer,
-                                  #         the /files browser, and §9's ownership link table (admin/password)
-cargo run -p blobthumbnailer-example  # :3000  a second blob app, smaller: pictures with generated thumbnails,
-                                  #         derived content written by the *app* (the crate ships no thumbnailer)
+cargo build --all-features && cargo test --all-features && cargo clippy --all-features --all-targets
 ```
 
-**Run one at a time — they all bind port 3000** (fresh seeded in-memory SQLite each start). Only
-`audit-example` prints to stdout: the crate itself logs nothing and persists no audit row, which is
-that example's whole subject. All four share `examples/model` — whose `event` table exists for the
-timezone demo, its rows straddling both 2026 DST transitions.
-
-## Documentation
-
-- **[docs/APP.md](docs/APP.md)** — composing a whole app: the page shell + nav bar, the login page,
-  the admin's two handlers, your own pages (dashboards, hand-written forms, multi-step workflows),
-  and a pre-deployment checklist. The practical entry point; the guides below are the reference.
-- **[docs/MIGRATION-0.3.md](docs/MIGRATION-0.3.md)** — 0.2.x → 0.3.0 upgrade guide, with the design
-  record for the MPA rewrite as its appendix.
-- **[docs/CRUD.md](docs/CRUD.md)** — the full `crud` guide: `MetaModel`/`MetaField`/`MetaRelation`,
-  the engine API, the URL as view state, the validation pipeline, columns, CSV, the web UI
-  (`Table`/`Form`/`Admin`), the write-observer audit hook, and composing with your app.
-  (Examples: `crud`, `adminpanel`.)
-- **[docs/AUTH.md](docs/AUTH.md)** — the `auth` guide: sessions, login, TOTP 2FA, OIDC SSO, the gate
-  presets, profile/password pages, and app-side wiring. (Examples: `auth`, `adminpanel`.)
-- **[docs/TIME.md](docs/TIME.md)** — time & timezones: integer-UTC storage, the `Tz` request zone
-  (a cookie, formatted server-side), `TzPicker`, and DST. (Examples: `crud`'s `/event`, `adminpanel`.)
-- **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module: typed field validators +
-  normalizers (IP/network, ranges, lengths, enums, hostname/FQDN, hex, email/URL), the crud `field`
-  adapters, and the `MetaField::validate_str/_int` sugar. Same predicate on CRUD + hand-written APIs.
-- **[docs/PRD.md](docs/PRD.md)** — product overview, module status, roadmap.
-- **[docs/TODO.md](docs/TODO.md)** — the ordered backlog.
-- **[docs/BLOBSTORE.md](docs/BLOBSTORE.md)** — the `blob` guide *and* spec: content-addressed storage
-  under a stable handle + version chain (§3), the store API (§4), ownership in the app's own link
-  table (§9). **Shipped** (`blob`, `blob-ui`): `Portal` for an app page, `Browser` + `Actions` for
-  the admin panel, `Receiver`/`UploadForm` for streaming uploads, an optional `Routes` router.
-  Deliberately small — a thumbnailer, a variant index and partial erasure were built and then
-  removed; §4.5 and §4.8 record both reversals.
-- **[docs/SORTFILTER.md](docs/SORTFILTER.md)** — a design record: why relation sorting and
-  `filter[…]` have the shape they do (kept for the reasoning; the behaviour is documented in CRUD.md).
-- **[CHANGELOG.md](CHANGELOG.md)** — per-release notes; land user-visible changes under `## Unreleased`
-  as you make them (breaking changes first, with the upgrade step), so a release is a rename + a tag.
-
----
-
-## Working *on* the library — keep the docs current
-
-It's a Cargo workspace: the crate lives in `relativelylight/` (`crud/` — with `ui/` as the renderer:
-`state.rs`, `render.rs`, `widgets.rs`, `decode.rs` — plus `auth/`, `authz.rs`, `observe.rs`, `time.rs`,
-Askama templates in `templates/`, one stylesheet in `assets/`) with runnable examples in `examples/`. Build
-with `cargo build --all-features`, test `cargo test --all-features`, lint `cargo clippy
---all-features`.
-
-**`--all-features` is not enough on its own** — it turns everything on, so it cannot catch a feature that
-forgets to enable what it uses (`auth` did exactly this with `axum`, and `examples/auth` stopped building
-without anyone noticing). Before a release, also build the combinations that real apps ask for:
+**`--all-features` is not enough.** It can't catch a feature that forgets to enable what it uses, or
+a helper that is dead code in a narrower build. Before a release, check the matrix for **warnings**
+as well as errors:
 
 ```bash
-for f in "" crud axum csrf tz csv auth auth,sso crud,ui crud,ui,csv; do
+for f in "" crud axum csrf tz csv auth auth,sso crud,ui crud,ui,csv blob blob-ui; do
   cargo build -p relativelylight --no-default-features ${f:+--features $f} 2>&1 \
-    | grep -E "^(error|warning: )" | grep -v "the following packages"    # WARNINGS too, not just errors
+    | grep -E "^(error|warning: )" | grep -v "the following packages"
 done
-cargo build --workspace      # and the examples, which pin their own narrow feature sets
+cargo build --workspace      # the examples pin their own narrow feature sets
 ```
 
-**Check the warnings, not only the exit status.** A helper used by one feature and compiled into
-another is dead code *there* — `--all-features` never shows it, and an app that enables only `auth`
-gets a wall of `never used` from a library it didn't write. Five of those were found this way. Deps: SeaORM 2.0, axum 0.8, askama 0.13, jiff 0.2, totp-rs 5.7.
+Don't run `rustfmt` over the whole repo; format only what you touch.
 
-**Security behavior is tested by rejection.** `auth/security_tests.rs` and `crud/gate_tests.rs` assert
-the *negative* cases over in-memory SQLite — bad password, bogus/expired/half-authenticated session,
-wrong TOTP code, non-manager profile writes, each gate preset's decision, every UI write operation's
-`Operation`, that **reads** are refused (not merely undecorated), that a denied request never reaches
-the backend, and CSRF on every write. `crud/ui_tests.rs` adds escaping (every cell, label, chip, option
-and input value, with `<script>`-bearing data) and form decoding. Touching login, sessions, 2FA, the profile pages,
-or a gate means extending them (with a positive control, so the negatives can't pass vacuously); see
-[docs/AUTH.md §10a](docs/AUTH.md) for what they cover and what they deliberately don't.
+**Security behaviour is tested by rejection.** `auth/security_tests.rs`, `auth/sso_tests.rs` (a fake
+IdP) and `crud/gate_tests.rs` assert the negative cases over in-memory SQLite: bad credentials,
+unusable sessions, replayed codes, non-manager profile writes, each gate's decision, refused reads,
+CSRF on every write. `crud/ui_tests.rs` covers escaping and form decoding; `crud/transform_tests.rs`
+covers a value's way through form, CSV and the codec against a real database. Touching login, sessions,
+2FA, the profile pages or a gate means extending them, with a positive control so the negatives can't
+pass vacuously ([AUTH.md §10a](docs/AUTH.md)).
 
-**The docs are the source of truth — treat them as part of the change, not an afterthought.** When you
-add or change functionality:
+**The docs are part of the change.**
 
-- Update the **per-module guide** that owns it (`docs/CRUD.md`, `docs/AUTH.md`, `docs/TIME.md`) — the
-  public API, wire formats, and behavior. Keep Rust doc-comments (the in-code contract) consistent too.
-- Reflect it in **an example**: extend the closest one, or add a new `examples/*` (and register it in
-  the root `Cargo.toml` `members` + link it from the relevant doc's "Examples" note + the README/AGENTS
-  example lists). Every user-facing feature should be demonstrated somewhere runnable.
-- Adding or promoting a **module/feature**? Update the module table + status in `docs/PRD.md`, add a
-  pointer in `README.md` and this file's Documentation list, and move any now-shipped item out of
-  `docs/TODO.md` (add new follow-ups there with a one-line rationale).
-- Anything a **user would notice** (new API, changed default, fixed bug, breaking behaviour) gets an
-  entry in `CHANGELOG.md` under `## Unreleased` **in the same change** — breaking items first, each with
-  the concrete upgrade step. Releasing is then: rename that heading to `## [x.y.z] — YYYY-MM-DD`, add its
-  compare link, bump `relativelylight/Cargo.toml`, commit `Release vx.y.z`, tag, push the tag. A
-  behaviour break bumps the **minor** while we're pre-1.0 (Cargo treats `0.1.x` as one compatible range).
-- `docs/PRD.md` is **requirements + roadmap only** — no usage tutorials (those live in the guides);
-  `README.md` is the user's starting point (what it is + pointers); this file is the using-it/working-on
-  orientation. Don't duplicate content across them — cross-link instead.
+- Update the guide that owns the behaviour, and the doc comments.
+- Demonstrate user-facing features in an example (a new one goes in the root `Cargo.toml` `members`
+  and the README's example list).
+- A new module or feature: the table in `docs/PRD.md`, a pointer in `README.md`; move shipped items
+  out of `docs/TODO.md`.
+- Anything a user would notice gets a `CHANGELOG.md` entry under `## Unreleased` in the same change,
+  breaking items first with the upgrade step — and, for a breaking change, a step in the current
+  `docs/MIGRATION-x.y.md`.
+- `PRD.md` is requirements and roadmap only; `README.md` is the starting point; this file is
+  orientation. Cross-link rather than copy.
+
+**Releasing:** rename `## Unreleased` to `## [x.y.z] — YYYY-MM-DD` with its compare link, bump
+`relativelylight/Cargo.toml`, commit `Release vx.y.z`, tag, push the tag. Pre-1.0, a behaviour break
+bumps the minor.

@@ -9,11 +9,10 @@ There is **no JSON API and no JavaScript framework**. The columns the module com
 rendered HTML — one Rust `match` per cell and per form input — and writes come back as posted forms.
 An app that wants to publish a JSON API writes those handlers itself over the same typed [`Engine`]
 (see [Reading and writing](#reading-and-writing)); its shape is a product decision this crate
-deliberately doesn't make. [MIGRATION-0.3.md](MIGRATION-0.3.md) records why that changed in 0.3.
+deliberately doesn't make.
 
 New here? **[APP.md](APP.md)** builds a whole app end to end (shell, nav bar, login, admin, your own
-pages); this document is the reference for the parts. Coming from 0.2.x?
-**[MIGRATION-0.3.md](MIGRATION-0.3.md)**.
+pages); this document is the reference for the parts. Upgrading from 0.3? **[MIGRATION-0.4.md](MIGRATION-0.4.md)**.
 
 - [Install & features](#install--features)
 - [Quick start](#quick-start)
@@ -33,7 +32,7 @@ pages); this document is the reference for the parts. Coming from 0.2.x?
 
 ```toml
 [dependencies]
-relativelylight = { version = "0.3", features = ["ui", "csv"] }
+relativelylight = { version = "0.4", features = ["ui", "csv"] }
 sea-orm = { version = "2.0", features = ["macros", "with-json"] }
 ```
 
@@ -687,7 +686,7 @@ and stops at the first failure — not atomic, and documented as such; the SeaOR
 
 ## Web UI (`ui`)
 
-Feature `ui`. Three components, **one implementation**:
+Feature `ui`. One implementation behind every component:
 
 - [`Table`](#table) — one entity: search, sortable headers, filters, a pager, CSV, bulk delete, and a
   create/edit dialog.
@@ -698,7 +697,7 @@ Feature `ui`. Three components, **one implementation**:
 - [`RelationField`](#relationfield--the-relation-input-in-a-form-of-your-own) — one relation's input
   (a `<select>`, or the picker past the threshold) for a `<form>` you write yourself.
 
-All three return **HTML fragments**: your app owns `<html>`, the Bootstrap 5 stylesheet and the
+All of them return **HTML fragments**: your app owns `<html>`, the Bootstrap 5 stylesheet and the
 layout. There is no JavaScript framework and no JSON in between. The one piece of client-side state
 is the [picker](#picker--choosing-from-a-large-relation)'s working selection while its dialog is open.
 
@@ -736,8 +735,7 @@ rejected write re-renders the same dialog with the messages beside the fields an
 still in them.
 
 **Writes are POST → 303 → GET.** `submit` returns a relative target (`?page=2#row-7`), so the browser
-lands back on the row that changed. One request per save, where the previous design took two (POST,
-then re-fetch the whole table).
+lands back on the row that changed.
 
 **What a write did is reported once, in the URL.** A delete or an import redirects with
 `?done=deleted:17` / `?done=imported:120,3`, which the next render turns into one Bootstrap alert
@@ -1164,24 +1162,14 @@ is the only moment at which they can be read.
 If you only want the count, use `after["deleted"]` or `before_rows.len()`; nothing forces a big
 "delete all" through an audit table row by row.
 
-The library provides only the hook and the
-`WriteEvent` type — the app owns the audit **table**, resolves the actor from `headers` (e.g.
-`auth.identify`), writes the row, and handles retention — the address arrives already resolved, so every
-audit row names the same client the lockout counted and your request log printed. The same
-`Arc` can also be handed to `Auth::on_write` (see [AUTH.md](AUTH.md)) so one sink captures both the
-auto-CRUD and the auth surfaces — which is why each emitter names **itself** in `source`: with one sink
-behind several of them, that value is what tells them apart. It says `autocrud` (this crate's
-auto-generated CRUD), not a bare `crud`, which names nothing in particular in an app that has CRUD
-screens of its own; store it as it arrives rather than translating it. **Times are UTC**
-(`i64` Unix seconds) — see the timezone note in [PRD.md](PRD.md).
+The library provides only the hook. The app owns the audit table, resolves the actor from `headers`
+(`auth.identify`), and handles retention; the address arrives already resolved. Hand the same `Arc` to
+`Auth::on_write` ([AUTH.md](AUTH.md)) and one sink sees both surfaces: `source` tells them apart
+(`autocrud` here, `auth-profile` and `auth-admin` there). Times are UTC `i64` seconds ([TIME.md](TIME.md)).
 
-**Runnable:** [`examples/audit`](../examples/audit/src/main.rs) is the whole thing in about sixty
-lines — one sink on `Crud::on_write` *and* `Auth::on_write`, printing `source op entity#key
-actor@address` plus a per-field diff of `before`/`after`, beside a request log built on the same
-`RealIp`. Two practical notes it makes concrete: the sink is `async` and runs **inside the request**
-(after the commit, before the response), so real work belongs on a channel rather than in it; and
-resolving the actor means calling `Auth::identify` from a sink that was constructed *before* `Auth`
-was — a `OnceLock` closes that loop.
+**Runnable:** [`examples/audit`](../examples/audit/src/main.rs) — one sink on both `on_write`s,
+printing `source op entity#key actor@address` and a per-field diff. The sink runs **inside the
+request** (after the commit, before the response), so real work belongs on a channel.
 
 ## Architecture & extending
 
@@ -1197,7 +1185,7 @@ any release.
 
 SeaORM is one backend (`relativelylight::crud::seaorm`); it does the heavy lifting (introspection, projection,
 validation, relation resolution, set-based bulk delete). A different backend (in-memory, another ORM)
-is just another `Accessor` implementation reusing the whole engine + router unchanged.
+is another `Accessor` implementation reusing the engine and the UI unchanged.
 
 Why the seam sits here: relation resolution and field projection are *database* concerns — they run
 queries and encode per-model visibility policy — so keeping them behind the accessor lets the engine

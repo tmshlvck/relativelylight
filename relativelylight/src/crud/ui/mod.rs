@@ -76,7 +76,7 @@ pub(crate) use write::{apply, authorize, csrf_token, Surface};
 use serde_json::Value;
 use std::sync::Arc;
 
-/// The stylesheet the components need beyond Bootstrap 5 (about thirty lines, mostly `<dialog>`).
+/// The stylesheet the components need beyond Bootstrap 5 (mostly `<dialog>`).
 /// Inline it once in your shell: `<style>{{ relativelylight::crud::ui::CSS }}</style>`.
 pub const CSS: &str = include_str!("../../../assets/rl.css");
 
@@ -86,17 +86,12 @@ pub const CSS: &str = include_str!("../../../assets/rl.css");
 /// large relation still shows its selection and saves it unchanged, it just can't be edited.
 pub const JS: &str = include_str!("../../../assets/rl.js");
 
-/// A custom renderer: `(value, row) -> HTML`, as [`Table::format_cell`] and [`Table::format_view`]
-/// store it. Its output is
-/// inserted **verbatim**, so escape anything that came from the database with [`esc`].
-///
-/// `pub(crate)`: the builders take an `impl Fn`, so no public signature names this, and an exported
-/// alias nobody can need is API kept forever for nothing.
+/// A custom renderer, `(value, row) -> HTML`, as [`Table::format_cell`] and [`Table::format_view`]
+/// store it. Its output is inserted **verbatim**.
 pub(crate) type Fmt = Arc<dyn Fn(&Value, &Value) -> String + Send + Sync>;
 
-/// Escape a JSON scalar for inclusion in HTML — what a [`Table::format_cell`] or
-/// [`Table::format_view`] closure wraps its values in.
-/// A `String` loses its quotes; anything else prints as JSON.
+/// Escape a JSON scalar for HTML — what a [`Table::format_cell`] / [`Table::format_view`] closure
+/// wraps its values in. A `String` loses its quotes; anything else prints as JSON.
 ///
 /// ```ignore
 /// .format_cell("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))
@@ -126,25 +121,11 @@ pub fn truncate(chars: usize) -> impl Fn(&Value, &Value) -> String + Send + Sync
 
 /// Escape a string for inclusion in HTML text or a quoted attribute.
 pub fn esc_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            c => out.push(c),
-        }
-    }
-    out
+    crate::html::esc(s)
 }
 
-/// What a [`submit`](Table::submit) did.
-///
-/// (`Invalid` makes this 240 bytes where `Done` needs 24. Boxing it would save a one-per-request
-/// stack move and cost every caller a `*state` deref in the match arm they write most often — not a
-/// trade worth making for a value returned once per HTTP write.)
+/// What a [`submit`](Table::submit) did. (`Invalid` is large; it's returned once per request, so it
+/// isn't boxed.)
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum Outcome {
@@ -156,6 +137,5 @@ pub enum Outcome {
     Invalid(ViewState),
 }
 
-/// A per-row CSS class: `(row) -> class`, as [`Table::row_class`] stores it. `pub(crate)` for the
-/// same reason as [`Fmt`].
+/// A per-row CSS class, `(row) -> class`, as [`Table::row_class`] stores it.
 pub(crate) type RowClass = Arc<dyn Fn(&Value) -> String + Send + Sync>;

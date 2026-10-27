@@ -15,9 +15,8 @@
 //!   [`_csrf`](crate::csrf::FIELD) field, and each `POST` verifies it before anything else (before the password
 //!   check, before any DB work). The token cookie is issued/refreshed when a form page is rendered and
 //!   rotated at login.
-//! - **the `crud` JSON API** — opt-in per engine: `Crud::csrf(auth.csrf())` (or
-//!   `Engine::set_csrf`). Once set, every write handler requires the header; the `crud::ui` tables
-//!   add it to their `fetch` calls automatically (they read the cookie name off the engine).
+//! - **`crud::ui`'s writes** — opt-in per engine: `Crud::csrf(auth.csrf())`. Once set, its forms carry
+//!   the hidden field and `submit` checks it before the gate.
 //! - **your own handlers** — call [`Csrf::verify`](crate::csrf::Csrf::verify) yourself, and [`Csrf::ensure`](crate::csrf::Csrf::ensure) to hand a token to a
 //!   page you render.
 //!
@@ -28,7 +27,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use http::HeaderMap;
 use rand_core::{OsRng, RngCore};
 
-/// The form field an MPA `<form>` submits the token in.
+/// The form field a `<form>` submits the token in.
 pub const FIELD: &str = "_csrf";
 /// The header a `fetch`/XHR client submits the token in.
 pub const HEADER: &str = "x-csrf-token";
@@ -196,7 +195,7 @@ impl Csrf {
 
     /// The hidden input to drop into a server-rendered `<form>` so its POST carries the token.
     pub fn hidden_input(token: &str) -> String {
-        format!(r#"<input type="hidden" name="{FIELD}" value="{}">"#, escape_attr(token))
+        format!(r#"<input type="hidden" name="{FIELD}" value="{}">"#, crate::html::esc(token))
     }
 
     /// Render the rejection page **yourself**, instead of the built-in bare 403.
@@ -209,8 +208,8 @@ impl Csrf {
     ///
     /// The hook is shared: set it on the `Csrf` you hand to [`Auth::csrf_rejection`] and it covers the
     /// login/profile pages, [`enforce`] on your own routes, and anywhere you call
-    /// [`reject`](Csrf::reject) directly. It does **not** apply to the `crud` JSON API, which answers a
-    /// machine with `403 {"error":"csrf token missing or invalid"}` — an HTML shell there would be wrong.
+    /// [`reject`](Csrf::reject) directly. `crud::ui`'s `submit` returns `Error::Csrf` instead, which your
+    /// handler renders (a plain `403` by default).
     ///
     /// [`Auth::csrf_rejection`]: crate::auth::Auth::csrf_rejection
     #[cfg(feature = "axum")]
@@ -276,9 +275,6 @@ const MAX_BUFFERED_UPLOAD: usize = 16 * 1024 * 1024;
 /// ```
 ///
 /// Pass the **same** `Csrf` the rest of the app uses (`auth.csrf()`), or the cookie names won't match.
-/// Apply it to a `Router` holding only the routes you want guarded: it rejects *any* unsafe request that
-/// arrives without a token, which is the point, and would therefore break an endpoint that is meant to
-/// take a Bearer credential from a non-browser client — though those are exempt anyway (see below).
 ///
 /// **What it checks**, in order:
 /// - **Safe methods pass** untouched (`GET`, `HEAD`, `OPTIONS`, `TRACE`) — there is nothing to protect.
@@ -292,11 +288,8 @@ const MAX_BUFFERED_UPLOAD: usize = 16 * 1024 * 1024;
 ///   handler doing anything.
 ///
 /// Anything else gets [`Csrf::reject`], so your [`on_reject`](Csrf::on_reject) page applies here too.
-///
-/// **Why the caps.** The token lives in the body, so finding it means holding the body; an
-/// unbounded read would let any request decide how much memory this process uses. A request over
-/// the cap is refused rather than read, which is also why the multipart limit is a knob: set it
-/// just above the largest upload the guarded routes accept.
+/// A body over its cap is refused rather than read; set `max_upload` just above the largest upload the
+/// guarded routes accept.
 #[cfg(feature = "axum")]
 pub async fn enforce(
     axum::extract::State(csrf): axum::extract::State<Csrf>,
@@ -370,11 +363,6 @@ fn form_field(body: &[u8], name: &str) -> Option<String> {
 fn header_token(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(HEADER)?.to_str().ok()?.trim();
     (!value.is_empty()).then(|| value.to_string())
-}
-
-/// Minimal attribute escaping for the hidden input (tokens are hex, but never interpolate blind).
-fn escape_attr(s: &str) -> String {
-    s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 #[cfg(test)]

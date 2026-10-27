@@ -1898,10 +1898,8 @@ mod nullable_tests {
         let row = stamped::Entity::find().one(&db).await.expect("query").expect("one row");
         assert_eq!(row.created_at, 1_700_000_000, "…and it is what the database holds");
 
-        // The upgrade hazard, asserted: **forget** the `read_only` and the same create is refused, because
-        // from the engine's side a hook-filled column is indistinguishable from one nothing fills. This is
-        // the one item in the 0.2.0 notes that can bite an app silently, so it gets a test rather than only
-        // a paragraph.
+        // **Forget** the `read_only` and the same create is refused: from the engine's side a hook-filled
+        // column is indistinguishable from one nothing fills.
         let bare = MetaModel::new(stamped::Entity);
         let obj = serde_json::json!({ "title": "t" }).as_object().unwrap().clone();
         match bare.prepare_write(&obj, true) {
@@ -2024,9 +2022,7 @@ mod nullable_tests {
 
     #[test]
     fn a_missing_required_field_is_a_field_error_not_a_database_crash() {
-        // The point of the whole feature: omitting `name` used to reach the database, which rejected it,
-        // which surfaced as a 500 carrying the database's own message. Now it is a 422 naming the field —
-        // which the admin form renders inline, and which doesn't leak the schema.
+        // Omitting `name` is a 422 naming the field, not a 500 carrying the database's message.
         let mm = MetaModel::new(thing::Entity);
         let errs = write_errors(&mm, serde_json::json!({ "nickname": "n" }), true);
         assert_eq!(errs.fields.get("name").map(String::as_str), Some("required"));

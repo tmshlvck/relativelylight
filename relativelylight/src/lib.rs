@@ -18,22 +18,18 @@
 //! let engine = crud.into_engine();            // render tables/forms from it on your own routes
 //! ```
 
-/// The per-model authorization gate: the [`Authz`](authz::Authz) trait, [`Operation`](authz::Operation) /
-/// [`Decision`](authz::Decision), and the [`Open`](authz::Open) gate. Identity-resolving presets live
-/// in [`auth`].
+/// The per-model authorization gate: [`Authz`](authz::Authz), [`Operation`](authz::Operation),
+/// [`Decision`](authz::Decision) and the [`Open`](authz::Open) gate. Identity-resolving presets live
+/// in `auth`.
 pub mod authz;
 
-/// The write-observer hook for audit logging: [`WriteEvent`](observe::WriteEvent) +
-/// [`WriteObserver`](observe::WriteObserver), fired by `crud` and `auth` write paths with the request
-/// context so the app can record who/what/from-where. Always compiled.
-/// Client-address resolution (`trust_proxy` → socket peer vs forwarded headers). The primitive behind
-/// [`middleware::resolve_real_ip`]; apps use the middleware, not this, so one client is one address
-/// everywhere. Also carries the CIDR helpers.
+/// Client-address resolution and the CIDR helpers — the primitive behind
+/// [`middleware::resolve_real_ip`], which apps use instead.
 pub mod net;
 
-/// The request-pipeline layer: [`resolve_real_ip`](middleware::resolve_real_ip), which resolves the
-/// caller's address once into a [`RealIp`](middleware::RealIp) extension and is **required** by anything
-/// in this crate that needs to know who is calling. There is no request log here — see `examples/audit`.
+/// [`resolve_real_ip`](middleware::resolve_real_ip): resolves the caller's address once into a
+/// [`RealIp`](middleware::RealIp) extension. **Required** by everything here that needs to know who
+/// called.
 #[cfg(feature = "axum")]
 pub mod middleware;
 
@@ -45,34 +41,32 @@ pub mod crud;
 #[cfg(feature = "auth")]
 pub mod auth;
 
+/// Content-addressed file storage under a stable handle and version chain — see `docs/BLOBSTORE.md`.
+#[cfg(feature = "blob")]
+pub mod blob;
+
 /// `application/x-www-form-urlencoded` encode/decode, shared by `csrf`, `time` and `crud::ui`.
 #[cfg(any(feature = "csrf", feature = "tz", feature = "ui"))]
 mod urlform;
 
-/// A strict reader for a buffered `multipart/form-data` body — how a file reaches the server
-/// without JavaScript in the middle (see `crud::ui`'s CSV import), and how [`csrf`] finds the token
-/// in one.
+/// HTML escaping for fragments built without a template (`ui` implies `tz`, `auth` implies `csrf`).
+#[cfg(any(feature = "csrf", feature = "tz"))]
+mod html;
+
+/// A strict reader for a buffered `multipart/form-data` body (the CSV import; the token in [`csrf`]).
 #[cfg(any(feature = "ui", feature = "csrf"))]
 mod multipart;
 
-/// Double-submit CSRF protection for cookie-authenticated writes: [`Csrf`](csrf::Csrf) issues and
-/// verifies the token. Always on for `auth`'s own forms; opt-in for the `crud` API via `Crud::csrf`.
-/// Feature `csrf` (implied by `auth`). See [`docs/AUTH.md` §7](https://github.com/tmshlvck/relativelylight/blob/main/docs/AUTH.md).
-#[cfg(feature = "blob")]
-pub mod blob;
-
+/// Double-submit CSRF protection for cookie-authenticated writes ([`Csrf`](csrf::Csrf)). Always on for
+/// `auth`'s forms; opt-in for `crud` via `Crud::csrf`. See `docs/AUTH.md` §7.
 #[cfg(feature = "csrf")]
 pub mod csrf;
 
-/// Timezone-aware presentation of UTC timestamps: [`Tz`](time::Tz) (the zone for one request, from a
-/// cookie) and the [`TzPicker`](time::TzPicker) form. Storage stays integer-UTC; formatting happens
-/// **server-side**, so a CSV export matches the screen. Feature `tz` (implied by `ui`). See
-/// [`docs/TIME.md`](https://github.com/tmshlvck/relativelylight/blob/main/docs/TIME.md).
+/// Server-side rendering of integer-UTC timestamps in the request's zone: [`Tz`](time::Tz) (from a
+/// cookie) and [`TzPicker`](time::TzPicker). See `docs/TIME.md`.
 #[cfg(feature = "tz")]
 pub mod time;
 
-/// Reusable field validators + normalizers ([`ipv4`](validate::ipv4), [`int_range`](validate::int_range),
-/// [`hostname`](validate::hostname), …) as typed predicates, plus the [`field`](validate::field) adapters
-/// that plug them into the CRUD write path. Std-only core, always compiled. See
-/// [`docs/DATAINPUT.md`](https://github.com/tmshlvck/relativelylight/blob/main/docs/DATAINPUT.md).
+/// Typed field validators and normalizers, plus the [`field`](validate::field) adapters for the CRUD
+/// write path. See `docs/DATAINPUT.md`.
 pub mod validate;

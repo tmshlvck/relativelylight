@@ -171,11 +171,8 @@ from this site. Reload the page and try again.</div>
     if let Some(sso) = &sso {
         app = app.merge(sso.routes()); // /sso/{provider}/login + /callback
     }
-    // The caller's address is resolved **once**, at the outermost layer, and read from there by
-    // `auth`'s lockout, the audit events, this app's own `/api/whoami` and anything it logs — so they all
-    // name the same client. This app used to resolve it in three places with two copies of the proxy
-    // flag; the layer is what makes that impossible. Mandatory: `auth`'s login routes 500 without it.
-    // (No request log here — the crate ships none; `examples/audit` shows the dozen lines.)
+    // Mandatory and outermost: the caller's address, resolved once for the lockout, the audit events
+    // and `/api/whoami`. `auth`'s login routes answer 500 without it.
     let app = app
         .layer(axum::middleware::from_fn_with_state(
             relativelylight::middleware::TrustProxy(trust_proxy_from_env()),

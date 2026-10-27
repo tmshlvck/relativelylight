@@ -1,48 +1,23 @@
-# relativelylight — the `auth` module (authn + authz) — DRAFT SPEC
+# `relativelylight::auth` — authentication and authorization
 
-Status: **implemented** (feature `auth`, usable without `crud`): `user`/`session`/`group`/
-`user_group` SeaORM models, argon2id hashing, login/logout with an opaque server-side session cookie
-(via `axum-extra`'s `CookieJar`; cookie name configurable, default `rl_session`), **on-demand session
-resolution** ([`Auth::identify`] → `Option<Identity>`; **no middleware, nothing injected into the
-request**), the always-compiled `authz` gate trait + presets (`authz::Open`,
-`auth::UserReadWrite::new(&auth)`, `auth::UserReadGroupWrite::new(&auth, [..])`,
-`auth::GroupReadWrite::new(&auth, [..])`), a self-service **profile / password-change page** plus a
-manager-only reset for other users (`GET/POST /profile`, `GET/POST /profile/{id}`), **TOTP two-factor
-authentication** (login second factor + self-service enrol/disable + manager disable — see §5a),
-**OIDC single sign-on** (feature `sso`: Google / Okta / corporate, with username- and claim-based group
-mapping and optional auto-registration — see §5b), admin helpers (`migrate`, `create_user`,
-`set_password`, `ensure_group`, `add_to_group`, `remove_from_group`, `make_admin`,
-`reset_admin_access`), and **per-model enforcement in the `crud` HTTP handlers** via
-`crud::seaorm::Crud::register(model, gate)` — mapping the gate's `Decision` to 401/403, plus
-per-request UI control-hiding via `Admin`/`Table::render_for` — **double-submit CSRF protection**
-(feature `csrf`, §7: always on for the module's own forms, `Crud::csrf` for the API), and
-**lockout** on the unauthenticated credential checks (§5e: two DB-backed counters, by account name and
-by source address, shared with the app's own credential checks and cleared by deleting a row in the
-admin panel). **Not yet:** the
-a CORS layer (client-IP resolution is shipped as middleware — §4; request logging is deliberately the
-app's), PassKeys. The rest of this doc is the design these grow into.
+Feature `auth`, usable without `crud`. It provides:
 
-The login, password-change, and 2FA pages are plain **MPA `<form>` posts** — no JS (the enrolment QR
-is a server-rendered inline PNG). The library renders the form fragment (Bootstrap-friendly classes);
-the app wraps + styles it via `Auth::login_shell` / `Auth::profile_shell`. General rule: keep security
-features as simple as possible.
+- users, groups and server-side sessions (SeaORM tables), argon2id password hashing;
+- login/logout, a self-service profile page (password, TOTP 2FA, recovery codes) and a manager reset
+  (§5, §5a, §5i);
+- OIDC single sign-on with group mapping (feature `sso`, §5b);
+- lockout on the unauthenticated credential checks (§5e), session lifetimes and revocation (§5f), a
+  password policy (§5g), re-authentication before sensitive changes (§5h);
+- double-submit CSRF (feature `csrf`, §7);
+- per-model gate presets for `crud` (§6).
 
-`auth` is a **feature-gated module** of the `relativelylight` crate — authentication (users,
-sessions, login, password hashing) *and* authorization (a small gate trait + presets) together. It's usable **on its own** (enable only `features = ["auth"]` to gate any
-axum app), and the `crud` module *optionally* consults it to gate the generated API + admin. It also
-keeps the door open for 2FA (TOTP / PassKeys), OIDC SSO, and app-defined API tokens.
+**There is no authn middleware.** `Auth::identify(&headers)` resolves the session cookie → user →
+groups in one round-trip and returns `Option<Identity>`; a gate or a page handler calls it when it
+needs to know who is asking, and nothing is injected into the request.
 
-**Independence:** `auth` does not require `crud`. When both are enabled, each `crud` handler consults
-the model's `relativelylight::auth::Authz` gate, which resolves the identity itself from the request
-headers; when `auth` is off, `crud` is ungated (`Open`).
-
-**No middleware.** Authn is not a layer that injects a context — it is a handful of on-demand lookups
-on [`Auth`]. Given a request's headers, `Auth::identify` resolves the session cookie → user → groups
-(one DB round-trip) and returns an `Option<Identity>`. A gate or a page handler calls it when it needs
-to know who's asking; nothing is stored in request extensions. This keeps the whole feature small: no
-layer ordering, no state-injection, no `FromRequestParts` magic — just a method you call.
-
-Sibling docs: [docs/CRUD.md](CRUD.md) (the API/UI), [PRD.md](PRD.md) (roadmap).
+The pages are plain `<form>` posts with no JavaScript (the enrolment QR is an inline PNG). The library
+renders fragments; the app wraps them with `Auth::login_shell` / `Auth::profile_shell`. See
+[APP.md](APP.md) for the whole composition, and [TODO.md](TODO.md) for what is not built yet.
 
 ## 1. Goals & principles
 
@@ -66,8 +41,8 @@ Sibling docs: [docs/CRUD.md](CRUD.md) (the API/UI), [PRD.md](PRD.md) (roadmap).
 
 ## 2. Layering
 
-There is **no authn/session middleware**. The optional cross-cutting layers (real-ip, logging, CORS,
-CSRF — §4/§7) are still `tower`/axum layers the app applies, but *identity resolution is not a layer*:
+The cross-cutting layers (real-ip, logging, CORS, CSRF — §4, §7) are axum layers the app applies;
+identity resolution is not a layer:
 
 ```
 client → [real-ip] → [request logging] → [CORS] → [CSRF for cookie-auth writes] → router
@@ -85,7 +60,7 @@ Everything lives in `relativelylight::auth`: the `Identity` / `Authz` / `Decisio
 SeaORM users/sessions + login + hashing. The `crud` module references `auth::Authz` / `auth::Decision`
 only when the `auth` feature is enabled (see §9).
 
-## 3. Identity mechanism — DECIDED: server-side session
+## 3. Identity mechanism: server-side session
 
 **Server-side session, carried in an opaque cookie.** A random session id in a
 `Set-Cookie: HttpOnly; Secure; SameSite=Strict` cookie, backed by a SeaORM `session` table (user id,
@@ -133,8 +108,7 @@ All optional, all applied by the app; defaults chosen for "safe but works out of
   can turn down on a high-volume endpoint — the one thing a hardcoded `eprintln!` in a library could never
   give you. Shipping one shape would have meant a logging dependency here and an opinion about all of it,
   so **[`examples/audit`](../examples/audit/src/main.rs)** carries the dozen lines instead,
-  runnable and in two variants. (An `access_log` middleware existed briefly during 0.2.0 development and
-  was removed before the tag.)
+  runnable and in two variants.
 
   Contrast `resolve_real_ip`, which stays: mandatory, security-relevant, and coupled to `auth`, which
   fails without it. Logging is none of those.
@@ -198,9 +172,7 @@ All optional, all applied by the app; defaults chosen for "safe but works out of
 SeaORM models (the app runs the migration / `create_table_from_entity`):
 
 - **`user`** — `id`, `username` (unique), `password_hash`, `is_active`, and the TOTP 2FA columns
-  `totp_secret` / `totp_pending` (nullable base32) + `totp_last_step` (the replay guard; §5a). (An
-  OIDC-subject column can be added later,
-  additively.) `username` is validated at every creation path (`create_user`, and the SSO
+  `totp_secret` / `totp_pending` (nullable base32) + `totp_last_step` (the replay guard; §5a). `username` is validated at every creation path (`create_user`, and the SSO
   auto-register path) by `auth::valid_username` — non-empty, ≤ 254 bytes, no spaces/control chars
   (permissive enough for email-style names). Wire the same check into the admin form:
   `user_mm.field("username").validate_str(relativelylight::auth::valid_username)`. Group names get
@@ -220,17 +192,6 @@ These are ordinary `crud`-registerable entities (so the admin can manage users/g
 DB or the examples, safe to call on every start. It is **not** a migration engine: it only *creates*
 missing tables, so it won't add columns when you upgrade the library (e.g. the TOTP / SSO columns on
 `auth_user`) or otherwise evolve the schema.
-
-> **Upgrading to 0.2.0** adds two columns to existing tables, which `migrate` will *not* create for you:
-> ```sql
-> ALTER TABLE auth_session ADD COLUMN last_seen_at BIGINT NOT NULL DEFAULT 0;  -- idle clock (§5f)
-> ALTER TABLE auth_user    ADD COLUMN totp_last_step BIGINT NULL;              -- replay guard (§5a)
-> ```
-> …and one new table, `auth_totp_recovery` (§5i) — take it from `table_create_statements`, which now
-> returns it, rather than writing the DDL by hand.
-> The `DEFAULT 0` on `last_seen_at` makes every pre-existing session read as idle-expired, so everyone
-> signs in again once — the safe direction. Backfill it to `strftime('%s','now')` (or your dialect's
-> equivalent) instead if you'd rather not log your users out on deploy.
 
 **Foreign keys, and what a deleted account takes with it.** Three tables hold a `user_id` that is a
 real foreign key onto `auth_user`, all three **cascading on delete** — `auth_session`,
@@ -277,7 +238,7 @@ the original, and rename the new one into place — all inside a transaction wit
 in-place edit available.
 
 `sea-orm-migration` will do this for you, and the new DDL should come from
-[`table_create_statements`](crate::auth::table_create_statements) rather than being written by hand,
+`auth::table_create_statements` rather than being written by hand,
 so the rebuilt table matches what a fresh install gets:
 
 ```rust
@@ -354,7 +315,7 @@ migration; when a later library version adds a column, add your own `ALTER TABLE
   `crud::ui` components) posting to a built-in login handler that verifies the hash, creates a
   `session` row, and sets the cookie. On success → redirect; on failure → re-render with an error.
 - **Logout:** deletes the session row + clears the cookie.
-- **Password change / profile — implemented.** `Auth::routes()` serves a self-service page at
+- **Password change / profile.** `Auth::routes()` serves a self-service page at
   `GET/POST /profile` (verify current password → set new hash; any signed-in user changes their own)
   and a manager reset at `GET/POST /profile/{id}` (set another user's password with **no** current
   password). The library renders the `<form>` fragment; the app wraps it via `Auth::profile_shell`
@@ -389,7 +350,7 @@ let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
 `s.csrf` is what makes the section able to hold a real form: the hook never sees the request, so it
 could not mint a token itself, and a form without one is refused like any other POST (§7). The
 section's *handler* is an ordinary route of yours — put
-[`reauthenticate`](#5h-re-authentication-before-sensitive-changes--implemented) at the top of it if
+[`reauthenticate`](#5h-re-authentication-before-sensitive-changes) at the top of it if
 the action is sensitive, which for an API token it is. `examples/auth` does exactly this: its
 `POST /api-token/rotate` is reached from a `profile_extra` section and re-authenticates before it
 does anything.
@@ -424,7 +385,7 @@ login capability by accident:
 
 Re-enabling a disabled *non-admin* account stays an explicit `is_active` edit (e.g. in the admin UI).
 
-## 5a. TOTP two-factor authentication — implemented
+## 5a. TOTP two-factor authentication
 
 A second factor (RFC 6238 TOTP, via the `totp-rs` crate) on top of username + password. When a user
 has 2FA enabled, a correct password isn't enough — they must also enter the 6-digit code from their
@@ -486,7 +447,7 @@ enrolment needs that user's device. Disabling clears `totp_secret`, `totp_pendin
 The profile page (`GET /profile`) shows a 2FA section reflecting the current state: a "Set up 2FA"
 link when off, or a "Disable 2FA" button when on.
 
-## 5b. SSO / OpenID Connect — implemented (feature `sso`)
+## 5b. SSO / OpenID Connect (feature `sso`)
 
 Sign users in through an external OIDC identity provider — Google, Okta, or any compliant corporate
 IdP — via the Authorization Code flow with PKCE. Built on the `openidconnect` crate (discovery, PKCE,
@@ -584,7 +545,7 @@ safe for key rotation: providers publish a new signing key well before retiring 
 > shipped client against a **fake IdP** on a loopback port — real discovery over HTTP, real RSA
 > signatures — so every rejection path is exercised in CI. See §10a.
 
-## 5c. Lifecycle timestamps — implemented
+## 5c. Lifecycle timestamps
 
 The auth entities carry UTC timestamps (`i64` Unix seconds), maintained automatically:
 
@@ -599,7 +560,7 @@ confirm (`login/totp`), and the SSO callback. Mark these fields `read_only` on t
 admin shows but doesn't edit them (see `examples/adminpanel`). All times are UTC; rendering them in the
 viewer's timezone is a frontend concern (see [docs/TIME.md](TIME.md)).
 
-## 5d. Write observer — audit hook (implemented)
+## 5d. Write observer — audit hook
 
 `auth` fires the shared [`WriteObserver`](../relativelylight/src/observe.rs) (see [CRUD.md](CRUD.md#write-observer-audit))
 from its **mutating handlers**, so auth-table changes made *outside* the crud engine are still audited:
@@ -634,7 +595,7 @@ built on the same `RealIp`. Two things it makes visible that are easy to get wro
   the row, and a manager's reset (`auth-admin`) names the manager normally. If you need the actor on
   that one event, record it in the handler rather than in the sink.
 
-## 5e. Lockout: the brute-force brake — implemented
+## 5e. Lockout: the brute-force brake
 
 The brake in front of the **unauthenticated** credential checks. Two counters, two tables, two
 deliberately separate types (`auth::lockout::{UsernameLockout, IpLockout}`) — they do the same
@@ -763,7 +724,7 @@ not the idle one (§5f). Skipping either is
 safe: a dead session never authenticates and an expired lockout row reads as unlocked and resets
 itself on the next failure — the rows just accumulate.
 
-## 5f. Session lifetime & revocation — implemented
+## 5f. Session lifetime & revocation
 
 A session is a row, so revoking one is a `DELETE` and there is no token to keep believing after the
 fact. That's the whole advantage over a JWT (§3), and this section is what the module does with it.
@@ -777,7 +738,7 @@ fact. That's the whole advantage over a JWT (§3), and this section is what the 
 
 The idle clock is the one that bounds a stolen cookie: without it an attacker who lifts a cookie has the
 full absolute window, whether or not the victim ever comes back. `session_idle_secs(0)` switches it off
-and leaves exactly the pre-0.2.0 behaviour. The absolute deadline always wins — a session used a second
+leaving only the absolute deadline. The absolute deadline always wins — a session used a second
 ago but past `expires_at` is dead.
 
 `last_seen_at` is refreshed **lazily**: a read only writes when the stamp is more than a minute stale.
@@ -825,7 +786,7 @@ name can keep it locked by failing on purpose, and now that the rows are durable
 clears it. That is why the lock is short, lifts on its own, and can be cleared from the admin panel.
 The alternative — progressive delays — holds a server task open per attempt, which is its own risk.
 
-## 5g. Password strength — implemented
+## 5g. Password strength
 
 `Auth` screens a **new** password on its own pages — `POST /profile` and a manager's `POST /profile/{id}`
 — against a [`validate::PasswordPolicy`](DATAINPUT.md). **On by default**, at
@@ -891,7 +852,7 @@ pipeline is **coerce → validate → transform**, so the validator sees the pla
 `MetaField::password()`'s argon2 hook hashes it — no engine change needed. `examples/adminpanel` wires
 both halves from one `PASSWORD_LEVEL` env value, `0` switching them off together.
 
-## 5h. Re-authentication before sensitive changes — implemented
+## 5h. Re-authentication before sensitive changes
 
 A live session proves that **someone** logged in once. It does not prove that the account's owner is the
 one asking now — a stolen cookie *is* a live session. The idle clock (§5f) bounds how long such a cookie
@@ -944,7 +905,7 @@ the refusal before anything is written.
 another `auth_session` column and a window during which a stolen session is dangerous again. These are
 rare actions; typing a password twice to reset two users is a fair price for having no open window.
 
-## 5i. TOTP recovery codes — implemented
+## 5i. TOTP recovery codes
 
 The answer to "my phone is gone". Without them, an enrolled user who loses their authenticator can only
 be let back in by a manager disabling their 2FA (§5a) — workable for staff with an IT department, useless
@@ -1178,7 +1139,7 @@ async fn admin_page(headers: HeaderMap, State(app): State<AppState>) -> Response
 `/metrics`) simply never calls `identify`. The one thing the app must **schedule** is housekeeping:
 `auth.prune()` on its own loop (§5f/§5e) — the crate spawns no tasks.
 
-## 7. CSRF — implemented (double-submit token, feature `csrf`)
+## 7. CSRF (double-submit token, feature `csrf`)
 
 Cookie-authenticated **unsafe** requests (POST/PATCH/PUT/DELETE) must carry a CSRF token, checked
 against a cookie-bound value (double-submit). Defense-in-depth on top of `SameSite=Strict`. The module
@@ -1277,27 +1238,13 @@ if !auth.csrf().verify(&headers, form.csrf.as_deref()) { return StatusCode::FORB
 [TODO.md](TODO.md). Note also that a **co-hosted** app sharing the host must use a distinct
 `csrf_cookie_name` (cookies aren't port-scoped), exactly as with the session cookie.
 
-## 8. Future-proofing (not in v1, but designed for)
+## 8. Not built, on purpose or not yet
 
-- **TOTP 2FA — done (§5a).** Implemented as an `awaiting_totp` session flag + `totp_secret` on the
-  user. **PassKeys/WebAuthn** would slot in similarly (a session assurance level a policy can require
-  for sensitive models) — parked at **milestone 0.3+**: nothing driving the crate needs it yet, and it is
-  a large surface (a credentials table, browser ceremonies, and an assurance level that would likely add
-  a field to `Identity`). It remains the only real answer to real-time phishing, which TOTP and its
-  replay guard do not address.
-- **OIDC SSO — done (§5b, feature `sso`).** The callback creates a `session` for the mapped user —
-  the same session model. Group memberships come from the username/claim mapping tables.
-- **App API tokens — deliberately the app's, and not on this roadmap.** An API-first service (its admin
-  panel a convenience this crate provides, its API the actual product) needs tokens shaped its own way:
-  per-machine or per-person, scoped or not, in their own table or alongside something else, rotated on
-  their own schedule. A built-in would have to pick, and every app that picked differently would carry
-  both. Nothing is missing for them to do it: **`Authz::authorize` is handed the headers**, so a gate the
-  app writes reads `Authorization`, verifies the token however it likes, and returns
-  `Allow`/`NeedsLogin`/`Denied` — the same three answers the cookie presets give, gating the same
-  generated CRUD routes. `Authorization`-bearing requests are CSRF-exempt (§7), so such a route needs no
-  token dance either. What this crate keeps is the **web** door: `auth_user`/`auth_group`, the login
-  session, 2FA, SSO. A web-only app uses that and never issues a token; an API-first app issues its own
-  and still gets the admin panel. Neither pays for the other.
+- **PassKeys/WebAuthn** — parked until an app faces real-time phishing, which TOTP doesn't address.
+  It would likely add a session assurance level, and so a field on `Identity`.
+- **App-issued API tokens** — the app's, by design. `Authz::authorize` is handed the headers, so an
+  app's own gate reads `Authorization`, verifies its token however it likes, and returns the same
+  `Decision`; `Authorization`-bearing requests are CSRF-exempt (§7). This crate owns the web door.
 
 ## 9. Module / feature layout
 
@@ -1307,9 +1254,8 @@ without `crud`:
 - **`auth`** — `Identity`, on-demand `Auth::identify`, the gate presets (`UserReadWrite`,
   `UserReadGroupWrite`, which impl `authz::Authz`), the SeaORM `user`/`group`/`session` models,
   argon2id hashing, the session cookie, and login/logout/password-change routes + components. (The
-  gate trait itself — `Authz`/`Operation`/`Decision`/`Open` — lives in the always-on `authz` module.
-  The cross-cutting layers — real-ip · logging · CORS · CSRF — are still planned; identity itself is
-  *not* a layer.) Pulls `sea-orm`, `argon2`, a cookie lib, `rand`, `time`; shares `axum` +
+  gate trait itself — `Authz`/`Operation`/`Decision`/`Open` — lives in the always-on `authz` module.)
+  Pulls `sea-orm`, `argon2`, a cookie lib, `rand`, `time`; shares `axum` +
   `async-trait` with the crud engine.
 - The **`authz`** module (the `Authz` trait, `Operation`, `Decision`, `Open`) is **always compiled**
   (it only needs `http` + `async-trait`), so `Crud::register(model, gate)` takes a gate in every
@@ -1541,46 +1487,35 @@ don't follow.
 
 ## 11. Decisions (confirmed)
 
-1. **Packaging** — ✅ a **feature-gated `auth` module** in the single `relativelylight` crate (authn +
+1. **Packaging** — a **feature-gated `auth` module** in the single `relativelylight` crate (authn +
    authz together). Usable without `crud`; `crud` optionally consults it.
-2. **Identity** — ✅ cookie + **server-side session** (SeaORM `session` table).
-3. **CSRF** — ✅ **double-submit token** (feature `csrf`, §7): always on for the module's own forms,
+2. **Identity** — cookie + **server-side session** (SeaORM `session` table).
+3. **CSRF** — **double-submit token** (feature `csrf`, §7): always on for the module's own forms,
    `Crud::csrf(auth.csrf())` for the admin UI's writes; `Authorization`-bearing requests exempt.
-4. **authz config** — ✅ **one gate per model, explicit at registration**: `Crud::register(model,
+4. **authz config** — **one gate per model, explicit at registration**: `Crud::register(model,
    gate)`. Each gate is attached per model (no slug arg), is handed the request headers, and resolves
    the identity itself → a `Decision`. The trait lives in the always-on `authz` module (`Open` for
    ungated). **No middleware**: authn is on-demand `Auth::identify(&headers)`.
-5. **Defaults** — ✅ hashing **argon2id**, admin group **`"admin"`** (configurable); presets
+5. **Defaults** — hashing **argon2id**, admin group **`"admin"`** (configurable); presets
    `authz::Open` / `UserReadWrite::new(&auth)` / `UserReadGroupWrite::new(&auth, [..])` /
    `PublicReadGroupWrite::new(&auth, [..])` / `GroupReadWrite::new(&auth, [..])` / custom.
-6. **2FA** — ✅ **TOTP** (RFC 6238) as a login second factor with self-service enrolment/disable and
+6. **2FA** — **TOTP** (RFC 6238) as a login second factor with self-service enrolment/disable and
    manager disable (§5a); PassKeys/WebAuthn remain future.
-7. **SSO** — ✅ **OIDC** (feature `sso`) for Google / Okta / corporate, with username- and claim-based
+7. **SSO** — **OIDC** (feature `sso`) for Google / Okta / corporate, with username- and claim-based
    group mapping (union + reconcile) and optional per-provider auto-registration (§5b).
-8. **Attempt limiting** — ✅ **DB-backed lockout** (429 + `Retry-After`) on the *unauthenticated*
+8. **Attempt limiting** — **DB-backed lockout** (429 + `Retry-After`) on the *unauthenticated*
    credential checks (§5e), by account name and by source address, both mandatory in `Auth::new`; the
    unlock is deleting the row in the admin panel. Authenticated checks are deliberately unlimited.
-9. **Session lifetime** — ✅ **two clocks** (§5f): an absolute deadline (7 days) plus an idle timeout
+9. **Session lifetime** — **two clocks** (§5f): an absolute deadline (7 days) plus an idle timeout
    (8 hours, `session_idle_secs(0)` to disable), the id rotated on privilege gain, and a password change
    or manager reset revoking the user's other sessions.
-10. **Client IP** — ✅ resolved **once, by mandatory middleware** into a `RealIp` extension (§4), with a
+10. **Client IP** — resolved **once, by mandatory middleware** into a `RealIp` extension (§4), with a
     **`trust_proxy` boolean**: one trusted hop, the **right-most** `X-Forwarded-For` entry. A trusted-proxy
     CIDR list, RFC 7239 `Forwarded` and CDN headers were all considered and rejected; a stranger topology
     is served by an app-supplied middleware inserting the same extension, which is why there is no hook.
 
-## 12. Open (later)
+## 12. Open
 
-- Row-level authorization (per-row read checks / list filters — the gate seeing the row/query). Filed
-  under *Transformative* in [TODO.md](TODO.md): it reshapes the one trait apps implement by hand, so it needs
-  **additional** `Authz` methods with defaults rather than a changed `authorize` signature, `Decision`
-  must stay fieldless, and the list-filter half reaches into `ListQuery`/`Accessor` too. Deferred until a
-  requirement arrives that an app can't meet in its own handler.
-- PassKeys/WebAuthn — §8, milestone 0.3+. (**App-issued API tokens are *not* open**: they're the app's by
-  design, and the header-carrying gate is all that's needed — §8.)
-- Security hardening — lockout (§5e), CSRF including the `csrf::enforce` layer and the rejection hook (§7),
-  session lifetime/revocation (§5f), the password policy (§5g), re-authentication (§5h), recovery codes
-  (§5i), SSO discovery caching, and the `RealIp`/access-log middleware (§4) have all landed. Still open:
-  re-auth through the IdP for SSO accounts (§5h states the limit), breached-password screening (§5g), and
-  CSRF on a multipart body (§7). CORS is answered by documenting `tower_http` rather than wrapping it (§4).
-- Session store scaling: sessions are already shared across replicas (they're rows), so this is a
-  performance question — the per-request read, and the lazy idle-refresh write — not a correctness one.
+In [TODO.md](TODO.md): re-authentication of SSO accounts through the IdP (§5h states the limit),
+breached-password screening (§5g), row-level authorization. Sessions are rows, so they are already
+shared across replicas; scaling them is a performance question, not a correctness one.

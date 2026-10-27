@@ -1,73 +1,39 @@
 //! examples/audit — **who called, and what they changed.**
 //!
-//! Two records every back-office keeps, neither of them shipped by relativelylight, and one value
-//! that makes them agree:
+//! Two records every back-office keeps, neither shipped by relativelylight (the crate writes nothing
+//! to stdout or stderr), over one value that makes them agree:
 //!
 //! | Record | The library gives you | The app writes |
 //! |---|---|---|
-//! | request log | [`RealIp`](relativelylight::middleware::RealIp) — the caller's address, resolved once at the edge | the line ([`access_log`], [`access_log_identify`]) |
-//! | audit trail | a [`WriteEvent`](relativelylight::observe::WriteEvent) per committed write, carrying before/after, headers and that same address | the record ([`AuditLog`]) |
-//!
-//! The crate writes nothing to stdout or stderr anywhere, on purpose: a log line is a dozen lines of
-//! code and the dozen differ per app — a structured `tracing` event or a line on stderr, the query
-//! string or just the path, a level you can turn down on a chatty endpoint. An audit *row* differs
-//! even more: its table, its retention, and who counts as the actor are product decisions. Shipping
-//! either shape would have meant a logging dependency in the library and an opinion about all of it.
-//!
-//! So here are both, printed to stdout, in about sixty lines between them.
-//!
-//! **The point is that the address is the same one in every record.** `resolve_real_ip` decides it
-//! once, at the outermost layer; the request log prints that value, the audit line prints that
-//! value, and `auth`'s lockout counts against that value. Nothing re-derives it from a header and a
-//! proxy policy it has to know about, so the three can't disagree about who was here.
+//! | request log | [`RealIp`], resolved once at the edge | the line ([`access_log`], [`access_log_identify`]) |
+//! | audit trail | a [`WriteEvent`] per committed write, with that same address | the record ([`AuditLog`]) |
 //!
 //! ```text
 //! cargo run -p audit-example                            # serve on :3000, log in as admin / password
-//! NAME_EVERY_REQUEST=1 cargo run -p audit-example       # …name the user on every request, not just ours
-//! TRUST_PROXY=1 cargo run -p audit-example              # …behind a proxy: believe X-Forwarded-For
+//! NAME_EVERY_REQUEST=1 cargo run -p audit-example       # name the user on every request
+//! TRUST_PROXY=1 cargo run -p audit-example              # behind a proxy: believe X-Forwarded-For
 //! ```
 //!
-//! Log in, edit a post at `/data/post`, change your password at `/profile`, and watch:
+//! Edit a post at `/data/post`, change your password at `/profile`, and watch:
 //!
 //! ```text
 //! 127.0.0.1       admin  GET  /data/post   200 3ms
 //! audit  autocrud    update post#1       admin@127.0.0.1  title: "Hello" → "Hello, world"
 //! 127.0.0.1       admin  POST /data/post   303 12ms
-//! audit  auth-profile update auth_user#1  admin@127.0.0.1  password_hash: (changed)
 //! ```
 //!
-//! The audit line is emitted **after the write commits** and before the redirect, from inside the
-//! library's write path — so it sees a change that happened, not one that was attempted, and it sees
-//! `auth`'s own writes (a password change, a 2FA enrolment, a manager's reset) as well as the CRUD
-//! panel's. One observer, registered on both.
+//! The audit line fires **after the commit**, for the CRUD panel's writes and `auth`'s own (one
+//! observer, registered on both).
 //!
-//! # The two shapes of the request log
+//! The request log comes in two shapes:
 //!
 //! | Variant | Names the user on | Costs |
 //! |---|---|---|
-//! | [`access_log`] (default) | routes that opt in by returning an [`Actor`] | nothing |
+//! | [`access_log`] (default) | our routes, whose handlers return an [`Actor`] | nothing |
 //! | [`access_log_identify`] (`NAME_EVERY_REQUEST=1`) | every request with a session cookie | one `Auth::identify` per request |
 //!
-//! Neither is more correct. Pick by whether naming an *anonymous* request's route matters more than
-//! a session lookup on every hit.
-//!
-//! ```text
-//! 127.0.0.1       -      GET  /            200 0ms      before logging in: nobody to name
-//! 127.0.0.1       -      POST /login       303 431ms    the library's route  ─┐
-//! 127.0.0.1       admin  GET  /            200 1ms      ours: it knows you    │ under variant 1,
-//! 127.0.0.1       admin  GET  /private     200 1ms      ours: it knows you    │ only our own
-//! 127.0.0.1       -      GET  /profile     200 2ms      the library's route  ─┘ handlers can say
-//! ```
-//!
-//! A route of **ours** names the caller because its handler had to resolve one anyway, and hands
-//! that name to the log on the way out — no second lookup. A route of the **library's** (`/login`,
-//! `/profile`, `/logout`) prints `-`, because there is no handler of ours in it to volunteer
-//! anything. `NAME_EVERY_REQUEST=1` names those too, at one session lookup per request — including
-//! the ones that never needed an identity. Note what neither can name: a caller authenticating with
-//! a **bearer token**, which isn't checked until the handler checks it.
-//!
-//! The audit line has no such problem: by the time a write commits, the library knows exactly whose
-//! request it was.
+//! Under the default, the library's routes (`/login`, `/profile`) print `-`. Neither variant can name
+//! a bearer-token caller, which isn't verified until inside the handler — log a line from there.
 
 use axum::body::Bytes;
 use axum::extract::{Path, Request, State};

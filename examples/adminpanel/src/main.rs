@@ -500,9 +500,8 @@ async fn save(
 /// The timezone picker's handler: set the cookie, come back to the page it was set from. Timestamps
 /// are then formatted server-side in that zone — cells, form inputs and CSV alike.
 async fn set_tz(Form(fields): Form<HashMap<String, String>>) -> Response {
-    let tz = Tz::named(fields.get("tz").map(String::as_str).unwrap_or("UTC"));
-    let back = fields.get("back").cloned().unwrap_or_else(|| "/".into());
-    ([(header::SET_COOKIE, tz.cookie())], Redirect::to(&back)).into_response()
+    let (cookie, back) = TzPicker::submitted(fields.get("tz"), fields.get("back"));
+    ([(header::SET_COOKIE, cookie)], Redirect::to(&back)).into_response()
 }
 
 /// The panel for this caller. Managers (members of the admin group) get the accounts section and the

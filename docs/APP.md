@@ -6,7 +6,7 @@ workflows.
 
 The library contributes fragments and a write path. *You* own the router, the `<html>`, and every
 decision about layout. This document is the worked example of that division, using
-`relativelylight = { version = "0.3", features = ["ui", "csv", "auth"] }`.
+`relativelylight = { version = "0.4", features = ["ui", "csv", "auth"] }`.
 
 - [1. The skeleton](#1-the-skeleton) — one shell, one state, one layer
 - [2. The page shell and the nav bar](#2-the-page-shell-and-the-nav-bar)
@@ -181,15 +181,14 @@ fn query_param<'a>(uri: &'a Uri, key: &str) -> Option<&'a str> {
 }
 ```
 
-**The timezone route** is four lines and the only thing your app does about timezones
+**The timezone route** is three lines and the only thing your app does about timezones
 ([TIME.md](TIME.md)); everything the library renders then follows the cookie — cells, datetime
 inputs, and CSV exports alike:
 
 ```rust
 async fn set_tz(Form(f): Form<HashMap<String, String>>) -> Response {
-    let tz = Tz::named(f.get("tz").map(String::as_str).unwrap_or("UTC"));
-    let back = f.get("back").cloned().unwrap_or_else(|| "/".into());
-    ([(header::SET_COOKIE, tz.cookie())], Redirect::to(&back)).into_response()
+    let (cookie, back) = TzPicker::submitted(f.get("tz"), f.get("back"));
+    ([(header::SET_COOKIE, cookie)], Redirect::to(&back)).into_response()
 }
 ```
 
@@ -533,4 +532,4 @@ Before a deployment goes out:
 - [AUTH.md](AUTH.md) — sessions, 2FA, SSO, the gate presets, CSRF, lockout.
 - [TIME.md](TIME.md) — the timezone cookie, the picker, configuring the offered zones.
 - [DATAINPUT.md](DATAINPUT.md) — validators you can call from a hand-written form.
-- [MIGRATION-0.3.md](MIGRATION-0.3.md) — upgrading an app from 0.2.x.
+- [MIGRATION-0.4.md](MIGRATION-0.4.md) — upgrading an app from 0.3.

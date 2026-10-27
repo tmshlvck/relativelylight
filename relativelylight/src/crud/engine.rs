@@ -7,10 +7,8 @@
 //! transforms applied) with relations embedded as `{id, label}`. All the heavy lifting lives in the
 //! backend, and all rendering lives in [`crud::ui`](crate::crud::ui).
 //!
-//! Everything here is **typed and in-process**: there is no JSON/metadata API any more, so
-//! `Vec<Column>` + [`Page`] go straight from the accessor to the renderer without a wire format in
-//! between (see `docs/MIGRATION-0.3.md`). An app that wants to publish its own JSON API writes the handlers and calls
-//! these same methods.
+//! Everything here is **typed and in-process**: `Vec<Column>` + [`Page`] go straight from the accessor
+//! to the renderer. An app that wants a JSON API writes the handlers over these same methods.
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -46,9 +44,7 @@ impl ValidationErrors {
     }
 }
 
-/// An engine failure, as the HTTP layer renders it. **`#[non_exhaustive]`**: variants do get added
-/// (`Csrf` was, this cycle), so a `match` on this in your code wants a `_` arm and then won't break when
-/// the next one arrives.
+/// An engine failure, as the HTTP layer renders it. `#[non_exhaustive]`: a `match` wants a `_` arm.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -227,16 +223,11 @@ pub enum Cardinality {
 /// The [`Accessor`] produces these and [`crud::ui`](crate::crud::ui) renders tables and forms straight
 /// from them: one `match` per cell and per form input, checked by the compiler.
 ///
-/// (A to-many relation is not a database column, but it *is* one of these entries.) Note this is the
-/// shape the engine **reports**; the thing you *configure* is
-/// [`MetaField`](crate::crud::seaorm::MetaField), which is a different direction despite the family
-/// resemblance the old name `ColumnMeta` implied.
+/// (A to-many relation is not a database column, but it *is* one of these entries.) This is the shape
+/// the engine **reports**; what you *configure* is [`MetaField`](crate::crud::seaorm::MetaField).
 ///
-/// **`#[non_exhaustive]` covers new *variants*, not new *fields*.** A non-exhaustive enum *variant*
-/// cannot be constructed from another crate at all, which would make [`Accessor`] unimplementable
-/// outside this one; since producing these values is that trait's whole job, the variants stay open. So
-/// adding a field here is a source break for an out-of-crate `Accessor` or an exhaustive `match` — which
-/// is acceptable because the seam is no longer a stability promise (see [`Accessor`]).
+/// `#[non_exhaustive]` covers new variants only: the variants themselves stay open so an out-of-crate
+/// [`Accessor`] can construct them, which makes a new field a source break (see [`Accessor`]).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Column {

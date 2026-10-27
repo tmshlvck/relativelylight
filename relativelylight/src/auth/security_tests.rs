@@ -891,7 +891,7 @@ async fn totp_enrolment_only_activates_on_a_matching_code() {
 
     // A wrong code re-shows the form and leaves 2FA off.
     let res = fx.post("/profile/totp", &reauth_form(&[("code", "000000")]), Some(&cookie)).await;
-    assert!(res.body.contains("didn't match"), "expected the retry form: {}", res.body);
+    assert!(res.body.contains("didn&#39;t match"), "expected the retry form: {}", res.body);
     let row = fx.row("alice").await;
     assert!(row.totp_secret.is_none(), "a wrong code must not enable 2FA");
     assert_eq!(row.totp_pending.as_deref(), Some(pending.as_str()), "same pending secret is kept");

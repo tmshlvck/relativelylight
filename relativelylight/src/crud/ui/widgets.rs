@@ -1,10 +1,5 @@
-//! One `match` from [`Column`] to a form input — the Rust replacement for `widgetOf(c)` and the
-//! eleven mutually-exclusive `<template x-if>` branches it drove.
-//!
-//! Picking the input is the easy half. The half worth doing in Rust is **the value**: what goes in the
-//! input is the operator's own rejected input if there was one, else the row being edited, else the
-//! column's create-default, else nothing — an ordering that was previously spread across
-//! `blankForm()`, `fromRow()`, and a `422` handler that reassembled it from a JSON error body.
+//! One `match` from [`Column`] to a form input, and **the value** in it: the operator's own rejected
+//! input if there was one, else the row being edited, else the column's create-default, else nothing.
 
 use super::state::ViewState;
 use crate::authz::Operation;

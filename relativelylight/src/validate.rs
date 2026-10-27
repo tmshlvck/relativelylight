@@ -8,8 +8,7 @@
 //!
 //! The core (addresses, ranges, lengths, enums, hostnames, hex, uuid, url, email) is **std-only** and
 //! always compiled. `regex_match` needs the `validate-regex` feature; `base64`/`base64_url` need
-//! `validate-base64` (both reuse crates already in the tree). See `docs/DATAINPUT.md` § 6 for why the
-//! rest is deliberately hand-rolled rather than pulling in `url`/`idna`/`email` crates.
+//! `validate-base64` (both reuse crates already in the tree).
 //!
 //! ```
 //! use relativelylight::validate;

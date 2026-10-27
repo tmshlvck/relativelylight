@@ -53,7 +53,7 @@ impl BrowseState {
     fn href(&self, page: u64, open: Option<HandleId>) -> String {
         let mut parts = Vec::new();
         if let Some(q) = self.search.as_deref().filter(|q| !q.is_empty()) {
-            parts.push(format!("q={}", urlencode(q)));
+            parts.push(format!("q={}", crate::urlform::encode(q)));
         }
         if page > 1 {
             parts.push(format!("page={page}"));
@@ -105,20 +105,6 @@ fn urldecode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
-}
-
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char)
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 /// A searchable list of documents, drilling into one document's version chain.

@@ -281,9 +281,8 @@ async fn home() -> Redirect {
 
 /// Set the zone cookie and come back to the page it was set from.
 async fn set_tz(AxumForm(fields): AxumForm<HashMap<String, String>>) -> Response {
-    let tz = Tz::named(fields.get("tz").map(String::as_str).unwrap_or("UTC"));
-    let back = fields.get("back").cloned().unwrap_or_else(|| "/".into());
-    ([(header::SET_COOKIE, tz.cookie())], Redirect::to(&back)).into_response()
+    let (cookie, back) = TzPicker::submitted(fields.get("tz"), fields.get("back"));
+    ([(header::SET_COOKIE, cookie)], Redirect::to(&back)).into_response()
 }
 
 // ---- a page of the app's own: a dashboard (docs/APP.md §6) ----
@@ -330,8 +329,7 @@ async fn dashboard(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) ->
             post::Column::Status.as_str(),
             post::Column::PublishedAt.as_str(),
         ])
-        // …and a row can say something no column does. Both are Rust closures, so they are checked
-        // and testable, where the old design took a string of JavaScript.
+        // …and a row can say something no column does.
         .row_class(|row| match row["status"].as_str() {
             Some("draft") => "table-warning".into(),
             Some("archived") => "text-body-secondary".into(),
@@ -416,7 +414,7 @@ async fn entity_write(
 ///
 /// `fixed_filter` gives no control to change it; the table shows it as a chip so the listing can't be
 /// mistaken for the whole set, and a create from here pre-selects that author. It narrows the
-/// **view** only — authorization is [`authz`]'s business, not the table's.
+/// **view** only — authorization is [`authz`](relativelylight::authz)'s business, not the table's.
 fn pinned<'a>(engine: &'a Engine, author_id: &str) -> Table<'a> {
     Table::new(engine, "post")
         .title("Posts")
