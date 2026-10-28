@@ -91,9 +91,17 @@ pub(crate) fn cell(col: &Column, row: &Value, fmt: Option<&Fmt>, tz: &Tz) -> Cel
         }
         Column::Relation { .. } => Cell::Badges(
             raw.and_then(Value::as_array)
-                .map(|a| a.iter().map(|l| text(l.get("label"))).collect())
+                .map(|a| a.iter().map(badge).collect())
                 .unwrap_or_default(),
         ),
+    }
+}
+
+/// A to-many link's badge; the backend ends a cut list with `{"more": n}`.
+fn badge(link: &Value) -> String {
+    match link.get("more").and_then(Value::as_u64) {
+        Some(n) => format!("+{n} more"),
+        None => text(link.get("label")),
     }
 }
 

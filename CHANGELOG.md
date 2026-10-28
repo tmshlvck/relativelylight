@@ -94,6 +94,17 @@ is easy to miss in a diff.
 
 ### Changed
 
+- **Relations are read a page at a time.** A listing used to resolve each relation of each row
+  separately — about `N × R` queries for `N` rows and `R` relation columns (601 for a 200-row page of
+  posts with an author and tags); it now costs one `IN (…)` query per relation, whatever the page
+  size. The bulk delete's `before_rows` and the CSV export get the same. Upgrade: none.
+- **`Table::DEFAULT_PER_PAGE_MAX` is 2,000 (was 500)**, now that a page's cost no longer multiplies
+  by its relations. The docs said 10,000; they now agree with the constant. Upgrade: lower it with
+  `per_page_max` in front of a table whose rows are expensive to render.
+- **A long inverse to-many says it was cut.** Past 100 links (an author's posts) the list ends with
+  `{"more": n}`, rendered as a "+n more" badge; it used to stop at 100 without saying so. The CSV
+  export now carries every link. Upgrade: code reading a to-many from `Engine::get` / `list` skips
+  an element without an `id`.
 - **Each write control follows its own operation's permission.** `+ New` and Import ask the gate
   about `Create`, Edit about `Update`, the deletes about `Delete`; all of them used to follow
   `Create`. A gate allowing `Update` but not `Create` now shows Edit, and one refusing `Delete`

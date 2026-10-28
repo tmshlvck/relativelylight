@@ -6,9 +6,6 @@ not here.
 
 ## crud / crud::ui
 
-- [ ] **Batch relation reads.** A page of `N` rows with `R` relation columns costs about `N × R`
-  queries, which is what holds `Table::DEFAULT_PER_PAGE_MAX` at 500. Keep it inside the SeaORM
-  backend; a new `Accessor` method would break implementors.
 - [ ] **Filter operators** (`filter[ttl][gt]=300`, `[in]`, `[is_null]`). The URL grammar already
   nests; wait for a real need.
 - [ ] **Cross-document view transitions** for POST → 303 → GET. Cheap to try, easy to get wrong (a 422

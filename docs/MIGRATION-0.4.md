@@ -111,6 +111,12 @@ rows' form has the id `{dom_id}-rows` (`rl-post-rows`). Only your own CSS or bro
 
 Nothing to change unless something of yours posted to a read-only table.
 
+## 10. A cut to-many list (silent)
+
+An inverse to-many (an author's posts) past 100 links now ends with `{"more": n}`. If your code
+reads that array from `Engine::get` or `Engine::list`, skip elements without an `id`. N:M lists are
+never cut.
+
 ## New in 0.4, nothing to change
 
 - `Table::create` / `edit` / `delete` / `bulk_delete` / `import` / `export(bool)`: one switch per

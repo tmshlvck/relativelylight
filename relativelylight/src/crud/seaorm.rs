@@ -466,11 +466,20 @@ fn pk_string(pk: &[String], full: &Value) -> String {
         .join(",")
 }
 
-// ---- N:M read resolver (typed find_related) ----
+// ---- N:M read resolver (typed find_with_related) ----
+
+/// Rows per `IN (…)` list: well under SQLite's bound-parameter limit, and what keeps an unpaginated
+/// export from building one statement the size of the table.
+const IN_CHUNK: usize = 500;
+
+/// The most links an inverse to-many shows; the rest are counted in a trailing `{"more": n}`. N:M
+/// is never cut — it is edited through the same value, and a cut set would save as fewer links.
+const INVERSE_SHOWN: usize = 100;
 
 #[async_trait]
 trait NmResolver: Send + Sync {
-    async fn read(&self, db: &DatabaseConnection, source_pk: &str) -> Result<Vec<Value>>;
+    /// The target rows linked to each source key, as `(value_key(source pk), raw target rows)`.
+    async fn read_many(&self, db: &DatabaseConnection, keys: &[Value]) -> Result<Vec<(String, Vec<Value>)>>;
 }
 
 struct RelatedResolver<E, T> {
@@ -482,16 +491,25 @@ struct RelatedResolver<E, T> {
 impl<E, T> NmResolver for RelatedResolver<E, T>
 where
     E: EntityTrait + Related<T> + Send + Sync + 'static,
-    E::Model: ModelTrait<Entity = E> + Send + Sync,
+    E::Model: ModelTrait<Entity = E> + Serialize + Send + Sync,
     T: EntityTrait + Copy + Send + Sync + 'static,
     T::Model: Serialize + Send + Sync,
 {
-    async fn read(&self, db: &DatabaseConnection, source_pk: &str) -> Result<Vec<Value>> {
-        let Some(src) = E::find().filter(pk_condition::<E>(source_pk)?).one(db).await? else {
+    async fn read_many(&self, db: &DatabaseConnection, keys: &[Value]) -> Result<Vec<(String, Vec<Value>)>> {
+        let Some(c) = <E::PrimaryKey as Iterable>::iter().next().map(|k| k.into_column()) else {
             return Ok(vec![]);
         };
-        let rows = src.find_related(self.target).all(db).await?;
-        Ok(rows.iter().map(|m| serde_json::to_value(m).unwrap()).collect())
+        let mut out = Vec::with_capacity(keys.len());
+        for chunk in keys.chunks(IN_CHUNK) {
+            let vals: Vec<DbValue> = chunk.iter().map(|v| json_to_db(c.def().get_column_type(), v)).collect();
+            let rows = E::find().filter(c.is_in(vals)).find_with_related(self.target).all(db).await?;
+            for (src, targets) in rows {
+                let src = serde_json::to_value(&src).unwrap();
+                let key = value_key(src.get(c.as_str()).unwrap_or(&Value::Null));
+                out.push((key, targets.iter().map(|m| serde_json::to_value(m).unwrap()).collect()));
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -505,7 +523,7 @@ struct Nm {
 // ---- Cross-entity registry (keeps relations resolvable inside the backend) ----
 
 /// The minimal capability one entity needs from a *sibling* entity to resolve a relation into a
-/// `{id, label}` link: fetch a raw row (or rows) and label it. Implemented by `SeaAccessor` for
+/// `{id, label}` link: fetch raw rows by key, a page's worth at a time, and label them. Implemented by `SeaAccessor` for
 /// itself. Note these return **raw** model rows (no relation resolution) — resolving a link must not
 /// recurse into the target's own relations.
 #[async_trait]
@@ -516,8 +534,8 @@ trait SeaRow: Send + Sync {
     /// The column `label_of` reads, when it reads exactly one — what lets an entity pointing *here*
     /// turn `?sort=<relation>` into an `ORDER BY` on this table. `None` = not sortable through.
     fn label_col(&self) -> Option<String>;
-    async fn get_raw(&self, pk: &str) -> Result<Option<Value>>;
-    async fn list_by(&self, col: &str, val: &Value) -> Result<Vec<Value>>;
+    /// The rows whose `col` is one of `vals`, in primary-key order.
+    async fn list_in(&self, col: &str, vals: &[Value]) -> Result<Vec<Value>>;
 }
 
 /// Table-name → sibling row source. Holds `Weak` refs (the strong `Arc`s live in the `Engine` as
@@ -722,7 +740,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
     pub fn relate<T>(&mut self, other: &MetaModel<T>) -> &mut Self
     where
         E: Related<T> + Send + Sync + 'static,
-        E::Model: ModelTrait<Entity = E> + Send + Sync,
+        E::Model: ModelTrait<Entity = E> + Serialize + Send + Sync,
         T: EntityTrait + EntityName + Copy + Send + Sync + 'static,
         T::Model: Serialize + Send + Sync,
     {
@@ -1106,18 +1124,19 @@ where
         Ok(cond)
     }
 
-    /// Turn raw model rows into listing items, finishing each row unless `terse`.
-    async fn rows_to_items(&self, rows: &[E::Model], terse: bool) -> Result<Vec<RowItem>> {
+    /// Turn raw model rows into listing items, finished (relations resolved) unless `terse`.
+    async fn rows_to_items(&self, rows: &[E::Model], terse: bool, cut: bool) -> Result<Vec<RowItem>> {
         let pk_col = self.model.pk.first().cloned().unwrap_or_default();
-        let mut out = Vec::with_capacity(rows.len());
-        for m in rows {
-            let raw = serde_json::to_value(m).unwrap();
-            let id = raw.get(&pk_col).cloned().unwrap_or(Value::Null);
-            let label = (self.model.row_label)(&raw);
-            let row = if terse { None } else { Some(self.finish(&raw).await?) };
-            out.push(RowItem { id, label, row });
-        }
-        Ok(out)
+        let raws: Vec<Value> = rows.iter().map(|m| serde_json::to_value(m).unwrap()).collect();
+        let mut finished = if terse { Vec::new() } else { self.finish_many(&raws, cut).await? }.into_iter();
+        Ok(raws
+            .iter()
+            .map(|raw| RowItem {
+                id: raw.get(&pk_col).cloned().unwrap_or(Value::Null),
+                label: (self.model.row_label)(raw),
+                row: finished.next(),
+            })
+            .collect())
     }
 
     /// The finished, ready-to-send row: visible scalars (`on_read` applied) + resolved relations.
@@ -1129,61 +1148,99 @@ where
     }
 
     async fn finish(&self, raw: &Value) -> Result<Value> {
-        let mut out = self.model.read_scalars(raw);
-        for r in &self.model.relations {
-            if r.hidden {
-                continue;
-            }
-            out.insert(r.name.clone(), self.resolve(r, raw).await?);
-        }
-        Ok(Value::Object(out))
+        Ok(self.finish_many(std::slice::from_ref(raw), true).await?.remove(0))
     }
 
-    /// Resolve one relation of a raw row into a link (to-one) or array of links (to-many / N:M).
-    async fn resolve(&self, r: &MetaRelation, raw: &Value) -> Result<Value> {
-        if r.is_nm {
-            let source_pk = pk_string(&self.model.pk, raw);
-            let rows = self.nm_targets(&r.name, &source_pk).await?;
-            let target = self.registry.by_table(&r.target);
-            return Ok(Value::Array(rows.iter().map(|tr| link(target.as_deref(), tr)).collect()));
-        }
-        if r.owns_fk {
-            let fk = raw.get(&r.from_col).cloned().unwrap_or(Value::Null);
-            if fk.is_null() {
-                return Ok(Value::Null);
+    /// Finish a page of rows, resolving each relation for all of them at once: one `IN (…)` query
+    /// per relation (per [`IN_CHUNK`] keys) however many rows there are. `cut` caps an inverse
+    /// to-many at [`INVERSE_SHOWN`]; only an unpaginated listing (the CSV export) asks for all.
+    async fn finish_many(&self, raws: &[Value], cut: bool) -> Result<Vec<Value>> {
+        let mut out: Vec<Map<String, Value>> = raws.iter().map(|r| self.model.read_scalars(r)).collect();
+        for r in self.model.relations.iter().filter(|r| !r.hidden) {
+            for (row, v) in out.iter_mut().zip(self.resolve_many(r, raws, cut).await?) {
+                row.insert(r.name.clone(), v);
             }
-            let id_str = value_key(&fk);
-            if let Some(t) = self.registry.by_table(&r.target) {
-                if let Some(trow) = t.get_raw(&id_str).await? {
-                    return Ok(link(Some(t.as_ref()), &trow));
+        }
+        Ok(out.into_iter().map(Value::Object).collect())
+    }
+
+    /// One relation of every row in `raws`, in order: a link (to-one) or an array of links (to-many,
+    /// N:M).
+    async fn resolve_many(&self, r: &MetaRelation, raws: &[Value], cut: bool) -> Result<Vec<Value>> {
+        let target = self.registry.by_table(&r.target);
+        // The distinct non-null keys this relation joins on, in first-seen order.
+        let key_col = if r.is_nm { self.model.pk.first().cloned().unwrap_or_default() } else { r.from_col.clone() };
+        let keys_of = |raw: &Value| raw.get(&key_col).filter(|k| !k.is_null()).cloned();
+        let mut seen = std::collections::HashSet::new();
+        let keys: Vec<Value> =
+            raws.iter().filter_map(keys_of).filter(|k| seen.insert(value_key(k))).collect();
+
+        if r.is_nm {
+            let mut by_key: HashMap<String, Vec<Value>> = HashMap::new();
+            if let (Some(nm), false) = (self.model.nm.get(&r.name), keys.is_empty()) {
+                for (k, rows) in nm.resolver.read_many(&self.db, &keys).await? {
+                    by_key.insert(k, rows.iter().map(|tr| link(target.as_deref(), tr)).collect());
                 }
             }
-            return Ok(json!({ "id": fk, "label": format!("#{id_str}") }));
+            return Ok(raws
+                .iter()
+                .map(|raw| {
+                    let k = keys_of(raw).map(|k| value_key(&k)).unwrap_or_default();
+                    Value::Array(by_key.remove(&k).unwrap_or_default())
+                })
+                .collect());
         }
-        // inverse (has_many / has_one): target rows where to_col == this row's from_col value.
-        let empty = if r.cardinality == Cardinality::ToOne {
-            Value::Null
-        } else {
-            Value::Array(vec![])
-        };
-        let key = raw.get(&r.from_col).cloned().unwrap_or(Value::Null);
-        let (Some(t), false) = (self.registry.by_table(&r.target), key.is_null()) else {
-            return Ok(empty);
-        };
-        let links: Vec<Value> =
-            t.list_by(&r.to_col, &key).await?.iter().map(|tr| link(Some(t.as_ref()), tr)).collect();
-        if r.cardinality == Cardinality::ToOne {
-            Ok(links.into_iter().next().unwrap_or(Value::Null))
-        } else {
-            Ok(Value::Array(links))
-        }
-    }
 
-    async fn nm_targets(&self, rel: &str, source_pk: &str) -> Result<Vec<Value>> {
-        match self.model.nm.get(rel) {
-            Some(nm) => nm.resolver.read(&self.db, source_pk).await,
-            None => Ok(vec![]),
+        let rows = match (&target, keys.is_empty()) {
+            (Some(t), false) => {
+                let col = if r.owns_fk { t.pk_col() } else { r.to_col.clone() };
+                t.list_in(&col, &keys).await?
+            }
+            _ => Vec::new(),
+        };
+        let t = target.as_deref();
+
+        if r.owns_fk {
+            let pk = t.map(|t| t.pk_col()).unwrap_or_default();
+            let by_pk: HashMap<String, &Value> =
+                rows.iter().map(|tr| (value_key(tr.get(&pk).unwrap_or(&Value::Null)), tr)).collect();
+            return Ok(raws
+                .iter()
+                .map(|raw| match keys_of(raw) {
+                    None => Value::Null,
+                    Some(fk) => {
+                        let id = value_key(&fk);
+                        match by_pk.get(&id) {
+                            Some(tr) => link(t, tr),
+                            None => json!({ "id": fk, "label": format!("#{id}") }),
+                        }
+                    }
+                })
+                .collect());
         }
+
+        // Inverse (has_many / has_one): the target rows whose `to_col` holds this row's `from_col`.
+        let mut by_key: HashMap<String, Vec<Value>> = HashMap::new();
+        for tr in &rows {
+            let k = value_key(tr.get(&r.to_col).unwrap_or(&Value::Null));
+            by_key.entry(k).or_default().push(link(t, tr));
+        }
+        Ok(raws
+            .iter()
+            .map(|raw| {
+                let mut links =
+                    keys_of(raw).and_then(|k| by_key.get(&value_key(&k)).cloned()).unwrap_or_default();
+                if r.cardinality == Cardinality::ToOne {
+                    return links.into_iter().next().unwrap_or(Value::Null);
+                }
+                if cut && links.len() > INVERSE_SHOWN {
+                    let more = links.len() - INVERSE_SHOWN;
+                    links.truncate(INVERSE_SHOWN);
+                    links.push(json!({ "more": more }));
+                }
+                Value::Array(links)
+            })
+            .collect())
     }
 
     async fn write_nm<C: ConnectionTrait>(&self, db: &C, rel: &str, source_pk: &str, ids: &[Value]) -> Result<()> {
@@ -1228,15 +1285,18 @@ where
     fn label_col(&self) -> Option<String> {
         self.model.label_col.clone()
     }
-    async fn get_raw(&self, pk: &str) -> Result<Option<Value>> {
-        let model = E::find().filter(pk_condition::<E>(pk)?).one(&self.db).await?;
-        Ok(model.map(|m| serde_json::to_value(m).unwrap()))
-    }
-    async fn list_by(&self, col: &str, val: &Value) -> Result<Vec<Value>> {
+    async fn list_in(&self, col: &str, vals: &[Value]) -> Result<Vec<Value>> {
         let c = column::<E>(col).ok_or_else(|| Error::BadRequest(format!("unknown column: {col}")))?;
-        let dbv = json_to_db(c.def().get_column_type(), val);
-        let rows = E::find().filter(c.eq(dbv)).limit(100).all(&self.db).await?;
-        Ok(rows.iter().map(|m| serde_json::to_value(m).unwrap()).collect())
+        let mut out = Vec::new();
+        for chunk in vals.chunks(IN_CHUNK) {
+            let dbv: Vec<DbValue> = chunk.iter().map(|v| json_to_db(c.def().get_column_type(), v)).collect();
+            let mut sel = E::find().filter(c.is_in(dbv));
+            for k in <E::PrimaryKey as Iterable>::iter() {
+                sel = sel.order_by(k.into_column(), Order::Asc);
+            }
+            out.extend(sel.all(&self.db).await?.iter().map(|m| serde_json::to_value(m).unwrap()));
+        }
+        Ok(out)
     }
 }
 
@@ -1399,7 +1459,7 @@ where
         if q.all {
             let rows = sel.all(&self.db).await?;
             let total = rows.len() as u64;
-            let data = self.rows_to_items(&rows, terse).await?;
+            let data = self.rows_to_items(&rows, terse, false).await?;
             return Ok(Page { total, page: 1, per_page: total, data });
         }
         let per_page = if q.per_page == 0 { 25 } else { q.per_page };
@@ -1407,7 +1467,7 @@ where
         let paginator = sel.paginate(&self.db, per_page);
         let total = paginator.num_items().await?;
         let rows = paginator.fetch_page(page - 1).await?;
-        let data = self.rows_to_items(&rows, terse).await?;
+        let data = self.rows_to_items(&rows, terse, true).await?;
         Ok(Page { total, page, per_page, data })
     }
 
@@ -1517,10 +1577,8 @@ where
         // pool), and once the rows are gone there is nothing left to describe. This is what lets an
         // observer answer "which parent just changed?" for a bulk delete — see `observe::WriteEvent`.
         let models = E::find().filter(self.build_condition(q)?).all(&self.db).await?;
-        let mut deleted = Vec::with_capacity(models.len());
-        for m in &models {
-            deleted.push(self.finish(&serde_json::to_value(m).unwrap()).await?);
-        }
+        let raws: Vec<Value> = models.iter().map(|m| serde_json::to_value(m).unwrap()).collect();
+        let deleted = self.finish_many(&raws, true).await?;
 
         let txn = self.db.begin().await?;
         use sea_orm::sea_query::ExprTrait; // Expr's comparisons; scoped so it can't shadow serde_json's is_null

@@ -18,6 +18,11 @@ mod gate_tests;
 #[cfg(all(test, feature = "ui"))]
 mod list_tests;
 
+/// Relation reads over a real database: what each kind resolves to, the inverse cap, and a page's
+/// query count staying flat as its rows grow.
+#[cfg(all(test, feature = "ui"))]
+mod relation_tests;
+
 /// A column's transforms end to end over a real database: typed text, `blank_is_null`, and
 /// `on_read`/`on_write` as an inverse pair (form and CSV).
 #[cfg(all(test, feature = "ui"))]

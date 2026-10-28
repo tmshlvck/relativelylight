@@ -352,6 +352,12 @@ backend, so a rendered cell needs no second query:
 }
 ```
 
+A listing resolves each relation for the whole page at once — one `IN (…)` query per relation, so
+a page costs the same number of queries at 10 rows as at 2,000. An **inverse to-many** (an author's
+posts) shows at most 100 links and ends with `{ "more": n }` for the rest, rendered as a "+n more"
+badge; the CSV export, which lists everything, is not cut. N:M is never cut: the edit form saves the
+same value back.
+
 ### Write format
 
 Flat object keyed by **writable column names**; relations by name. Absent keys → unchanged (update) /
@@ -766,7 +772,7 @@ and in all three examples.
 | `search(bool)` | the search box (default on) |
 | `pagination(bool)` / `per_page(n)` | the pager (default on, 30); off shows the first `per_page` rows only |
 | `per_page_choices([…])` | the sizes the toolbar offers (default `[10, 30, 100, 250]`; empty hides the control) |
-| `per_page_max(n)` | the largest page this table will fetch, however large a `?per_page=` asks for (default **10,000**) |
+| `per_page_max(n)` | the largest page this table will fetch, however large a `?per_page=` asks for (default **2,000**) |
 | `detail(bool)` | the per-row **View** action and its read-only dialog (default on) |
 | `detail_href("/post/{id}")` | point **View** at a page of the app's own instead of the dialog |
 | `create` / `edit` / `delete` / `bulk_delete` / `import(bool)` | each write action, separately (default on) — see *Which controls a table offers* below |
@@ -904,7 +910,7 @@ back with the caret at the end, since the reload it just caused would otherwise 
 
 **Choosing a page size.** The sizes sit beside the pager as **links** (no form, no script), and the
 URL carries the answer; `per_page_choices` sets them.
-`?per_page=` is user input, so it is **clamped** to `per_page_max` (default 10,000) — unclamped, it
+`?per_page=` is user input, so it is **clamped** to `per_page_max` (default 2,000) — unclamped, it
 is a cheap way to make a server read a whole table into memory and render it. The clamp normalises
 the view state itself, so every link the page renders carries the clamped number rather than
 propagating the greedy one. CSV export is unaffected: it is explicitly unpaginated.
@@ -1182,7 +1188,7 @@ them, with **one shape for all three delete paths**: one element for a per-row d
 one, empty for anything that is not a delete. Without it an app with derived state — a search index to
 evict, a cache to invalidate, a *parent* row to re-render or re-publish — could not act on a bulk
 delete at all, because by the time the observer runs the rows are gone. The engine reads them before
-deleting, which costs what listing the same rows costs (`N × R` queries for `R` relation columns) and
+deleting, which costs what listing the same rows costs (one query per relation column) and
 is the only moment at which they can be read.
 
 If you only want the count, use `after["deleted"]` or `before_rows.len()`; nothing forces a big

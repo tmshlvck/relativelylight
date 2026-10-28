@@ -179,12 +179,9 @@ impl<'a> Table<'a> {
     /// The default [`per_page_max`](Table::per_page_max): the largest page a table will fetch
     /// however large a `?per_page=` asks for.
     ///
-    /// 500 rather than something rounder, because of what a row *costs*: the SeaORM backend
-    /// resolves relations per row, so a page of `N` rows with `R` relation columns is on the order
-    /// of `N × R` queries. At 500 that is a page a server can answer; at 10,000 a single typed URL
-    /// would be tens of thousands of them. Raise it for tables with no relations, or once relation
-    /// reads are batched (`docs/TODO.md`).
-    pub const DEFAULT_PER_PAGE_MAX: u64 = 500;
+    /// The SeaORM backend resolves each relation for a whole page in one query, so the cost of a
+    /// large page is the rows themselves: reading, finishing and rendering them.
+    pub const DEFAULT_PER_PAGE_MAX: u64 = 2000;
 
     pub fn new(engine: &'a Engine, slug: impl Into<String>) -> Self {
         Self {
@@ -254,7 +251,7 @@ impl<'a> Table<'a> {
     }
 
     /// The largest page this table will fetch, however large a `?per_page=` asks for. Default
-    /// **10,000**.
+    /// **2,000**.
     ///
     /// The URL is user input: `?per_page=100000000` is a cheap way to make a server read a whole
     /// table into memory, resolve every row's relations, and render the lot — so the number is
