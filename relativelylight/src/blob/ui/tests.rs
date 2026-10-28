@@ -326,7 +326,7 @@ fn a_hostile_filename_or_url_cannot_break_out_of_the_viewer() {
 
 #[test]
 fn the_viewer_never_inlines_stored_bytes_only_urls() {
-    // BLOBSTORE.md §10: a hostile MIME can steer *which tag* is rendered and nothing more — and
+    // BLOBSTORE.md §9: a hostile MIME can steer *which tag* is rendered and nothing more — and
     // whatever branch it steers into, the content is reached by URL and never written into the page.
     for mime in ["image/svg+xml", "text/html", "image/png", "application/pdf", "application/zip"] {
         let info = fake_version("f", mime);

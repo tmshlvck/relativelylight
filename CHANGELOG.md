@@ -94,6 +94,10 @@ is easy to miss in a diff.
 
 ### Changed
 
+- **The docs are reorganised.** `docs/PRD.md` is now [`docs/DESIGN.md`](docs/DESIGN.md) and holds the
+  design decisions the guides used to repeat; open work is only in `docs/TODO.md`. AUTH.md and
+  BLOBSTORE.md are shorter, BLOBSTORE.md's sections from §6 on are renumbered, and BLOBSTORE.md's API
+  listing now matches the code (`relabel`, `ingest`, the `PutMeta` builder).
 - **`auth`'s pages render through Askama** (`templates/auth/`), as `crud::ui`'s do, so every value
   they show is escaped by the template rather than by hand. The login error was the one value
   inserted unescaped; only the crate's own messages reached it. The markup is unchanged apart from

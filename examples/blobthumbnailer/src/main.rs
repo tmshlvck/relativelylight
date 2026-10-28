@@ -192,7 +192,7 @@ async fn serve(
     attach: bool,
 ) -> Response {
     // Ungated on purpose: this example is about thumbnails, not authorization. `examples/blob` is
-    // the one that shows ownership and gating (BLOBSTORE.md §9).
+    // the one that shows ownership and gating (BLOBSTORE.md §8).
     let _ = Open;
     let Ok(Some(p)) = picture::Entity::find_by_id(id).one(&app.db).await else {
         return StatusCode::NOT_FOUND.into_response();

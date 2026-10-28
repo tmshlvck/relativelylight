@@ -24,7 +24,7 @@ pages); this document is the reference for the parts. Upgrading from 0.3? **[MIG
 - [Web UI](#web-ui-ui) — `ui::Table`, `ui::Form` and `ui::Admin`
 - [Composing with your app](#composing-with-your-app) — you own the roots
 - [Write observer (audit)](#write-observer-audit)
-- [Architecture & extending](#architecture--extending)
+- [Extending](#extending) — the `Accessor` seam
 
 ---
 
@@ -543,10 +543,6 @@ marker), and **enforced by the engine**:
 | update | absent | fine: absent means "leave it alone", so partial updates still work |
 | either | `""` | fine — `required` means **present**, not non-empty |
 
-Before this, an omitted `NOT NULL` column reached the database, which rejected it, which surfaced as a
-**`500` carrying the database's own error text** — the wrong status, no field for the form to highlight,
-and the schema leaked to the caller.
-
 Two ways out where introspection guesses wrong:
 
 - `field("x").required = false` — needed when the **database** has a default the entity doesn't declare
@@ -601,9 +597,6 @@ post.field("status").options = vec!["draft".into(), "review".into(), "published"
 That works on *any* column — the widget and the check key off the list, not the logical type — so it is also
 how you close a set that the database doesn't model as an enum at all. Both `examples/crud` and
 `examples/adminpanel` do exactly this for `post.status`.
-
-Before this, an enum column fell through to a free-text input and **any** string was accepted: on a real
-enum column the database rejected it (a `500`), and on a text-backed one the typo was simply stored.
 
 ## Columns
 
@@ -1185,11 +1178,9 @@ best-effort pre-fetch.
 names no single row, so `before` and `key` are `None` and `after` carries only the count
 (`{"deleted": N}`). `before_rows` carries the rows themselves, finished as a listing would render
 them, with **one shape for all three delete paths**: one element for a per-row delete, `N` for a bulk
-one, empty for anything that is not a delete. Without it an app with derived state — a search index to
-evict, a cache to invalidate, a *parent* row to re-render or re-publish — could not act on a bulk
-delete at all, because by the time the observer runs the rows are gone. The engine reads them before
-deleting, which costs what listing the same rows costs (one query per relation column) and
-is the only moment at which they can be read.
+one, empty for anything that is not a delete. It is what lets an app with derived state — a search
+index, a cache, a *parent* row to re-render — act on a bulk delete, since by the time the observer
+runs the rows are gone. The engine reads them just before deleting, at the cost of a listing.
 
 If you only want the count, use `after["deleted"]` or `before_rows.len()`; nothing forces a big
 "delete all" through an audit table row by row.
@@ -1206,24 +1197,11 @@ there). Times are UTC `i64` seconds ([TIME.md](TIME.md)).
 printing `source op entity#key actor@address` and a per-field diff. The sink runs **inside the
 request** (after the commit, before the response), so real work belongs on a channel.
 
-## Architecture & extending
+## Extending
 
-The **`Engine`** is a registry: it holds the entities, consults each model's gate, and forwards data
-to and from accessors. Every backend implements the per-entity **`Accessor`** trait — `slug` / `pk` /
-`columns` + `list` / `get` / `create` / `update` / `delete` / `delete_many` / `write_batch`, each data
-method returning finished rows. The trait names no ORM types.
-
-Its real job is **type erasure**: `Arc<dyn Accessor>` lets one registry hold entities of different
-Rust types (`SeaAccessor<E>` is generic over the entity), which is why the seam exists even with a
-single backend. It is *not* a stability promise — expect `Accessor` and `Column` to gain members in
-any release.
-
-SeaORM is one backend (`relativelylight::crud::seaorm`); it does the heavy lifting (introspection, projection,
-validation, relation resolution, set-based bulk delete). A different backend (in-memory, another ORM)
-is another `Accessor` implementation reusing the engine and the UI unchanged.
-
-Why the seam sits here: relation resolution and field projection are *database* concerns — they run
-queries and encode per-model visibility policy — so keeping them behind the accessor lets the engine
-stay a pure pass-through. In the SeaORM backend, siblings are resolved through a `Weak`-keyed registry
-(no reference cycle; the strong `Arc`s live in the `Engine`), which preserves zero-config
-auto-discovery — nothing needs declaring beyond N:M.
+The **`Engine`** holds the registered entities and their gates and forwards to one **`Accessor`** per
+entity: `slug` / `pk` / `columns` plus `list` / `get` / `create` / `update` / `delete` / `delete_many` /
+`write_batch`, each returning finished rows. The trait names no ORM types; the SeaORM backend
+(`crud::seaorm`) is one implementation, and another backend would reuse the engine and the UI
+unchanged. `Accessor` and `Column` may gain members in any release
+([DESIGN.md](DESIGN.md#crud-and-crudui)).

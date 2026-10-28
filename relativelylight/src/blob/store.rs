@@ -335,7 +335,7 @@ impl<B: BlobBackend> BlobStore<B> {
     // ===================== writes =====================
 
     /// Create a handle and its **first** version, in one transaction. The returned id is what an
-    /// app's own table stores (BLOBSTORE.md §9).
+    /// app's own table stores (BLOBSTORE.md §8).
     pub async fn create(
         &self,
         data: impl AsyncRead + Send + Unpin,
@@ -397,7 +397,7 @@ impl<B: BlobBackend> BlobStore<B> {
     /// version references becomes collectable by [`collect_garbage`](Self::collect_garbage) — it is **not** deleted here,
     /// because dedup means these bytes may still be another document's.
     ///
-    /// Call this in the same transaction the app deletes its own document row in (BLOBSTORE.md §9.3).
+    /// Call this in the same transaction the app deletes its own document row in (BLOBSTORE.md §8.3).
     pub async fn delete_handle(
         &self,
         handle: HandleId,
@@ -546,7 +546,7 @@ impl<B: BlobBackend> BlobStore<B> {
         // it to serve. That keeps §2's guarantee exact — no unverified byte ever reaches a caller —
         // at constant memory, and on a local filesystem the second read comes off the page cache.
         // A future backend where re-reading is expensive (an object store: a second round trip and
-        // a second egress charge) will want a different strategy; see §12.
+        // a second egress charge) will want a different strategy; see docs/TODO.md.
         self.verify_content(&blob).await?;
         let reader = self.backend.read(&blob).await?;
 
@@ -1163,7 +1163,7 @@ async fn set_head<C: sea_orm::ConnectionTrait>(
 }
 
 /// Magic-byte sniffing for the handful of types a back-office store actually sees. Deliberately
-/// small: this is **advisory** (BLOBSTORE.md §10) — it exists so an app can compare it against what
+/// small: this is **advisory** (BLOBSTORE.md §9) — it exists so an app can compare it against what
 /// the uploader claimed, never so anything downstream can dispatch on it.
 fn sniff_mime(bytes: &[u8]) -> String {
     let m = match bytes {

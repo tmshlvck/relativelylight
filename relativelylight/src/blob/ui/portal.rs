@@ -73,7 +73,7 @@ impl<'a, B: BlobBackend> Portal<'a, B> {
     /// A template for the app's **own** content route — `{version}` is substituted, e.g.
     /// `"/invoice/42/attachment/{version}"`. The download URL is the same with `?download=1`.
     ///
-    /// This is the per-document case, and the one BLOBSTORE.md §9.2 recommends: the route names the
+    /// This is the per-document case, and the one BLOBSTORE.md §8.2 recommends: the route names the
     /// owning record, so authorization is a gated query on it and a handle never appears in a URL.
     pub fn view_url(mut self, template: impl Into<String>) -> Self {
         self.view_url = Some(template.into());

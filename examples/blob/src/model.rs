@@ -1,5 +1,5 @@
 //! The app's own tables. **`ticket_document` is the point of this example** — it is
-//! BLOBSTORE.md §9's link table, written out.
+//! BLOBSTORE.md §8's link table, written out.
 //!
 //! `blob` deliberately stores no owner. A `blob_handle` is an identity and a version chain and
 //! nothing else, which is what lets the module depend on neither `crud` nor `auth`. Ownership lives

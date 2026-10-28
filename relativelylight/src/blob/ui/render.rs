@@ -25,7 +25,7 @@ use crate::crud::ui::esc_str;
 /// Renders one version for a page — **always by reference, never by value**.
 ///
 /// Every branch emits a URL the browser fetches separately; no branch ever writes stored bytes into
-/// the current document. That is the enforcement of BLOBSTORE.md §10's "MIME is advisory, never
+/// the current document. That is the enforcement of BLOBSTORE.md §9's "MIME is advisory, never
 /// trusted for dispatch", not merely a description of it: a maliciously-crafted type steers *which
 /// tag* appears and nothing else, and what the browser then does is decided by the `Content-Type`
 /// the download route sets (see [`to_inline_response`](super::to_inline_response), which keeps its

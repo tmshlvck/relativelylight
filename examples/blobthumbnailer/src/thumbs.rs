@@ -1,7 +1,7 @@
 //! Thumbnail generation — **an app's code, not the library's**.
 //!
 //! `blob` deliberately has no thumbnailer and no variant table. Sizes, formats and quality are
-//! policy, and the same argument that puts ownership in the app's own table (BLOBSTORE.md §9) puts
+//! policy, and the same argument that puts ownership in the app's own table (BLOBSTORE.md §8) puts
 //! this here too: the crate cannot know what an app wants, and a wrong guess is worse than none.
 //!
 //! What it costs the app is this file. What it buys is that a thumbnail is **an ordinary document**:

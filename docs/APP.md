@@ -448,8 +448,8 @@ it `before_rows`: every row that went, in one shape for all three of the admin's
 
 ## 8. Multi-step workflows
 
-The library models rows, not processes — deliberately ([PRD §7](PRD.md)). A wizard is your handlers,
-your state, and the library's forms wherever a step happens to be one row. Unlike §§2–6 there is no
+The library models rows, not processes ([DESIGN.md](DESIGN.md#principles)). A wizard is your
+handlers, your state, and the library's forms wherever a step happens to be one row. Unlike §§2–6 there is no
 runnable example of this one; it is a pattern, assembled from pieces each of which is demonstrated
 elsewhere.
 

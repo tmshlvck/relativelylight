@@ -121,7 +121,7 @@ enum Target {
 ///     .by(Some("alice".into()))
 ///     .receive(&headers, body, WriteContext::none())
 ///     .await?;
-/// // `upload.handle` is what your own document table stores (BLOBSTORE.md §9).
+/// // `upload.handle` is what your own document table stores (BLOBSTORE.md §8).
 /// # Ok(()) }
 /// ```
 pub struct Receiver<'a, B: BlobBackend = crate::blob::FsBackend> {

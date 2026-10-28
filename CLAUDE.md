@@ -10,7 +10,7 @@ Start with [README.md](README.md) (features, quick start, examples) and [docs/AP
 (a whole app). The reference guides are [docs/CRUD.md](docs/CRUD.md), [docs/AUTH.md](docs/AUTH.md),
 [docs/TIME.md](docs/TIME.md), [docs/DATAINPUT.md](docs/DATAINPUT.md) and
 [docs/BLOBSTORE.md](docs/BLOBSTORE.md); upgrading is [docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md);
-the roadmap is [docs/PRD.md](docs/PRD.md) and [docs/TODO.md](docs/TODO.md).
+the design is [docs/DESIGN.md](docs/DESIGN.md) and open work [docs/TODO.md](docs/TODO.md).
 
 ## Things that are easy to get wrong
 
@@ -69,19 +69,20 @@ unusable sessions, replayed codes, non-manager profile writes, each gate's decis
 CSRF on every write. `crud/ui_tests.rs` covers escaping and form decoding; `crud/transform_tests.rs`
 covers a value's way through form, CSV and the codec against a real database. Touching login, sessions,
 2FA, the profile pages or a gate means extending them, with a positive control so the negatives can't
-pass vacuously ([AUTH.md §10a](docs/AUTH.md)).
+pass vacuously ([AUTH.md §9](docs/AUTH.md#9-tests--the-negative-paths)).
 
 **The docs are part of the change.**
 
 - Update the guide that owns the behaviour, and the doc comments.
 - Demonstrate user-facing features in an example (a new one goes in the root `Cargo.toml` `members`
   and the README's example list).
-- A new module or feature: the table in `docs/PRD.md`, a pointer in `README.md`; move shipped items
+- A new module or feature: the table in `docs/DESIGN.md`, a pointer in `README.md`; move shipped items
   out of `docs/TODO.md`.
 - Anything a user would notice gets a `CHANGELOG.md` entry under `## Unreleased` in the same change,
   breaking items first with the upgrade step — and, for a breaking change, a step in the current
   `docs/MIGRATION-x.y.md`.
-- `PRD.md` is requirements and roadmap only; `README.md` is the starting point; this file is
+- `DESIGN.md` holds the design and its decisions, `TODO.md` is the only place for open work and
+  future ideas, the guides describe what ships. `README.md` is the starting point; this file is
   orientation. Cross-link rather than copy.
 
 **Releasing:** rename `## Unreleased` to `## [x.y.z] — YYYY-MM-DD` with its compare link, bump

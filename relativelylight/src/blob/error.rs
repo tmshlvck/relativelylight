@@ -14,7 +14,7 @@ pub enum BlobError {
     Backend(Box<dyn std::error::Error + Send + Sync>),
     Db(sea_orm::DbErr),
     /// The upload exceeded `BlobStore::max_bytes`, or `metadata` exceeded its own cap — caught
-    /// **while streaming**, not after buffering (BLOBSTORE.md §10).
+    /// **while streaming**, not after buffering (BLOBSTORE.md §9).
     TooLarge { limit: u64 },
     NotFound(String),
     /// The content read back did not hash to the id it was stored under. **No partial bytes reach

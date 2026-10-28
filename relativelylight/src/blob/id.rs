@@ -87,7 +87,7 @@ impl fmt::Display for BlobId {
 }
 
 /// The stable identity of a document: what an app's own tables hold a foreign key to, unchanged for
-/// the life of the document however many versions it acquires (BLOBSTORE.md §9).
+/// the life of the document however many versions it acquires (BLOBSTORE.md §8).
 ///
 /// A **UUIDv7** ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562.html)) — time-ordered, so inserts
 /// land at the end of a B-tree index instead of scattering across it the way v4 does, while staying

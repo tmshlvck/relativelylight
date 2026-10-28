@@ -104,7 +104,7 @@ struct App {
     store: Arc<BlobStore<FsBackend>>,
     /// Where the **admin** panel serves content from. Store-wide gated, which is why nothing
     /// user-facing uses it: ticket attachments go through `/ticket/{id}/attachment/{n}`, whose
-    /// authorization is a query on the app's own row (BLOBSTORE.md §9.2).
+    /// authorization is a query on the app's own row (BLOBSTORE.md §8.2).
     admin_routes: Routes,
     engine: Arc<relativelylight::crud::engine::Engine>,
     /// The gate over `ticket_document`: logged-in users read, the admin group writes. Per *model*,
@@ -328,7 +328,7 @@ async fn show_ticket(
 
         // One component for the whole attachment: current version, history, and the form that adds
         // the next one. Its URLs name the *ticket and attachment*, never the handle — so
-        // authorization stays a gated query on our own row (BLOBSTORE.md §9.2) and the admin
+        // authorization stays a gated query on our own row (BLOBSTORE.md §8.2) and the admin
         // router mounted at /admin/blob is not involved.
         let base = format!("/ticket/{}/attachment/{}", t.id, d.id);
         let portal = Portal::new(&*app.store, handle, app.docs_gate.clone())
@@ -458,7 +458,7 @@ async fn replace(
 
 // ===================== downloads =====================
 
-/// **Routed by the owning document, never by the handle** (BLOBSTORE.md §9.2). Authorization is a
+/// **Routed by the owning document, never by the handle** (BLOBSTORE.md §8.2). Authorization is a
 /// gated query on the app's own row; a handle id never appears in a URL, so it never has to be
 /// treated as a secret.
 async fn download(

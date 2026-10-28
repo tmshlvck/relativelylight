@@ -155,7 +155,7 @@ cargo run -p blobthumbnailer-example # derived content (thumbnails) written by t
 - **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module.
 - **[docs/BLOBSTORE.md](docs/BLOBSTORE.md)** — file storage.
 - **[docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md)** — upgrading from 0.3.
-- **[docs/PRD.md](docs/PRD.md)** and **[docs/TODO.md](docs/TODO.md)** — roadmap and backlog.
+- **[docs/DESIGN.md](docs/DESIGN.md)** — the design and its decisions; **[docs/TODO.md](docs/TODO.md)** — open work.
 - **[CHANGELOG.md](CHANGELOG.md)** — per-release changes.
 - **[CLAUDE.md](CLAUDE.md)** — working *on* the library.
 

@@ -117,6 +117,22 @@ An inverse to-many (an author's posts) past 100 links now ends with `{"more": n}
 reads that array from `Engine::get` or `Engine::list`, skip elements without an `id`. N:M lists are
 never cut.
 
+## 11. `auth` foreign keys, if your database predates 0.3.2
+
+Since 0.3.2, `auth_session`, `auth_totp_recovery` and `auth_user_group` reference `auth_user` (and
+`auth_group`) with `ON DELETE CASCADE`. `auth::migrate` doesn't alter existing tables, so an older
+database keeps working without them; deleting a user then leaves their sessions and codes behind, and
+fails with `409` while they belong to a group. To add them, first delete orphaned rows
+(`DELETE FROM auth_session WHERE user_id NOT IN (SELECT id FROM auth_user)`, the same for
+`auth_totp_recovery`), then:
+
+- **PostgreSQL / MySQL:** `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY (user_id) REFERENCES
+  auth_user(id) ON DELETE CASCADE` per table; on `auth_user_group`, drop and re-add both existing keys.
+- **SQLite** can't alter a constraint: rebuild each table by
+  [its documented procedure](https://sqlite.org/lang_altertable.html#otheralter) (create the new shape
+  from `auth::table_create_statements` under a temporary name, copy the rows, drop, rename, with
+  `PRAGMA foreign_keys=OFF` around it).
+
 ## New in 0.4, nothing to change
 
 - `Table::create` / `edit` / `delete` / `bulk_delete` / `import` / `export(bool)`: one switch per

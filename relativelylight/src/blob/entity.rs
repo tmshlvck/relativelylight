@@ -1,4 +1,4 @@
-//! The four tables — BLOBSTORE.md §3.2. Plain SeaORM entities, so an app with `crud` + `ui` can
+//! The three tables — BLOBSTORE.md §3.2. Plain SeaORM entities, so an app with `crud` + `ui` can
 //! register them into the ordinary admin console with no new UI code (§5.3).
 //!
 //! The foreign keys are declared on the `belongs_to` relations, with their `ON DELETE` actions, so
@@ -64,7 +64,7 @@ pub mod handle {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-/// One upload. **Immutable once written**, except the two erasure fields (BLOBSTORE.md §4.8).
+/// One upload. **Immutable once written** (BLOBSTORE.md §4.8).
 pub mod version {
     use sea_orm::entity::prelude::*;
 
@@ -74,8 +74,7 @@ pub mod version {
         #[sea_orm(primary_key)]
         pub id: i64,
         pub handle_id: Uuid,
-        /// 1, 2, 3… within the handle. Unique with `handle_id`, and **never renumbered** — an erased
-        /// version leaves its number behind, so a gap reads as a gap.
+        /// 1, 2, 3… within the handle. Unique with `handle_id`, and never renumbered.
         pub seq: i32,
         pub prev_version_id: Option<i64>,
         /// The content. **Not nullable**: a version always has bytes behind it. Destroying content
@@ -84,7 +83,7 @@ pub mod version {
         pub blob_id: String,
         /// The filename **as at this version** — a rename is a new version over the same content.
         pub filename: String,
-        /// What the uploader claimed. Advisory, never trusted for dispatch (§10); compare it against
+        /// What the uploader claimed. Advisory, never trusted for dispatch (BLOBSTORE.md §9); compare it against
         /// `blob.mime_sniffed` if you want to refuse a mismatch.
         pub mime_declared: String,
         /// An identity **snapshot**, not a key (BLOBSTORE.md §3.3): the username as at upload time,
@@ -138,7 +137,7 @@ pub mod content {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: String,
         pub size_bytes: i64,
-        /// Sniffed from the leading bytes. Advisory, never trusted for dispatch (§10).
+        /// Sniffed from the leading bytes. Advisory, never trusted for dispatch (BLOBSTORE.md §9).
         pub mime_sniffed: String,
         pub created_at: i64,
         /// When the digest was last confirmed against the stored bytes — by a read, or by a

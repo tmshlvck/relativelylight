@@ -4,7 +4,7 @@
 //! [`BlobStore::read`](crate::blob::BlobStore::read), and calls one of these to build the response.
 //! A library-owned download route could do none of the three things that matter: verify the digest,
 //! decide whether *this* caller may see *this* document, and emit whatever the app's compliance
-//! regime wants emitted (BLOBSTORE.md §9.2 — route by the owning document, never by the handle).
+//! regime wants emitted (BLOBSTORE.md §8.2 — route by the owning document, never by the handle).
 
 use axum::body::Body;
 use axum::response::Response;
@@ -17,7 +17,7 @@ use crate::blob::ContentStream;
 ///
 /// An allowlist rather than a denylist, because the failure mode is XSS: `image/svg+xml` is an
 /// image to a user and a scriptable document to a browser, and `text/html` needs no explanation.
-/// Sniffed content types are advisory (BLOBSTORE.md §10), so the question this answers isn't "what
+/// Sniffed content types are advisory (BLOBSTORE.md §9), so the question this answers isn't "what
 /// is this file" but "what is safe to *say* it is while asking a browser to render it".
 const INLINE_SAFE: &[&str] = &[
     "image/png",

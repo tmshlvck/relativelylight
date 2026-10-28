@@ -20,7 +20,7 @@
 //!
 //! This module depends on **neither `crud` nor `auth`**. Ownership and per-document access live in
 //! the app's own link table — one per document kind, gated with the `authz` presets you already have
-//! (BLOBSTORE.md §9). That is not a shortcut: a typed `owner_user_id` in *your* table gets a real
+//! (BLOBSTORE.md §8). That is not a shortcut: a typed `owner_user_id` in *your* table gets a real
 //! foreign key with `ON DELETE RESTRICT`, which is better integrity than this crate could offer, and
 //! a table per kind is what makes the per-model gate sufficient for per-document access.
 //!
