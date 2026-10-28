@@ -618,7 +618,7 @@ key for `duration` after the last one"** — a decaying window, not a strict sli
 | `POST /login` (password) | account + address | the anonymous guessing surface |
 | `POST /login/totp` (second factor) | account + address | still unauthenticated (the session grants nothing until the code is confirmed), and 6 digits are the most guessable secret we hold |
 | the app's own checks (`Auth::username_lockout` / `ip_lockout`) | whichever it passes | same counters, so one account has one budget everywhere |
-| `POST /profile` (current password) | **not limited** | the caller is *authenticated*: that's session theft, whose mitigations are short TTLs and re-auth (TODO.md) — and counting it would let a stolen session lock the real user out of logging in |
+| `POST /profile` (current password) | **not limited** | the caller is *authenticated*: that's session theft, whose mitigations are short TTLs and re-authentication (§5h) — and counting it would let a stolen session lock the real user out of logging in |
 | `POST /profile/totp` (enrolment code) | **not limited** | authenticated, and the code guessed is the caller's *own* pending secret |
 | `POST /profile/{id}` (manager reset) | **not limited** | verifies no secret; gated by group membership instead |
 
@@ -771,10 +771,6 @@ page — deletes the caller's other sessions and keeps the one they're using. Th
 code decides a user's sessions are void (you disabled the account, a group sync removed their access, an
 operator hit a force-logout). Note that `is_active = false` already denies every request at `identify`,
 so revoking there is tidiness rather than enforcement.
-
-**Not yet.** Re-authentication before sensitive changes (a fresh password or code before disabling 2FA)
-is still open — see [TODO.md](TODO.md). Until it lands, a stolen *live* session can still turn 2FA off, which is
-why the idle window matters.
 
 **Durable and shared, on purpose.** The rows survive a restart (a deploy must not hand every attacker a
 fresh budget) and every replica sees the same counts. The cost is a write per *failed* check and a read
@@ -1229,14 +1225,11 @@ let jar = if let Some(c) = set { jar.add(c) } else { jar };
 if !auth.csrf().verify(&headers, form.csrf.as_deref()) { return StatusCode::FORBIDDEN.into_response(); }
 ```
 
-> **Note — one deviation from the original sketch.** `crud::ui` reads the token from the cookie at
-> request time rather than having it baked into the rendered fragment. Same check, but a fragment
-> rendered before a rotation (or cached) can't go stale, and `Table::render()` keeps working without
-> request headers.
+`crud::ui` reads the token from the cookie at request time rather than baking it into the fragment,
+so a fragment rendered before a rotation (or cached) can't go stale.
 
-**Limits.** There is no `Csrf` tower layer yet, and the 403 page isn't themeable — both in
-[TODO.md](TODO.md). Note also that a **co-hosted** app sharing the host must use a distinct
-`csrf_cookie_name` (cookies aren't port-scoped), exactly as with the session cookie.
+A **co-hosted** app sharing the host must use a distinct `csrf_cookie_name` (cookies aren't
+port-scoped), exactly as with the session cookie.
 
 ## 8. Not built, on purpose or not yet
 

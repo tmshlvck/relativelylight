@@ -233,6 +233,8 @@ impl<'a> Table<'a> {
         self.search = on;
         self
     }
+    /// The pager. Off, the table shows the first [`per_page`](Table::per_page) rows and nothing
+    /// says there are more — a "latest five" panel, not a whole listing. Default: on.
     pub fn pagination(mut self, on: bool) -> Self {
         self.pagination = on;
         self

@@ -231,35 +231,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// This app's table configuration, in one place: both handlers below build it the same way, so the
 /// links a page renders and the writes it accepts can't drift apart.
 fn table<'a>(engine: &'a Engine, slug: &str) -> Table<'a> {
-    let mut t = Table::new(engine, slug)
+    let t = Table::new(engine, slug)
         .title(capitalize(slug))
-        .read_only(slug == "user") // display only; the rest are read-write
         .per_page(5); // small, so the example exercises the pager (post → 9 pages)
-    if slug == "author" {
-        // One switch per action: authors go one at a time — no checkboxes, no "delete all", and a
-        // posted bulk delete is refused rather than merely not drawn.
-        t = t.bulk_delete(false);
+    // Each table switches off something different. A switched-off write is refused on submit, not
+    // just left undrawn — and what stays on is still up to the model's gate.
+    match slug {
+        // Authors go one at a time: no checkboxes, no "delete all". Every column is already in the
+        // listing, so there is no View either.
+        "author" => t.bulk_delete(false).detail(false).sort(author::Column::Name.as_str()),
+        // Tags are added and removed, never renamed (a rename would retag every post at once), and
+        // not exported.
+        "tag" => t.edit(false).export(false),
+        // A calendar: events are created, moved and imported (TIME.md's CSV round trip), never
+        // deleted. Listed in time order.
+        "event" => t.delete(false).sort(event::Column::HappensAt.as_str()),
+        // A profile comes with its user: edited here, never added. Six rows: no search, and no
+        // page-size control beside the pager.
+        "profile" => t.create(false).search(false).per_page_choices([]),
+        // Display only, and not for export.
+        "user" => t.read_only(true).export(false),
+        "post" => post_table(t),
+        _ => t,
     }
-    if slug == "post" {
-        t = t
-            // Custom cell renderer: link each title to its own edit page. Escaping is the app's job
-            // and `esc` is how — the closure's output is inserted verbatim.
-            .format_cell(post::Column::Title.as_str(), |v, row| {
-                format!(r#"<a href="/post/{}/edit">{}</a>"#, esc(&row["id"]), esc(v))
-            })
-            // The listing shows the start of the body (whole in the tooltip); the post's own page
-            // below shows all of it.
-            .format_cell(post::Column::Body.as_str(), truncate(60))
-            // A filter on a *relation*: the toolbar gets an author picker, and choosing one narrows
-            // the listing, the CSV export and "delete all matching" alike. Sorting by `author` orders
-            // by the name shown in the cell rather than the foreign key.
-            .filter("author")
-            .sort(post::Column::Title.as_str())
-            // View opens this app's own page for the row (`post_page` below, its own template)
-            // rather than the built-in dialog — and `?show=` no longer opens that dialog here.
-            .detail_href("/post/{id}");
-    }
+}
+
+/// The post table shows the rest: cell renderers, a relation filter, a default sort, and a View
+/// that opens a page of the app's own.
+fn post_table(t: Table<'_>) -> Table<'_> {
     t
+        // Custom cell renderer: link each title to its own edit page. Escaping is the app's job
+        // and `esc` is how — the closure's output is inserted verbatim.
+        .format_cell(post::Column::Title.as_str(), |v, row| {
+            format!(r#"<a href="/post/{}/edit">{}</a>"#, esc(&row["id"]), esc(v))
+        })
+        // The listing shows the start of the body (whole in the tooltip); the post's own page
+        // below shows all of it.
+        .format_cell(post::Column::Body.as_str(), truncate(60))
+        // A filter on a *relation*: the toolbar gets an author picker, and choosing one narrows
+        // the listing, the CSV export and "delete all matching" alike. Sorting by `author` orders
+        // by the name shown in the cell rather than the foreign key.
+        .filter("author")
+        .sort(post::Column::Title.as_str())
+        // View opens this app's own page for the row (`post_page` below, its own template)
+        // rather than the built-in dialog — and `?show=` no longer opens that dialog here.
+        .detail_href("/post/{id}")
 }
 
 /// The page inside the picker dialog: the target's own table, with a radio or a checkbox per row.

@@ -764,7 +764,7 @@ and in all three examples.
 |---|---|
 | `title` / `description` | heading and a muted subtitle |
 | `search(bool)` | the search box (default on) |
-| `pagination(bool)` / `per_page(n)` | the pager (default on, 30) |
+| `pagination(bool)` / `per_page(n)` | the pager (default on, 30); off shows the first `per_page` rows only |
 | `per_page_choices([…])` | the sizes the toolbar offers (default `[10, 30, 100, 250]`; empty hides the control) |
 | `per_page_max(n)` | the largest page this table will fetch, however large a `?per_page=` asks for (default **10,000**) |
 | `detail(bool)` | the per-row **View** action and its read-only dialog (default on) |

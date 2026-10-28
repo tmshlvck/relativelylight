@@ -734,14 +734,12 @@ assembling in memory. Parsing is [`multer`](https://docs.rs/multer) — the crat
 uses, and the one `crate::multipart`'s docs already named for when streaming was needed. A
 hand-written parser here would be security-sensitive code with no upside.
 
-**The CSRF gap is closed on this path**, which was not a given. `csrf::enforce` cannot check a
-multipart body (`csrf.rs`, `TODO.md`), so the historic answer was "session-gated but not
-CSRF-checked". A *buffered* parser could check the token whenever it liked, because it already held
-the whole body; a streaming one has to decide **before it starts writing**. So `Receiver` requires
+**The CSRF check has to come first on this path.** A *buffered* parser (`csrf::enforce`, the CSV
+import) can check the token whenever it likes, because it already holds the whole body; a streaming
+one has to decide **before it starts writing**. So `Receiver` requires
 `_csrf` to arrive *before* the file part, and `UploadForm` renders the hidden input first — a browser
 posts parts in document order, so that ordering is the mechanism rather than a detail. A body with
 the file first is refused with nothing staged (`a_token_after_the_file_is_refused_with_nothing_written`).
-`crud::ui`'s CSV import still has the original gap; it inherits `TODO.md`'s pre-scan when that lands.
 
 The three `blob*` tables are plain SeaORM entities, so an app with `crud` + `ui` registers them into
 the ordinary console with **zero new UI code** — listing, search, filters, sortable headers:

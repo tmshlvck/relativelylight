@@ -10,7 +10,8 @@ not here.
   queries, which is what holds `Table::DEFAULT_PER_PAGE_MAX` at 500. Keep it inside the SeaORM
   backend; a new `Accessor` method would break implementors.
 - [ ] **Split `Table` into smaller pieces** (`List`, `Search`, `FilterSelect`, the write actions) with
-  `Table`/`Admin` as presets over them, so each control owns its `<form>`.
+  `Table`/`Admin` as presets over them, so each control owns its `<form>` and can be placed on its
+  own. Turning a control off is already covered by the per-action switches.
 - [ ] **Browser tests for the picker** (Playwright against `examples/crud`); `ui_tests.rs` covers the
   server half only.
 - [ ] **Filter operators** (`filter[ttl][gt]=300`, `[in]`, `[is_null]`). The URL grammar already
