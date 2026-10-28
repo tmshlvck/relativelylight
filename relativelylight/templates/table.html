@@ -53,20 +53,20 @@
           "Delete all N matching". `<details>` is the dropdown: it opens and closes itself, so the
           toolbar needs no JavaScript to have a menu. The delete sits outside the rows' form, so it
           names that form (`form=`) — its CSRF token and the view's filters are what it posts. -#}
-      {%- let wipe = editable && !rows.is_empty() %}
-      {%- if csv || wipe %}
+      {%- let wipe = can.bulk_delete && !rows.is_empty() %}
+      {%- if can.export || can.import || wipe %}
       <details class="rl-menu">
         <summary class="btn btn-outline-secondary btn-sm" title="Table operations"
                  aria-label="Table operations">&#8942;</summary>
         <div class="rl-menu-items card shadow-sm">
-          {%- if csv %}
+          {%- if can.export %}
           <a class="dropdown-item py-1 px-3" href="{{ csv_href }}">Export CSV</a>
-          {%- if editable %}
+          {%- endif %}
+          {%- if can.import %}
           <a class="dropdown-item py-1 px-3" href="{{ import_href }}">Import CSV…</a>
           {%- endif %}
-          {%- endif %}
           {%- if wipe %}
-          {%- if csv %}<hr class="dropdown-divider my-1">{% endif %}
+          {%- if can.export || can.import %}<hr class="dropdown-divider my-1">{% endif %}
           <button class="dropdown-item text-danger py-1 px-3" type="submit" form="{{ dom_id }}-rows"
                   name="_op" value="delete_all"
                   {% if confirm %}onclick="return confirm('Delete every row this view matches?')"{% endif %}>Delete all {{ pager.total }} matching</button>
@@ -74,7 +74,7 @@
         </div>
       </details>
       {%- endif %}
-      {%- if editable %}<a class="btn btn-primary btn-sm" href="{{ new_href }}">+ New</a>{% endif %}
+      {%- if can.create %}<a class="btn btn-primary btn-sm" href="{{ new_href }}">+ New</a>{% endif %}
     </div>
   </div>
 
@@ -104,7 +104,7 @@
       <table class="table table-sm table-hover align-middle">
         <thead>
           <tr>
-            {%- if editable %}
+            {%- if can.bulk_delete %}
             <th style="width:1%"><input type="checkbox" class="form-check-input" aria-label="Select all on this page"
                    onclick="for (const c of this.closest('form').querySelectorAll('input[name=ids]')) c.checked = this.checked"></th>
             {%- endif %}
@@ -117,13 +117,13 @@
               {%- match h.add_href %}{% when Some with (href) %} <a href="{{ href }}" class="rl-add text-muted text-decoration-none" title="Add as a secondary sort key">+</a>{% when None %}{% endmatch %}
             </th>
             {%- endfor %}
-            {%- if editable || detail %}<th class="text-end">Actions</th>{% endif %}
+            {%- if can.edit || can.delete || detail %}<th class="text-end">Actions</th>{% endif %}
           </tr>
         </thead>
         <tbody>
           {%- for r in rows %}
           <tr id="row-{{ r.id }}"{% if !r.class.is_empty() %} class="{{ r.class }}"{% endif %}>
-            {%- if editable %}
+            {%- if can.bulk_delete %}
             <td><input type="checkbox" class="form-check-input" name="ids" value="{{ r.id }}"
                        aria-label="Select row {{ r.id }}"></td>
             {%- endif %}
@@ -139,13 +139,15 @@
               {%- endmatch %}
             </td>
             {%- endfor %}
-            {%- if editable || detail %}
+            {%- if can.edit || can.delete || detail %}
             <td class="text-end text-nowrap">
               {%- if !r.show_href.is_empty() %}
               <a class="btn btn-outline-secondary btn-sm" href="{{ r.show_href }}">View</a>
               {%- endif %}
-              {%- if editable %}
+              {%- if can.edit %}
               <a class="btn btn-outline-secondary btn-sm" href="{{ r.edit_href }}">Edit</a>
+              {%- endif %}
+              {%- if can.delete %}
               <button class="btn btn-outline-danger btn-sm" type="submit" name="_del" value="{{ r.id }}"
                       {% if confirm %}onclick="return confirm('Delete this row?')"{% endif %}>Delete</button>
               {%- endif %}
@@ -159,7 +161,7 @@
         </tbody>
       </table>
     </div>
-    {%- if editable && !rows.is_empty() %}
+    {%- if wipe %}
     <div class="d-flex gap-2 mb-2">
       <button class="btn btn-outline-danger btn-sm" type="submit" name="_op" value="delete_selected"
               {% if confirm %}onclick="return confirm('Delete the selected rows?')"{% endif %}>Delete selected</button>

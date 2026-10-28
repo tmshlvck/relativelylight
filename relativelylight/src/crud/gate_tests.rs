@@ -10,10 +10,12 @@
 //! - a rejected request **never reaches the backend** (the stub [`Accessor`] counts calls, so a gate
 //!   checked *after* the write would fail the test rather than pass silently);
 //! - an unregistered model is `404` — not an open door;
+//! - a write the surface doesn't offer (`read_only`, a switch turned off, a `Form`'s delete) is
+//!   `403` before the gate is asked — a hidden control is also a refused one;
 //! - CSRF: every write needs the token, reads need nothing, and a bearer client is exempt.
 
 use super::engine::{Accessor, Column, Engine, Error, ListQuery, Page, Result};
-use super::ui::{Table, ViewState};
+use super::ui::{Form, Table, ViewState};
 use crate::auth::{migrate, Auth, UserReadGroupWrite};
 use crate::authz::{Authz, Decision, Operation};
 use axum::body::Body;
@@ -217,6 +219,80 @@ async fn each_write_is_authorized_as_the_operation_it_actually_is() {
             gate.seen()
         );
     }
+}
+
+// ===================== what the surface offers =====================
+
+/// Post `body` and return the error, or `None` if the write went through.
+async fn refusal(table: &Table<'_>, body: &str) -> Option<Error> {
+    table.submit(&no_headers(), IP, body.as_bytes(), &ViewState::default()).await.err()
+}
+
+#[tokio::test]
+async fn a_read_only_table_refuses_every_write_even_when_the_gate_allows_it() {
+    let gate = Fixed::new(Decision::Allow);
+    let (engine, calls) = engine_with(gate.clone(), None);
+    let table = Table::new(&engine, "thing").read_only(true);
+    for (what, body, _) in writes() {
+        let err = refusal(&table, &body).await;
+        assert!(matches!(err, Some(Error::Forbidden)), "{what}: {err:?}");
+    }
+    assert_eq!(calls.snapshot().1, 0, "not one write reached the backend");
+    assert!(gate.seen().is_empty(), "refused before the gate was asked: {:?}", gate.seen());
+}
+
+#[tokio::test]
+async fn each_switch_refuses_exactly_its_own_writes() {
+    let (engine, _) = engine_with(Fixed::new(Decision::Allow), None);
+    let t = || Table::new(&engine, "thing");
+    let cases: Vec<(&str, Table<'_>, &[&str])> = vec![
+        ("create(false)", t().create(false), &["create"]),
+        ("edit(false)", t().edit(false), &["update"]),
+        ("delete(false)", t().delete(false), &["delete one", "delete selected", "delete all"]),
+        ("bulk_delete(false)", t().bulk_delete(false), &["delete selected", "delete all"]),
+        ("import(false)", t().import(false), &["import"]),
+        // The positive control: with every switch on, every write goes through.
+        ("all on", t(), &[]),
+    ];
+    for (switch, table, refused) in cases {
+        for (what, body, _) in writes() {
+            let err = refusal(&table, &body).await;
+            if refused.contains(&what) {
+                let refused = matches!(err, Some(Error::Forbidden));
+                assert!(refused, "{switch} must refuse {what}: {err:?}");
+            } else {
+                assert!(err.is_none(), "{switch} must still allow {what}: {err:?}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_form_saves_one_row_and_refuses_the_tables_other_writes() {
+    // A form's query is the whole table: a delete-all posted to it would have nothing to narrow it.
+    let (engine, calls) = engine_with(Fixed::new(Decision::Allow), None);
+    let form = Form::new(&engine, "thing");
+    for (what, body, _) in writes() {
+        let result = form.submit(&no_headers(), IP, body.as_bytes(), &ViewState::default()).await;
+        if what == "create" || what == "update" {
+            result.unwrap_or_else(|e| panic!("a form saves its row ({what}): {e}"));
+        } else {
+            assert!(matches!(result, Err(Error::Forbidden)), "a form must refuse {what}");
+        }
+    }
+    assert_eq!(calls.snapshot().1, 2, "only the create and the update landed");
+}
+
+#[cfg(feature = "csv")]
+#[tokio::test]
+async fn an_export_switched_off_is_refused_and_read_only_leaves_it_on() {
+    let (engine, calls) = engine_with(Fixed::new(Decision::Allow), None);
+    let state = ViewState::default();
+    let off = Table::new(&engine, "thing").export(false);
+    let err = off.csv(&no_headers(), &state).await.unwrap_err();
+    assert!(matches!(err, Error::Forbidden), "{err}");
+    assert_eq!(calls.snapshot().0, 0, "and the rows were never read");
+    Table::new(&engine, "thing").read_only(true).csv(&no_headers(), &state).await.expect("a read");
 }
 
 #[tokio::test]

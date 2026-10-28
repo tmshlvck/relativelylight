@@ -1,5 +1,6 @@
-//! The write path every surface shares: CSRF check, gate, apply, audit, and where to go next. One
-//! function, which is why the negative cases only have to be tested once (`crud::gate_tests`).
+//! The write path every surface shares: CSRF check, what the surface offers, gate, apply, audit,
+//! and where to go next. One function, which is why the negative cases only have to be tested
+//! once (`crud::gate_tests`).
 
 use super::decode::{self, Posted};
 use super::render;
@@ -20,10 +21,25 @@ pub(crate) struct Surface<'a> {
     pub(crate) renders: &'a (dyn Fn(&str) -> bool + Send + Sync),
     /// The view's own query, so a bulk delete can only ever hit the rows on screen.
     pub(crate) query: ListQuery,
+    /// The writes this surface offers. Anything else is refused before the gate is asked: a
+    /// control the page doesn't draw must not be reachable by posting its name.
+    pub(crate) writes: Writes,
 }
 
-/// CSRF check → gate → apply → audit → where to go next. One function for every write the UI does,
-/// which is why the negative cases only have to be tested once (`crud::gate_tests`).
+/// Which writes a surface accepts. The gate still decides each one; this only narrows it.
+#[derive(Clone, Copy)]
+pub(crate) struct Writes {
+    pub(crate) create: bool,
+    pub(crate) update: bool,
+    pub(crate) delete: bool,
+    /// Delete selected and delete all matching.
+    pub(crate) bulk_delete: bool,
+    pub(crate) import: bool,
+}
+
+/// CSRF check → offered here? → gate → apply → audit → where to go next. One function for every
+/// write the UI does, which is why the negative cases only have to be tested once
+/// (`crud::gate_tests`).
 pub(crate) async fn apply(
     s: &Surface<'_>,
     cols: &[Column],
@@ -36,6 +52,9 @@ pub(crate) async fn apply(
     let op = Op::of(&posted)?;
     if !s.engine.csrf_ok(headers, posted.one("_csrf")) {
         return Err(Error::Csrf);
+    }
+    if !op.offered(&s.writes) {
+        return Err(Error::Forbidden);
     }
     authorize(s.engine, op.operation(), s.slug, headers).await?;
 
@@ -277,6 +296,16 @@ impl Op {
             "delete_all" => Ok(Op::DeleteAll),
             "import" => Ok(Op::Import),
             other => Err(Error::BadRequest(format!("crud::ui: unknown form operation '{other}'"))),
+        }
+    }
+
+    fn offered(&self, w: &Writes) -> bool {
+        match self {
+            Op::Create => w.create,
+            Op::Update => w.update,
+            Op::DeleteOne(_) => w.delete,
+            Op::DeleteSelected | Op::DeleteAll => w.bulk_delete,
+            Op::Import => w.import,
         }
     }
 

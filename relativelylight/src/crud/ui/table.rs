@@ -6,7 +6,7 @@ use super::state::{Mode, ViewState};
 use super::widgets::{self, FieldV, Opt, Widget};
 use super::{
     apply, authorize, banner, check_fields, check_sort, check_widgets, csrf_token, csv_header,
-    is_filterable, render_err, renders, Fmt, Outcome, RowClass, Surface,
+    is_filterable, render_err, renders, Fmt, Outcome, RowClass, Surface, Writes,
 };
 use crate::authz::Operation;
 use crate::crud::engine::{Cardinality, Column, Engine, Error, ListQuery, Result};
@@ -25,12 +25,12 @@ struct TableTmpl {
     description: String,
     search: bool,
     pagination: bool,
-    editable: bool,
+    /// What this caller is offered here — see [`Offer`].
+    can: Offer,
     confirm: bool,
     /// Whether rows offer a View action (and therefore whether the actions column exists for a
     /// caller who can't write).
     detail: bool,
-    csv: bool,
     q: String,
     csrf: String,
     span: usize,
@@ -50,6 +50,17 @@ struct TableTmpl {
     flash: String,
     /// The same view without the report — where the alert's dismiss link goes.
     flash_dismiss: String,
+}
+
+/// The table's controls this caller gets: a switch that is on, and that the gate allows them.
+#[derive(Clone, Copy)]
+struct Offer {
+    create: bool,
+    edit: bool,
+    delete: bool,
+    bulk_delete: bool,
+    import: bool,
+    export: bool,
 }
 
 /// Where a renderer applies: [`Table::format_cell`] or [`Table::format_view`].
@@ -145,6 +156,12 @@ pub struct Table<'a> {
     per_page_choices: Vec<u64>,
     per_page_max: u64,
     read_only: bool,
+    create: bool,
+    edit: bool,
+    delete: bool,
+    bulk_delete: bool,
+    import: bool,
+    export: bool,
     confirm: bool,
     picker_threshold: u64,
     fields: Vec<String>,
@@ -182,6 +199,12 @@ impl<'a> Table<'a> {
             per_page_choices: vec![10, 30, 100, 250],
             per_page_max: Self::DEFAULT_PER_PAGE_MAX,
             read_only: false,
+            create: true,
+            edit: true,
+            delete: true,
+            bulk_delete: true,
+            import: true,
+            export: true,
             confirm: true,
             picker_threshold: 50,
             fields: Vec::new(),
@@ -240,10 +263,76 @@ impl<'a> Table<'a> {
         self.per_page_max = n.max(1);
         self
     }
-    /// Read-only table: no Create/Edit/Delete and no dialog. Default: false.
+    /// Read-only table: no writes of any kind — every switch below off, whatever it says. The
+    /// controls go and [`submit`](Table::submit) refuses a posted write with `403`. Default: false.
     pub fn read_only(mut self, on: bool) -> Self {
         self.read_only = on;
         self
+    }
+
+    // Each write switch removes its control and makes `submit` refuse the operation (`403`) before
+    // the gate is asked. On, the control still shows only to a caller the gate allows it. All on by
+    // default.
+
+    /// **+ New** and the create dialog.
+    pub fn create(mut self, on: bool) -> Self {
+        self.create = on;
+        self
+    }
+    /// Each row's **Edit** and the edit dialog.
+    pub fn edit(mut self, on: bool) -> Self {
+        self.edit = on;
+        self
+    }
+    /// Each row's **Delete** — and, off, the bulk deletes too.
+    pub fn delete(mut self, on: bool) -> Self {
+        self.delete = on;
+        self
+    }
+    /// The row checkboxes, **Delete selected** and **Delete all N matching**, keeping the per-row
+    /// Delete.
+    pub fn bulk_delete(mut self, on: bool) -> Self {
+        self.bulk_delete = on;
+        self
+    }
+    /// **Import CSV…** and its dialog (with the `csv` feature).
+    pub fn import(mut self, on: bool) -> Self {
+        self.import = on;
+        self
+    }
+    /// **Export CSV** (with the `csv` feature); off, [`csv`](Table::csv) refuses with `403`.
+    /// Not a write, so [`read_only`](Table::read_only) leaves it alone.
+    pub fn export(mut self, on: bool) -> Self {
+        self.export = on;
+        self
+    }
+
+    /// The writes this table accepts, before the gate is asked.
+    fn writes(&self) -> Writes {
+        let on = |switch: bool| switch && !self.read_only;
+        Writes {
+            create: on(self.create),
+            update: on(self.edit),
+            delete: on(self.delete),
+            bulk_delete: on(self.delete && self.bulk_delete),
+            import: on(self.import) && cfg!(feature = "csv"),
+        }
+    }
+
+    /// What this caller is offered: each write this table accepts that the gate also allows them.
+    async fn offer(&self, headers: &HeaderMap) -> Offer {
+        let w = self.writes();
+        let permits = |on: bool, op: Operation| async move {
+            on && self.engine.permits(&self.slug, op, headers).await
+        };
+        Offer {
+            create: permits(w.create, Operation::Create).await,
+            edit: permits(w.update, Operation::Update).await,
+            delete: permits(w.delete, Operation::Delete).await,
+            bulk_delete: permits(w.bulk_delete, Operation::Delete).await,
+            import: permits(w.import, Operation::Create).await,
+            export: self.export && cfg!(feature = "csv"),
+        }
     }
     /// Offer a **View** action per row, opening a read-only dialog (`?show=<id>`) with every
     /// published column. Default: on.
@@ -450,8 +539,7 @@ impl<'a> Table<'a> {
         if *state.mode() != Mode::List {
             authorize(self.engine, Operation::Read, &self.slug, headers).await?;
         }
-        let editable = !self.read_only
-            && self.engine.permits(&self.slug, Operation::Create, headers).await;
+        let can = self.offer(headers).await;
         let tz = Tz::from_headers(headers);
         let state = self.effective_state(state, &cols)?;
         let page = self.engine.list(&self.slug, &self.list_query(&state), false).await?;
@@ -460,17 +548,20 @@ impl<'a> Table<'a> {
         let per_page_options = self.per_page_options(&state);
         let (controls, chips) = self.filter_views(&cols, &state).await?;
 
-        let dialog = match (state.mode(), editable) {
-            (Mode::List, _) => String::new(),
+        let dialog = match state.mode() {
             // A read-only row is a *read*: a caller who may not write still gets it.
-            (Mode::Show(id), _) if self.detail_dialog_on() => {
-                self.detail_dialog(&cols, id, &state, &tz, editable).await?
+            Mode::Show(id) if self.detail_dialog_on() => {
+                self.detail_dialog(&cols, id, &state, &tz, can.edit).await?
             }
-            // Declined, or the view is a page of the app's: a typed `?show=` opens nothing.
-            (Mode::Show(_), _) => String::new(),
-            (_, false) => String::new(),
-            (Mode::Import, true) => self.import_dialog(&cols, &state, &csrf)?,
-            (mode, true) => self.dialog(&cols, mode, &state, headers, &csrf).await?,
+            Mode::New if can.create => {
+                self.dialog(&cols, state.mode(), &state, headers, &csrf).await?
+            }
+            Mode::Edit(_) if can.edit => {
+                self.dialog(&cols, state.mode(), &state, headers, &csrf).await?
+            }
+            Mode::Import if can.import => self.import_dialog(&cols, &state, &csrf)?,
+            // The list, or a dialog this caller isn't offered here: a typed URL opens nothing.
+            _ => String::new(),
         };
         TableTmpl {
             dom_id: self.dom_id.clone().unwrap_or_else(|| format!("rl-{}", self.slug)),
@@ -478,11 +569,11 @@ impl<'a> Table<'a> {
             description: self.description.clone().unwrap_or_default(),
             search: self.search,
             pagination: self.pagination,
-            editable,
             confirm: self.confirm,
-            csv: cfg!(feature = "csv"),
             q: state.q.clone(),
-            span: shown.len() + usize::from(editable) + usize::from(editable || self.detail),
+            span: shown.len()
+                + usize::from(can.bulk_delete)
+                + usize::from(can.edit || can.delete || self.detail),
             keep: self.keep(&state),
             per_page_options,
             controls,
@@ -510,6 +601,7 @@ impl<'a> Table<'a> {
             flash_dismiss: state.href_dismiss(),
             csrf,
             dialog,
+            can,
         }
         .render()
         .map_err(render_err)
@@ -562,6 +654,7 @@ impl<'a> Table<'a> {
             slug: &self.slug,
             renders: &renders,
             query: self.list_query(&state),
+            writes: self.writes(),
         };
         apply(&surface, &cols, headers, client_ip, body, &state).await
     }
@@ -571,6 +664,9 @@ impl<'a> Table<'a> {
     /// [`ViewState::csv`] is set (that is what the toolbar's Export link asks for).
     #[cfg(feature = "csv")]
     pub async fn csv(&self, headers: &HeaderMap, state: &ViewState) -> Result<String> {
+        if !self.export {
+            return Err(Error::Forbidden);
+        }
         authorize(self.engine, Operation::List, &self.slug, headers).await?;
         let cols = self.engine.columns(&self.slug)?;
         let state = self.effective_state(state, &cols)?;
@@ -872,7 +968,7 @@ impl<'a> Table<'a> {
         id: &str,
         state: &ViewState,
         tz: &Tz,
-        editable: bool,
+        edit: bool,
     ) -> Result<String> {
         // `render_for` has already authorized `Read` for this caller (every non-list mode does),
         // with their real headers — there is nothing left to check here.
@@ -896,7 +992,7 @@ impl<'a> Table<'a> {
         DetailTmpl {
             title: format!("{} #{id}", self.title.clone().unwrap_or_else(|| self.slug.clone())),
             cancel_href: state.href_list(),
-            edit_href: if editable { state.href_edit(id) } else { String::new() },
+            edit_href: if edit { state.href_edit(id) } else { String::new() },
             fields,
         }
         .render()

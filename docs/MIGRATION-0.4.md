@@ -102,8 +102,19 @@ async fn set_tz(Form(f): Form<HashMap<String, String>>) -> Response {
 "Delete all N matching" and the CSV export/import moved into a ⋮ "Table operations" menu, and the
 rows' form has the id `{dom_id}-rows` (`rl-post-rows`). Only your own CSS or browser tests notice.
 
+## 9. Write controls (silent)
+
+- **A read-only table refuses posted writes** (`403`), and a `Form` refuses anything but a create or
+  an update. Before, both hid the controls but applied whatever the gate allowed.
+- **Each control asks the gate about its own operation**: Edit appears for a caller allowed `Update`
+  even without `Create`, and the deletes disappear for one refused `Delete`.
+
+Nothing to change unless something of yours posted to a read-only table.
+
 ## New in 0.4, nothing to change
 
+- `Table::create` / `edit` / `delete` / `bulk_delete` / `import` / `export(bool)`: one switch per
+  action, each refused on submit when off.
 - `Table::detail_href("/post/{id}")`: View opens a page of your own instead of the dialog.
 - `crud::ui::truncate(n)`: a ready-made `format_cell` renderer.
 - `crud::ui::RelationField`: the relation input (select or picker) for a form you write yourself.

@@ -47,6 +47,10 @@ is easy to miss in a diff.
 
 ### Added
 
+- **Per-action switches on `Table`: `create`, `edit`, `delete`, `bulk_delete`, `import`, `export`**
+  (all on by default, so `Admin` and existing tables are unchanged). Each removes its control and
+  makes `submit` (or `Table::csv`) refuse the operation with `403` before the gate is asked.
+  `delete(false)` turns off the bulk deletes too; `bulk_delete(false)` keeps the per-row Delete.
 - **`TzPicker::submitted(tz, back)` — the timezone route's whole body.** Returns the `Set-Cookie` value
   and the path to redirect to, following `back` only when it is a local path (`/…`, not `//…`). The
   handler the docs and examples used to show redirected to any posted `back` — an open redirect.
@@ -83,6 +87,10 @@ is easy to miss in a diff.
 
 ### Changed
 
+- **Each write control follows its own operation's permission.** `+ New` and Import ask the gate
+  about `Create`, Edit about `Update`, the deletes about `Delete`; all of them used to follow
+  `Create`. A gate allowing `Update` but not `Create` now shows Edit, and one refusing `Delete`
+  no longer draws delete buttons that answer `403`. Upgrade: none.
 - **`picker_threshold` defaults to 50 (was 20) and now covers to-many relations.** Past it, either
   relation uses the picker if the app serves one, and otherwise stays a `<select>` / multi-select of
   every row. **The typed-id input a to-one used to fall back to is gone.** Upgrade: nothing breaks;
@@ -99,6 +107,12 @@ is easy to miss in a diff.
 
 ### Fixed
 
+- **`Table::read_only(true)` only hid the controls; a posted write still went through** whenever the
+  gate allowed it (`_del=7`, `_op=delete_all`, `_op=import`). It is now refused with `403`, before
+  the gate. Upgrade: none, unless something posts to a read-only table — make it writable.
+- **`Form::submit` accepted the table's writes too.** A crafted `_op=delete_all` posted to a form
+  deleted every row the gate allowed (a form has no view to narrow it), and `_op=import` imported.
+  A form now accepts only a create or an update; anything else is `403`. Upgrade: none.
 - **Saving a row with a required to-one left blank panicked the request** (SeaORM 2.0's
   `ActiveModel::set` panics on a `NULL` for a NOT NULL column, where 1.x let the database refuse it).
   A blank or missing to-one over a NOT NULL foreign key is now a `required` error beside the field, on

@@ -235,6 +235,11 @@ fn table<'a>(engine: &'a Engine, slug: &str) -> Table<'a> {
         .title(capitalize(slug))
         .read_only(slug == "user") // display only; the rest are read-write
         .per_page(5); // small, so the example exercises the pager (post → 9 pages)
+    if slug == "author" {
+        // One switch per action: authors go one at a time — no checkboxes, no "delete all", and a
+        // posted bulk delete is refused rather than merely not drawn.
+        t = t.bulk_delete(false);
+    }
     if slug == "post" {
         t = t
             // Custom cell renderer: link each title to its own edit page. Escaping is the app's job

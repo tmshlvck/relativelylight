@@ -5,6 +5,7 @@ use super::state::ViewState;
 use super::widgets::{self, FieldV, Widget};
 use super::{
     apply, banner, check_fields, check_widgets, csrf_token, render_err, renders, Outcome, Surface,
+    Writes,
 };
 use crate::authz::{Decision, Operation};
 use crate::crud::engine::{Engine, Error, ListQuery, Result};
@@ -229,6 +230,15 @@ impl<'a> Form<'a> {
             slug: &self.slug,
             renders: &shown,
             query: ListQuery::default(),
+            // A form saves one row. Its query is the whole table, so a posted delete-all or import
+            // must not get this far.
+            writes: Writes {
+                create: true,
+                update: true,
+                delete: false,
+                bulk_delete: false,
+                import: false,
+            },
         };
         match apply(&surface, &cols, headers, client_ip, body, state).await? {
             Outcome::Done(to) => Ok(Outcome::Done(match &self.redirect {

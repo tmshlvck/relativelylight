@@ -71,7 +71,7 @@ pub use table::Table;
 pub(crate) use checks::{
     banner, check_fields, check_sort, check_widgets, csv_header, is_filterable, render_err, renders,
 };
-pub(crate) use write::{apply, authorize, csrf_token, Surface};
+pub(crate) use write::{apply, authorize, csrf_token, Surface, Writes};
 
 use serde_json::Value;
 use std::sync::Arc;

@@ -883,6 +883,100 @@ async fn a_reader_gets_a_table_with_no_write_controls_at_all() {
     assert!(!html.contains("+ New"), "{html}");
 }
 
+/// Each table control, by a piece of markup only it renders.
+const CONTROLS: [(&str, &str); 7] = [
+    ("create", "+ New"),
+    ("edit", ">Edit</a>"),
+    ("delete", "name=\"_del\""),
+    ("checkboxes", "name=\"ids\""),
+    ("delete selected", "delete_selected"),
+    ("delete all", "delete_all"),
+    ("export", "Export CSV"),
+];
+
+fn drawn(html: &str) -> Vec<&'static str> {
+    let mut on: Vec<_> =
+        CONTROLS.iter().filter(|(_, m)| html.contains(m)).map(|(c, _)| *c).collect();
+    if html.contains("Import CSV") {
+        on.push("import");
+    }
+    on
+}
+
+#[tokio::test]
+async fn each_switch_removes_its_own_controls_and_only_those() {
+    let (e, _) = engine();
+    let csv = |names: &[&'static str]| -> Vec<&'static str> {
+        let has = |n: &&str| cfg!(feature = "csv") || !["export", "import"].contains(n);
+        names.iter().copied().filter(has).collect()
+    };
+    let all = csv(&[
+        "create",
+        "edit",
+        "delete",
+        "checkboxes",
+        "delete selected",
+        "delete all",
+        "export",
+        "import",
+    ]);
+    let without = |gone: &[&str]| -> Vec<&'static str> {
+        all.iter().copied().filter(|c| !gone.contains(c)).collect()
+    };
+    let t = || Table::new(&e, "post");
+    let bulk = ["checkboxes", "delete selected", "delete all"];
+    for (switch, table, expect) in [
+        // The positive control: every marker is found when everything is on.
+        ("all on", t(), all.clone()),
+        ("create(false)", t().create(false), without(&["create"])),
+        ("edit(false)", t().edit(false), without(&["edit"])),
+        ("delete(false)", t().delete(false), without(&["delete", bulk[0], bulk[1], bulk[2]])),
+        ("bulk_delete(false)", t().bulk_delete(false), without(&bulk)),
+        ("import(false)", t().import(false), without(&["import"])),
+        ("export(false)", t().export(false), without(&["export"])),
+        ("read_only(true)", t().read_only(true), csv(&["export"])),
+    ] {
+        assert_eq!(drawn(&render(&table, &list()).await), expect, "{switch}");
+    }
+}
+
+#[tokio::test]
+async fn a_dialog_switched_off_is_not_opened_by_typing_its_url() {
+    let (e, _) = engine();
+    let t = || Table::new(&e, "post");
+    for (url, on, off) in [
+        ("new=1", t(), t().create(false)),
+        ("edit=7", t(), t().edit(false)),
+        ("import=1", t(), t().import(false)),
+    ] {
+        if url != "import=1" || cfg!(feature = "csv") {
+            assert!(render(&on, &ViewState::from_query(url)).await.contains("<dialog"), "{url}");
+        }
+        assert!(!render(&off, &ViewState::from_query(url)).await.contains("<dialog"), "{url}");
+    }
+}
+
+#[tokio::test]
+async fn each_control_follows_its_own_operations_permission() {
+    // A gate that allows editing but neither creating nor deleting: only Edit is drawn. Before,
+    // every write control followed Create alone.
+    struct UpdateOnly;
+    #[async_trait]
+    impl Authz for UpdateOnly {
+        async fn authorize(&self, op: Operation, _h: &HeaderMap) -> Decision {
+            match op {
+                Operation::Create | Operation::Delete => Decision::Denied,
+                _ => Decision::Allow,
+            }
+        }
+    }
+    let (e, _) = engine_with(Arc::new(UpdateOnly));
+    let on = drawn(&render(&Table::new(&e, "post"), &list()).await);
+    let expect: Vec<&str> =
+        ["edit", "export"].into_iter().filter(|c| *c == "edit" || cfg!(feature = "csv")).collect();
+    assert_eq!(on, expect);
+}
+
 // ---------- decoding a posted form ----------
 
 /// Submit a body and return what the backend actually received.

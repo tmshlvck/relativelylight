@@ -769,7 +769,9 @@ and in all three examples.
 | `per_page_max(n)` | the largest page this table will fetch, however large a `?per_page=` asks for (default **10,000**) |
 | `detail(bool)` | the per-row **View** action and its read-only dialog (default on) |
 | `detail_href("/post/{id}")` | point **View** at a page of the app's own instead of the dialog |
-| `read_only(bool)` | no Create/Edit/Delete and no dialog, for anyone |
+| `create` / `edit` / `delete` / `bulk_delete` / `import(bool)` | each write action, separately (default on) — see *Which controls a table offers* below |
+| `export(bool)` | the **Export CSV** link, and `Table::csv` (default on) |
+| `read_only(bool)` | every write off, for anyone; export stays |
 | `confirm(bool)` | an `onclick` confirm on destructive buttons (default on) |
 | `columns([…])` | which columns the **table** shows, and in what order (default: all of them) |
 | `fields([…])` / `omit([…])` | which columns the **dialog's form** shows, and in what order |
@@ -872,6 +874,29 @@ The page is yours, and so is its gate: `Engine` is ungated, so ask
 `engine.decide("post", Operation::Read, &headers)` before `engine.get("post", &id)` — the check the
 table makes before its own dialog. In `Admin` it is per entity:
 `.entity_with("post", |t| t.detail_href("/post/{id}"))`. (Example: `crud`'s `/post/{id}`.)
+
+**Which controls a table offers.** A write control is drawn when **its switch is on and the model's gate allows its operation** to this
+caller: `+ New` and Import ask `Create`, Edit asks `Update`, the deletes ask `Delete`. A switch that
+is off is also a refusal — `submit` answers a posted write it doesn't offer with `403` before the gate
+is asked, so a hidden button can't be reached by posting its name. The gate stays the authorization
+boundary; a switch only narrows what this surface does.
+
+| Switch | Removes |
+|---|---|
+| `create(false)` | `+ New` and the `?new=1` dialog |
+| `edit(false)` | each row's Edit, the `?edit=` dialog, and the View dialog's Edit button |
+| `delete(false)` | every delete: the row's Delete and the bulk ones |
+| `bulk_delete(false)` | the row checkboxes, "Delete selected" and "Delete all N matching"; the row's Delete stays |
+| `import(false)` | "Import CSV…" and the `?import=1` dialog |
+| `export(false)` | "Export CSV"; `Table::csv` returns `403` |
+| `read_only(true)` | all the write switches at once |
+
+```rust
+// Rows are added and fixed one at a time; nothing leaves in bulk, nothing arrives by file.
+Table::new(&engine, "invoice").bulk_delete(false).import(false).export(false)
+```
+
+A `Form` accepts only a create or an update; a posted delete or import is refused the same way.
 
 **Searching.** Typing submits the view two seconds after you stop; Enter submits at once. A submit
 is a page load, so it waits for a pause rather than chasing keystrokes — and the input takes focus
