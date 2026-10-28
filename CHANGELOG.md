@@ -47,6 +47,13 @@ is easy to miss in a diff.
 
 ### Added
 
+- **`WriteEvent::actor`** — the username on every `auth` event. A self-service password change
+  rotates the session before its event fires, so `auth.identify(ev.headers)` found nobody and audit
+  logs showed no actor. `None` from `crud` and `blob`: resolve from `headers` as before.
+- **`Auth::same_site_lax(true)`** issues the session and CSRF cookies `SameSite=Lax` instead of
+  `Strict`, so a link to the app from a mail or chat arrives signed in. Writes still need the CSRF
+  token; a cross-site link to `/logout` then signs the user out. `Csrf::same_site_lax` for a
+  standalone checker.
 - **Per-action switches on `Table`: `create`, `edit`, `delete`, `bulk_delete`, `import`, `export`**
   (all on by default, so `Admin` and existing tables are unchanged). Each removes its control and
   makes `submit` (or `Table::csv`) refuse the operation with `403` before the gate is asked.

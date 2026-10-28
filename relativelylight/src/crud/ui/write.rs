@@ -353,6 +353,7 @@ async fn notify(
             before: before.cloned(),
             after: after.cloned(),
             before_rows,
+            actor: None, // the gate resolved the caller; `crud` never names one
             headers,
             client_ip,
             version: None, // `crud` rows have no version chain — see `observe::WriteEvent::version`

@@ -987,6 +987,7 @@ impl<B: BlobBackend> BlobStore<B> {
             before: None,
             before_rows: &[],
             after,
+            actor: None,
             headers: ctx.headers.unwrap_or(&empty),
             client_ip: ctx
                 .client_ip

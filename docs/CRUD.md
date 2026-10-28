@@ -1162,7 +1162,8 @@ pub struct WriteEvent<'a> {
     pub before: Option<Value>,  // prior row (single update/delete); None on create and bulk delete
     pub before_rows: &'a [Value], // every row a DELETE removed: 1 for a single, N for a bulk, else empty
     pub after: Option<Value>,   // new row (create/update); None on delete
-    pub headers: &'a HeaderMap, // resolve the actor (auth.identify) + read X-Forwarded-For
+    pub actor: Option<&'a str>, // the username, from `auth`'s own events; None from crud
+    pub headers: &'a HeaderMap, // resolve the actor (auth.identify) when `actor` is None
     pub client_ip: IpAddr,        // the caller, already resolved by middleware::resolve_real_ip
 }
 
@@ -1187,10 +1188,13 @@ is the only moment at which they can be read.
 If you only want the count, use `after["deleted"]` or `before_rows.len()`; nothing forces a big
 "delete all" through an audit table row by row.
 
-The library provides only the hook. The app owns the audit table, resolves the actor from `headers`
-(`auth.identify`), and handles retention; the address arrives already resolved. Hand the same `Arc` to
-`Auth::on_write` ([AUTH.md](AUTH.md)) and one sink sees both surfaces: `source` tells them apart
-(`autocrud` here, `auth-profile` and `auth-admin` there). Times are UTC `i64` seconds ([TIME.md](TIME.md)).
+The library provides only the hook. The app owns the audit table, takes the actor from `actor` or
+resolves it from `headers` (`auth.identify`), and handles retention. `auth`'s events always carry
+`actor`: a self-service password change rotates the session before its event fires, so its headers
+no longer identify anyone. `crud`'s are `None`, since the gate resolved the caller. The address
+arrives already resolved. Hand the same `Arc` to `Auth::on_write` ([AUTH.md](AUTH.md)) and one sink
+sees both surfaces: `source` tells them apart (`autocrud` here, `auth-profile` and `auth-admin`
+there). Times are UTC `i64` seconds ([TIME.md](TIME.md)).
 
 **Runnable:** [`examples/audit`](../examples/audit/src/main.rs) — one sink on both `on_write`s,
 printing `source op entity#key actor@address` and a per-field diff. The sink runs **inside the

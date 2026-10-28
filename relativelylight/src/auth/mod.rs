@@ -588,6 +588,8 @@ struct Inner {
     login_path: String,
     profile_path: String,
     secure_cookies: bool,
+    /// `SameSite=Lax` instead of `Strict` (see [`Auth::same_site_lax`]).
+    same_site_lax: bool,
     /// The **absolute** session lifetime (see [`Auth::session_ttl_secs`]).
     ttl_secs: i64,
     /// The **idle** session lifetime, `0` = no idle timeout (see [`Auth::session_idle_secs`]).
@@ -724,6 +726,7 @@ impl Inner {
         let mut csrf = crate::csrf::Csrf::new()
             .cookie_name(self.csrf_cookie.clone())
             .secure(self.secure_cookies)
+            .same_site_lax(self.same_site_lax)
             .ttl_secs(self.ttl_secs);
         // Carried on the handle rather than applied at the call sites, so the app's page covers this
         // module's forms, `csrf::enforce` on the app's own routes, and any `Csrf::reject` it calls itself.
@@ -755,9 +758,11 @@ impl Inner {
 
     /// Fire the audit observer for a mutating auth action (no-op if none registered). `after` should
     /// describe *what* changed without secrets (never a password hash / TOTP secret).
+    #[allow(clippy::too_many_arguments)]
     async fn notify(
         &self,
         source: &'static str,
+        actor: &str,
         entity: &str,
         key: Option<String>,
         after: serde_json::Value,
@@ -773,6 +778,7 @@ impl Inner {
             before: None,
             after: Some(after),
             before_rows: &[], // auth writes are never deletes
+            actor: Some(actor),
             headers,
             client_ip,
             version: None, // `auth` rows have no version chain — see `observe::WriteEvent::version`
@@ -831,6 +837,7 @@ impl Auth {
                 login_path: "/login".into(),
                 profile_path: "/profile".into(),
                 secure_cookies: true,
+                same_site_lax: false,
                 ttl_secs: 7 * 24 * 3600,
                 idle_secs: 8 * 3600,
                 observer: None,
@@ -929,6 +936,18 @@ impl Auth {
     /// Set the `Secure` cookie attribute (default `true`; set `false` for local http).
     pub fn secure_cookies(mut self, on: bool) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().secure_cookies = on;
+        self
+    }
+
+    /// Issue the session and CSRF cookies `SameSite=Lax` instead of `Strict` (default `false`).
+    ///
+    /// Under `Strict`, a user who follows a link to the app from another site (a mail, a chat, a
+    /// ticket) arrives without their session and sees the login page. `Lax` sends the cookie on
+    /// such a top-level `GET` — never on a cross-site `POST`, and every write still needs the CSRF
+    /// token. The cost: a link elsewhere to `/logout` signs the user out. `SameSite=None` is not
+    /// offered. See `docs/AUTH.md` §3.
+    pub fn same_site_lax(mut self, on: bool) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().same_site_lax = on;
         self
     }
 
@@ -1639,6 +1658,7 @@ async fn profile_submit(
     inner
         .notify(
             "auth-profile",
+            &who.username,
             "auth_user",
             Some(who.id.clone()),
             serde_json::json!({ "password_changed": true, "sessions_revoked": true }),
@@ -1779,6 +1799,7 @@ async fn manage_submit(
     inner
         .notify(
             "auth-admin",
+            &who.username,
             "auth_user",
             Some(id.clone()),
             serde_json::json!({
@@ -1937,6 +1958,7 @@ async fn recovery_regenerate(
             inner
                 .notify(
                     "auth-profile",
+                    &who.username,
                     "auth_user",
                     Some(who.id.clone()),
                     serde_json::json!({ "recovery_codes_reissued": codes.len() }),
@@ -1990,6 +2012,7 @@ async fn sessions_revoke(
     inner
         .notify(
             "auth-profile",
+            &who.username,
             "auth_user",
             Some(who.id.clone()),
             serde_json::json!({ "sessions_revoked": revoked }),
@@ -2221,11 +2244,11 @@ fn csrf_rejected(inner: &Inner) -> Response {
         .into_response()
 }
 
-/// Build the session cookie (HttpOnly, SameSite=Strict, Path=/, configurable Secure + Max-Age).
+/// Build the session cookie: HttpOnly, SameSite Strict or Lax, Path=/, Secure if set, Max-Age.
 fn session_cookie(inner: &Inner, token: String) -> Cookie<'static> {
     Cookie::build((inner.cookie_name.clone(), token))
         .http_only(true)
-        .same_site(SameSite::Strict)
+        .same_site(if inner.same_site_lax { SameSite::Lax } else { SameSite::Strict })
         .path("/")
         .secure(inner.secure_cookies)
         .max_age(time::Duration::seconds(inner.ttl_secs))

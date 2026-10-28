@@ -7,7 +7,8 @@
 //! the library fires a [`WriteEvent`] at the points that do — each `crud` write handler and each
 //! mutating `auth` handler — carrying the change **and** the request context ([`headers`] +
 //! [`client_ip`]). The app registers one [`WriteObserver`] (via `Crud::on_write` / `Auth::on_write`),
-//! resolves the actor itself (e.g. `auth.identify(ev.headers)`), and persists a row in its own audit
+//! takes the actor from [`actor`](WriteEvent::actor) or resolves it itself
+//! (`auth.identify(ev.headers)`), and persists a row in its own audit
 //! table. The address arrives **already resolved** — see
 //! [`middleware::resolve_real_ip`](crate::middleware::resolve_real_ip) — so every audit row names the
 //! same client the lockout and the access log did.
@@ -72,7 +73,15 @@ pub struct WriteEvent<'a> {
     pub before_rows: &'a [Value],
     /// New row state where known (create/update); `None` on delete.
     pub after: Option<Value>,
-    /// The request headers — resolve the actor from here (`auth.identify`).
+    /// The username of the caller, when the emitter authenticated them itself: every `auth` event.
+    /// `None` from `crud` and `blob`, which leave identity to the gate — resolve it from
+    /// [`headers`](WriteEvent::headers).
+    ///
+    /// It matters for a self-service password change, which rotates the session before the event
+    /// fires: `auth.identify(headers)` then finds nobody, because that cookie is already spent.
+    pub actor: Option<&'a str>,
+    /// The request headers — resolve the actor from here (`auth.identify`) when
+    /// [`actor`](WriteEvent::actor) is `None`.
     pub headers: &'a HeaderMap,
     /// The caller's address, already resolved by
     /// [`middleware::resolve_real_ip`](crate::middleware::resolve_real_ip) — so an audit row records the

@@ -953,6 +953,65 @@ fn profile_routes(other_id: i32) -> Vec<(&'static str, String, String)> {
     ]
 }
 
+/// `(source, actor, what identify(headers) finds)` for one event.
+type Seen = (&'static str, Option<String>, Option<String>);
+
+#[derive(Default)]
+struct Actors {
+    auth: std::sync::OnceLock<Auth>,
+    seen: std::sync::Mutex<Vec<Seen>>,
+}
+
+#[async_trait::async_trait]
+impl crate::observe::WriteObserver for Actors {
+    async fn on_write(&self, ev: &crate::observe::WriteEvent<'_>) {
+        let identified = match self.auth.get() {
+            Some(auth) => auth.identify(ev.headers).await.map(|i| i.username),
+            None => None,
+        };
+        self.seen.lock().unwrap().push((ev.source, ev.actor.map(str::to_string), identified));
+    }
+}
+
+#[tokio::test]
+async fn an_auth_event_names_its_actor_even_after_the_session_rotated() {
+    let actors = Arc::new(Actors::default());
+    let fx = Fx::with(|a| a.on_write(actors.clone())).await;
+    let _ = actors.auth.set(fx.auth.clone());
+    fx.user("alice").await;
+    let bob = fx.user("bob").await;
+    fx.user_in("admin", "admin").await;
+
+    // A self-service password change: the session rotates before the event fires.
+    let alice = fx.cookie(&fx.session_for("alice").await);
+    let change = form(&[
+        ("current_password", PW),
+        ("new_password", OTHER_PW),
+        ("confirm_password", OTHER_PW),
+    ]);
+    fx.post("/profile", &change, Some(&alice)).await;
+    // A manager's reset of someone else.
+    let admin = fx.cookie(&fx.session_for("admin").await);
+    let reset = form(&[
+        ("current_password", PW),
+        ("new_password", OTHER_PW),
+        ("confirm_password", OTHER_PW),
+    ]);
+    fx.post(&format!("/profile/{bob}"), &reset, Some(&admin)).await;
+
+    let seen = actors.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "both writes fired an event: {seen:?}");
+    let (source, actor, identified) = &seen[0];
+    assert_eq!((*source, actor.as_deref()), ("auth-profile", Some("alice")));
+    // Why the field exists: the headers no longer resolve to anyone.
+    assert_eq!(identified.as_deref(), None, "the rotated cookie identifies nobody");
+    // The positive control: an event whose session survives resolves the same name both ways.
+    let (source, actor, identified) = &seen[1];
+    assert_eq!((*source, actor.as_deref()), ("auth-admin", Some("admin")));
+    assert_eq!(identified.as_deref(), Some("admin"));
+    assert!(fx.password_works("alice", OTHER_PW).await && fx.password_works("bob", OTHER_PW).await);
+}
+
 #[tokio::test]
 async fn anonymous_and_bogus_sessions_reach_no_profile_route() {
     let fx = Fx::new().await;
@@ -2932,6 +2991,45 @@ async fn every_unsafe_auth_route_rejects_a_missing_or_mismatched_token() {
     assert!(!fx.password_works("victim", OTHER_PW).await);
     assert_eq!(fx.row("victim").await.totp_secret.as_deref(), Some(victim_secret.as_str()));
     assert!(fx.row("admin").await.totp_pending.is_none(), "no enrolment was started");
+}
+
+#[tokio::test]
+async fn same_site_lax_relaxes_both_cookies_and_a_post_still_needs_the_token() {
+    // The Strict default is asserted by the cookie tests above and below; this is the opt-in.
+    let fx = Fx::with(|a| a.same_site_lax(true)).await;
+    fx.user("alice").await;
+    let csrf = fx.auth.csrf().cookie().to_string();
+    let find = |res: &Resp, name: &str| {
+        res.set_cookies().into_iter().find(|c| c.starts_with(name)).expect(name).to_string()
+    };
+
+    let page = fx.get("/login", None).await;
+    assert!(find(&page, &csrf).contains("SameSite=Lax"), "the token cookie follows the setting");
+    let token = page.session_token(&csrf).expect("token value");
+
+    // Lax is not a weaker check: a post without the token is refused exactly as under Strict.
+    let res = fx
+        .post_raw(
+            "/login",
+            &form(&[("username", "alice"), ("password", PW)]),
+            Some(&format!("{csrf}={token}")),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "no token, no login");
+    assert!(res.session_token(fx.auth.session_cookie_name()).is_none());
+
+    // The positive control: with the token it logs in, and both cookies come back Lax.
+    let res = fx
+        .post_raw(
+            "/login",
+            &form(&[("username", "alice"), ("password", PW), ("_csrf", &token)]),
+            Some(&format!("{csrf}={token}")),
+        )
+        .await;
+    res.assert_redirect("/");
+    let session = find(&res, fx.auth.session_cookie_name());
+    assert!(session.contains("SameSite=Lax") && session.contains("HttpOnly"), "{session}");
+    assert!(find(&res, &csrf).contains("SameSite=Lax"), "the rotated token too");
 }
 
 #[tokio::test]

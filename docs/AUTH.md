@@ -83,9 +83,14 @@ session. **Bearer tokens remain first-class for the app's own API — and stay t
 receives the headers, so an app verifies its own token and answers `Decision` from it, without this crate
 having an opinion on how tokens are shaped, scoped or stored.
 
-Cookie attributes: `HttpOnly`, `Secure` (configurable off for local http), `SameSite=Strict` (or
-`Lax` if the app needs top-level cross-site GETs), `Path=/`, a rolling idle timeout + absolute
-lifetime.
+Cookie attributes: `HttpOnly`, `Secure` (configurable off for local http), `SameSite=Strict`,
+`Path=/`, a rolling idle timeout + absolute lifetime.
+
+**`SameSite=Lax`** (`Auth::same_site_lax(true)`, for the session and CSRF cookies together): under
+`Strict`, a user following a link to the app from a mail, a chat or a ticket arrives without their
+session and meets the login page. `Lax` sends the cookie on that top-level `GET` and still never on
+a cross-site `POST`; every write needs the CSRF token either way. The cost is that a link elsewhere
+to `/logout` signs the user out. `SameSite=None` is not offered.
 
 ## 4. Middleware the module provides
 

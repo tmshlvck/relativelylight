@@ -163,9 +163,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///   events, so this is what tells them apart.
 /// - **`before` / `after`** — the row either side of the change, secrets already redacted by the
 ///   emitter. `before` is `None` on a create, `after` is `None` on a delete.
-/// - **`headers`** — resolve the actor from these. The library deliberately does *not* name one for
-///   you: an app may authenticate by session, by bearer token, or by a service account, and only it
-///   knows which.
+/// - **`actor`** — the username, on `auth`'s own events (it authenticated the caller itself).
+/// - **`headers`** — otherwise resolve the actor from these. `crud` deliberately does *not* name
+///   one for you: an app may authenticate by session, by bearer token, or by a service account, and
+///   only it knows which.
 /// - **`client_ip`** — already resolved by `resolve_real_ip`, so this line's address is the same one
 ///   the request log printed and the lockout counted.
 ///
@@ -187,18 +188,17 @@ impl AuditLog {
 #[async_trait::async_trait]
 impl WriteObserver for AuditLog {
     async fn on_write(&self, ev: &WriteEvent<'_>) {
-        // Resolving the actor is the app's job, from the headers the event carries. Two cases print
-        // `-`: a write with no session at all (a seeder, or a route authenticating some other way),
-        // and — worth knowing — a **self-service password change**, because that write rotates the
-        // caller's session id, so the cookie on the request it came from is already spent by the
-        // time this runs. The event's `key` still names the row, and a manager's reset (source
-        // `auth-admin`) names the manager normally.
-        let who = match self.auth.get() {
-            Some(auth) => match auth.identify(ev.headers).await {
+        // `auth`'s events name their actor. A self-service password change has to: it rotates the
+        // session before this runs, so its cookie identifies nobody. Otherwise resolving the actor
+        // is the app's job, from the headers; `-` is a write with no session at all (a seeder, or
+        // a route authenticating some other way).
+        let who = match (ev.actor, self.auth.get()) {
+            (Some(actor), _) => actor.to_string(),
+            (None, Some(auth)) => match auth.identify(ev.headers).await {
                 Some(id) => id.username,
                 None => "-".to_string(),
             },
-            None => "-".to_string(),
+            (None, None) => "-".to_string(),
         };
         let key = ev.key.clone().unwrap_or_else(|| "*".into()); // `*` = a bulk delete: no single row
         println!(

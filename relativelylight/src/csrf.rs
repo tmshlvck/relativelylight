@@ -68,6 +68,8 @@ pub struct Csrf {
     max_upload: usize,
     cookie: String,
     secure: bool,
+    /// `SameSite=Lax` instead of `Strict` ([`Csrf::same_site_lax`]).
+    lax: bool,
     ttl_secs: i64,
     /// The app's own rejection page, if it set one ([`Csrf::on_reject`]).
     #[cfg(feature = "axum")]
@@ -79,7 +81,10 @@ pub struct Csrf {
 impl std::fmt::Debug for Csrf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("Csrf");
-        s.field("cookie", &self.cookie).field("secure", &self.secure).field("ttl_secs", &self.ttl_secs);
+        s.field("cookie", &self.cookie)
+            .field("secure", &self.secure)
+            .field("same_site_lax", &self.lax)
+            .field("ttl_secs", &self.ttl_secs);
         #[cfg(feature = "axum")]
         s.field("on_reject", &self.reject.as_ref().map(|_| "<set>").unwrap_or("<default>"));
         s.finish()
@@ -98,6 +103,7 @@ impl Csrf {
         Self {
             cookie: DEFAULT_COOKIE.into(),
             secure: true,
+            lax: false,
             ttl_secs: 7 * 24 * 3600,
             max_upload: MAX_BUFFERED_UPLOAD,
             #[cfg(feature = "axum")]
@@ -115,6 +121,13 @@ impl Csrf {
     /// Set the `Secure` cookie attribute (default `true`; `false` for local http).
     pub fn secure(mut self, on: bool) -> Self {
         self.secure = on;
+        self
+    }
+
+    /// Issue the token cookie `SameSite=Lax` instead of `Strict` (default `false`). Follow the
+    /// session cookie: [`Auth::same_site_lax`](crate::auth::Auth::same_site_lax) sets both.
+    pub fn same_site_lax(mut self, on: bool) -> Self {
+        self.lax = on;
         self
     }
 
@@ -243,7 +256,7 @@ impl Csrf {
         // Readable by JS on purpose (the `fetch` clients echo it); the *session* cookie stays HttpOnly.
         Cookie::build((self.cookie.clone(), token))
             .http_only(false)
-            .same_site(SameSite::Strict)
+            .same_site(if self.lax { SameSite::Lax } else { SameSite::Strict })
             .path("/")
             .secure(self.secure)
             .max_age(time::Duration::seconds(self.ttl_secs))
