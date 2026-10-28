@@ -1,0 +1,12 @@
+{#- Shown once: the codes are hashed on the way in, so this page cannot be reproduced. -#}
+<h1 class="h5 mb-3">Recovery codes</h1>
+<div class="alert alert-success">{{ headline }}</div>
+<p class="text-muted small">Each code works <strong>once</strong>. Keep them somewhere you can reach
+without this account — a password manager, or printed. <strong>They are not shown again:</strong> only
+hashes are stored, so this page cannot be reproduced.</p>
+<ul class="list-unstyled bg-body-secondary p-3 rounded" style="columns:2;font-size:1.05rem;letter-spacing:.05em">
+{%- for c in codes %}
+<li><code>{{ c }}</code></li>
+{%- endfor %}
+</ul>
+<a class="btn btn-primary btn-sm" href="/profile">I've saved them</a>

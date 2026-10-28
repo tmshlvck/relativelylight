@@ -1,0 +1,31 @@
+{%- import "auth/_macros.html" as m -%}
+<h1 class="h5 mb-3">Reset password</h1>
+<p class="text-muted">Set a new password for <strong>{{ username }}</strong> — you don't need their current one,
+which is why you have to confirm your own identity below.</p>
+<form method="post" action="/profile/{{ id }}">
+  {% call m::csrf(csrf) %}
+  {% call m::alert(error, success) %}
+  <div class="mb-3">
+    <label class="form-label" for="rl-new">New password</label>
+    <input class="form-control" id="rl-new" name="new_password" type="password" autocomplete="new-password" autofocus>
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="rl-confirm">Confirm new password</label>
+    <input class="form-control" id="rl-confirm" name="confirm_password" type="password" autocomplete="new-password">
+  </div>
+  <hr class="my-3">
+  {%- call m::reauth("rl-mgr-pw", manager_totp_on, "Confirm it's you — this sets a password without knowing the old one, so it's the most valuable thing a stolen session of yours could reach.") %}
+  <button class="btn btn-primary" type="submit">Reset password</button>
+</form>
+<hr class="my-4">
+<h2 class="h6">Two-factor authentication</h2>
+{%- if totp_on %}
+<p class="text-muted small mb-2">This user has 2FA enabled. Disabling it lets them log in with just a password until they set it up again.</p>
+<form method="post" action="/profile/{{ id }}/totp/disable">
+  {% call m::csrf(csrf) %}
+  {%- call m::reauth("rl-mgr-2fa", manager_totp_on, "Confirm it's you before removing someone else's second factor.") %}
+  <button class="btn btn-outline-danger btn-sm" type="submit">Disable 2FA for {{ username }}</button>
+</form>
+{%- else %}
+<p class="text-muted small mb-0">This user has no two-factor authentication set up.</p>
+{%- endif %}

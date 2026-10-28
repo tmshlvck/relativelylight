@@ -1,0 +1,60 @@
+{%- import "auth/_macros.html" as m -%}
+<h1 class="h5 mb-3">Change your password</h1>
+<p class="text-muted small">Signed in as <strong>{{ username }}</strong>.</p>
+<form method="post" action="/profile">
+  {% call m::csrf(csrf) %}
+  {% call m::alert(error, success) %}
+  <div class="mb-3">
+    <label class="form-label" for="rl-current">Current password</label>
+    <input class="form-control" id="rl-current" name="current_password" type="password" autocomplete="current-password" autofocus>
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="rl-new">New password</label>
+    <input class="form-control" id="rl-new" name="new_password" type="password" autocomplete="new-password">
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="rl-confirm">Confirm new password</label>
+    <input class="form-control" id="rl-confirm" name="confirm_password" type="password" autocomplete="new-password">
+  </div>
+  <button class="btn btn-primary" type="submit">Change password</button>
+</form>
+<hr class="my-4">
+<h2 class="h6">Two-factor authentication</h2>
+{%- if totp_on %}
+<p class="text-muted small mb-2">Enabled — a code from your authenticator app is required at login.</p>
+<form method="post" action="/profile/totp/disable">
+  {% call m::csrf(csrf) %}
+  {%- call m::reauth("rl-2fa-off", true, "Turning off your second factor needs confirming — this is what stops someone who has taken over your session from removing it.") %}
+  <button class="btn btn-outline-danger btn-sm" type="submit">Disable 2FA</button>
+</form>
+{%- else %}
+<p class="text-muted small mb-2">Off. Add a second factor with an authenticator app (TOTP).</p>
+<a class="btn btn-outline-primary btn-sm" href="/profile/totp">Set up 2FA</a>
+{%- endif %}
+{%- if let Some(left) = recovery_left %}
+{#- Only with 2FA on: codes recover a second factor, so without one there is nothing for them to do. #}
+<hr class="my-4">
+<h2 class="h6">Recovery codes</h2>
+<p class="text-muted small mb-2">Single-use codes that log you in when your authenticator isn't
+available.
+{%- if *left == 0 %} <strong>None left.</strong> If you lose your authenticator now, only an administrator can get you back in — generate a new set.
+{%- else if *left == 1 %} <strong>1 code left.</strong> Generate a new set soon.
+{%- else if *left <= 3 %} <strong>{{ left }} codes left.</strong> Generate a new set soon.
+{%- else %} {{ left }} unused codes.
+{%- endif %}</p>
+<form method="post" action="/profile/totp/recovery">
+  {% call m::csrf(csrf) %}
+  {%- call m::reauth("rl-rec", true, "Confirm it's you — a new set is a new way into this account.") %}
+  <button class="btn btn-outline-secondary btn-sm" type="submit">Generate new codes</button>
+</form>
+<p class="text-muted small mt-2 mb-0">Generating a set invalidates the previous one.</p>
+{%- endif %}
+<hr class="my-4">
+{#- Other sessions only: a button that signed you out of this page too would be no use. #}
+<h2 class="h6">Other sessions</h2>
+<p class="text-muted small mb-2">Signed in somewhere you'd rather not be — a shared or lost device? Sign
+out everywhere except here.</p>
+<form method="post" action="/profile/sessions/revoke">
+  {% call m::csrf(csrf) %}
+  <button class="btn btn-outline-secondary btn-sm" type="submit">Sign out other sessions</button>
+</form>

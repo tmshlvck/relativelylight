@@ -1,0 +1,14 @@
+{%- import "auth/_macros.html" as m -%}
+<form method="post" action="/login">
+  {% call m::csrf(csrf) %}
+  {% call m::alert(error, success) %}
+  <div class="mb-3">
+    <label class="form-label" for="rl-username">Username</label>
+    <input class="form-control" id="rl-username" name="username" autofocus autocomplete="username">
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="rl-password">Password</label>
+    <input class="form-control" id="rl-password" name="password" type="password" autocomplete="current-password">
+  </div>
+  <button class="btn btn-primary" type="submit">Log in</button>
+</form>

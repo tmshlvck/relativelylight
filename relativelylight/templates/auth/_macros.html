@@ -1,0 +1,29 @@
+{#- Pieces every auth page shares. Askama escapes each `{{ }}`; nothing here is inserted raw. -#}
+
+{%- macro csrf(token) -%}
+<input type="hidden" name="_csrf" value="{{ token }}">
+{%- endmacro -%}
+
+{%- macro alert(error, success) -%}
+{%- if let Some(e) = error %}<div class="alert alert-danger" role="alert">{{ e }}</div>
+{%- else if let Some(s) = success %}<div class="alert alert-success" role="alert">{{ s }}</div>
+{%- endif -%}
+{%- endmacro -%}
+
+{#- The confirm-it's-you inputs for a sensitive action (AUTH.md §5h): the account's password, or a
+    fresh code when it has 2FA. `prefix` keeps the input ids unique when two render on one page. -#}
+{%- macro reauth(prefix, totp_on, hint) %}
+  <p class="text-muted small mb-2">{{ hint }}</p>
+  <div class="mb-2">
+    <label class="form-label small" for="{{ prefix }}-reauth">Your current password</label>
+    <input class="form-control form-control-sm" id="{{ prefix }}-reauth" name="current_password"
+           type="password" autocomplete="current-password">
+  </div>
+  {%- if totp_on %}
+  <div class="mb-2">
+    <label class="form-label small" for="{{ prefix }}-code">…or a code from your authenticator app</label>
+    <input class="form-control form-control-sm" id="{{ prefix }}-code" name="totp_code"
+           inputmode="numeric" autocomplete="one-time-code" placeholder="123456">
+  </div>
+  {%- endif %}
+{%- endmacro -%}

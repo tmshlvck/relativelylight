@@ -1,0 +1,14 @@
+{#- An SSO account, seen by its owner (`managed` false) or a manager: password, 2FA and groups belong
+    to the identity provider, so there is nothing to change here. -#}
+{%- if managed %}
+<h1 class="h5 mb-3">Manage {{ username }}</h1>
+<div class="alert alert-info mb-0">This account signs in through <strong>{{ provider }}</strong> (single
+sign-on). Its password and two-factor settings are managed by the identity provider — there is nothing to
+reset here. Group memberships come from the SSO mapping and are reconciled at each login.</div>
+{%- else %}
+<h1 class="h5 mb-3">Profile</h1>
+<p class="text-muted small">Signed in as <strong>{{ username }}</strong>.</p>
+<div class="alert alert-info mb-0">This account signs in through <strong>{{ provider }}</strong> (single
+sign-on). Its password, two-factor settings, and group memberships are managed by the identity
+provider — there's nothing to change here.</div>
+{%- endif %}

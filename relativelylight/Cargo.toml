@@ -64,7 +64,7 @@ tz = ["dep:jiff"]             # timezone-aware rendering of integer-UTC timestam
 # caller's address from `middleware::RealIp`, which is `#[cfg(feature = "axum")]`. Depending on `dep:axum`
 # alone left `auth`-without-`axum` a combination that didn't compile (and `--all-features` can't catch that,
 # because it turns everything on).
-auth = ["csrf", "axum", "dep:sea-orm", "dep:axum-extra", "dep:argon2", "dep:totp-rs", "dep:sha2"] # sessions/login + TOTP 2FA + Authz gate
+auth = ["csrf", "axum", "dep:askama", "dep:sea-orm", "dep:axum-extra", "dep:argon2", "dep:totp-rs", "dep:sha2"] # sessions/login + TOTP 2FA + Authz gate
 csrf = ["axum", "dep:rand_core", "dep:axum-extra", "dep:time"] # the double-submit CSRF token (the `csrf` module); implied by `auth`
 sso = ["auth", "dep:openidconnect", "dep:regex", "dep:base64"] # OIDC single sign-on (Google / Okta / corporate) + group mapping
 # Content-addressed file storage: a stable handle + an immutable version chain over digest-addressed

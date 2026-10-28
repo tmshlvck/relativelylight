@@ -10,8 +10,6 @@ not here.
   nests; wait for a real need.
 - [ ] **Cross-document view transitions** for POST → 303 → GET. Cheap to try, easy to get wrong (a 422
   re-render animated as a navigation).
-- [ ] **Render `auth`'s pages with Askama**, as `crud::ui` does: one escaping story. It touches every
-  security-tested page, so do it on its own with the negative-path suite as the guard.
 - **`Table`'s API is stable for 0.4** — no split into `List`/`Search`/… pieces; the per-action
   switches cover turning a control off.
 - **No browser tests in CI** (no Playwright); `ui_tests.rs` covers the server half of the picker.

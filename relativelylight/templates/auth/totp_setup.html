@@ -1,0 +1,20 @@
+{%- import "auth/_macros.html" as m -%}
+<h1 class="h5 mb-3">Set up two-factor authentication</h1>
+<p class="text-muted small">Scan this QR code with an authenticator app (or add the setup URL by hand), then enter the 6-digit code it shows to confirm.</p>
+{% call m::alert(error, success) %}
+<div class="text-center mb-3">
+  <img src="{{ qr }}" alt="TOTP QR code" width="200" height="200" style="image-rendering:pixelated">
+</div>
+<p class="small text-muted mb-1">Setup URL (otpauth)</p>
+<pre class="bg-body-secondary p-2 rounded" style="white-space:pre-wrap;word-break:break-all"><code>{{ url }}</code></pre>
+<form method="post" action="/profile/totp">
+  {% call m::csrf(csrf) %}
+  <div class="mb-3">
+    <label class="form-label" for="rl-totp">Authentication code</label>
+    <input class="form-control" id="rl-totp" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus>
+  </div>
+  <hr class="my-3">
+  {%- call m::reauth("rl-2fa-on", totp_on, "Confirm it's you: the code above proves you hold that device, not that the account is yours.") %}
+  <button class="btn btn-primary" type="submit">Verify &amp; enable</button>
+  <a class="btn btn-link" href="/profile">Cancel</a>
+</form>

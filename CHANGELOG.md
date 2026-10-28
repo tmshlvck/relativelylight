@@ -94,6 +94,10 @@ is easy to miss in a diff.
 
 ### Changed
 
+- **`auth`'s pages render through Askama** (`templates/auth/`), as `crud::ui`'s do, so every value
+  they show is escaped by the template rather than by hand. The login error was the one value
+  inserted unescaped; only the crate's own messages reached it. The markup is unchanged apart from
+  entity spelling (`&#60;` for `&lt;`). The `auth` feature now depends on `askama`. Upgrade: none.
 - **Relations are read a page at a time.** A listing used to resolve each relation of each row
   separately — about `N × R` queries for `N` rows and `R` relation columns (601 for a 200-row page of
   posts with an author and tags); it now costs one `IN (…)` query per relation, whatever the page
