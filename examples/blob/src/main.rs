@@ -50,11 +50,12 @@ use relativelylight::crud::ui::{esc_str, Admin, Outcome, ViewState, CSS};
 use relativelylight::middleware::RealIp;
 use relativelylight::observe::{WriteEvent, WriteObserver};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter,
-    QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait,
+    QueryFilter, QueryOrder, Set,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 const ADMIN_GROUP: &str = "admin";
 
@@ -154,7 +155,13 @@ impl WriteObserver for Log {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fresh in-memory database and a scratch directory, seeded on every start.
-    let db = Database::connect("sqlite::memory:").await?;
+    // One permanent connection: an in-memory database lives inside its connection, and the pool
+    // would otherwise retire it after SeaORM's 10-minute idle timeout, taking every table with it
+    // (the next login fails as if the password were wrong). See `examples/model` `setup()`.
+    const FOREVER: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
+    let mut opt = ConnectOptions::new("sqlite::memory:".to_owned());
+    opt.max_connections(1).min_connections(1).idle_timeout(FOREVER).max_lifetime(FOREVER);
+    let db = Database::connect(opt).await?;
     auth::migrate(&db).await?;
     blob::migrate(&db).await?;
     model::migrate(&db).await?;

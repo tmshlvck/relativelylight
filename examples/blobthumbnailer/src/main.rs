@@ -35,9 +35,10 @@ use relativelylight::crud::ui::esc_str;
 use relativelylight::middleware::RealIp;
 use relativelylight::observe::{WriteEvent, WriteObserver};
 use sea_orm::entity::prelude::*;
-use sea_orm::{ActiveModelTrait, Database, Schema, Set};
+use sea_orm::{ActiveModelTrait, ConnectOptions, Database, Schema, Set};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// The app's own table: a picture, and the thumbnail generated for it. **Two handles**, because a
 /// thumbnail is a document like any other — not a variant hanging off the first one.
@@ -86,7 +87,13 @@ impl WriteObserver for Log {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = Database::connect("sqlite::memory:").await?;
+    // One permanent connection: an in-memory database lives inside its connection, and the pool
+    // would otherwise retire it after SeaORM's 10-minute idle timeout, taking every table with it
+    // (the next login fails as if the password were wrong). See `examples/model` `setup()`.
+    const FOREVER: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
+    let mut opt = ConnectOptions::new("sqlite::memory:".to_owned());
+    opt.max_connections(1).min_connections(1).idle_timeout(FOREVER).max_lifetime(FOREVER);
+    let db = Database::connect(opt).await?;
     blob::migrate(&db).await?;
     let backend = sea_orm::DatabaseBackend::Sqlite;
     let schema = Schema::new(backend);
