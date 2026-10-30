@@ -16,6 +16,10 @@
 //! [`headers`]: WriteEvent::headers
 //! [`client_ip`]: WriteEvent::client_ip
 //!
+//! **Errors the caller must not see** go to a second sink, [`ErrorObserver`]. Where answering
+//! honestly would leak something — a login that failed because the database did, not the password —
+//! the crate answers as if nothing went wrong *there* and hands the real error to the app instead.
+//!
 //! **Times are UTC.** The library stores/returns timestamps as `i64` Unix seconds (UTC); an audit
 //! sink should do the same. (Presenting them in the viewer's local/preferred timezone is a frontend
 //! concern — see `docs/TIME.md`.)
@@ -106,5 +110,38 @@ pub trait WriteObserver: Send + Sync {
 impl<T: WriteObserver + ?Sized> WriteObserver for Arc<T> {
     async fn on_write(&self, event: &WriteEvent<'_>) {
         (**self).on_write(event).await
+    }
+}
+
+/// An error the crate kept from the caller, handed to the registered [`ErrorObserver`]. The response
+/// said something deliberately unremarkable (a login answers `401 Invalid username or password`
+/// whether the password was wrong or the database was gone), so this is the only place the real cause
+/// surfaces. Without an observer it is dropped: the crate writes nothing to stdout or stderr.
+///
+/// **`#[non_exhaustive]`**, as [`WriteEvent`].
+#[non_exhaustive]
+pub struct ErrorEvent<'a> {
+    /// The surface that hid it, in [`WriteEvent::source`]'s vocabulary (`"auth-login"`).
+    pub source: &'static str,
+    /// What the crate was doing, for a log line: `"credential lookup"`, `"session create"`.
+    pub during: &'static str,
+    /// The error itself. Database errors carry no row data, but a driver's message may name tables or
+    /// columns — fine for a server log, not for a response.
+    pub error: &'a (dyn std::error::Error + Send + Sync),
+    /// The caller's address, resolved as for [`WriteEvent::client_ip`].
+    pub client_ip: IpAddr,
+}
+
+/// A sink for [`ErrorEvent`]s — typically one line to the app's log. Register it with
+/// `Auth::on_error`.
+#[async_trait]
+pub trait ErrorObserver: Send + Sync {
+    async fn on_error(&self, event: &ErrorEvent<'_>);
+}
+
+#[async_trait]
+impl<T: ErrorObserver + ?Sized> ErrorObserver for Arc<T> {
+    async fn on_error(&self, event: &ErrorEvent<'_>) {
+        (**self).on_error(event).await
     }
 }

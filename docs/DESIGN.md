@@ -13,7 +13,7 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 | `crud::ui` | the web UI: form, table, admin panel, relation picker, CSV | [CRUD.md → Web UI](CRUD.md#web-ui-ui) |
 | `auth` | users/groups, sessions, login, TOTP 2FA, OIDC SSO, gate presets | [AUTH.md](AUTH.md) |
 | `middleware` | `resolve_real_ip` — required; the caller's address, resolved once | [AUTH.md §4](AUTH.md#4-middleware-the-module-provides) |
-| `observe` | the write observer for audit logging | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
+| `observe` | the write observer for audit logging, and the error observer for failures a response hides | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
 | `time` | integer-UTC timestamps rendered in the request's zone | [TIME.md](TIME.md) |
 | `validate` | typed field validators and normalizers | [DATAINPUT.md](DATAINPUT.md) |
 | `blob` | content-addressed file storage with a version chain, upload, viewer | [BLOBSTORE.md](BLOBSTORE.md) |

@@ -627,6 +627,54 @@ async fn login_rejects_bad_credentials_without_creating_a_session() {
     }
 }
 
+/// What an [`ErrorObserver`](crate::observe::ErrorObserver) was handed: `(source, during)`.
+#[derive(Default)]
+struct Errors(std::sync::Mutex<Vec<(&'static str, &'static str)>>);
+
+#[async_trait::async_trait]
+impl crate::observe::ErrorObserver for Errors {
+    async fn on_error(&self, ev: &crate::observe::ErrorEvent<'_>) {
+        self.0.lock().unwrap().push((ev.source, ev.during));
+    }
+}
+
+#[tokio::test]
+async fn a_database_failure_at_login_looks_like_bad_credentials_and_is_reported() {
+    let errors = Arc::new(Errors::default());
+    let fx = Fx::with(|a| a.on_error(errors.clone())).await;
+    fx.user("alice").await;
+    fx.user("bob").await;
+    let login = |user: &str, pw: &str| form(&[("username", user), ("password", pw)]);
+
+    // Positive control: a wrong password is an ordinary failure — counted, and no error reported.
+    let res = fx.post("/login", &login("alice", OTHER_PW), None).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    assert!(fx.lockout_row("alice").await.is_some(), "a checked guess is counted");
+    assert!(errors.0.lock().unwrap().is_empty(), "a wrong password is not an error");
+
+    // The session insert fails after a correct password.
+    fx.db.execute_unprepared("DROP TABLE auth_session").await.unwrap();
+    let res = fx.post("/login", &login("bob", PW), None).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED, "no 500 for a failed session insert");
+    assert!(res.body.contains("Invalid username or password"), "the generic message only");
+    assert!(res.session_token(fx.auth.session_cookie_name()).is_none());
+
+    // The credential lookup itself fails: the right password, and still the generic rejection.
+    fx.db.execute_unprepared("DROP TABLE auth_user").await.unwrap();
+    let res = fx.post("/login", &login("bob", PW), None).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    assert!(res.body.contains("Invalid username or password"), "the generic message only");
+    assert!(!res.body.contains("auth_user"), "nothing of the error reaches the page");
+    assert!(res.session_token(fx.auth.session_cookie_name()).is_none());
+    assert!(fx.lockout_row("bob").await.is_none(), "an outage is not a guess");
+
+    assert_eq!(
+        *errors.0.lock().unwrap(),
+        [("auth-login", "session create"), ("auth-login", "credential lookup")],
+        "each hidden failure reached the observer"
+    );
+}
+
 #[tokio::test]
 async fn login_rejects_inactive_and_sso_accounts() {
     let fx = Fx::new().await;

@@ -598,6 +598,8 @@ struct Inner {
     idle_secs: i64,
     /// Optional audit sink; fired from the mutating auth handlers (password change, manager reset).
     observer: Option<Arc<dyn crate::observe::WriteObserver>>,
+    /// Optional sink for errors the responses hide (see [`Auth::on_error`]).
+    error_observer: Option<Arc<dyn crate::observe::ErrorObserver>>,
     /// Wraps the login-form fragment into a full page. Default: a minimal unstyled document; set
     /// [`Auth::login_shell`] to embed it in your Bootstrap (or other) shell so the app styles it.
     login_shell: LoginShell,
@@ -787,6 +789,19 @@ impl Inner {
         };
         observer.on_write(&ev).await;
     }
+
+    /// Hand an error the response won't mention to the error observer (no-op if none registered).
+    async fn report(
+        &self,
+        source: &'static str,
+        during: &'static str,
+        error: &(dyn std::error::Error + Send + Sync),
+        client_ip: std::net::IpAddr,
+    ) {
+        let Some(observer) = &self.error_observer else { return };
+        let ev = crate::observe::ErrorEvent { source, during, error, client_ip };
+        observer.on_error(&ev).await;
+    }
 }
 
 /// Stamp a user's `last_login_at` (UTC Unix seconds). Uses a set-based update so it doesn't bump
@@ -843,6 +858,7 @@ impl Auth {
                 ttl_secs: 7 * 24 * 3600,
                 idle_secs: 8 * 3600,
                 observer: None,
+                error_observer: None,
                 login_shell: Arc::new(default_login_shell),
                 profile_shell: Arc::new(default_profile_shell),
                 profile_extra: None,
@@ -906,6 +922,15 @@ impl Auth {
     /// — see [`crate::observe`]. Share one `Arc` with `Crud::on_write` to capture both surfaces.
     pub fn on_write(mut self, observer: Arc<dyn crate::observe::WriteObserver>) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().observer = Some(observer);
+        self
+    }
+
+    /// Register a sink for errors the login keeps from the visitor — see
+    /// [`crate::observe::ErrorEvent`]. A database failure during sign-in still answers `401 Invalid
+    /// username or password` (an outage is nobody's business at the login form), so without this the
+    /// cause is lost.
+    pub fn on_error(mut self, observer: Arc<dyn crate::observe::ErrorObserver>) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().error_observer = Some(observer);
         self
     }
 
@@ -1250,20 +1275,25 @@ async fn identity_from(inner: &Inner, token: &str) -> Option<Identity> {
 
 /// Verify username + password. Returns the user on success (regardless of 2FA) — the caller decides
 /// whether a second factor is still required (`user.has_totp()`). SSO accounts
-/// (`sso_provider` set) never authenticate by password.
-async fn verify_credentials(inner: &Inner, username: &str, password: &str) -> Option<user::Model> {
-    let user = user::Entity::find()
-        .filter(user::Column::Username.eq(username))
-        .one(&inner.db)
-        .await
-        .ok()??;
-    (user.is_active && !user.is_sso() && verify_password(&user.password_hash, password))
-        .then_some(user)
+/// (`sso_provider` set) never authenticate by password. `Err` is a failed lookup, not a wrong
+/// password: the caller reports it and must not count it against the account.
+async fn verify_credentials(
+    inner: &Inner,
+    username: &str,
+    password: &str,
+) -> Result<Option<user::Model>, DbErr> {
+    let Some(user) =
+        user::Entity::find().filter(user::Column::Username.eq(username)).one(&inner.db).await?
+    else {
+        return Ok(None);
+    };
+    Ok((user.is_active && !user.is_sso() && verify_password(&user.password_hash, password))
+        .then_some(user))
 }
 
 /// Create a session row and return its token. `awaiting_totp` marks it half-authenticated (password
 /// ok, TOTP pending) — [`identity_from`] rejects such sessions until the code is confirmed.
-async fn create_session(inner: &Inner, user_id: i32, awaiting_totp: bool) -> Option<String> {
+async fn create_session(inner: &Inner, user_id: i32, awaiting_totp: bool) -> Result<String, DbErr> {
     let token = new_token();
     let now = now_secs();
     session::ActiveModel {
@@ -1274,9 +1304,8 @@ async fn create_session(inner: &Inner, user_id: i32, awaiting_totp: bool) -> Opt
         awaiting_totp: Set(awaiting_totp),
     }
     .insert(&inner.db)
-    .await
-    .ok()?;
-    Some(token)
+    .await?;
+    Ok(token)
 }
 
 /// Give a user exactly **one** live session, freshly minted: everything else they hold is deleted.
@@ -1287,7 +1316,7 @@ async fn create_session(inner: &Inner, user_id: i32, awaiting_totp: bool) -> Opt
 /// session untouched; deleting every session including the caller's own would sign them out of the page
 /// they are reading. So: mint one, drop the rest.
 async fn resession(inner: &Inner, user_id: i32) -> Option<String> {
-    let token = create_session(inner, user_id, false).await?;
+    let token = create_session(inner, user_id, false).await.ok()?;
     inner.revoke_sessions(user_id, Some(&token)).await;
     Some(token)
 }
@@ -1303,7 +1332,7 @@ async fn resession(inner: &Inner, user_id: i32) -> Option<String> {
 /// authenticated session the moment the victim typed their own code. A new id leaves the attacker
 /// holding a token that was deleted.
 async fn rotate_session(inner: &Inner, old: session::Model) -> Option<String> {
-    let token = create_session(inner, old.user_id, false).await?;
+    let token = create_session(inner, old.user_id, false).await.ok()?;
     // Best-effort: a surviving old row is half-authenticated, so it grants nothing either way.
     let _ = session::Entity::delete_by_id(old.id).exec(&inner.db).await;
     Some(token)
@@ -1344,22 +1373,29 @@ async fn login_submit(
             Html((inner.login_shell)(&login_form_html(Some(&lockout_message(retry)), &token))),
         );
     }
-    let Some(user) = verify_credentials(&inner, &form.username, &form.password).await else {
-        inner.record_failure(&form.username, client_ip).await;
-        let (token, jar) = csrf_token(&inner, &headers, jar);
-        return (
-            StatusCode::UNAUTHORIZED,
-            jar,
-            Html((inner.login_shell)(&login_form_html(
-                Some("Invalid username or password."),
-                &token,
-            ))),
-        )
-            .into_response();
+    let user = match verify_credentials(&inner, &form.username, &form.password).await {
+        Ok(Some(user)) => Some(user),
+        Ok(None) => {
+            inner.record_failure(&form.username, client_ip).await;
+            None
+        }
+        Err(e) => {
+            // The visitor gets the ordinary rejection; the app gets the cause. Not counted: an outage
+            // is no guess, and counting it would lock everyone out once the database is back.
+            inner.report("auth-login", "credential lookup", &e, client_ip).await;
+            None
+        }
+    };
+    let Some(user) = user else {
+        return login_rejected(&inner, &headers, jar);
     };
     let needs_totp = user.has_totp();
-    let Some(token) = create_session(&inner, user.id, needs_totp).await else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
+    let token = match create_session(&inner, user.id, needs_totp).await {
+        Ok(token) => token,
+        Err(e) => {
+            inner.report("auth-login", "session create", &e, client_ip).await;
+            return login_rejected(&inner, &headers, jar);
+        }
     };
     // Credentials accepted → forget this account's failures (the address's are left alone: one valid
     // login shouldn't reset a spraying source's budget).
@@ -1377,6 +1413,17 @@ async fn login_submit(
         "/"
     };
     (jar, Redirect::to(dest)).into_response()
+}
+
+/// The one answer to a failed sign-in, whatever failed: `401` and the generic message.
+fn login_rejected(inner: &Inner, headers: &HeaderMap, jar: CookieJar) -> Response {
+    let (token, jar) = csrf_token(inner, headers, jar);
+    (
+        StatusCode::UNAUTHORIZED,
+        jar,
+        Html((inner.login_shell)(&login_form_html(Some("Invalid username or password."), &token))),
+    )
+        .into_response()
 }
 
 /// `GET /login/totp` — the second-factor form, reached after a correct password when 2FA is on. Reads

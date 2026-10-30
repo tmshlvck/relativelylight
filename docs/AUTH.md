@@ -74,7 +74,8 @@ to `/logout` signs the user out. `SameSite=None` is not offered.
   Get the flag right: unproxied with `TrustProxy(true)`, a caller chooses whose address gets locked
   out by sending a header; proxied with `TrustProxy(false)`, every user shares the proxy's address and
   a hundred failures lock the whole login form.
-- **Request logging — yours.** The crate ships none and writes nothing to stdout or stderr.
+- **Request logging — yours.** The crate ships none and writes nothing to stdout or stderr; errors
+  it keeps from the caller reach you through `Auth::on_error` (§5d).
   [`examples/audit`](../examples/audit/src/main.rs) has the dozen lines in two variants: the handler
   puts the caller in the response extensions for the layer to read (free), or the layer calls
   `Auth::identify` itself (one lookup per request). Neither can name a bearer-token caller, which is
@@ -408,6 +409,19 @@ crud.on_write(audit.clone());
 
 The app owns the audit table and its retention. [`examples/audit`](../examples/audit/src/main.rs)
 prints a line per committed write next to a request log built on the same `RealIp`.
+
+**Errors the login hides** go to a second sink, `Auth::on_error`
+([`ErrorObserver`](../relativelylight/src/observe.rs)). A database failure during sign-in — the
+credential lookup or the session insert — answers the visitor exactly like a wrong password (`401`,
+"Invalid username or password"), and is **not** counted against the account or the address: an
+outage is no guess. The cause arrives as an `ErrorEvent` (`source`, `during`, the `error`,
+`client_ip`); without a sink it is dropped, since the crate writes nothing to stdout or stderr.
+
+```rust
+let auth = Auth::new(db.clone(), lockout).on_write(audit.clone()).on_error(Arc::new(MyErrorLog));
+```
+
+[`examples/audit`](../examples/audit/src/main.rs) prints one stderr line per event.
 
 ## 5e. Lockout: the brute-force brake
 

@@ -9,6 +9,25 @@ Work that has landed on `main` but isn't tagged yet lives under **Unreleased**; 
 heading to the version + date and adds a compare link. Per-entry commit hashes are given where a change
 is easy to miss in a diff.
 
+## Unreleased
+
+### Added
+
+- **`Auth::on_error` and `observe::{ErrorEvent, ErrorObserver}`** — a sink for errors the crate keeps
+  from the caller. Register one to log them; the crate still writes nothing itself
+  ([AUTH.md §5d](docs/AUTH.md#5d-write-observer--audit-hook), `examples/audit`).
+
+### Fixed
+
+- **A database failure at login is reported, not mistaken for a wrong password.** The credential
+  lookup swallowed the error, so an outage looked exactly like bad credentials, left no trace, and
+  counted a failure against the account and the address. It still answers `401 Invalid username or
+  password`, now fires `Auth::on_error`, and counts nothing. A failed session insert after a correct
+  password answered `500 session error`; it now gets the same `401`, and is reported the same way.
+- **`examples/blob` and `examples/blobthumbnailer` lost their in-memory database** after ten idle
+  minutes (the pool retired its only connection), after which every login failed. They now pin one
+  permanent connection, as `examples/model` does.
+
 ## [0.4.0] — 2026-10-28
 
 ### Breaking

@@ -7,6 +7,7 @@
 //! |---|---|---|
 //! | request log | [`RealIp`], resolved once at the edge | the line ([`access_log`], [`access_log_identify`]) |
 //! | audit trail | a [`WriteEvent`] per committed write, with that same address | the record ([`AuditLog`]) |
+//! | error log | an [`ErrorEvent`] per failure the response hides (a login's database error) | the line ([`ErrorLog`]) |
 //!
 //! ```text
 //! cargo run -p audit-example                            # serve on :3000, log in as admin / password
@@ -49,7 +50,7 @@ use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::crud::ui::{Admin, Outcome, ViewState, CSS};
 use relativelylight::middleware::{resolve_real_ip, RealIp, TrustProxy};
-use relativelylight::observe::{WriteEvent, WriteObserver};
+use relativelylight::observe::{ErrorEvent, ErrorObserver, WriteEvent, WriteObserver};
 use sea_orm::IdenStatic; // `post::Column::Title.as_str()` — a column name the compiler checks
 use serde_json::Value;
 use std::sync::{Arc, OnceLock};
@@ -88,7 +89,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // default document and `auth`'s Bootstrap-classed validation errors show up as unstyled text.
         .login_shell(|form| page("Log in", form))
         .profile_shell(|frag, _who| page("Profile", frag))
-        .on_write(audit.clone());
+        .on_write(audit.clone())
+        // A login whose database lookup failed still answers "Invalid username or password"; this is
+        // where the real cause goes.
+        .on_error(Arc::new(ErrorLog));
     audit.attach(auth.clone());
 
     // Something ordinary to edit, so there are CRUD writes to audit. Any logged-in user may read and
@@ -209,6 +213,17 @@ impl WriteObserver for AuditLog {
             ev.client_ip,
             changes(ev),
         );
+    }
+}
+
+/// One stderr line per error the crate kept from the caller. The visitor saw an ordinary `401`; an
+/// operator watching only the request log would see a run of failed logins and suspect the users.
+struct ErrorLog;
+
+#[async_trait::async_trait]
+impl ErrorObserver for ErrorLog {
+    async fn on_error(&self, ev: &ErrorEvent<'_>) {
+        eprintln!("error  {:<12} {} from {}: {}", ev.source, ev.during, ev.client_ip, ev.error);
     }
 }
 

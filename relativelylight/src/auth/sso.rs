@@ -475,7 +475,7 @@ async fn callback(
     super::stamp_login(db, user.id, None).await; // no local 2FA on an SSO account, so no step to spend
 
     // SSO accounts have no local 2FA, so this is a full session immediately.
-    let Some(token) = super::create_session(&sso.auth.inner, user.id, false).await else {
+    let Ok(token) = super::create_session(&sso.auth.inner, user.id, false).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, clear, "session error").into_response();
     };
     let jar = clear.add(session_cookie(&sso.auth.inner, token));
