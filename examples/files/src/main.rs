@@ -10,7 +10,7 @@
 //!   see it (here: anyone), what a failed upload leaves behind.
 //!
 //! An app with a database keeps an index table and link tables instead of listing a directory —
-//! docs/FILES.md §5.
+//! docs/FILES.md §4.
 //!
 //! What to look at:
 //!

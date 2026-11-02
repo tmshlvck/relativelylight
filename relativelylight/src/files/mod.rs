@@ -2,13 +2,8 @@
 //!
 //! The guide is **[docs/FILES.md](../../../docs/FILES.md)**; this is the orientation.
 //!
-//! # What this is, and what it is not
-//!
-//! The crate does the parts every app with attachments needs and gets subtly wrong — reading a
-//! streamed upload safely, serving bytes without turning them into script, rendering the form and
-//! the previews — and nothing else. **Where the bytes live, what they are called, who may see them
-//! and how they are listed is the app's**: a directory, a `bytea` column, an object store, with its
-//! own index and link tables (FILES.md §5). Nothing here reads, writes, lists or deletes a file.
+//! Where the bytes live, what they are called, who may see them and how they are listed is the
+//! app's (FILES.md §4). Nothing here reads, writes, lists or deletes a file.
 //!
 //! | Piece | What it does |
 //! |---|---|

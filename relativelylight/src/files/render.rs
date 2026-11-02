@@ -1,4 +1,4 @@
-//! The rendered fragments: [`UploadForm`], [`Preview`], [`Thumbnail`] — FILES.md §4.
+//! The rendered fragments: [`UploadForm`], [`Preview`], [`Thumbnail`] — FILES.md §3.
 //!
 //! Bootstrap 5 HTML fragments, never whole pages, like `crud::ui`: the app owns the `<html>`, the
 //! stylesheet and the layout — and any listing, which is a table or a grid of its own design with
@@ -113,7 +113,7 @@ impl Preview {
 /// A square tile for one file: its thumbnail image, or — for a file without one — a badge with the
 /// file's extension. Links to `href` when given. For a listing the app lays out itself.
 ///
-/// The crate makes no thumbnails: `src` is the app's URL for one (FILES.md §6 and `examples/files`
+/// The crate makes no thumbnails: `src` is the app's URL for one (FILES.md §4 and `examples/files`
 /// generate them on the fly into a cache). Leave it unset for a type that has none, and the tile shows
 /// "PDF", "ZIP", … instead, at the same size, so a mixed grid stays aligned.
 ///

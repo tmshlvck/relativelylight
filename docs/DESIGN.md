@@ -76,28 +76,15 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 
 ## files
 
-- **The crate handles files on a page; the app stores them.** 0.4 shipped a content-addressed store
-  (handle → version chain → digest, three tables, garbage collection). It was correct and nobody's
-  shape: an app wanted small files in a database column, large ones on disk under names a person can
-  read, and an index row of its own pointing at either. The store was neither transactional like a
-  column, scalable like an object store, nor browsable like a directory — so 0.5 removed it and kept
-  what every one of those choices needs.
-- **No storage layer of any size.** A safe flat directory type, an upload-sink trait, a gated router
-  and a file list with delete buttons were all drafted for 0.5 and dropped: each forced a shape on
-  the app — a sink to implement, a listing to fit, a router serving by name — when the app already
-  has its own idea of all three. What remains does no I/O on the app's storage at all.
-- **The upload is a pull API, not a sink.** `Upload::next` yields parts in document order and the app
-  pulls each file's chunks, so the same loop writes to a file, a column or an object store with no
-  trait in between. The crate keeps what is easy to get wrong: the CSRF token checked *before* the
-  first file (a streaming parser can't check it afterwards), limits enforced while streaming, the
-  type sniffed before the first chunk, the hash computed on the way. The price is that cleaning up a
-  refused upload is the app's — which it has to own anyway for its index row or transaction.
-- **Components take values, never call back.** `UploadForm`, `Preview` and `Thumbnail` render from a
-  name, a type and URLs. Listing is the app's: a table or grid of its own design, with the components
-  inside, because what a row shows (an owner, a date, actions) is the app's.
-- **No thumbnailer, no versions, no ownership here.** Thumbnails are the app's, made on request into a
-  content-hash cache ([FILES.md §6](FILES.md#6-thumbnails)) — a pure function would have been
-  shippable, but it would pull in an image decoder for every app using `files`. A revision is a new
-  file; ownership is a link table with real foreign keys and a per-kind gate. Each is policy.
-- **Downloads are the app's route**, authorised by the owning record; the crate supplies the response
-  builder, which is where the inline/attachment decision has to live.
+- **The crate handles files on a page; the app stores them.** Apps keep small files in a database
+  column, large ones on disk or in an object store, and their own index row for either; one store
+  type fits none of them. So nothing in `files` reads, writes, lists or deletes a file.
+- **The upload is a pull API, not a sink.** The app pulls each file's chunks, so the same loop writes
+  to a file, a column or an object store with no trait in between. The crate keeps what is easy to get
+  wrong: the CSRF token checked before the first file, limits enforced while streaming, the type
+  sniffed and the hash computed on the way. Cleaning up a refused upload is the app's.
+- **Components take values, never call back.** Listings are the app's, because what a row shows is.
+- **Thumbnails, versions and ownership are the app's** — policy, and an image decoder no other app
+  should pay for.
+- **Downloads are the app's route**; the crate supplies the response, where the inline/attachment
+  decision lives.

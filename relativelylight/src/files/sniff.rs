@@ -7,7 +7,7 @@ pub const SNIFF_BYTES: usize = 1024;
 /// The content type the **bytes** say, from magic numbers — for the handful of types a back office
 /// actually sees.
 ///
-/// Advisory, and deliberately small (FILES.md §7): it decides which tag [`Preview`](super::Preview)
+/// Advisory, and deliberately small (FILES.md §5): it decides which tag [`Preview`](super::Preview)
 /// picks and whether [`to_inline_response`](super::to_inline_response) will render inline, and is
 /// what you compare against the uploader's claim. Anything it doesn't recognise is
 /// `application/octet-stream`, which is always downloaded rather than rendered — the safe default.

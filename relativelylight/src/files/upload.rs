@@ -1,4 +1,4 @@
-//! Reading a posted `multipart/form-data` upload, one part at a time — FILES.md §2.
+//! Reading a posted `multipart/form-data` upload, one part at a time — FILES.md §1.
 //!
 //! **The crate parses, the app stores.** [`Upload::next`] yields the form's parts in the order the
 //! browser sent them: text fields as values, files as a [`FilePart`] the app pulls chunks from and

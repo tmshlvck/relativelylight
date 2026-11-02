@@ -1,4 +1,4 @@
-//! Turning any byte stream into an HTTP reply — FILES.md §3.
+//! Turning any byte stream into an HTTP reply — FILES.md §2.
 //!
 //! **Not a route.** The app's handler authorises the request, opens the bytes from wherever they
 //! live (a file or an object store via [`Download::new`], a database column via

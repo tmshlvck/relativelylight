@@ -1,7 +1,7 @@
 //! The app's storage: **one flat directory**. Not library code — this is the part `relativelylight`
 //! leaves to the app, because a directory, a database column and an object store want different
 //! answers to every question below. An app with a database would keep an index table instead of
-//! listing the directory (docs/FILES.md §5).
+//! listing the directory (docs/FILES.md §4).
 //!
 //! What it has to get right, and does here in a few lines each:
 //!

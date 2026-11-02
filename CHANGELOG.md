@@ -13,31 +13,20 @@ is easy to miss in a diff.
 
 ### Breaking
 
-- **`blob` and `blob-ui` are replaced by `files`: the crate handles files on a page, the app stores,
-  names and lists them.** The content-addressed store (`BlobStore`, `BlobBackend`, `FsBackend`, the
-  `blob_handle` / `blob_version` / `blob` tables, `Receiver`, `Routes`, `Portal`, `Browser`, `Actions`,
-  `Viewer`, verify/collect/copy) is removed. It fit no real app's storage: small files belong in a
-  database column, large ones on disk under readable names, and what is known about a file in the
-  app's own index. Upgrade: export your files with 0.4 first, then follow
-  [docs/MIGRATION-0.5.md](docs/MIGRATION-0.5.md).
+- **`blob` and `blob-ui` are removed in favour of `files`**: the crate no longer stores files; the app
+  does. Upgrade: export stored files with 0.4, then follow [docs/MIGRATION-0.5.md](docs/MIGRATION-0.5.md).
 - **`observe::WriteEvent::version` is removed.** Only the blob store set it. Upgrade: delete the field
   from your observer.
 
 ### Added
 
 - **`files`** (feature `files`; [docs/FILES.md](docs/FILES.md)), with no database and no `crud`:
-  - **`Upload`**, a pull API over a posted form: `next()` yields fields and files in document order,
-    and the app pulls each file's chunks and writes them wherever it keeps files. One file or many;
-    a CSRF token arriving after a file is refused; each file is capped while streaming; its type is
-    sniffed before the first chunk and its size and SHA-256 computed on the way.
-  - `Download` serves any reader or bytes; `to_inline_response` renders inline only an allowlist of
-    types.
-  - Components from plain values: **`UploadForm`** with `multiple()`, **`camera()`**
-    (`capture="environment"`) and `name_field()`, and **`UploadForm::photo()`**, a single button that
-    opens the camera and posts the picture on accept; **`Preview`** (image, PDF, open/download links);
-    **`Thumbnail`**, a tile showing the app's thumbnail or an extension badge.
-  - `examples/files` — upload, preview, download, delete in a directory, with thumbnails made on
-    request into a content-hash cache — replaces `examples/blob` and `examples/blobthumbnailer`.
+  - **`Upload`**, a streaming pull API over a posted form: fields and files in order, the CSRF token
+    required before the first file, per-file limits, type and SHA-256 computed on the way.
+  - **`Download`** with `to_response` / `to_inline_response` (inline only for safe types).
+  - **`UploadForm`** (`multiple`, `camera`, `name_field`, and `photo` — one tap: camera, posted),
+    **`Preview`** and **`Thumbnail`**, rendered from plain values.
+  - `examples/files` replaces `examples/blob` and `examples/blobthumbnailer`.
 
 - **`Auth::on_error` and `observe::{ErrorEvent, ErrorObserver}`** — a sink for errors the crate keeps
   from the caller. Register one to log them; the crate still writes nothing itself
