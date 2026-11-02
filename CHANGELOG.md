@@ -9,12 +9,15 @@ Work that has landed on `main` but isn't tagged yet lives under **Unreleased**; 
 heading to the version + date and adds a compare link. Per-entry commit hashes are given where a change
 is easy to miss in a diff.
 
-## Unreleased
+## [0.4.1] — 2026-11-03
+
+**This release breaks, despite the patch number**: the items below need the steps in
+[docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md#upgrading-from-040-to-041).
 
 ### Breaking
 
 - **`blob` and `blob-ui` are removed in favour of `files`**: the crate no longer stores files; the app
-  does. Upgrade: export stored files with 0.4, then follow [docs/MIGRATION-0.5.md](docs/MIGRATION-0.5.md).
+  does. Upgrade: export stored files with 0.4, then follow [docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md#1-blob--files).
 - **`observe::WriteEvent::version` is removed.** Only the blob store set it. Upgrade: delete the field
   from your observer.
 - **`Table::fixed_filter` holds for the writes, not just the listing.** The form no longer renders
@@ -24,7 +27,7 @@ is easy to miss in a diff.
   column empty, so the operator chose the parent — or a different one — despite the docs promising a
   pre-filled create. Upgrade: nothing, unless a pinned table was how operators moved rows between
   parents; give them an unpinned table or `Admin` for that
-  ([MIGRATION-0.5.md §3](docs/MIGRATION-0.5.md#3-tablefixed_filter-pins-the-writes)).
+  ([MIGRATION-0.4.md](docs/MIGRATION-0.4.md#3-tablefixed_filter-pins-the-writes)).
 
 ### Added
 
@@ -1168,6 +1171,7 @@ Renames the authorization presets to a consistent `<ReadAudience>Read<WriteAudie
 First published release: the `crud` engine + SeaORM backend, the Bootstrap/Alpine admin UI, OpenAPI and
 CSV adapters, and the `auth` module (sessions, login, TOTP 2FA, OIDC SSO, per-model gates).
 
+[0.4.1]: https://github.com/tmshlvck/relativelylight/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/tmshlvck/relativelylight/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/tmshlvck/relativelylight/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/tmshlvck/relativelylight/compare/v0.3.0...v0.3.1

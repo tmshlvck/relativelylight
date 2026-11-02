@@ -9,7 +9,7 @@ on typed columns, writes are posted forms (`POST` → `303` → `GET`).
 Start with [README.md](README.md) (features, quick start, examples) and [docs/APP.md](docs/APP.md)
 (a whole app). The reference guides are [docs/CRUD.md](docs/CRUD.md), [docs/AUTH.md](docs/AUTH.md),
 [docs/TIME.md](docs/TIME.md), [docs/DATAINPUT.md](docs/DATAINPUT.md) and
-[docs/FILES.md](docs/FILES.md); upgrading is [docs/MIGRATION-0.5.md](docs/MIGRATION-0.5.md);
+[docs/FILES.md](docs/FILES.md); upgrading is [docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md);
 the design is [docs/DESIGN.md](docs/DESIGN.md) and open work [docs/TODO.md](docs/TODO.md).
 
 ## Things that are easy to get wrong

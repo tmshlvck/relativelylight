@@ -153,7 +153,7 @@ cargo run -p files-example           # files in a directory: upload, preview, do
 - **[docs/TIME.md](docs/TIME.md)** — timestamps and timezones.
 - **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module.
 - **[docs/FILES.md](docs/FILES.md)** — uploads, downloads and the file components.
-- **[docs/MIGRATION-0.5.md](docs/MIGRATION-0.5.md)** — upgrading from 0.4; [MIGRATION-0.4.md](docs/MIGRATION-0.4.md) from 0.3.
+- **[docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md)** — upgrading to 0.4.1 from 0.4.0, and to 0.4 from 0.3.
 - **[docs/DESIGN.md](docs/DESIGN.md)** — the design and its decisions; **[docs/TODO.md](docs/TODO.md)** — open work.
 - **[CHANGELOG.md](CHANGELOG.md)** — per-release changes.
 - **[CLAUDE.md](CLAUDE.md)** — working *on* the library.
