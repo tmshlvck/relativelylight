@@ -686,6 +686,29 @@ impl Engine {
         }
         self.accessor(slug)?.delete_many(q).await
     }
+
+    /// Those of `ids` that are not rows of `slug` matching every `pins` filter, in order — what
+    /// keeps a write through a pinned view ([`Table::fixed_filter`](crate::crud::ui::Table::fixed_filter))
+    /// on the rows that view shows. No pins, no query: every id is inside.
+    #[cfg(any(feature = "ui", feature = "csv"))]
+    pub(crate) async fn outside(
+        &self,
+        slug: &str,
+        pins: &[(String, String)],
+        ids: &[String],
+    ) -> Result<Vec<String>> {
+        if pins.is_empty() || ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let q = ListQuery { eq: pins.to_vec(), pk_in: ids.to_vec(), all: true, ..Default::default() };
+        let found: Vec<String> = match self.list(slug, &q, true).await {
+            Ok(page) => page.data.iter().map(|it| crate::crud::text::text(Some(&it.id))).collect(),
+            // `BadRequest`: an id that can't even be a key here (text for an integer key).
+            Err(Error::BadRequest(_)) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        Ok(ids.iter().filter(|id| !found.contains(id)).cloned().collect())
+    }
 }
 
 impl Default for Engine {

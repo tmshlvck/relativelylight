@@ -72,6 +72,7 @@ pub(crate) fn check_fields(
     cols: &[Column],
     only: &[String],
     omit: &[String],
+    pinned: &[String],
     creating: bool,
 ) -> Result<()> {
     let known: Vec<&str> = cols.iter().map(render::name_of).collect();
@@ -96,13 +97,14 @@ pub(crate) fn check_fields(
     }
 
     // A create must be able to satisfy every required column; an edit needn't, since the row already
-    // has values for the fields this form doesn't show.
+    // has values for the fields this form doesn't show. A pinned column (`Table::fixed_filter`) is
+    // satisfied without being shown: the write path supplies it.
     if creating {
         let missing: Vec<&str> = cols
             .iter()
             .filter(|c| matches!(c, Column::Field { required: true, read_only: false, .. }))
             .map(render::name_of)
-            .filter(|name| !renders(only, omit, name))
+            .filter(|name| !renders(only, omit, name) && !pinned.iter().any(|p| p == name))
             .collect();
         if !missing.is_empty() {
             return Err(Error::BadRequest(format!(

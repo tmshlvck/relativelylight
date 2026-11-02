@@ -1,6 +1,6 @@
 # Upgrading from 0.4 to 0.5
 
-Every step is a compile error; none is silent. [CHANGELOG.md](../CHANGELOG.md) has the full list.
+Every step but §3 is a compile error; §3 is a behaviour change. [CHANGELOG.md](../CHANGELOG.md) has the full list.
 
 ## 1. `blob` → `files`
 
@@ -28,3 +28,11 @@ tables.
 ## 2. `WriteEvent::version`
 
 Removed. Delete the field from your observer.
+
+## 3. `Table::fixed_filter` pins the writes
+
+A pinned table's form no longer shows the pinned column, its writes always carry the pinned value,
+and a row outside the pin is `404` there ([CRUD.md → A pinned filter](CRUD.md#a-pinned-filter)). Most
+apps need nothing. If operators used a pinned table to move a row to another parent, or a
+`.fields([…])` list named the pinned column, that column is now absent from the form: offer the
+change through an unpinned `Table` or the `Admin`.

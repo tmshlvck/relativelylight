@@ -437,8 +437,9 @@ async fn entity_write(
 /// One author's posts — a page that is *about* one value, so the filter is pinned rather than offered.
 ///
 /// `fixed_filter` gives no control to change it; the table shows it as a chip so the listing can't be
-/// mistaken for the whole set, and a create from here pre-selects that author. It narrows the
-/// **view** only — authorization is [`authz`](relativelylight::authz)'s business, not the table's.
+/// mistaken for the whole set. It holds for the writes too: the form has no author field, a post
+/// created or saved here belongs to this author, and another author's post isn't found here. Who may
+/// write at all is still [`authz`](relativelylight::authz)'s business, not the table's.
 fn pinned<'a>(engine: &'a Engine, author_id: &str) -> Table<'a> {
     Table::new(engine, "post")
         .title("Posts")

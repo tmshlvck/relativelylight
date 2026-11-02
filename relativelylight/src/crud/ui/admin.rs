@@ -93,8 +93,9 @@ impl<'a> Admin<'a> {
     ///
     /// This is the shape that matters when an admin lists many tables of the same kind — fifteen
     /// per-type DNS record tables, say. An operator works inside one zone at a time, so they pick it
-    /// once and it follows them from table to table, because every nav link carries it. Like
-    /// [`Table::fixed_filter`], it narrows a **view** and is not an authorization boundary.
+    /// once and it follows them from table to table, because every nav link carries it. It narrows
+    /// only the **view** — unlike [`Table::fixed_filter`], the forms and writes don't carry it — and
+    /// neither is an authorization boundary.
     pub fn filter(mut self, name: impl Into<String>) -> Self {
         self.filters.push(name.into());
         self

@@ -777,7 +777,7 @@ and in all three examples.
 | `row_class(closure)` | a CSS class per row, from the row — `(row) -> class` |
 | `sort(col)` / `sort_desc(col)` | the default sort, used until the URL says otherwise |
 | `filter(name)` | a filter `<select>` in the toolbar, for a column or a to-one relation |
-| `fixed_filter(name, value)` | a filter **pinned** to one value, with no control — a table *about* that value |
+| `fixed_filter(name, value)` | a filter **pinned** to one value, with no control — a table *about* that value, whose writes stay inside it ([below](#a-pinned-filter)) |
 | `format_cell(col, closure)` | a custom renderer for the column's cells, `(value, row) -> HTML` |
 | `format_view(col, closure)` | the same for the View dialog — independent of `format_cell` |
 | `picker_threshold(n)` | how many target rows a relation may list as a `<select>` / multi-select before it uses the [picker](#picker--choosing-from-a-large-relation) (default 50) |
@@ -855,6 +855,23 @@ none". A value in force that the list lacks — a stale id in a link — is stil
 with nothing selected the browser would show "all", and the control would name a filter the table
 isn't using. A chip always shows the target's **label** (`Author: Ada Lovelace`), resolved by an
 exact id lookup, rather than the id the URL carries.
+
+<a id="a-pinned-filter"></a>**A pinned filter.** `fixed_filter("zone", id)` makes a table that is
+*about* one value — a parent's child rows on the parent's own page. The value shows as a chip with no
+control, and it holds for everything the table does:
+
+- **Listing, export, bulk delete** act on the pinned rows only.
+- **The create/edit form doesn't render the column.** A create is written with the pinned value, an
+  update keeps it, and a value posted for the column anyway is overwritten — so a row can't be
+  created elsewhere or moved out. A required pinned column doesn't make the create form
+  unsatisfiable: the table supplies it.
+- **A row outside the pin is not found here** (`404`): `?edit=` or `?show=` with its id, a one-row
+  delete, an update, and a CSV import row naming its key — which rejects the file, as any bad row
+  does. Import rows without a key are created with the pinned value.
+
+It is still not an authorization boundary: another surface over the same entity (an `Admin`, an
+unpinned table) isn't pinned, and an app's own handler isn't either. Who may write at all is the
+gate's decision. An `Admin` shared [`filter`](#addressing-a-model) narrows the view only.
 
 **The read-only row.** Every table offers a **View** action per row, opening `?show=<pk>` — a dialog
 listing *every* published column, not just the writable ones. It is the only way to see a generated
@@ -1003,8 +1020,9 @@ fifteen per-type DNS record tables, say. An operator works inside one zone at a 
 once and it follows them from table to table, because each nav link carries it — **to the tables
 that have the column**. A link to one that doesn't stays clean, and a filter that reaches a table
 whose entity can't honour it is ignored rather than passed to a backend that would refuse the whole
-listing. So a shared filter narrows every table it means something in, and nothing else. Like `fixed_filter`, it narrows a **view**; scoping who may see what is
-[`authz`](AUTH.md)'s job.
+listing. So a shared filter narrows every table it means something in, and nothing else. Unlike
+`fixed_filter`, it narrows only the **view** — the forms and writes don't carry it; scoping who may see
+what is [`authz`](AUTH.md)'s job.
 
 ### `Picker` — choosing from a large relation
 

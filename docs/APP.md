@@ -321,14 +321,18 @@ one value:
 fn records<'a>(app: &'a App, zone: &str) -> Table<'a> {
     Table::new(&app.engine, "record")
         .title("Records")
-        .fixed_filter("zone", zone)      // pinned: no control, a chip, and a create pre-filled with it
+        .fixed_filter("zone", zone)      // pinned: no control, a chip, and every write in this zone
         .sort("name")
         .per_page(50)
 }
 ```
 
-The pinned value narrows the listing, the CSV export and "delete all matching" together. It is a
-**view**, not an authorization boundary — scoping who may see what is [`authz`](AUTH.md)'s job.
+The pinned value narrows the listing, the CSV export and "delete all matching" together, and it
+holds for the writes: the form doesn't show the column, a create, update or import is written with
+the pinned value, and another zone's record is not found here (to open, update or delete). That makes
+it the way to edit a parent's child rows on the parent's own page. It is still not an authorization
+boundary — another table over `record` isn't pinned, so who may write at all is [`authz`](AUTH.md)'s
+job ([CRUD.md → A pinned filter](CRUD.md#a-pinned-filter)).
 
 ### A form on a page of yours
 

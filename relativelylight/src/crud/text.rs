@@ -43,6 +43,29 @@ pub(crate) fn to_one(raw: &str) -> Value {
     }
 }
 
+/// A pinned filter value (`Table::fixed_filter`) as the write value it stands for: the id a
+/// relation filter names, or the column's own reading of the text. Blank is `NULL`, as the filter
+/// means "rows with none".
+pub(crate) fn pinned(col: &Column, raw: &str, tz: &Tz) -> Value {
+    match col {
+        Column::Relation { .. } => to_one(raw),
+        Column::Field { .. } => field_value(col, raw, tz).unwrap_or(Value::Null),
+    }
+}
+
+/// Write `pins` into a write body, over whatever it carried — a crafted value included.
+pub(crate) fn apply_pins(body: &mut Value, cols: &[Column], pins: &[(String, String)], tz: &Tz) {
+    let Some(map) = body.as_object_mut() else { return };
+    for (name, raw) in pins {
+        let named = |c: &&Column| match c {
+            Column::Field { name: n, .. } | Column::Relation { name: n, .. } => n == name,
+        };
+        if let Some(col) = cols.iter().find(named) {
+            map.insert(name.clone(), pinned(col, raw, tz));
+        }
+    }
+}
+
 /// What `raw`, one typed value for a scalar column, means as a write value. `None` leaves the field
 /// out of the body.
 ///

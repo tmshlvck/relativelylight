@@ -23,6 +23,11 @@ mod list_tests;
 #[cfg(all(test, feature = "ui"))]
 mod relation_tests;
 
+/// `Table::fixed_filter` holding for the writes over a real database: the pinned value written on
+/// create, update and import, and a row outside the pin refused.
+#[cfg(all(test, feature = "ui"))]
+mod pin_tests;
+
 /// A column's transforms end to end over a real database: typed text, `blank_is_null`, and
 /// `on_read`/`on_write` as an inverse pair (form and CSV).
 #[cfg(all(test, feature = "ui"))]

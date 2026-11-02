@@ -175,7 +175,7 @@ impl<'a> Form<'a> {
         }
         let cols = self.engine.columns(&self.slug)?;
         check_widgets(&self.slug, &cols)?;
-        check_fields(&self.slug, &cols, &self.fields, &self.omit, self.edit_id.is_none())?;
+        check_fields(&self.slug, &cols, &self.fields, &self.omit, &[], self.edit_id.is_none())?;
         let tz = Tz::from_headers(headers);
         let row = match &self.edit_id {
             Some(id) => Some(self.engine.get(&self.slug, id).await?),
@@ -230,6 +230,7 @@ impl<'a> Form<'a> {
             slug: &self.slug,
             renders: &shown,
             query: ListQuery::default(),
+            pins: Vec::new(),
             // A form saves one row. Its query is the whole table, so a posted delete-all or import
             // must not get this far.
             writes: Writes {

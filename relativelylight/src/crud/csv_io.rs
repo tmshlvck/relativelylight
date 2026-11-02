@@ -108,6 +108,20 @@ pub async fn import(
     text: &str,
     tz: &Tz,
 ) -> Result<ImportReport> {
+    import_pinned(engine, slug, cols, text, tz, &[]).await
+}
+
+/// [`import`] through a pinned view (`Table::fixed_filter`): every row is written with `pins`,
+/// whatever its own cells say, and a row naming a primary key outside the view is rejected rather
+/// than updated — an import can't reach further than the table it was posted from.
+pub(crate) async fn import_pinned(
+    engine: &Engine,
+    slug: &str,
+    cols: &[Column],
+    text: &str,
+    tz: &Tz,
+    pins: &[(String, String)],
+) -> Result<ImportReport> {
     let pk = engine.pk(slug)?;
     let mut rdr = csv::ReaderBuilder::new().flexible(true).from_reader(text.as_bytes());
     let headers = rdr.headers().map_err(be)?.clone();
@@ -127,6 +141,20 @@ pub async fn import(
     }
     if report.failed > 0 {
         return Ok(report); // unparseable CSV: say so, write nothing
+    }
+    for (_, body) in &mut rows {
+        text::apply_pins(body, cols, pins, tz);
+    }
+    let keys: Vec<String> = rows.iter().filter_map(|(key, _)| key.clone()).collect();
+    let outside = engine.outside(slug, pins, &keys).await?;
+    for (i, (key, _)) in rows.iter().enumerate() {
+        if let Some(key) = key.as_ref().filter(|k| outside.contains(k)) {
+            report.failed += 1;
+            report.errors.push(ImportError { row: i + 2, message: format!("no row {key} in this view") });
+        }
+    }
+    if report.failed > 0 {
+        return Ok(report);
     }
 
     match engine.write_batch(slug, rows).await {

@@ -17,6 +17,14 @@ is easy to miss in a diff.
   does. Upgrade: export stored files with 0.4, then follow [docs/MIGRATION-0.5.md](docs/MIGRATION-0.5.md).
 - **`observe::WriteEvent::version` is removed.** Only the blob store set it. Upgrade: delete the field
   from your observer.
+- **`Table::fixed_filter` holds for the writes, not just the listing.** The form no longer renders
+  the pinned column; every create, update and CSV import through the table is written with the
+  pinned value, whatever was posted; and a row outside the pin is not found there (`?edit=`,
+  `?show=`, update, one-row delete, an import row naming its key). Before, the form offered the
+  column empty, so the operator chose the parent — or a different one — despite the docs promising a
+  pre-filled create. Upgrade: nothing, unless a pinned table was how operators moved rows between
+  parents; give them an unpinned table or `Admin` for that
+  ([MIGRATION-0.5.md §3](docs/MIGRATION-0.5.md#3-tablefixed_filter-pins-the-writes)).
 
 ### Added
 

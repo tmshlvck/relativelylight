@@ -21,6 +21,10 @@ pub(crate) struct Surface<'a> {
     pub(crate) renders: &'a (dyn Fn(&str) -> bool + Send + Sync),
     /// The view's own query, so a bulk delete can only ever hit the rows on screen.
     pub(crate) query: ListQuery,
+    /// The view's pinned filters (`Table::fixed_filter`), as `(name, value)`. Every create, update
+    /// and import writes them; an update or delete of one row is refused unless the row matches
+    /// them — the other half of the form not rendering them.
+    pub(crate) pins: Vec<(String, String)>,
     /// The writes this surface offers. Anything else is refused before the gate is asked: a
     /// control the page doesn't draw must not be reachable by posting its name.
     pub(crate) writes: Writes,
@@ -67,7 +71,11 @@ pub(crate) async fn apply(
     let (before, after, key) = match &op {
         Op::Create | Op::Update => {
             let id = posted.one("_id").unwrap_or("").to_string();
-            let write_body = decode::to_write_body(cols, s.renders, &posted, &tz);
+            let mut write_body = decode::to_write_body(cols, s.renders, &posted, &tz);
+            crate::crud::text::apply_pins(&mut write_body, cols, &s.pins, &tz);
+            if matches!(op, Op::Update) {
+                in_view(s, &id).await?;
+            }
             let mode = if matches!(op, Op::Create) {
                 Mode::New
             } else {
@@ -102,6 +110,7 @@ pub(crate) async fn apply(
             }
         }
         Op::DeleteOne(id) => {
+            in_view(s, id).await?;
             let row = s.engine.delete(s.slug, id).await?;
             done = Some(Done::Deleted(1));
             // Also as `before_rows`, so an observer reads one field for every delete.
@@ -176,6 +185,15 @@ pub(crate) async fn apply(
         target.push_str(&format!("#row-{anchor}"));
     }
     Ok(Outcome::Done(target))
+}
+
+/// Refuse a one-row write to a row the surface's pinned filters leave out — a `404`, as the row
+/// isn't there as far as this view is concerned.
+async fn in_view(s: &Surface<'_>, id: &str) -> Result<()> {
+    match s.engine.outside(s.slug, &s.pins, &[id.to_string()]).await?.is_empty() {
+        true => Ok(()),
+        false => Err(Error::NotFound),
+    }
 }
 
 /// A relation value that names no row of its target, as a field error rather than whatever the
@@ -264,7 +282,7 @@ fn import_rejection(report: &Value) -> Option<ValidationErrors> {
 
 #[cfg(feature = "csv")]
 async fn import_csv(s: &Surface<'_>, cols: &[Column], text: &str, tz: &Tz) -> Result<Value> {
-    let report = crate::crud::csv_io::import(s.engine, s.slug, cols, text, tz).await?;
+    let report = crate::crud::csv_io::import_pinned(s.engine, s.slug, cols, text, tz, &s.pins).await?;
     serde_json::to_value(&report).map_err(|e| Error::Backend(e.to_string()))
 }
 

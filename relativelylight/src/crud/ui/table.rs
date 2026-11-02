@@ -467,8 +467,14 @@ impl<'a> Table<'a> {
         self
     }
     /// A filter pinned to one value and offered as no control — a table that is *about* one value,
-    /// e.g. on a `/zone/{id}/records` page. It narrows a **view**; it is not an authorization
-    /// boundary ([`authz`](crate::authz) is).
+    /// e.g. on a `/zone/{id}/records` page.
+    ///
+    /// It holds for the writes too. The create/edit form doesn't render the column; every create,
+    /// update and CSV import through this table writes the pinned value, whatever the body says;
+    /// and a row outside it is not found here — its `?edit=`/`?show=`, a one-row delete, an update
+    /// or an import naming its key. (Bulk deletes already act on the filtered view.) It is still not
+    /// an authorization boundary: another surface over the same entity isn't pinned, so the gate
+    /// ([`authz`](crate::authz)) is what decides who may write at all.
     pub fn fixed_filter(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.filters.push(FilterSpec {
             name: name.into(),
@@ -546,17 +552,20 @@ impl<'a> Table<'a> {
         let shown = self.shown_columns(&cols)?;
         let per_page_options = self.per_page_options(&state);
         let (controls, chips) = self.filter_views(&cols, &state).await?;
+        let pins = self.pins(&cols)?;
 
         let dialog = match state.mode() {
             // A read-only row is a *read*: a caller who may not write still gets it.
             Mode::Show(id) if self.detail_dialog_on() => {
+                self.in_view(&pins, id).await?;
                 self.detail_dialog(&cols, id, &state, &tz, can.edit).await?
             }
             Mode::New if can.create => {
-                self.dialog(&cols, state.mode(), &state, headers, &csrf).await?
+                self.dialog(&cols, &pins, state.mode(), &state, headers, &csrf).await?
             }
-            Mode::Edit(_) if can.edit => {
-                self.dialog(&cols, state.mode(), &state, headers, &csrf).await?
+            Mode::Edit(id) if can.edit => {
+                self.in_view(&pins, id).await?;
+                self.dialog(&cols, &pins, state.mode(), &state, headers, &csrf).await?
             }
             Mode::Import if can.import => self.import_dialog(&cols, &state, &csrf)?,
             // The list, or a dialog this caller isn't offered here: a typed URL opens nothing.
@@ -647,12 +656,14 @@ impl<'a> Table<'a> {
     ) -> Result<Outcome> {
         let cols = self.engine.columns(&self.slug)?;
         let state = self.effective_state(state, &cols)?;
-        let renders = |name: &str| self.renders(name);
+        let pins = self.pins(&cols)?;
+        let renders = |name: &str| self.form_renders(&pins, name);
         let surface = Surface {
             engine: self.engine,
             slug: &self.slug,
             renders: &renders,
             query: self.list_query(&state),
+            pins: pins.clone(),
             writes: self.writes(),
         };
         apply(&surface, &cols, headers, client_ip, body, &state).await
@@ -919,6 +930,7 @@ impl<'a> Table<'a> {
     async fn dialog(
         &self,
         cols: &[Column],
+        pins: &[(String, String)],
         mode: &Mode,
         state: &ViewState,
         headers: &HeaderMap,
@@ -926,7 +938,8 @@ impl<'a> Table<'a> {
     ) -> Result<String> {
         let creating = *mode == Mode::New;
         let tz = Tz::from_headers(headers);
-        check_fields(&self.slug, cols, &self.fields, &self.omit, creating)?;
+        let pinned: Vec<String> = pins.iter().map(|(name, _)| name.clone()).collect();
+        check_fields(&self.slug, cols, &self.fields, &self.omit, &pinned, creating)?;
         let row = match mode {
             Mode::Edit(id) => Some(self.engine.get(&self.slug, id).await?),
             _ => None,
@@ -934,7 +947,7 @@ impl<'a> Table<'a> {
         let fields = widgets::fields(
             self.engine,
             cols,
-            &|name| self.renders(name),
+            &|name| self.form_renders(pins, name),
             row.as_ref(),
             state,
             &tz,
@@ -1037,6 +1050,31 @@ impl<'a> Table<'a> {
 
     fn renders(&self, name: &str) -> bool {
         renders(&self.fields, &self.omit, name)
+    }
+
+    /// The pinned filters ([`fixed_filter`](Table::fixed_filter)) this entity can honour, as
+    /// `(name, value)` — what every write through this table carries.
+    fn pins(&self, cols: &[Column]) -> Result<Vec<(String, String)>> {
+        Ok(self
+            .applicable_filters(cols)?
+            .into_iter()
+            .filter_map(|f| f.fixed.map(|value| (f.name, value)))
+            .collect())
+    }
+
+    /// Whether the form renders `name`: as [`renders`](Self::renders), except a pinned column, which
+    /// isn't the operator's to change — the write path supplies it.
+    fn form_renders(&self, pins: &[(String, String)], name: &str) -> bool {
+        self.renders(name) && !pins.iter().any(|(pinned, _)| pinned == name)
+    }
+
+    /// Refuse a row the pinned filters leave out, as not found: `?edit=` or `?show=` with another
+    /// parent's id must not open it here.
+    async fn in_view(&self, pins: &[(String, String)], id: &str) -> Result<()> {
+        match self.engine.outside(&self.slug, pins, &[id.to_string()]).await?.is_empty() {
+            true => Ok(()),
+            false => Err(Error::NotFound),
+        }
     }
 }
 
