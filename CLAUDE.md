@@ -9,7 +9,7 @@ on typed columns, writes are posted forms (`POST` → `303` → `GET`).
 Start with [README.md](README.md) (features, quick start, examples) and [docs/APP.md](docs/APP.md)
 (a whole app). The reference guides are [docs/CRUD.md](docs/CRUD.md), [docs/AUTH.md](docs/AUTH.md),
 [docs/TIME.md](docs/TIME.md), [docs/DATAINPUT.md](docs/DATAINPUT.md) and
-[docs/BLOBSTORE.md](docs/BLOBSTORE.md); upgrading is [docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md);
+[docs/FILES.md](docs/FILES.md); upgrading is [docs/MIGRATION-0.5.md](docs/MIGRATION-0.5.md);
 the design is [docs/DESIGN.md](docs/DESIGN.md) and open work [docs/TODO.md](docs/TODO.md).
 
 ## Things that are easy to get wrong
@@ -41,7 +41,7 @@ the design is [docs/DESIGN.md](docs/DESIGN.md) and open work [docs/TODO.md](docs
 ## Working on the library
 
 A Cargo workspace: the crate is `relativelylight/` (`crud/` with `ui/` as the renderer, `auth/`,
-`blob/`, `authz.rs`, `observe.rs`, `time.rs`, `validate.rs`; Askama templates in `templates/`; CSS and
+`files/`, `authz.rs`, `observe.rs`, `time.rs`, `validate.rs`; Askama templates in `templates/`; CSS and
 the picker's script in `assets/`), with runnable examples in `examples/` sharing `examples/model`.
 Deps: SeaORM 2.0, axum 0.8, askama 0.13, jiff 0.2, totp-rs 5.7.
 
@@ -54,7 +54,7 @@ a helper that is dead code in a narrower build. Before a release, check the matr
 as well as errors:
 
 ```bash
-for f in "" crud axum csrf tz csv auth auth,sso crud,ui crud,ui,csv blob blob-ui; do
+for f in "" crud axum csrf tz csv auth auth,sso crud,ui crud,ui,csv files files,csrf; do
   cargo build -p relativelylight --no-default-features ${f:+--features $f} 2>&1 \
     | grep -E "^(error|warning: )" | grep -v "the following packages"
 done
@@ -67,8 +67,10 @@ Don't run `rustfmt` over the whole repo; format only what you touch.
 IdP) and `crud/gate_tests.rs` assert the negative cases over in-memory SQLite: bad credentials,
 unusable sessions, replayed codes, non-manager profile writes, each gate's decision, refused reads,
 CSRF on every write. `crud/ui_tests.rs` covers escaping and form decoding; `crud/transform_tests.rs`
-covers a value's way through form, CSV and the codec against a real database. Touching login, sessions,
-2FA, the profile pages or a gate means extending them, with a positive control so the negatives can't
+covers a value's way through form, CSV and the codec against a real database. `files/tests.rs` covers
+the CSRF token required before the first file, limits holding while streaming, and escaping in the
+components. Touching login, sessions, 2FA, the profile pages, a gate or the upload
+path means extending them, with a positive control so the negatives can't
 pass vacuously ([AUTH.md §9](docs/AUTH.md#9-tests--the-negative-paths)).
 
 **The docs are part of the change.**

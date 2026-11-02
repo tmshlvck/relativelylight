@@ -356,7 +356,6 @@ async fn notify(
             actor: None, // the gate resolved the caller; `crud` never names one
             headers,
             client_ip,
-            version: None, // `crud` rows have no version chain — see `observe::WriteEvent::version`
         })
         .await;
 }

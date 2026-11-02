@@ -47,7 +47,8 @@ URL, verified (and re-authenticated) before it's on.</sub></td>
   Publish your own JSON API over it if you need one.
 - **Auth** (`auth`): sessions, login, TOTP 2FA with recovery codes, lockout, CSRF, OIDC SSO, and a
   per-model gate.
-- **File storage** (`blob`): content-addressed blobs under a stable handle with a version chain.
+- **Files** (`files`): a streaming upload reader (several files, or a phone's camera), safe download
+  responses, and upload-form, preview and thumbnail components. Storage, naming and listing stay yours.
 - **Timezones** (`tz`): integer-UTC storage, rendered server-side in the operator's zone.
 
 ## Quick start
@@ -126,15 +127,14 @@ async fn save(headers: HeaderMap, uri: Uri, RealIp(ip): RealIp,
 | `auth` | | sessions, login, TOTP 2FA, lockout, profile pages, gate presets |
 | `csrf` | | the double-submit CSRF token; implied by `auth` |
 | `sso` | | OIDC single sign-on + group mapping; implies `auth` |
-| `blob` | | content-addressed file storage + version chain |
-| `blob-ui` | | upload, viewer, document browser and admin panel for `blob`; implies `blob` + `ui` |
+| `files` | | streaming upload reader, download responses, upload form/preview/thumbnail components; implies `axum` |
 
 Registered entities need a **single-column primary key**, **single-column to-one FKs**, and
 `Serialize`/`Deserialize` (SeaORM's `with-json`).
 
 ## Examples
 
-All run on port 3000 over a seeded in-memory SQLite, so run one at a time:
+All run on port 3000, so run one at a time; the database ones use a seeded in-memory SQLite:
 
 ```bash
 cargo run -p crud-example            # Table/Form on your own pages, CSV, timezones, the relation picker
@@ -142,8 +142,7 @@ cargo run -p relationfield-example   # the admin's relation input in a hand-writ
 cargo run -p adminpanel-example      # Admin behind login + 2FA (admin / password)
 cargo run -p auth-example            # login, SSO wiring, 2FA, re-auth, the accounts panel (admin / password)
 cargo run -p audit-example           # a request log and a write observer over one resolved address
-cargo run -p blob-example            # file storage: uploads, viewer, browser, ownership (admin / password)
-cargo run -p blobthumbnailer-example # derived content (thumbnails) written by the app
+cargo run -p files-example           # files in a directory: upload, preview, download, delete, thumbnails
 ```
 
 ## Documentation
@@ -153,8 +152,8 @@ cargo run -p blobthumbnailer-example # derived content (thumbnails) written by t
 - **[docs/AUTH.md](docs/AUTH.md)** — sessions, login, 2FA, SSO, gates, CSRF.
 - **[docs/TIME.md](docs/TIME.md)** — timestamps and timezones.
 - **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module.
-- **[docs/BLOBSTORE.md](docs/BLOBSTORE.md)** — file storage.
-- **[docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md)** — upgrading from 0.3.
+- **[docs/FILES.md](docs/FILES.md)** — uploads, downloads and the file components.
+- **[docs/MIGRATION-0.5.md](docs/MIGRATION-0.5.md)** — upgrading from 0.4; [MIGRATION-0.4.md](docs/MIGRATION-0.4.md) from 0.3.
 - **[docs/DESIGN.md](docs/DESIGN.md)** — the design and its decisions; **[docs/TODO.md](docs/TODO.md)** — open work.
 - **[CHANGELOG.md](CHANGELOG.md)** — per-release changes.
 - **[CLAUDE.md](CLAUDE.md)** — working *on* the library.

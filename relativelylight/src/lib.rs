@@ -41,16 +41,17 @@ pub mod crud;
 #[cfg(feature = "auth")]
 pub mod auth;
 
-/// Content-addressed file storage under a stable handle and version chain — see `docs/BLOBSTORE.md`.
-#[cfg(feature = "blob")]
-pub mod blob;
+/// Files on a page — streaming upload, a safe directory, download responses and the list/viewer/upload
+/// components; storage is the app's. See `docs/FILES.md`.
+#[cfg(feature = "files")]
+pub mod files;
 
 /// `application/x-www-form-urlencoded` encode/decode, shared by `csrf`, `time` and `crud::ui`.
 #[cfg(any(feature = "csrf", feature = "tz", feature = "ui"))]
 mod urlform;
 
 /// HTML escaping for fragments built without a template (`ui` implies `tz`, `auth` implies `csrf`).
-#[cfg(any(feature = "csrf", feature = "tz"))]
+#[cfg(any(feature = "csrf", feature = "tz", feature = "files"))]
 mod html;
 
 /// A strict reader for a buffered `multipart/form-data` body (the CSV import; the token in [`csrf`]).

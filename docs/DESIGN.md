@@ -16,16 +16,16 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 | `observe` | the write observer for audit logging, and the error observer for failures a response hides | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
 | `time` | integer-UTC timestamps rendered in the request's zone | [TIME.md](TIME.md) |
 | `validate` | typed field validators and normalizers | [DATAINPUT.md](DATAINPUT.md) |
-| `blob` | content-addressed file storage with a version chain, upload, viewer | [BLOBSTORE.md](BLOBSTORE.md) |
+| `files` | a streaming upload reader, safe download responses, upload/preview/thumbnail components | [FILES.md](FILES.md) |
 
 ## Principles
 
 1. **The library is part of an app, never its frame.** The app owns the router, the page shell and
-   the URLs; modules contribute HTML fragments and the write path behind them. `auth::routes` and
-   `blob::ui::Routes` are opt-in exceptions, mounted where the app chooses.
+   the URLs; modules contribute HTML fragments and the write path behind them. `auth::routes` is the
+   opt-in exception, mounted where the app chooses.
 2. **The contract in the middle is typed and in-process** — `Vec<Column>` + `Page`, not a wire format.
    An app wanting a JSON API writes it over `Engine`, where its versioning belongs.
-3. **No mandatory coupling between modules.** `auth` works without `crud`; `blob` needs neither; an
+3. **No mandatory coupling between modules.** `auth` works without `crud`; `files` needs neither; an
    unused feature costs no dependencies. The one required piece is `middleware::resolve_real_ip`, so
    the lockout, audit events and the app's log agree about who called.
 4. **Authorization is a per-model gate handed the request headers.** It resolves identity itself, so
@@ -74,20 +74,30 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 - **Not here, on purpose:** a registration page, API tokens, request logging. Each is product policy;
   the gate receives the headers, so an app's own tokens need no change here.
 
-## blob
+## files
 
-- **Three identities: content, version, handle.** Content is addressed by digest; a version records
-  one upload (filename, uploader, time); a handle is the stable id app tables reference. A digest is
-  never a foreign-key target: dedup would merge per-upload metadata and every edit would change it.
-  It is the split git, OCI registries and OCFL use.
-- **No `auth` dependency.** Ownership lives in the app's own link table, with a real foreign key and
-  a gate ([BLOBSTORE.md §8](BLOBSTORE.md#8-ownership-in-your-own-table)); `created_by` is a snapshot string, so attribution
-  survives the account.
-- **Correctness above the backend.** Hashing, dedup and the write order (bytes before rows, rows in
-  one transaction, so a crash leaves only collectable garbage) live once in `BlobStore`; a backend
-  only stores, returns and lists bytes.
-- **History is append-only.** A version is never deleted or hollowed out; destroying content is
-  `delete_handle` plus `collect_garbage`, and the record of who destroyed it is the audit log's.
-- **Derived content is the app's.** A thumbnail is an ordinary document of its own
-  (`examples/blobthumbnailer`); sizes and formats are policy.
-- **Downloads are the app's route**, routed by the owning document, never by the handle.
+- **The crate handles files on a page; the app stores them.** 0.4 shipped a content-addressed store
+  (handle → version chain → digest, three tables, garbage collection). It was correct and nobody's
+  shape: an app wanted small files in a database column, large ones on disk under names a person can
+  read, and an index row of its own pointing at either. The store was neither transactional like a
+  column, scalable like an object store, nor browsable like a directory — so 0.5 removed it and kept
+  what every one of those choices needs.
+- **No storage layer of any size.** A safe flat directory type, an upload-sink trait, a gated router
+  and a file list with delete buttons were all drafted for 0.5 and dropped: each forced a shape on
+  the app — a sink to implement, a listing to fit, a router serving by name — when the app already
+  has its own idea of all three. What remains does no I/O on the app's storage at all.
+- **The upload is a pull API, not a sink.** `Upload::next` yields parts in document order and the app
+  pulls each file's chunks, so the same loop writes to a file, a column or an object store with no
+  trait in between. The crate keeps what is easy to get wrong: the CSRF token checked *before* the
+  first file (a streaming parser can't check it afterwards), limits enforced while streaming, the
+  type sniffed before the first chunk, the hash computed on the way. The price is that cleaning up a
+  refused upload is the app's — which it has to own anyway for its index row or transaction.
+- **Components take values, never call back.** `UploadForm`, `Preview` and `Thumbnail` render from a
+  name, a type and URLs. Listing is the app's: a table or grid of its own design, with the components
+  inside, because what a row shows (an owner, a date, actions) is the app's.
+- **No thumbnailer, no versions, no ownership here.** Thumbnails are the app's, made on request into a
+  content-hash cache ([FILES.md §6](FILES.md#6-thumbnails)) — a pure function would have been
+  shippable, but it would pull in an image decoder for every app using `files`. A revision is a new
+  file; ownership is a link table with real foreign keys and a per-kind gate. Each is policy.
+- **Downloads are the app's route**, authorised by the owning record; the crate supplies the response
+  builder, which is where the inline/attachment decision has to live.

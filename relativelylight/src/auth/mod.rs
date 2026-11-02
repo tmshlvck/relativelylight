@@ -785,7 +785,6 @@ impl Inner {
             actor: Some(actor),
             headers,
             client_ip,
-            version: None, // `auth` rows have no version chain — see `observe::WriteEvent::version`
         };
         observer.on_write(&ev).await;
     }

@@ -37,15 +37,6 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
 - **The SSO transaction cookie stays unsigned.** Anyone can get a validly signed one from
   `/sso/{key}/login`; the real fix would be server-side state.
 
-## blob
-
-- [ ] **A second backend (S3/Ceph)** — probably a companion crate, to keep an AWS SDK out of the core.
-  It forces the read-path question: verify-then-serve reads content twice, which is cheap on a
-  filesystem and two round trips on an object store (options: a `reread_is_cheap()` predicate,
-  buffering under a threshold, or hashing while streaming and aborting on mismatch).
-- [ ] **Retention / archival policy** for `copy_content_to`, collection and the audit log — one answer
-  rather than three, when an app needs it.
-
 ## Deferred: changes to a published interface
 
 Each reshapes a contract rather than adding to it, so each waits for a concrete requirement and a
@@ -56,7 +47,7 @@ minor bump.
   hasn't met rows that differ in visibility within one kind.
 - **Composite primary keys.** `Accessor::pk() -> String`, the URL shape and `RowItem.id` assume one
   column. A `row_key` hook could be additive if the need is narrower.
-- **A second `Accessor` backend or a second frontend.** Each seam (`Accessor`, `BlobBackend`,
+- **A second `Accessor` backend or a second frontend.** Each seam (`Accessor`,
   `Vec<Column>` + `Page`) has one implementation; a second would very likely change it.
 - Adding to `MetaField` is free (`#[non_exhaustive]`); adding to `Column::Field` breaks an exhaustive
   `match`, so batch those.

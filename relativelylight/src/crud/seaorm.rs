@@ -439,7 +439,7 @@ fn str_to_db(ct: &ColumnType, s: &str) -> DbValue {
         // different type and quietly matches **nothing** — so `filter[handle]=<uuid>` returned an
         // empty listing, and a `pk_in` delete on a UUID-keyed table selected no rows. Both fail in
         // the safe direction, which is exactly why neither was noticed: nothing shipped had a UUID
-        // key until `blob_handle`.
+        // key until the old blob store's handle table.
         LogicalType::Uuid => s
             .parse::<sea_orm::prelude::Uuid>()
             .map(DbValue::from)

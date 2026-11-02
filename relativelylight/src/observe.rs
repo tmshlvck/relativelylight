@@ -47,10 +47,9 @@ pub struct WriteEvent<'a> {
     /// what tells them apart. It says `autocrud` — this crate's auto-generated CRUD — rather than a
     /// bare `crud`, which in an app that has CRUD screens of its own names nothing in particular.
     pub source: &'static str,
-    /// What the caller did. `Create` / `Update` / `Delete` from `crud` and `auth`; `blob` also fires
-    /// `Read`, because a download of regulated content can itself be compliance-weight
-    /// (`docs/BLOBSTORE.md` §4.7). The type has carried all five since the gate trait existed — a
-    /// sink matching on it should expect `Read` and `List` rather than assuming three.
+    /// What the caller did: `Create` / `Update` / `Delete` from `crud` and `auth`. The type has
+    /// carried all five since the gate trait existed, and a sink that also takes the app's own
+    /// events (a download of regulated content, say) should expect `Read` and `List` as well.
     pub op: Operation,
     /// The affected entity (table/slug), e.g. `"auth_user"`, `"zone"`.
     pub entity: &'a str,
@@ -78,7 +77,7 @@ pub struct WriteEvent<'a> {
     /// New row state where known (create/update); `None` on delete.
     pub after: Option<Value>,
     /// The username of the caller, when the emitter authenticated them itself: every `auth` event.
-    /// `None` from `crud` and `blob`, which leave identity to the gate — resolve it from
+    /// `None` from `crud`, which leaves identity to the gate — resolve it from
     /// [`headers`](WriteEvent::headers).
     ///
     /// It matters for a self-service password change, which rotates the session before the event
@@ -92,11 +91,6 @@ pub struct WriteEvent<'a> {
     /// **same** address the lockout counted and the access log printed, rather than each observer
     /// re-deriving one from `headers` and a proxy policy it has to know about.
     pub client_ip: IpAddr,
-    /// The version row this event concerns, for an entity that keeps a version chain — today only
-    /// `blob` (see `docs/BLOBSTORE.md` §4.7), where `entity`/`key` name a `blob_version` and this
-    /// carries the same id in typed form. `None` from every other emitter, and from any `blob` event
-    /// that isn't about one particular version (a purge, a backup).
-    pub version: Option<i64>,
 }
 
 /// A sink for [`WriteEvent`]s. Register one with `Crud::on_write` and/or `Auth::on_write`; the same

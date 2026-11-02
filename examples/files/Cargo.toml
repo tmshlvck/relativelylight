@@ -1,0 +1,17 @@
+[package]
+name = "files-example"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Files in a directory: upload (several at once, or from a phone's camera), preview, download, delete,
+# and a thumbnail for every image, made on request into a cache. The crate contributes the upload reader,
+# the responses and the components; storage, naming, listing and thumbnails are this app's code.
+# See docs/FILES.md.
+[dependencies]
+relativelylight = { path = "../../relativelylight", default-features = false, features = ["files", "csrf"] }
+axum = "0.8"
+axum-extra = { version = "0.10", features = ["cookie"] }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "sync"] }
+sha2 = "0.10"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
