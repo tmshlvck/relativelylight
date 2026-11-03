@@ -9,6 +9,29 @@ Work that has landed on `main` but isn't tagged yet lives under **Unreleased**; 
 heading to the version + date and adds a compare link. Per-entry commit hashes are given where a change
 is easy to miss in a diff.
 
+## Unreleased
+
+### Changed
+
+- **Dependencies: askama 0.16 (was 0.13), axum-extra 0.12 (0.10), argon2 0.6 (0.5), totp-rs 6 (5.7),
+  sha2 0.11 (0.10), base64 0.23 (0.22); `getrandom` 0.4 replaces `rand_core`.** Nothing to change in an
+  app:
+  - **askama is a private dependency.** No template type of this crate is public, so your app can use
+    any askama version, not necessarily this one. askama is built without its `config` feature, so
+    the unmaintained `basic-toml` (RUSTSEC-2026-0374) is no longer in a build that doesn't ask for it.
+  - `Csrf::issue` / `ensure` still return the same `cookie` 0.18 `Cookie`, so an app on axum-extra
+    0.10 or 0.12 can pass it to its `CookieJar`.
+  - Stored password hashes and TOTP secrets keep working; tests pin a hash made by argon2 0.5 and an
+    RFC 6238 vector.
+- **MSRV is 1.88** (askama 0.16, totp-rs 6), now declared as `rust-version`.
+- **Recovery codes are drawn by rejection sampling**, so every character is exactly uniform (it was
+  `u32 % 30`, a bias of under 10⁻⁸).
+
+### Documentation
+
+- `cargo audit` and `rsa` (RUSTSEC-2023-0071) under `sso`: why SSO isn't exposed, and the
+  `.cargo/audit.toml` ignore ([AUTH.md §5b](docs/AUTH.md#5b-sso--openid-connect-feature-sso)).
+
 ## [0.4.1] — 2026-11-03
 
 **This release breaks, despite the patch number**: the items below need the steps in

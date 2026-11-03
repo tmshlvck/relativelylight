@@ -11,7 +11,7 @@ publish = false
 [dependencies]
 relativelylight = { path = "../../relativelylight", default-features = false, features = ["files", "csrf"] }
 axum = "0.8"
-axum-extra = { version = "0.10", features = ["cookie"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
 tokio = { workspace = true, features = ["fs", "io-util", "net", "sync"] }
 sha2 = "0.10"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

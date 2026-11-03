@@ -25,7 +25,6 @@
 
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use http::HeaderMap;
-use rand_core::{OsRng, RngCore};
 
 /// The form field a `<form>` submits the token in.
 pub const FIELD: &str = "_csrf";
@@ -37,7 +36,7 @@ const DEFAULT_COOKIE: &str = "rl_csrf";
 /// A 256-bit random token as lowercase hex. Also used for session ids.
 pub(crate) fn random_token() -> String {
     let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    getrandom::fill(&mut bytes).expect("the OS random source failed");
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

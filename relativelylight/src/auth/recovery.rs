@@ -102,19 +102,17 @@ pub fn display(code: &str) -> String {
 
 /// A fresh set of [`SET_SIZE`] codes, in the plaintext form to show the user **once**.
 fn fresh_codes() -> Vec<String> {
-    use rand_core::{OsRng, RngCore};
-    (0..SET_SIZE)
-        .map(|_| {
-            let mut out = String::with_capacity(CODE_LEN);
-            for _ in 0..CODE_LEN {
-                // Rejection-free because 30 doesn't divide 256 evenly but the bias is negligible at
-                // this entropy; draw a fresh byte per character from the OS CSPRNG.
-                let idx = (OsRng.next_u32() % ALPHABET.len() as u32) as usize;
-                out.push(ALPHABET[idx] as char);
-            }
-            out
-        })
-        .collect()
+    // Rejection sampling over OS-random bytes: a byte at or above the largest multiple of the
+    // alphabet's length is redrawn, so every character is exactly uniform.
+    let limit = (256 / ALPHABET.len() * ALPHABET.len()) as u8;
+    let pick = || loop {
+        let mut b = [0u8; 1];
+        getrandom::fill(&mut b).expect("the OS random source failed");
+        if b[0] < limit {
+            return ALPHABET[b[0] as usize % ALPHABET.len()] as char;
+        }
+    };
+    (0..SET_SIZE).map(|_| (0..CODE_LEN).map(|_| pick()).collect()).collect()
 }
 
 /// Issue a new set for `user_id`, **replacing** any existing one, and return the plaintext codes to

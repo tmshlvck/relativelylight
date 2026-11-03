@@ -43,7 +43,7 @@ the design is [docs/DESIGN.md](docs/DESIGN.md) and open work [docs/TODO.md](docs
 A Cargo workspace: the crate is `relativelylight/` (`crud/` with `ui/` as the renderer, `auth/`,
 `files/`, `authz.rs`, `observe.rs`, `time.rs`, `validate.rs`; Askama templates in `templates/`; CSS and
 the picker's script in `assets/`), with runnable examples in `examples/` sharing `examples/model`.
-Deps: SeaORM 2.0, axum 0.8, askama 0.13, jiff 0.2, totp-rs 5.7.
+Deps: SeaORM 2.0, axum 0.8, askama 0.16, jiff 0.2, totp-rs 6, argon2 0.6. MSRV 1.88 (askama, totp-rs).
 
 ```bash
 cargo build --all-features && cargo test --all-features && cargo clippy --all-features --all-targets

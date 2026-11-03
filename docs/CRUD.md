@@ -43,7 +43,7 @@ sea-orm = { version = "2.0", features = ["macros", "with-json"] }
 | `ui` | | `askama` | the server-rendered components (`crud::ui::Table`, `::Form`, `::Admin`); implies `axum` + `tz` |
 | `csv` | | `csv` | CSV import/export for the UI + `crud::csv_io`; implies `tz` |
 | `tz` | | `jiff` | timezone-aware rendering of integer-UTC timestamps (`time`) |
-| `csrf` | | `rand_core` | `Crud::csrf` — require a token on writes (implied by `auth`) |
+| `csrf` | | `getrandom` | `Crud::csrf` — require a token on writes (implied by `auth`) |
 
 Enable only what you use — an unused feature pulls no dependencies.
 

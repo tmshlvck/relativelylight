@@ -2,8 +2,8 @@
 <h1 class="h5 mb-3">Change your password</h1>
 <p class="text-muted small">Signed in as <strong>{{ username }}</strong>.</p>
 <form method="post" action="/profile">
-  {% call m::csrf(csrf) %}
-  {% call m::alert(error, success) %}
+  {{ m::csrf(csrf) }}
+  {{ m::alert(error, success) }}
   <div class="mb-3">
     <label class="form-label" for="rl-current">Current password</label>
     <input class="form-control" id="rl-current" name="current_password" type="password" autocomplete="current-password" autofocus>
@@ -23,8 +23,8 @@
 {%- if totp_on %}
 <p class="text-muted small mb-2">Enabled — a code from your authenticator app is required at login.</p>
 <form method="post" action="/profile/totp/disable">
-  {% call m::csrf(csrf) %}
-  {%- call m::reauth("rl-2fa-off", true, "Turning off your second factor needs confirming — this is what stops someone who has taken over your session from removing it.") %}
+  {{ m::csrf(csrf) }}
+  {{- m::reauth("rl-2fa-off", true, "Turning off your second factor needs confirming — this is what stops someone who has taken over your session from removing it.") }}
   <button class="btn btn-outline-danger btn-sm" type="submit">Disable 2FA</button>
 </form>
 {%- else %}
@@ -43,8 +43,8 @@ available.
 {%- else %} {{ left }} unused codes.
 {%- endif %}</p>
 <form method="post" action="/profile/totp/recovery">
-  {% call m::csrf(csrf) %}
-  {%- call m::reauth("rl-rec", true, "Confirm it's you — a new set is a new way into this account.") %}
+  {{ m::csrf(csrf) }}
+  {{- m::reauth("rl-rec", true, "Confirm it's you — a new set is a new way into this account.") }}
   <button class="btn btn-outline-secondary btn-sm" type="submit">Generate new codes</button>
 </form>
 <p class="text-muted small mt-2 mb-0">Generating a set invalidates the previous one.</p>
@@ -55,6 +55,6 @@ available.
 <p class="text-muted small mb-2">Signed in somewhere you'd rather not be — a shared or lost device? Sign
 out everywhere except here.</p>
 <form method="post" action="/profile/sessions/revoke">
-  {% call m::csrf(csrf) %}
+  {{ m::csrf(csrf) }}
   <button class="btn btn-outline-secondary btn-sm" type="submit">Sign out other sessions</button>
 </form>

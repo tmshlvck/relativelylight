@@ -3408,3 +3408,28 @@ async fn an_unmigrated_database_keeps_the_old_deletion_behaviour_and_nothing_wor
     // The property that held throughout and still does: an orphan authenticates nobody.
     assert!(fx.identify_token(&bob_token).await.is_none());
 }
+
+#[tokio::test]
+async fn the_login_page_renders_its_macros_as_markup() {
+    // The auth templates expand `m::csrf` / `m::alert` as expressions (`{{ m::csrf(csrf) }}`): a
+    // macro's output must land as markup, not as escaped text, or every form loses its CSRF field.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let res = fx.post("/login", &form(&[("username", "alice"), ("password", "wrong")]), None).await;
+    assert!(res.body.contains(&format!("<input type=\"hidden\" name=\"{}\"", crate::csrf::FIELD)), "the CSRF input is markup: {}", res.body);
+    assert!(res.body.contains("<div class=\"alert alert-danger\""), "so is the error alert: {}", res.body);
+    assert!(!res.body.contains("&lt;"), "and nothing a macro rendered is escaped: {}", res.body);
+}
+
+#[test]
+fn a_hash_stored_by_an_older_argon2_still_verifies() {
+    // Made by argon2 0.5 (relativelylight ≤ 0.4.1). Upgrading the hasher must not lock existing
+    // accounts out: the parameters are read from the PHC string, not from today's defaults.
+    const OLD: &str = "$argon2id$v=19$m=19456,t=2,p=1$+tFqmXdyYE1YpZLLetWj0Q$i3UbaoniF1kq8LzM5tXwz1sNpzf7faoql5MO6p1zBFc";
+    assert!(verify_password(OLD, "correct horse"));
+    assert!(!verify_password(OLD, "correct horse "), "and only for its own password");
+    assert!(!verify_password("not a phc string", "correct horse"));
+    let fresh = hash_password("correct horse");
+    assert!(fresh.starts_with("$argon2id$") && fresh != OLD, "a new hash is argon2id with its own salt");
+    assert!(verify_password(&fresh, "correct horse"));
+}

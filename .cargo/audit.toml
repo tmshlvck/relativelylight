@@ -1,0 +1,10 @@
+# cargo audit configuration (https://github.com/rustsec/rustsec/tree/main/cargo-audit).
+[advisories]
+ignore = [
+    # rsa: Marvin attack, a timing side channel recovering an RSA *private* key from decryption or
+    # signing. No fixed release exists. It reaches us through openidconnect (feature `sso`), which
+    # only verifies ID-token signatures with the provider's public key; the fake IdP in
+    # auth/sso_tests.rs signs, but only in tests. Drop this once openidconnect moves to a fixed rsa.
+    # See docs/AUTH.md §5b.
+    "RUSTSEC-2023-0071",
+]

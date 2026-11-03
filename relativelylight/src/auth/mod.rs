@@ -52,8 +52,7 @@ pub mod user_group;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::Argon2;
+use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use async_trait::async_trait;
 use axum::extract::{Form, Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -64,7 +63,6 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use pages::*;
 use crate::authz::{Authz, Decision, Operation};
 use crate::middleware::RealIp;
-use rand_core::OsRng;
 use sea_orm::sea_query::TableCreateStatement;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr,
@@ -250,19 +248,17 @@ impl Authz for GroupReadWrite {
 
 /// Hash a password with argon2id, returning a PHC string suitable for storage.
 pub fn hash_password(password: &str) -> String {
-    let salt = SaltString::generate(&mut OsRng);
+    // A fresh random salt from the OS (argon2's `getrandom` feature).
     Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .expect("argon2 hashing failed")
         .to_string()
 }
 
 /// Verify a password against a stored PHC hash (constant-time; `false` on any error).
 pub fn verify_password(hash: &str, password: &str) -> bool {
-    match PasswordHash::new(hash) {
-        Ok(parsed) => Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok(),
-        Err(_) => false,
-    }
+    // The parameters come from the PHC string, so hashes made with other settings still verify.
+    Argon2::default().verify_password(password.as_bytes(), hash).is_ok()
 }
 
 // ===================== Setup helpers =====================

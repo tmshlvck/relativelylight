@@ -368,6 +368,12 @@ key rotation: providers publish a new key well before retiring the old one.
 > don't trust.
 
 
+**`cargo audit` reports `rsa` (RUSTSEC-2023-0071, the Marvin attack)** in any build with `sso`:
+`openidconnect` depends on it to check RS256 ID-token signatures, and no fixed `rsa` release exists.
+The attack recovers a **private** key from the timing of decryption or signing. SSO here only verifies
+signatures, using the provider's public key, so this crate holds no RSA private key to leak. Ignore the
+advisory in your `.cargo/audit.toml`, with that reason, until `openidconnect` moves to a fixed `rsa`.
+
 ## 5c. Lifecycle timestamps
 
 The auth entities carry UTC timestamps (`i64` Unix seconds), maintained automatically:
