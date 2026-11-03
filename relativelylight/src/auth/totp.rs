@@ -59,10 +59,7 @@ pub(crate) fn verify(secret_b32: &str, code: &str) -> bool {
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::auth::now_secs() as u64
 }
 
 /// Enrolment material for a pending secret: the `otpauth://` URL (shown as text) and a QR code as a

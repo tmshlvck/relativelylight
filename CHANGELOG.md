@@ -27,6 +27,11 @@ is easy to miss in a diff.
 - **Recovery codes are drawn by rejection sampling**, so every character is exactly uniform (it was
   `u32 % 30`, a bias of under 10⁻⁸).
 
+### Fixed
+
+- **The profile page keeps the app's `profile_extra` section after disabling 2FA**, and when
+  recovery codes could not be created at enrolment. Both rendered the password form alone.
+
 ### Documentation
 
 - `cargo audit` and `rsa` (RUSTSEC-2023-0071) under `sso`: why SSO isn't exposed, and the

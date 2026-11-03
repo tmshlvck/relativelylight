@@ -3433,3 +3433,22 @@ fn a_hash_stored_by_an_older_argon2_still_verifies() {
     assert!(fresh.starts_with("$argon2id$") && fresh != OLD, "a new hash is argon2id with its own salt");
     assert!(verify_password(&fresh, "correct horse"));
 }
+
+#[tokio::test]
+async fn the_profile_extra_section_survives_disabling_2fa() {
+    // Every self-service page is the profile page with a message; disabling 2FA used to render the
+    // password form alone, dropping the app's `profile_extra` section and the sessions block.
+    let fx = Fx::with(|a| a.profile_extra(|_| async { "<section id=\"app-extra\"></section>".to_string() })).await;
+    fx.user("alice").await;
+    fx.enable_totp("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+
+    let page = fx.get("/profile", Some(&cookie)).await;
+    assert!(page.body.contains("app-extra"), "positive control: the profile page carries it");
+
+    let res = fx.post("/profile/totp/disable", &reauth_form(&[]), Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert!(fx.row("alice").await.totp_secret.is_none(), "2FA is off");
+    assert!(res.body.contains("Two-factor authentication disabled."), "{}", res.body);
+    assert!(res.body.contains("app-extra"), "and the page still carries the app's section: {}", res.body);
+}
