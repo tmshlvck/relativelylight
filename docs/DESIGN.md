@@ -1,7 +1,8 @@
 # relativelylight — design
 
 **relativelylight** turns SeaORM entities into a back-office stack — a typed CRUD engine, a
-server-rendered admin, authentication/authorization and file storage — with **no per-model code**.
+server-rendered admin, authentication/authorization and file uploads/downloads — with **no per-model
+code**.
 One crate of feature-gated modules; take the pieces you need.
 
 This is the design: what each module is for and the decisions an addition should have to argue with.

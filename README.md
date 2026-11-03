@@ -128,6 +128,7 @@ async fn save(headers: HeaderMap, uri: Uri, RealIp(ip): RealIp,
 | `csrf` | | the double-submit CSRF token; implied by `auth` |
 | `sso` | | OIDC single sign-on + group mapping; implies `auth` |
 | `files` | | streaming upload reader, download responses, upload form/preview/thumbnail components; implies `axum` |
+| `validate-regex`, `validate-base64` | | the regex and base64 validators in `validate` ([docs/DATAINPUT.md](docs/DATAINPUT.md)) |
 
 Registered entities need a **single-column primary key**, **single-column to-one FKs**, and
 `Serialize`/`Deserialize` (SeaORM's `with-json`).

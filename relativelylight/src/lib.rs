@@ -41,7 +41,7 @@ pub mod crud;
 #[cfg(feature = "auth")]
 pub mod auth;
 
-/// Files on a page — streaming upload, a safe directory, download responses and the list/viewer/upload
+/// Files on a page — a streaming upload reader, download responses and the upload/preview/thumbnail
 /// components; storage is the app's. See `docs/FILES.md`.
 #[cfg(feature = "files")]
 pub mod files;

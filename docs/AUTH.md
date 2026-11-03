@@ -367,7 +367,6 @@ key rotation: providers publish a new key well before retiring the old one.
 > in practice means HTTPS (ideally HSTS), no XSS, and not sharing a registrable domain with something you
 > don't trust.
 
-
 **`cargo audit` reports `rsa` (RUSTSEC-2023-0071, the Marvin attack)** in any build with `sso`:
 `openidconnect` depends on it to check RS256 ID-token signatures, and no fixed `rsa` release exists.
 The attack recovers a **private** key from the timing of decryption or signing. SSO here only verifies
@@ -583,35 +582,10 @@ so revoking there is tidiness rather than enforcement.
 — against a [`validate::PasswordPolicy`](DATAINPUT.md). **On by default**, at
 `PasswordPolicy::recommended()`.
 
-**Length first, composition rules off.** That follows NIST SP 800-63B, which recommends screening for
-length and against known-bad values and explicitly advises *against* requiring character-class mixtures:
-users satisfy `upper + digit + special` with `Password1!` and `Summer2024!`, so the rule costs usability
-and buys a search space every cracking ruleset already covers. The flags exist
-(`PasswordPolicy::legacy_composition()`) because audits still ask for them; no other preset sets them.
-
-| preset | length | screening | composition |
-|---|---|---|---|
-| `nist_minimum()` | ≥ 8 | common values, patterns, context words | — |
-| `recommended()` *(default)* | ≥ 12 | same | — |
-| `legacy_composition()` | ≥ 12 | same | upper + lower + digit + symbol |
-
-`PasswordPolicy::from_level(1\|2\|3)` maps a config integer onto those, so an app can expose
-`password_level` and be done; an unrecognised value lands on `recommended()` rather than the weakest one.
-
-What every preset enforces: a minimum **and a maximum** length (a bound is a security control — the value
-is fed to argon2, and hashing an unbounded input burns CPU per request), no control characters, and
-screening against a built-in list of common values (matched whole, after folding and stripping a
-digit/symbol tail, so `Password1!` is caught), your own `blocklist` words (matched as substrings — the app
-name, a product name), and patterns (one repeated character, or any run of six consecutive characters like
-`123456`). Everything printable is allowed — spaces, punctuation, emoji — and nothing is truncated.
-
-On this surface the policy also gets the **username** as context, so a password containing it is refused.
-That check is inherently cross-field, which is why a single-field `crud` validator can't do it.
-
-**The built-in list is a floor, not a breach corpus** — a few dozen perennial values plus keyboard walks.
-Real breach screening means a local corpus or an online service (HIBP's k-anonymity API); that's an
-app-level dependency and a network call, so it isn't built in. Add your own via `blocklist`, or replace
-the check entirely.
+The policy itself — the presets, what every one of them enforces, and why composition rules are off —
+is described once, in [DATAINPUT.md → Passwords](DATAINPUT.md#passwords). What `Auth` adds is the
+**username** as context, so a password containing it is refused. That check is cross-field, which is
+why a single-field `crud` validator can't do it.
 
 **Opt out, two ways** — a library shouldn't dictate this:
 
@@ -799,7 +773,7 @@ Four things are load-bearing:
 2. **`GroupReadWrite`, not `UserReadGroupWrite`** — reads included. A list of accounts is not
    something a logged-in stranger should be able to enumerate, and `render_for` is where that is
    enforced: a non-admin gets `403`, not a page with the buttons greyed out.
-3. **`password_hash().password()` plus the policy** — wire the policy into `Auth` *and* this form, or
+3. **`field("password_hash").password()` plus the policy** — wire the policy into `Auth` *and* this form, or
    the form becomes the way around it (§5g).
 4. **Hide the TOTP columns.** The secret and the pending secret are credentials; `totp_last_step` is
    the replay guard, and hand-editing it either lets a code be replayed or locks the user out of their

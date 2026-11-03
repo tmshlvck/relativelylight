@@ -101,7 +101,7 @@ don't reject every passphrase containing them. Real breach screening means a cor
 API — app-level, so not built in; add words via `blocklist` or replace the check.
 
 `auth` applies this to `/profile` and a manager's reset by default and can be opted out of two ways — see
-[AUTH.md §5g](AUTH.md), which also explains why both this surface *and* the admin form need wiring.
+[AUTH.md §5g](AUTH.md#5g-password-strength), which also explains why both this surface *and* the admin form need wiring.
 
 ### Host and DNS names
 
