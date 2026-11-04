@@ -21,10 +21,12 @@ pub struct Model {
 /// A post's editorial state. **`db_type = "Enum"`** makes the column report `ColumnType::Enum` with these
 /// variants, so the admin renders a dropdown and refuses anything else with no per-model code. That holds
 /// on SQLite too: it has no enum type, so the column is created as text and sea-query skips the cast it
-/// makes on Postgres — the database stores `"draft"`, `"review"`, ….
+/// makes on Postgres — the database stores `"draft"`, `"review"`, …. (On Postgres the same entity needs a
+/// real `post_status` enum type in the database.)
 ///
 /// (`db_type = "String(..)"` would store the same text but report a plain string column, leaving the app
-/// to declare the set with `field("status").options_from::<Status>()`.)
+/// to declare the set with `field("status").options_from::<Status>()` — the choice on Postgres when new
+/// variants shouldn't need a migration.)
 ///
 /// The serde names must match the `string_value`s: the admin reads rows through `Serialize`, so a variant
 /// serialized as `"Draft"` would match none of the options.

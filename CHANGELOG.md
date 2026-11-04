@@ -19,9 +19,11 @@ is easy to miss in a diff.
 
 ### Changed
 
-- **Docs: `db_type = "Enum"` is the recommended enum shape, on SQLite too.** Its variants are introspected
-  on every backend (SQLite stores the `string_value` as text, uncast), so a SQLite app gets the dropdown and
-  the membership check without declaring `options`. The guide used to say SQLite needed them by hand.
+- **Docs: on SQLite, `db_type = "Enum"` is the recommended enum shape.** Its variants are introspected on
+  every backend, and SQLite stores the `string_value` as plain text, uncast, so a SQLite app gets the
+  dropdown and the membership check without declaring `options`. The guide used to say SQLite needed them
+  by hand. On Postgres it is a database enum type that must exist and be migrated per new variant; a
+  text column with `options_from` is the alternative — the guide has a table per backend.
   `examples/model`'s `post.status` is now a `post::Status` enum, and `examples/crud` / `examples/adminpanel`
   no longer declare its values. An enum's serde names must match its `string_value`s
   ([CRUD.md → Enumerations](docs/CRUD.md#enumerations-a-closed-set-of-values)).

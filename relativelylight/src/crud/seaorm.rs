@@ -56,7 +56,8 @@ pub struct MetaField {
     /// **Introspected** from `ColumnType::Enum` — a `DeriveActiveEnum` with `db_type = "Enum"` — so an
     /// enum needs no per-model code, on SQLite as much as on Postgres/MySQL: the variants become a
     /// `<select>` (or a radio group) in the admin form and a membership check on write — a value
-    /// outside the list is refused, where before *any* string was accepted.
+    /// outside the list is refused, where before *any* string was accepted. (On SQLite that column is
+    /// plain text; on Postgres it is a real enum type, which must exist.)
     ///
     /// A `DeriveActiveEnum` with `db_type = "String"` is a text column as far as the schema is
     /// concerned, so there is nothing to introspect: take the list from the enum with
@@ -200,9 +201,10 @@ impl MetaField {
     /// field kept as `String`), where there are no variants to introspect. The list then can't drift
     /// from the Rust enum the way a hand-written one can.
     ///
-    /// Prefer `db_type = "Enum"` where you own the entity: the variants are then introspected, on
-    /// SQLite too, and this isn't needed. Integer-backed enums have no labels to show, so they are not
-    /// accepted.
+    /// On SQLite, prefer `db_type = "Enum"` where you own the entity: it is still a text column, the
+    /// variants are introspected, and this isn't needed. On Postgres it means a database enum type,
+    /// migrated for each new variant — a text column with this is the alternative. Integer-backed
+    /// enums have no labels to show, so they are not accepted.
     ///
     /// ```ignore
     /// post.field("status").options_from::<Status>();

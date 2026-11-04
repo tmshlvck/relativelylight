@@ -587,12 +587,25 @@ one-timestamp form made the form unable to create anything at all.)
 Values match **exactly** — they are the `string_value`s, not the Rust variant names; database enums are
 case-sensitive.
 
-**Use `db_type = "Enum"`, on SQLite too.** The variants come from the *entity's* column type, not from the
-database, and a `DeriveActiveEnum` with `db_type = "Enum"` reports `ColumnType::Enum` on every backend.
-SQLite has no enum type, so it stores the `string_value` as text — the column is `TEXT` in an existing
-schema (`enum_text`, still text, when SeaORM creates it), and sea-query adds its enum cast only on Postgres.
-Moving a SQLite text column to it changes the entity, not the data. This is what `examples/model` does for
-`post.status`, so neither `examples/crud` nor `examples/adminpanel` declares anything:
+**Which shape.** The variants come from the *entity's* column type, not from the database. A
+`DeriveActiveEnum` with `db_type = "Enum"` reports `ColumnType::Enum`, so its variants are introspected; one
+with `db_type = "String(..)"` reports a string column and needs [`options_from`](#a-string-backed-enum). What
+`db_type = "Enum"` costs depends on the backend:
+
+| Backend | `db_type = "Enum"` | Pick it when |
+|---|---|---|
+| SQLite | a text column, as before — there is no enum type, and sea-query adds no cast | always: it is free |
+| Postgres | a **real enum type**: every value is cast to it (`CAST($1 AS post_status)`), so the type must exist (`CREATE TYPE … AS ENUM`) — over a `TEXT` column the write fails with *type does not exist* | you want the database to enforce the set, and accept a migration (`ALTER TYPE … ADD VALUE`) for each new variant |
+| MySQL | no cast, so it works over a `VARCHAR` column too; a table SeaORM creates gets `ENUM(…)`, altered for each new variant | always over a text column; for an `ENUM(…)` column, as Postgres |
+
+So on SQLite, moving a text column to `db_type = "Enum"` changes the entity, not the data (the column stays
+`TEXT`; `enum_text`, still text, when SeaORM creates it). On Postgres, a set that grows often — or a column
+that is `TEXT` in the database — is the string-backed case below: a new variant is then a code change only,
+and the database no longer refuses other values; the app's check does. An app that develops on SQLite and
+runs on Postgres takes the Postgres row.
+
+`examples/model` uses `db_type = "Enum"` for `post.status`, so neither `examples/crud` nor
+`examples/adminpanel` declares anything:
 
 ```rust
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
@@ -612,8 +625,10 @@ pub status: Option<Status>,
 show as a value outside the set — an edit form with nothing chosen. Use a `rename_all` that produces the
 `string_value`s, or `#[serde(rename = "…")]` per variant.
 
-**A string-backed enum the schema sees as text** — `db_type = "String(..)"`, or a model field kept as
-`String` — has no variants to find. Take the list from the enum rather than repeating it:
+<a id="a-string-backed-enum"></a>**A string-backed enum the schema sees as text** — `db_type = "String(..)"`,
+or a model field kept as `String` (what `sea-orm-cli` generates from a text column) — has no variants to
+find: the crate sees the column type, not the field's Rust type. Take the list from the enum rather than
+repeating it:
 
 ```rust
 post.field("status").options_from::<Status>(); // its string_values, in declaration order
