@@ -11,7 +11,20 @@ is easy to miss in a diff.
 
 ## Unreleased
 
+### Added
+
+- **`MetaField::options_from::<E>()`** closes a column over a string-backed `ActiveEnum`'s values, for an
+  enum the schema sees as text (`db_type = "String(..)"`, or a `String` model field) — so the list can't
+  drift from the Rust enum.
+
 ### Changed
+
+- **Docs: `db_type = "Enum"` is the recommended enum shape, on SQLite too.** Its variants are introspected
+  on every backend (SQLite stores the `string_value` as text, uncast), so a SQLite app gets the dropdown and
+  the membership check without declaring `options`. The guide used to say SQLite needed them by hand.
+  `examples/model`'s `post.status` is now a `post::Status` enum, and `examples/crud` / `examples/adminpanel`
+  no longer declare its values. An enum's serde names must match its `string_value`s
+  ([CRUD.md → Enumerations](docs/CRUD.md#enumerations-a-closed-set-of-values)).
 
 - **Dependencies: askama 0.16 (was 0.13), axum-extra 0.12 (0.10), argon2 0.6 (0.5), totp-rs 6 (5.7),
   sha2 0.11 (0.10), base64 0.23 (0.22); `getrandom` 0.4 replaces `rand_core`.** Nothing to change in an

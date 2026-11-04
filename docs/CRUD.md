@@ -217,7 +217,7 @@ pub struct MetaField {
     pub validate:  Option<Box<dyn Fn(&Value) -> Result<(), String> + ...>>,
     pub nullable:  bool,        // from the entity: does the column accept NULL? (read-only info)
     pub required:  bool,        // NOT NULL + no default + not the PK → a create must carry it
-    pub options: Vec<String>,   // allowed values; introspected from an enum column, or set by hand
+    pub options: Vec<String>,   // allowed values; introspected from an enum column, or set (options_from / by hand)
     pub blank_is_null: bool,    // nullable + empty string submitted → store NULL (default true)
     pub on_write:  Option<Box<dyn Fn(Value) -> Value + ...>>,   // storage codec, inbound  (e.g. hash)
     pub on_read:   Option<Box<dyn Fn(&Value) -> Value + ...>>,  // storage codec, outbound: on_write's inverse
@@ -277,8 +277,7 @@ and these override that where the type alone can't know better. **Only the form 
 ```rust
 post.field("body").textarea(8);                    // prose
 post.field("views").range(0.0, 500.0, 1.0);        // slider + readout
-post.field("status").options = vec!["draft".into(), "published".into()];
-post.field("status").radio();                      // …the options must exist first
+post.field("status").radio();                      // an enum column, or one given `options`
 author.field("email").email();
 author.field("email").validate_str(validate::optional(Box::new(validate::email)));
 ```
@@ -576,7 +575,7 @@ one-timestamp form made the form unable to create anything at all.)
 ### Enumerations: a closed set of values
 
 `MetaField::options` is the list of values a column accepts — empty for everything else. It is
-**introspected** from `ColumnType::Enum`, so a Postgres/MySQL enum needs no per-model code:
+**introspected** from `ColumnType::Enum`, so an enum column needs no per-model code:
 
 | Where | Effect |
 |---|---|
@@ -585,18 +584,48 @@ one-timestamp form made the form unable to create anything at all.)
 | CSV | an unknown value is rejected on import like any other invalid cell |
 | write path | membership checked before your own validator → `422 {"fields":{"status":"must be one of: …"}}` |
 
-Values match **exactly**; database enums are case-sensitive.
+Values match **exactly** — they are the `string_value`s, not the Rust variant names; database enums are
+case-sensitive.
 
-**Declare it by hand for the common SQLite shape.** A `DeriveActiveEnum` with `db_type = "String"` is a text
-column as far as the schema is concerned, so there are no variants to find:
+**Use `db_type = "Enum"`, on SQLite too.** The variants come from the *entity's* column type, not from the
+database, and a `DeriveActiveEnum` with `db_type = "Enum"` reports `ColumnType::Enum` on every backend.
+SQLite has no enum type, so it stores the `string_value` as text — the column is `TEXT` in an existing
+schema (`enum_text`, still text, when SeaORM creates it), and sea-query adds its enum cast only on Postgres.
+Moving a SQLite text column to it changes the entity, not the data. This is what `examples/model` does for
+`post.status`, so neither `examples/crud` nor `examples/adminpanel` declares anything:
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "post_status")]
+#[serde(rename_all = "lowercase")] // ← must agree with the string_values
+pub enum Status {
+    #[sea_orm(string_value = "draft")]     Draft,
+    #[sea_orm(string_value = "review")]    Review,
+    #[sea_orm(string_value = "published")] Published,
+}
+// in the Model:
+pub status: Option<Status>,
+```
+
+**The serde names must agree with the `string_value`s.** The engine reads a row through the model's
+`Serialize`, while options, filters and writes use the stored values; a variant serialized as `"Draft"` would
+show as a value outside the set — an edit form with nothing chosen. Use a `rename_all` that produces the
+`string_value`s, or `#[serde(rename = "…")]` per variant.
+
+**A string-backed enum the schema sees as text** — `db_type = "String(..)"`, or a model field kept as
+`String` — has no variants to find. Take the list from the enum rather than repeating it:
+
+```rust
+post.field("status").options_from::<Status>(); // its string_values, in declaration order
+```
+
+`options_from` accepts only `rs_type = "String"`; an integer-backed enum would offer `0`, `1`, … with no
+labels. Or set the list by hand — that works on *any* column, since the widget and the check key off the
+list, not the logical type, so it is also how you close a set that isn't an enum in Rust at all:
 
 ```rust
 post.field("status").options = vec!["draft".into(), "review".into(), "published".into()];
 ```
-
-That works on *any* column — the widget and the check key off the list, not the logical type — so it is also
-how you close a set that the database doesn't model as an enum at all. Both `examples/crud` and
-`examples/adminpanel` do exactly this for `post.status`.
 
 ## Columns
 

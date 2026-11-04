@@ -218,3 +218,108 @@ async fn a_blank_required_relation_is_a_field_error_not_a_panic() {
     // Positive control: given, it saves.
     assert!(matches!(submit("_op=create&text=t&contact=1").await, Ok(Outcome::Done(_))));
 }
+
+/// A `db_type = "Enum"` column on **SQLite**: the entity reports `ColumnType::Enum`, so the variants
+/// are introspected, while SQLite stores plain text (sea-query only casts to the enum type on
+/// Postgres). The table is created as `TEXT`, the way an existing SQLite schema has it.
+mod ticket {
+    use sea_orm::entity::prelude::*;
+    use serde::{Deserialize, Serialize};
+
+    /// Serde names match the `string_value`s: the engine reads rows through `Serialize`.
+    #[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+    #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "ticket_state")]
+    #[serde(rename_all = "snake_case")]
+    pub enum State {
+        #[sea_orm(string_value = "open")]
+        Open,
+        #[sea_orm(string_value = "in_review")]
+        InReview,
+        #[sea_orm(string_value = "closed")]
+        Closed,
+    }
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "ticket")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i32,
+        pub state: State,
+        pub previous: Option<State>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+#[tokio::test]
+async fn an_enum_column_round_trips_on_sqlite() {
+    use crate::crud::engine::{Column, ListQuery};
+
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    for stmt in [
+        "CREATE TABLE ticket (id INTEGER PRIMARY KEY, state TEXT NOT NULL, previous TEXT)",
+        "INSERT INTO ticket (id, state, previous) VALUES (1, 'in_review', 'open')",
+    ] {
+        db.execute_unprepared(stmt).await.unwrap();
+    }
+    let mut crud = Crud::new(db.clone());
+    crud.register(MetaModel::new(ticket::Entity), Open);
+    let e = crud.into_engine();
+    let stored = |id: i32| {
+        let db = db.clone();
+        async move {
+            let row = db
+                .query_one_raw(sea_orm::Statement::from_string(
+                    db.get_database_backend(),
+                    format!("SELECT state, previous FROM ticket WHERE id = {id}"),
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            (row.try_get::<String>("", "state").unwrap(), row.try_get::<Option<String>>("", "previous").unwrap())
+        }
+    };
+
+    // Introspected, with nothing declared.
+    let options: Vec<Vec<String>> = e
+        .columns("ticket")
+        .unwrap()
+        .into_iter()
+        .filter_map(|c| match c {
+            Column::Field { name, options, .. } if name == "state" => Some(options),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(options, vec![vec!["open".to_string(), "in_review".into(), "closed".into()]]);
+
+    // The edit form is a dropdown with the stored value chosen.
+    let html = Form::new(&e, "ticket").edit("1").render_for(&HeaderMap::new(), &ViewState::default()).await.unwrap();
+    assert!(html.contains(r#"<option value="in_review" selected>"#), "{html}");
+
+    let submit = |body: &'static str| {
+        let e = &e;
+        async move {
+            Form::new(e, "ticket").submit(&HeaderMap::new(), IP, body.as_bytes(), &ViewState::default()).await
+        }
+    };
+    // Writes store the string value, and a nullable enum clears to NULL.
+    assert!(matches!(submit("_op=update&_id=1&state=closed&previous=").await, Ok(Outcome::Done(_))));
+    assert_eq!(stored(1).await, ("closed".to_string(), None));
+    assert!(matches!(submit("_op=create&state=open&previous=in_review").await, Ok(Outcome::Done(_))));
+    assert_eq!(stored(2).await, ("open".to_string(), Some("in_review".to_string())));
+
+    // A Rust variant name is not a value.
+    match submit("_op=create&state=InReview").await {
+        Ok(Outcome::Invalid(s)) => {
+            assert_eq!(s.field_error("state"), Some("must be one of: open, in_review, closed"))
+        }
+        other => panic!("expected a field error, got {other:?}"),
+    }
+
+    // Filtering compares against the stored text.
+    let q = ListQuery { eq: vec![("state".into(), "open".into())], per_page: 10, ..Default::default() };
+    let page = e.list("ticket", &q, false).await.unwrap();
+    assert_eq!(page.data.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), vec![json!(2)]);
+}

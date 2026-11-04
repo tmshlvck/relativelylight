@@ -53,12 +53,14 @@ pub struct MetaField {
     pub is_fk: bool,
     /// The allowed values, when the column is an enumeration — empty for everything else.
     ///
-    /// **Introspected** from `ColumnType::Enum`, so a Postgres/MySQL enum needs no per-model code: the
-    /// variants become a `<select>` (or a radio group) in the admin form and a membership check on
-    /// write — a value outside the list is refused, where before *any* string was accepted.
+    /// **Introspected** from `ColumnType::Enum` — a `DeriveActiveEnum` with `db_type = "Enum"` — so an
+    /// enum needs no per-model code, on SQLite as much as on Postgres/MySQL: the variants become a
+    /// `<select>` (or a radio group) in the admin form and a membership check on write — a value
+    /// outside the list is refused, where before *any* string was accepted.
     ///
-    /// **Set it by hand for the common SQLite shape.** A `DeriveActiveEnum` with `db_type = "String"` is a
-    /// text column as far as the schema is concerned, so there is nothing to introspect:
+    /// A `DeriveActiveEnum` with `db_type = "String"` is a text column as far as the schema is
+    /// concerned, so there is nothing to introspect: take the list from the enum with
+    /// [`options_from`](Self::options_from), or set it by hand —
     /// `model.field("status").options = vec!["draft".into(), "live".into()]`. Doing that on any text
     /// column turns it into a closed set — the check and the `<select>` key off this list, not off the
     /// logical type.
@@ -190,6 +192,26 @@ impl MetaField {
     /// ```
     pub fn radio(&mut self) -> &mut Self {
         self.display = Some(FieldDisplay::Radio);
+        self
+    }
+
+    /// Close this column over a **string-backed** `ActiveEnum`'s values — its `string_value`s, in
+    /// declaration order — for a column the schema sees as text (`db_type = "String(..)"`, or a model
+    /// field kept as `String`), where there are no variants to introspect. The list then can't drift
+    /// from the Rust enum the way a hand-written one can.
+    ///
+    /// Prefer `db_type = "Enum"` where you own the entity: the variants are then introspected, on
+    /// SQLite too, and this isn't needed. Integer-backed enums have no labels to show, so they are not
+    /// accepted.
+    ///
+    /// ```ignore
+    /// post.field("status").options_from::<Status>();
+    /// ```
+    pub fn options_from<E>(&mut self) -> &mut Self
+    where
+        E: sea_orm::ActiveEnum<Value = String>,
+    {
+        self.options = E::values();
         self
     }
 
@@ -1790,7 +1812,7 @@ mod nullable_tests {
     /// An entity with a **real** enum column, so introspection has variants to find. `db_type = "Enum"`
     /// is what makes `ColumnDef::get_column_type()` report `ColumnType::Enum`; a `DeriveActiveEnum` with
     /// `db_type = "String"` is a text column as far as the schema knows, which is the case the app has to
-    /// declare `options` for by hand (tested separately below).
+    /// declare `options` for (`options_from`, or by hand — tested separately below).
     mod enum_thing {
         use sea_orm::entity::prelude::*;
 
@@ -1893,6 +1915,31 @@ mod nullable_tests {
         let errs = write_errors(&mm, serde_json::json!({ "name": "gamma" }), true);
         assert_eq!(errs.fields.get("name").map(String::as_str), Some("must be one of: alpha, beta"));
         let _ = bad;
+    }
+
+    /// A string-backed enum the schema sees as text: `db_type = "String"`, so nothing to introspect.
+    mod colour {
+        use sea_orm::entity::prelude::*;
+
+        #[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+        #[sea_orm(rs_type = "String", db_type = "String(StringLen::None)")]
+        pub enum Colour {
+            #[sea_orm(string_value = "red")]
+            Red,
+            #[sea_orm(string_value = "light_blue")]
+            LightBlue,
+        }
+    }
+
+    #[test]
+    fn options_from_takes_the_string_values_of_an_active_enum() {
+        let mut mm = MetaModel::new(thing::Entity);
+        mm.field("name").options_from::<colour::Colour>();
+        // The stored values, in declaration order — not the Rust variant names.
+        assert_eq!(mm.field("name").options, vec!["red".to_string(), "light_blue".into()]);
+        let errs = write_errors(&mm, serde_json::json!({ "name": "LightBlue" }), true);
+        assert_eq!(errs.fields.get("name").map(String::as_str), Some("must be one of: red, light_blue"));
+        assert!(mm.prepare_write(serde_json::json!({ "name": "light_blue" }).as_object().unwrap(), true).is_ok());
     }
 
     /// An entity whose `NOT NULL` timestamp is filled by a **hook**, not by the database and not by the

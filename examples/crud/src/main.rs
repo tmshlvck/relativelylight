@@ -98,17 +98,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     post_mm.field(post::Column::Views.as_str()).range(0.0, 500.0, 1.0);
     post_mm.field(post::Column::Views.as_str()).description =
         Some("View counter — defaults to 0 on create.".into());
-    // A **closed set of values**. `status` is a plain text column in SQLite, so the allowed values are
-    // declared here — which turns the form input into a dropdown and makes anything else a validation
-    // error instead of a stored typo. A Postgres/MySQL enum column needs none of this: the variants
-    // are introspected from `ColumnType::Enum`.
-    post_mm.field(post::Column::Status.as_str()).options =
-        vec!["draft".into(), "review".into(), "published".into(), "archived".into()];
+    // A **closed set of values**, with nothing declared here: `status` is a `DeriveActiveEnum` with
+    // `db_type = "Enum"` (see `post::Status`), so its variants are introspected — on SQLite as on
+    // Postgres — and anything else is a validation error instead of a stored typo.
     post_mm.field(post::Column::Status.as_str()).description =
         Some("Editorial state — a closed set.".into());
-    // The same closed set as a **radio group** rather than a dropdown: four choices worth seeing at
-    // once. (`radio` needs `options`, so it's set above — reversing these two lines is a render-time
-    // error naming the field.)
+    // Shown as a **radio group** rather than the default dropdown: four choices worth seeing at once.
     post_mm.field(post::Column::Status.as_str()).radio();
     post_mm.field(post::Column::Published.as_str()).label = Some("Published".into());
     post_mm.field(post::Column::Published.as_str()).default = Some(serde_json::json!(true));
