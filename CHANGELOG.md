@@ -28,6 +28,9 @@ is easy to miss in a diff.
 
 - **`TzPicker` renders `autocomplete="off"`**, so a browser restoring form state on reload (Firefox)
   can't show a zone other than the one the cookie holds.
+- **`Admin`'s side nav stays 210px wide.** Bootstrap's `.nav` sets `flex-wrap: wrap`, so a label
+  longer than the nav widened every pill past the sidebar into the table. The list is now
+  `flex-nowrap`, and a long label wraps inside its pill.
 
 ## [0.4.2] — 2026-11-04
 

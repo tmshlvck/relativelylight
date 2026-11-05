@@ -6,7 +6,7 @@
     {%- if !title.is_empty() %}
     <h6 class="text-uppercase text-muted fw-semibold px-2 mb-2">{{ title }}</h6>
     {%- endif %}
-    <ul class="nav nav-pills flex-column">
+    <ul class="nav nav-pills flex-column flex-nowrap">
       {%- for item in nav %}
       {%- match item %}
       {%- when NavV::Entity with { label, href, active } %}
