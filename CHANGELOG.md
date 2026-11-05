@@ -11,6 +11,8 @@ is easy to miss in a diff.
 
 ## Unreleased
 
+## [0.4.3] — 2026-11-05
+
 ### Added
 
 - **`files::Preview` shows text.** For any `text/*` type, `.text(bytes)` puts the content into a
@@ -1237,6 +1239,7 @@ Renames the authorization presets to a consistent `<ReadAudience>Read<WriteAudie
 First published release: the `crud` engine + SeaORM backend, the Bootstrap/Alpine admin UI, OpenAPI and
 CSV adapters, and the `auth` module (sessions, login, TOTP 2FA, OIDC SSO, per-model gates).
 
+[0.4.3]: https://github.com/tmshlvck/relativelylight/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/tmshlvck/relativelylight/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/tmshlvck/relativelylight/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/tmshlvck/relativelylight/compare/v0.3.2...v0.4.0
