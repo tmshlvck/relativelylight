@@ -397,7 +397,7 @@ impl TzPicker {
             })
             .collect();
         format!(
-            r#"<form method="post" action="{action}" class="d-flex align-items-center gap-1" title="{label}">
+            r#"<form method="post" action="{action}" class="d-flex align-items-center gap-1" title="{label}" autocomplete="off">
 <input type="hidden" name="back" value="{back}">
 <select class="form-select form-select-sm w-auto" name="tz" aria-label="{label}">{options}</select>
 <button class="btn btn-outline-secondary btn-sm" type="submit">Set</button>
@@ -418,6 +418,15 @@ impl Default for TzPicker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_no_cookie_the_picker_shows_utc_selected() {
+        let tz = Tz::from_headers(&http::HeaderMap::new());
+        assert_eq!(tz, Tz::UTC, "no cookie is UTC");
+        let html = TzPicker::new().render(&tz, "/");
+        assert!(html.contains(r#"<option value="UTC" selected>"#), "{html}");
+        assert_eq!(html.matches(" selected").count(), 1, "and nothing else is: {html}");
+    }
 
     #[test]
     fn a_posted_picker_returns_only_to_a_local_path() {

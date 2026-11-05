@@ -183,8 +183,10 @@ let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
 });
 ```
 
-`s.csrf` is what makes the section able to hold a real form: the hook never sees the request, so it
-could not mint a token itself, and a form without one is refused like any other POST (§7). The
+`s.csrf` is what makes the section able to hold a real form. The hook can't mint a token itself, and
+a form without one is refused like any other POST (§7). `s.headers` are the request's headers, for a
+section that reads a preference cookie, such as a
+[timezone picker](TIME.md#3-the-picker-and-its-handler) showing the caller's current zone. The
 section's *handler* is an ordinary route of yours — put
 [`reauthenticate`](#5h-re-authentication-before-sensitive-changes) at the top of it if
 the action is sensitive, which for an API token it is. `examples/auth` does exactly this: its

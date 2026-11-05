@@ -563,6 +563,10 @@ pub struct ProfileSection {
     /// The double-submit CSRF token for **this request**. A form in your section must carry it —
     /// `csrf::Csrf::hidden_input(&s.csrf)` — or its POST is refused like any other.
     pub csrf: String,
+    /// This request's headers — for whatever your section reads from the request itself, such as a
+    /// display-preference cookie: `time::Tz::from_headers(&s.headers)` preselects a
+    /// [`TzPicker`](crate::time::TzPicker) in the caller's current zone.
+    pub headers: HeaderMap,
 }
 
 type ProfileShell = Arc<dyn Fn(&str, &Identity) -> String + Send + Sync>;
@@ -751,10 +755,17 @@ impl Inner {
     }
 
     /// Append the app's profile-extra section (if configured) to a self-profile fragment.
-    async fn with_profile_extra(&self, frag: String, who: &Identity, csrf: &str) -> String {
+    async fn with_profile_extra(
+        &self,
+        frag: String,
+        who: &Identity,
+        csrf: &str,
+        headers: &HeaderMap,
+    ) -> String {
         match &self.profile_extra {
             Some(hook) => {
-                let ctx = ProfileSection { who: who.clone(), csrf: csrf.to_string() };
+                let ctx =
+                    ProfileSection { who: who.clone(), csrf: csrf.to_string(), headers: headers.clone() };
                 format!("{frag}{}", hook(ctx).await)
             }
             None => frag,
@@ -1673,9 +1684,9 @@ async fn profile_form(
     let (token, jar) = csrf_token(&inner, &headers, jar);
     let frag = match user.sso_key() {
         Some(provider) => {
-            inner.with_profile_extra(sso_profile_html(&who, provider), &who, &token).await
+            inner.with_profile_extra(sso_profile_html(&who, provider), &who, &token, &headers).await
         }
-        None => profile_fragment(&inner, &who, &user, None, None, &token).await,
+        None => profile_fragment(&inner, &who, &user, None, None, &token, &headers).await,
     };
     (jar, inner.page(&who, &frag)).into_response()
 }
@@ -1711,13 +1722,13 @@ async fn profile_submit(
             .map(|e| format!("Your new password {e}."))
     };
     if let Some(msg) = error {
-        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf).await;
+        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf, &headers).await;
         return (StatusCode::BAD_REQUEST, page).into_response();
     }
 
     if set_password(&inner.db, &who.username, &form.new_password).await.is_err() {
         let msg = "Could not change the password.";
-        let page = profile_page(&inner, &who, &user, Some(msg), None, &csrf).await;
+        let page = profile_page(&inner, &who, &user, Some(msg), None, &csrf, &headers).await;
         return (StatusCode::INTERNAL_SERVER_ERROR, page).into_response();
     }
     // The password is changed, so every session it ever unlocked is void: mint one fresh session for
@@ -1746,7 +1757,7 @@ async fn profile_submit(
             client_ip,
         )
         .await;
-    (jar, profile_page(&inner, &who, &user, None, Some(msg), &csrf).await).into_response()
+    (jar, profile_page(&inner, &who, &user, None, Some(msg), &csrf, &headers).await).into_response()
 }
 
 /// `GET /profile/{id}` — a manager's reset form for another user (self → own page; not a manager →
@@ -1965,7 +1976,7 @@ async fn totp_setup_submit(
         // 2FA *is* on, so don't imply otherwise; they can generate codes from the profile page.
         Err(_) => {
             let msg = "Two-factor authentication is on, but recovery codes could not be created — generate them below.";
-            profile_page(&inner, &who, &user, Some(msg), None, &csrf).await.into_response()
+            profile_page(&inner, &who, &user, Some(msg), None, &csrf, &headers).await.into_response()
         }
     }
 }
@@ -1988,7 +1999,7 @@ async fn recovery_regenerate(
         return Redirect::to(&inner.profile_path).into_response();
     }
     if let Err(msg) = inner.reauth(&user, &form.current_password, &form.totp_code).await {
-        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf).await;
+        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf, &headers).await;
         return (StatusCode::FORBIDDEN, page).into_response();
     }
     match recovery::issue(&inner.db, user.id).await {
@@ -2012,7 +2023,7 @@ async fn recovery_regenerate(
         }
         Err(_) => {
             let msg = "Could not generate new recovery codes.";
-            let page = profile_page(&inner, &who, &user, Some(msg), None, &csrf).await;
+            let page = profile_page(&inner, &who, &user, Some(msg), None, &csrf, &headers).await;
             (StatusCode::INTERNAL_SERVER_ERROR, page).into_response()
         }
     }
@@ -2052,7 +2063,7 @@ async fn sessions_revoke(
         1 => "1 other session signed out.".to_string(),
         n => format!("{n} other sessions signed out."),
     };
-    profile_page(&inner, &who, &user, None, Some(&msg), &csrf).await.into_response()
+    profile_page(&inner, &who, &user, None, Some(&msg), &csrf, &headers).await.into_response()
 }
 
 /// `POST /profile/totp/disable` — the caller turns off their own 2FA. **Re-authenticated** (§5h):
@@ -2067,12 +2078,12 @@ async fn totp_self_disable(
         Err(res) => return res,
     };
     if let Err(msg) = inner.reauth(&user, &form.current_password, &form.totp_code).await {
-        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf).await;
+        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf, &headers).await;
         return (StatusCode::FORBIDDEN, page).into_response();
     }
     let user = clear_totp(&inner, user).await;
     let msg = "Two-factor authentication disabled.";
-    profile_page(&inner, &who, &user, None, Some(msg), &csrf).await.into_response()
+    profile_page(&inner, &who, &user, None, Some(msg), &csrf, &headers).await.into_response()
 }
 
 /// `POST /profile/{id}/totp/disable` — a manager turns off *another* user's 2FA (they can re-enrol).
@@ -2126,6 +2137,7 @@ async fn profile_fragment(
     error: Option<&str>,
     success: Option<&str>,
     csrf: &str,
+    headers: &HeaderMap,
 ) -> String {
     let totp_on = user.has_totp();
     let left = match totp_on {
@@ -2133,7 +2145,7 @@ async fn profile_fragment(
         false => None,
     };
     let frag = change_form_html(who, totp_on, left, error, success, csrf);
-    inner.with_profile_extra(frag, who, csrf).await
+    inner.with_profile_extra(frag, who, csrf, headers).await
 }
 
 /// The caller's own profile page — [`profile_fragment`] in the app's profile shell.
@@ -2144,8 +2156,9 @@ async fn profile_page(
     error: Option<&str>,
     success: Option<&str>,
     csrf: &str,
+    headers: &HeaderMap,
 ) -> Html<String> {
-    inner.page(who, &profile_fragment(inner, who, user, error, success, csrf).await)
+    inner.page(who, &profile_fragment(inner, who, user, error, success, csrf, headers).await)
 }
 
 /// The signed-in caller and their account row; `None` sends them to the login page.

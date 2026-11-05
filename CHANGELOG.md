@@ -19,6 +19,15 @@ is easy to miss in a diff.
   file", or with `&[]` only "12.3 MiB is too large to display here; please download it". Without
   `.text()` nothing changes; `examples/files` uses it
   ([FILES.md → Preview](docs/FILES.md#preview)).
+- **`ProfileSection::headers`**: the `Auth::profile_extra` hook now gets the request's headers, so a
+  section can read a preference cookie. A `TzPicker` on the profile page can now show the caller's
+  current zone instead of UTC
+  ([TIME.md → The picker](docs/TIME.md#3-the-picker-and-its-handler)).
+
+### Fixed
+
+- **`TzPicker` renders `autocomplete="off"`**, so a browser restoring form state on reload (Firefox)
+  can't show a zone other than the one the cookie holds.
 
 ## [0.4.2] — 2026-11-04
 

@@ -49,7 +49,8 @@ URL, verified (and re-authenticated) before it's on.</sub></td>
   per-model gate.
 - **Files** (`files`): a streaming upload reader (several files, or a phone's camera), safe download
   responses, and upload-form, preview and thumbnail components. Storage, naming and listing stay yours.
-- **Timezones** (`tz`): integer-UTC storage, rendered server-side in the operator's zone.
+- **Timezones** (`tz`): integer-UTC storage, rendered server-side in the operator's zone, and
+  `TzPicker`, a navbar or profile-page zone selector (a cookie; UTC until one is chosen).
 
 ## Quick start
 
@@ -151,7 +152,7 @@ cargo run -p files-example           # files in a directory: upload, preview, do
 - **[docs/APP.md](docs/APP.md)** — start here: a whole app (shell, login, admin, your own pages).
 - **[docs/CRUD.md](docs/CRUD.md)** — the `crud` engine and the web UI.
 - **[docs/AUTH.md](docs/AUTH.md)** — sessions, login, 2FA, SSO, gates, CSRF.
-- **[docs/TIME.md](docs/TIME.md)** — timestamps and timezones.
+- **[docs/TIME.md](docs/TIME.md)** — timestamps and timezones, and the `TzPicker` zone selector.
 - **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module.
 - **[docs/FILES.md](docs/FILES.md)** — uploads, downloads and the file components.
 - **[docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md)** — upgrading to 0.4.1 from 0.4.0, and to 0.4 from 0.3.

@@ -79,9 +79,20 @@ async fn set_tz(Form(fields): Form<HashMap<String, String>>) -> Response {
   `back` set to the current URL, so a zone can be changed from wherever the operator noticed the
   problem. This is the right default for a console whose whole job is reading timestamps.
 - **On the profile page** — either in your own `/settings` page, or appended to the library's profile
-  page with [`Auth::profile_extra`](AUTH.md) (the hook hands you the caller's identity and the
-  request's CSRF token, and the picker's own form is plain HTML). Better when the zone is a rarely
-  changed personal preference rather than a working control.
+  page with [`Auth::profile_extra`](AUTH.md). Better when the zone is a rarely changed personal
+  preference rather than a working control. The hook gets the request's headers, so the picker
+  shows the caller's current zone, and `back` returns to the profile page:
+
+  ```rust
+  let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
+      let picker = TzPicker::new().render(&Tz::from_headers(&s.headers), "/profile");
+      format!(r#"<hr><h2 class="h6">Timezone</h2>{picker}"#)
+  });
+  ```
+
+  The `/tz` route is unchanged. The choice is still a cookie, so it applies **per browser**, not per
+  account. For a zone that follows the user to other devices, see *Store it per user* in
+  [§6](#6-choosing-a-policy).
 - **Both**, or neither: nothing in the library reads the picker. It only reads the **cookie**, via
   `Tz::from_headers` in your handler. A page with no picker anywhere still renders in whatever zone
   the cookie says, and an app that gets the zone from somewhere else entirely — a column on its own
@@ -184,9 +195,22 @@ The cookie is the mechanism; the policy is yours.
   operations console whose logs are UTC too.
 - **Let the user choose** (the usual). Render `TzPicker` and the three-line handler. The choice persists
   for a year and costs no storage.
-- **Seed it from the browser once.** If you want a first-visit default without asking, three lines of
-  JavaScript can set the cookie from `Intl.DateTimeFormat().resolvedOptions().timeZone` and reload.
-  This crate ships no such script on purpose: it is three lines, it is the app's policy, and every app
+- **Seed it from the browser once.** The server cannot know the browser's zone, so with no cookie
+  the default is UTC, not browser-local. For a browser-local first-visit default, put this in your
+  shell. It sets the cookie only when there is none, so a zone the user chose is never overwritten:
+
+  ```html
+  <script>
+  if (!document.cookie.split('; ').some(c => c.startsWith('rl_tz='))) {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    document.cookie = 'rl_tz=' + encodeURIComponent(tz) + '; Path=/; Max-Age=31536000; SameSite=Lax';
+    if (document.cookie.includes('rl_tz=')) location.reload();   // no loop if cookies are off
+  }
+  </script>
+  ```
+
+  The first page renders in UTC, then reloads once. A zone the host's tz database doesn't know still
+  renders as UTC. The crate doesn't ship this script on purpose: it is the app's policy, and every app
   wants a slightly different trigger.
 - **Store it per user.** Read your own `user.timezone` column in your page handler and pass
   `Tz::named(&user.timezone)` where you would have passed `Tz::from_headers(&headers)`; set the cookie

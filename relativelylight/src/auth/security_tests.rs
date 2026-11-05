@@ -3452,3 +3452,28 @@ async fn the_profile_extra_section_survives_disabling_2fa() {
     assert!(res.body.contains("Two-factor authentication disabled."), "{}", res.body);
     assert!(res.body.contains("app-extra"), "and the page still carries the app's section: {}", res.body);
 }
+
+#[tokio::test]
+async fn the_profile_extra_section_sees_the_request_it_renders_for() {
+    // An app's section reads display preferences from the request — a profile-page timezone picker
+    // must preselect the zone in the caller's own `rl_tz` cookie, not UTC.
+    let fx = Fx::with(|a| {
+        a.profile_extra(|s| async move {
+            let cookies = s.headers.get(http::header::COOKIE).and_then(|v| v.to_str().ok()).unwrap_or("");
+            match cookies.contains("rl_tz=Europe%2FPrague") {
+                true => "<p>zone:prague</p>".to_string(),
+                false => "<p>zone:none</p>".to_string(),
+            }
+        })
+    })
+    .await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+
+    let page = fx.get("/profile", Some(&cookie)).await;
+    assert!(page.body.contains("zone:none"), "control: no preference cookie, none seen: {}", page.body);
+
+    let with_tz = format!("{cookie}; rl_tz=Europe%2FPrague");
+    let page = fx.get("/profile", Some(&with_tz)).await;
+    assert!(page.body.contains("zone:prague"), "the hook sees this request's cookies: {}", page.body);
+}
