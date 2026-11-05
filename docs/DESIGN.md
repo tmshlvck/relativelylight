@@ -85,6 +85,10 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
   wrong: the CSRF token checked before the first file, limits enforced while streaming, the type
   sniffed and the hash computed on the way. Cleaning up a refused upload is the app's.
 - **Components take values, never call back.** Listings are the app's, because what a row shows is.
+- **Previews are by reference, except text.** An image or a PDF is a URL, so the response's allowlist
+  decides what renders. Text has no tag that shows it by reference without an `<iframe>` of awkward
+  size, so `Preview::text` takes the bytes — from the app, since the component does no I/O — and
+  escapes them into a `<pre>`, capped at 5 MiB so a log file can't become a 1 GB page.
 - **Thumbnails, versions and ownership are the app's** — policy, and an image decoder no other app
   should pay for.
 - **Downloads are the app's route**; the crate supplies the response, where the inline/attachment

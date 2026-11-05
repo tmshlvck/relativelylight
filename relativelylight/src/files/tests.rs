@@ -343,6 +343,8 @@ fn nothing_a_component_is_given_breaks_out_of_it() {
         Thumbnail::new(format!("{evil}.pdf")).render(),
         UploadForm::new(evil).accept(evil).label(evil).submit(evil).csrf(evil).render(),
         UploadForm::photo(evil, evil).csrf(evil).render(),
+        Preview::new(evil, "text/plain", evil).download_url(evil).text(evil.as_bytes()).render(),
+        Preview::new(evil, "text/html", evil).size(1 << 30).download_url(evil).text(evil.as_bytes()).render(),
     ];
     for h in html {
         assert!(!h.contains("<script>"), "{h}");
@@ -351,13 +353,74 @@ fn nothing_a_component_is_given_breaks_out_of_it() {
 }
 
 #[test]
-fn the_preview_embeds_only_urls_never_bytes() {
+fn an_image_or_a_pdf_is_embedded_by_url_never_by_value() {
     let html = Preview::new("a.png", "image/png", "/v/a.png").render();
     assert!(html.contains("<img src=\"/v/a.png\""));
     let pdf = Preview::new("a.pdf", "application/pdf", "/v/a.pdf").render();
     assert!(pdf.contains("<embed src=\"/v/a.pdf\""));
     let none = Preview::new("a.png", "image/png", "/v/a.png").links_only().render();
     assert!(!none.contains("<img"));
+}
+
+#[test]
+fn a_text_file_is_shown_escaped_in_a_pre_when_its_content_is_given() {
+    let body = b"line 1\n<b>not bold</b> & more";
+    for mime in ["text/plain", "text/csv; charset=utf-8", "Text/HTML"] {
+        let html = Preview::new("a.txt", mime, "/v").size(body.len() as u64).text(body).render();
+        assert!(html.contains("<pre"), "{mime}: {html}");
+        assert!(html.contains("line 1\n&lt;b&gt;not bold&lt;/b&gt; &amp; more</pre>"), "{mime}: {html}");
+        assert!(!html.contains("<b>") && !html.contains("download</a> the whole"), "{mime}: {html}");
+    }
+    // Not text, no content, or links only: no `<pre>`.
+    let cases = [
+        Preview::new("a.bin", "application/octet-stream", "/v").text(body),
+        Preview::new("a.png", "image/png", "/v").text(body),
+        Preview::new("a.txt", "text/plain", "/v"),
+        Preview::new("a.txt", "text/plain", "/v").text(body).links_only(),
+        Preview::new("a.txt", "textual/plain", "/v").text(body),
+    ];
+    for p in cases {
+        assert!(!p.render().contains("<pre"), "{}", p.render());
+    }
+}
+
+#[test]
+fn a_large_text_file_shows_its_beginning_or_a_note_never_more_than_the_limit() {
+    use crate::files::TEXT_PREVIEW_MAX;
+    let max = TEXT_PREVIEW_MAX as usize;
+    let size = 12 * 1024 * 1024;
+
+    // The app passed the whole 12 MiB: the page carries 5 MiB of it, and says so.
+    let all = vec![b'x'; size];
+    let html = Preview::new("big.log", "text/plain", "/v").size(size as u64).download_url("/d").text(&all).render();
+    let pre = &html[html.find("70vh\">").unwrap()..html.find("</pre>").unwrap()];
+    assert_eq!(pre.matches('x').count(), max, "only the first TEXT_PREVIEW_MAX bytes");
+    assert!(html.contains("Showing the first 5.0 MiB of 12.0 MiB; <a href=\"/d\" download>download</a>"), "{}", &html[html.len() - 300..]);
+
+    // Its beginning only — what the app read with `take`.
+    let html = Preview::new("big.log", "text/plain", "/v").size(size as u64).text(b"head").render();
+    assert!(html.contains(">head</pre>") && html.contains("first 4 B of 12.0 MiB"), "{html}");
+    assert!(html.contains("<a href=\"/v\">download</a>"), "no download_url: the content url, {html}");
+
+    // Nothing passed: the note alone.
+    let html = Preview::new("big.log", "text/plain", "/v").size(size as u64).download_url("/d").text(&[]).render();
+    assert!(!html.contains("<pre"), "{html}");
+    assert!(html.contains("12.0 MiB is too large to display here; please <a href=\"/d\" download>download</a> it."), "{html}");
+
+    // Positive control: exactly at the limit is shown whole.
+    let html = Preview::new("ok.log", "text/plain", "/v").size(max as u64).text(&all[..max]).render();
+    assert!(html.contains("<pre") && !html.contains("Showing the first"), "at the limit");
+}
+
+#[test]
+fn an_excerpt_cut_inside_a_character_drops_it_and_a_whole_file_keeps_bad_bytes_visible() {
+    // "žluť" with the last character cut: the excerpt ends at "žlu", not with U+FFFD.
+    let cut = &"žluť".as_bytes()[..5];
+    let html = Preview::new("a.txt", "text/plain", "/v").size(100).text(cut).render();
+    assert!(html.contains(">žlu</pre>"), "{html}");
+    // A whole file that isn't UTF-8 shows the replacement character instead of hiding the bytes.
+    let html = Preview::new("a.txt", "text/plain", "/v").size(3).text(b"a\xffb").render();
+    assert!(html.contains(">a\u{fffd}b</pre>"), "{html}");
 }
 
 #[test]

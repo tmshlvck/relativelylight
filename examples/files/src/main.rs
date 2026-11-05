@@ -17,7 +17,8 @@
 //! - **Upload** — pick several files at once, or (on a phone) take a photo. Give a name, or keep the
 //!   uploaded one; a name that is taken becomes `name (2).ext` rather than overwriting.
 //! - **The list** — images show a thumbnail, other files a badge. Images and PDFs preview in the
-//!   page; an SVG or HTML file is only ever downloaded.
+//!   page, and so does text — in full up to 5 MiB, beyond that its first 5 MiB and a download link.
+//!   An SVG or HTML file is only ever downloaded.
 //! - **stdout** — one line per stored file, with the SHA-256 computed while it streamed, and one per
 //!   thumbnail generated (reload the page: none, they come from the cache).
 //!
@@ -43,7 +44,7 @@ use axum_extra::extract::CookieJar;
 use relativelylight::csrf::Csrf;
 use relativelylight::files::{
     human_size, sniff_mime, to_inline_response, to_response, url_segment, Download, Part, Preview,
-    Thumbnail, Upload, UploadForm, SNIFF_BYTES,
+    Thumbnail, Upload, UploadForm, SNIFF_BYTES, TEXT_PREVIEW_MAX,
 };
 use tokio::io::AsyncReadExt;
 
@@ -233,9 +234,20 @@ async fn view(State(app): State<App>, Path(name): Path<String>) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     };
     let seg = url_segment(&name);
-    let preview = Preview::new(&name, sniff(&app.store, &name).await, format!("/raw/{seg}"))
+    let mime = sniff(&app.store, &name).await;
+    let mut preview = Preview::new(&name, mime, format!("/raw/{seg}"))
         .size(meta.len())
         .download_url(format!("/download/{seg}"));
+    // Text goes into the page itself, so the component needs the bytes: read the file, or its first
+    // TEXT_PREVIEW_MAX bytes — `Preview` then notes how much of the whole it shows. (To show only the
+    // note for a large file, read nothing and pass `&[]`.)
+    if mime.starts_with("text/") {
+        let mut head = Vec::new();
+        if let Ok(f) = tokio::fs::File::open(&path).await {
+            let _ = f.take(TEXT_PREVIEW_MAX).read_to_end(&mut head).await;
+        }
+        preview = preview.text(&head);
+    }
     shell(&format!("<p><a href=\"/\">← all files</a></p>{}", preview.render())).into_response()
 }
 

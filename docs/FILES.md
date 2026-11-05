@@ -116,6 +116,26 @@ Preview::new(&name, mime, "/raw/scan.pdf")   // the URL serves the content inlin
 An `<img>` for an image, an `<embed>` for a PDF, then the name, size and links. "open" is offered only
 for types `to_inline_response` renders inline. `.links_only()` drops the embed.
 
+**Text is shown in the page**, in a scrolling `<pre>`, for any `text/*` type — but the component does no
+I/O, so the app passes the bytes with `.text(…)`. Read at most `TEXT_PREVIEW_MAX` (5 MiB):
+
+```rust
+let mut head = Vec::new();
+file.take(TEXT_PREVIEW_MAX).read_to_end(&mut head).await?;
+Preview::new(&name, mime, "/raw/notes.txt").size(len).download_url("/download/notes.txt").text(&head)
+```
+
+| What was passed | Shown |
+|---|---|
+| the whole file (≤ 5 MiB) | all of it |
+| its beginning (`size` is larger) | the beginning, then "Showing the first 5.0 MiB of 12.3 MiB; download the whole file." |
+| nothing, `&[]` (`size` is larger) | only the note: "12.3 MiB is too large to display here; please download it." |
+
+The bytes are decoded as UTF-8 — invalid sequences show as `�`, and a character cut by the excerpt is
+dropped — and **escaped**, so `text/html` shows as its source. The component never shows more than
+`TEXT_PREVIEW_MAX`, whatever it is passed. The link is `download_url`, or `url` without one. A non-text
+type ignores `.text()`, and so does `.links_only()`.
+
 ### `Thumbnail`
 
 ```rust
@@ -148,6 +168,8 @@ table per owning kind, with real foreign keys; a link table with columns of its 
 
 ## 5. Security notes
 
+- **Text in a `Preview` is the one place stored bytes enter the page**, escaped, and only when the app
+  passed them. Everything else is a URL the browser fetches, with its own response headers.
 - **The type is advisory.** `mime()` comes from magic numbers (PNG, JPEG, GIF, WebP, PDF, ZIP, SVG,
   UTF-8 text, else `application/octet-stream`); never dispatch on it.
 - **Serve through `to_inline_response`.** Serving `image/svg+xml` inline from a route of your own is

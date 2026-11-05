@@ -11,6 +11,15 @@ is easy to miss in a diff.
 
 ## Unreleased
 
+### Added
+
+- **`files::Preview` shows text.** For any `text/*` type, `.text(bytes)` puts the content into a
+  scrolling `<pre>`, escaped — in full up to `files::TEXT_PREVIEW_MAX` (5 MiB). For a larger file it
+  shows the beginning the app passed and "Showing the first 5.0 MiB of 12.3 MiB; download the whole
+  file", or with `&[]` only "12.3 MiB is too large to display here; please download it". Without
+  `.text()` nothing changes; `examples/files` uses it
+  ([FILES.md → Preview](docs/FILES.md#preview)).
+
 ## [0.4.2] — 2026-11-04
 
 ### Added

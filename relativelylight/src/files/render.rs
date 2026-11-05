@@ -5,17 +5,30 @@
 //! these inside it. They take plain values the app already has (a name, a type, a URL), so they do
 //! no I/O and take no gate: the page that renders them is gated, and so are the URLs they point at.
 //!
-//! **By reference, never by value.** Every preview is a URL the browser fetches separately; no
-//! branch writes stored bytes into the page. A hostile content type steers which tag appears and
-//! nothing else; what the browser then does is decided by the response
-//! ([`to_inline_response`](super::to_inline_response) keeps its own allowlist).
+//! **By reference, except text the app hands over.** An image or a PDF is a URL the browser fetches
+//! separately; what the browser then does is decided by the response
+//! ([`to_inline_response`](super::to_inline_response) keeps its own allowlist). The one branch that
+//! writes stored bytes into the page is [`Preview::text`], and only with bytes the app passed in: they
+//! are decoded as UTF-8 and **escaped** into a `<pre>`, so `text/html` shows as its source. A hostile
+//! content type steers which tag appears and nothing else.
 
 use crate::html::esc;
 
 use super::response::INLINE_SAFE;
 use super::sniff::human_size;
 
-/// One file shown in full: the image, the PDF, or just its name — with "open" and "download" links.
+/// The most of a text file [`Preview::text`] puts into a page: 5 MiB. Read at most this much
+/// (`file.take(TEXT_PREVIEW_MAX)`); a file larger than that shows its beginning and a note.
+pub const TEXT_PREVIEW_MAX: u64 = 5 * 1024 * 1024;
+
+/// `text/plain`, `text/csv; charset=utf-8`, `Text/Markdown`, … — any `text/*`.
+fn is_text(mime: &str) -> bool {
+    let essence = mime.split(';').next().unwrap_or_default().trim();
+    essence.len() > 5 && essence[..5].eq_ignore_ascii_case("text/")
+}
+
+/// One file shown in full: the image, the PDF, the text, or just its name — with "open" and
+/// "download" links.
 ///
 /// `url` serves the content **inline** (an app route ending in
 /// [`to_inline_response`](super::to_inline_response)); `mime` is the type the **bytes** say, since it
@@ -28,6 +41,8 @@ use super::sniff::human_size;
 ///     .download_url("/files/scan.pdf?download")
 ///     .render();
 /// ```
+///
+/// A `text/*` file shows in a `<pre>` when the app passes its content with [`text`](Self::text).
 pub struct Preview {
     name: String,
     mime: String,
@@ -35,6 +50,7 @@ pub struct Preview {
     size: Option<u64>,
     download_url: Option<String>,
     embed: bool,
+    text: Option<Vec<u8>>,
 }
 
 impl Preview {
@@ -46,6 +62,7 @@ impl Preview {
             size: None,
             download_url: None,
             embed: true,
+            text: None,
         }
     }
 
@@ -60,10 +77,70 @@ impl Preview {
         self
     }
 
-    /// Name, size and links only — no embedded image or PDF, whatever the type.
+    /// Name, size and links only — no embedded image, PDF or text, whatever the type.
     pub fn links_only(mut self) -> Self {
         self.embed = false;
         self
+    }
+
+    /// The content of a `text/*` file, or its beginning, shown in a scrolling `<pre>` — decoded as
+    /// UTF-8 (anything else becomes `�`) and escaped. Ignored for any other type.
+    ///
+    /// Pass the whole file when it fits in [`TEXT_PREVIEW_MAX`], and at most that much otherwise; the
+    /// component never shows more. When [`size`](Self::size) says the file is larger than what was
+    /// passed, the excerpt ends with a note — "the first 5.0 MiB of 12.3 MiB" — and a download link.
+    /// Pass nothing (`&[]`) for a large file to show the note alone:
+    ///
+    /// ```
+    /// # use relativelylight::files::{Preview, TEXT_PREVIEW_MAX};
+    /// # let (size, head) = (40 << 20, Vec::<u8>::new());
+    /// // `head`: the first TEXT_PREVIEW_MAX bytes, read with `file.take(TEXT_PREVIEW_MAX)`.
+    /// let full = Preview::new("notes.txt", "text/plain", "/raw/notes.txt").size(size).text(&head);
+    /// let note = Preview::new("dump.log", "text/plain", "/raw/dump.log").size(size).text(&[]);
+    /// ```
+    ///
+    /// The link goes to [`download_url`](Self::download_url), or to `url` without one.
+    pub fn text(mut self, content: &[u8]) -> Self {
+        let n = content.len().min(TEXT_PREVIEW_MAX as usize);
+        self.text = Some(content[..n].to_vec());
+        self
+    }
+
+    /// The `<pre>` and, when it shows less than the whole file, the note under it.
+    fn render_text(&self, bytes: &[u8]) -> String {
+        let total = self.size.unwrap_or(0).max(bytes.len() as u64);
+        let whole = bytes.len() as u64 == total;
+        let link = format!(
+            "<a href=\"{}\"{}>download</a>",
+            esc(self.download_url.as_deref().unwrap_or(&self.url)),
+            if self.download_url.is_some() { " download" } else { "" }
+        );
+        let note = |text: String| format!("<p class=\"small text-body-secondary mb-0\">{text}</p>");
+        if bytes.is_empty() && !whole {
+            return note(format!(
+                "{} is too large to display here; please {link} it.",
+                human_size(total)
+            ));
+        }
+        // An excerpt was cut at an arbitrary byte: drop a character left incomplete at the end
+        // rather than show it as `�`.
+        let bytes = match std::str::from_utf8(bytes) {
+            Err(e) if !whole && e.error_len().is_none() => &bytes[..e.valid_up_to()],
+            _ => bytes,
+        };
+        let pre = format!(
+            "<pre class=\"rl-file-text border rounded bg-body-tertiary p-2 mb-1 overflow-auto\" \
+             style=\"max-height: 70vh\">{}</pre>",
+            esc(&String::from_utf8_lossy(bytes))
+        );
+        match whole {
+            true => pre,
+            false => pre + &note(format!(
+                "Showing the first {} of {}; {link} the whole file.",
+                human_size(bytes.len() as u64),
+                human_size(total)
+            )),
+        }
     }
 
     pub fn render(&self) -> String {
@@ -78,7 +155,8 @@ impl Preview {
             "application/pdf" => format!(
                 "<div class=\"ratio ratio-4x3\"><embed src=\"{url}\" type=\"application/pdf\"></div>"
             ),
-            // Text opens in a tab of its own but has no business inlined into this layout.
+            // Only what the app handed over: the component does no I/O.
+            m if is_text(m) => self.text.as_deref().map(|t| self.render_text(t)).unwrap_or_default(),
             _ => String::new(),
         };
         let size = self
