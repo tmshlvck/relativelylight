@@ -4,6 +4,7 @@
 //! wraps and styles it.
 
 use super::{recovery, totp, Identity};
+use axum::http::request::Parts;
 use askama::Template;
 
 /// Askama renders into a `String` and these templates insert only `&str`s and integers, so this
@@ -20,12 +21,12 @@ struct Shell<'a> {
 }
 
 /// The page around the login fragment when the app sets no `login_shell`: a minimal document.
-pub(super) fn default_login_shell(form: &str) -> String {
+pub(super) fn default_login_shell(form: &str, _req: &Parts) -> String {
     render(Shell { title: "Log in", body: form })
 }
 
 /// The page around the profile fragment when the app sets no `profile_shell`.
-pub(super) fn default_profile_shell(fragment: &str, _who: &Identity) -> String {
+pub(super) fn default_profile_shell(fragment: &str, _who: &Identity, _req: &Parts) -> String {
     render(Shell { title: "Profile", body: fragment })
 }
 

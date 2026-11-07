@@ -36,6 +36,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Path, State};
+use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -297,11 +298,11 @@ async fn thumbnail(
 async fn delete(
     State(app): State<App>,
     Path(name): Path<String>,
-    headers: HeaderMap,
+    req: Parts,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if !app.csrf.verify(&headers, form.get("_csrf").map(String::as_str)) {
-        return app.csrf.reject();
+    if !app.csrf.verify(&req.headers, form.get("_csrf").map(String::as_str)) {
+        return app.csrf.reject(&req); // the app's `on_reject` page, if it set one, gets the request
     }
     match app.store.delete(&name).await {
         Ok(()) => {

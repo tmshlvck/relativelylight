@@ -87,8 +87,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .admin_group("admin")
         // The library renders login/profile as *fragments*; without these two the app gets the bare
         // default document and `auth`'s Bootstrap-classed validation errors show up as unstyled text.
-        .login_shell(|form| page("Log in", form))
-        .profile_shell(|frag, _who| page("Profile", frag))
+        .login_shell(|form, _req| page("Log in", form))
+        .profile_shell(|frag, _who, _req| page("Profile", frag))
         .on_write(audit.clone())
         // A login whose database lookup failed still answers "Invalid username or password"; this is
         // where the real cause goes.

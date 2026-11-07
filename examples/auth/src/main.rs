@@ -110,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The CSRF refusal, in this app's own shell instead of the library's bare page. One closure
         // covers the library's forms *and* `csrf::enforce` on the routes above, because it travels on the
         // `auth.csrf()` handle. Same discipline as the default: no user named, no cookies set, still 403.
-        .csrf_rejection(|| {
+        .csrf_rejection(|_req| {
             (
                 StatusCode::FORBIDDEN,
                 Html(page(
@@ -122,8 +122,8 @@ from this site. Reload the page and try again.</div>
             )
                 .into_response()
         })
-        .login_shell(move |form| bootstrap_login(form, &sso_buttons))
-        .profile_shell(bootstrap_profile)
+        .login_shell(move |form, _req| bootstrap_login(form, &sso_buttons))
+        .profile_shell(|frag, who, _req| bootstrap_profile(frag, who))
         // The app's own section on the library's profile page — see `api_token_section`.
         .profile_extra(|s| async move { api_token_section(&s) });
 

@@ -78,6 +78,29 @@ async fn set_tz(Form(fields): Form<HashMap<String, String>>) -> Response {
 - **In the navbar** (what the examples do) — one `TzPicker` rendered by the shell on every page, with
   `back` set to the current URL, so a zone can be changed from wherever the operator noticed the
   problem. This is the right default for a console whose whole job is reading timestamps.
+
+  The library's own pages carry it too. [`Auth::login_shell`](AUTH.md) and `Auth::profile_shell`
+  are handed the request's `http::request::Parts`, so the shell that wraps `/login`, `/profile`,
+  `/profile/totp` and a manager's `/profile/{id}` reads the cookie and renders the same picker,
+  with the zone the caller already chose selected:
+
+  ```rust
+  let auth = Auth::new(db, lockout)
+      .login_shell(|form, req| shell(req, None, form))
+      .profile_shell(|frag, who, req| shell(req, Some(who), frag));
+
+  fn shell(req: &Parts, who: Option<&Identity>, body: &str) -> String {
+      // A re-rendered form after a refused POST has no URL to return to; send `back` home instead.
+      let back = match req.method {
+          Method::GET => req.uri.path_and_query().map_or("/", |p| p.as_str()),
+          _ => "/profile",
+      };
+      let picker = TzPicker::new().render(&Tz::from_headers(&req.headers), back);
+      // … the navbar with `picker` in it, `who` as its user link, `body` below
+  }
+  ```
+
+  `examples/adminpanel` does this.
 - **On the profile page** — either in your own `/settings` page, or appended to the library's profile
   page with [`Auth::profile_extra`](AUTH.md). Better when the zone is a rarely changed personal
   preference rather than a working control. The hook gets the request's headers, so the picker

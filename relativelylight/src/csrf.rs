@@ -55,8 +55,9 @@ pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Renders the response for a rejected request — see [`Csrf::on_reject`].
 #[cfg(feature = "axum")]
-pub(crate) type RejectFn =
-    std::sync::Arc<dyn Fn() -> axum::response::Response + Send + Sync + 'static>;
+pub(crate) type RejectFn = std::sync::Arc<
+    dyn Fn(&http::request::Parts) -> axum::response::Response + Send + Sync + 'static,
+>;
 
 /// The double-submit CSRF checker: a cookie name + the cookie attributes to issue it with. Cheap to
 /// clone; hold one per app (`Auth::csrf()` builds the one `auth` uses, so handing that to
@@ -223,23 +224,32 @@ impl Csrf {
     /// [`reject`](Csrf::reject) directly. `crud::ui`'s `submit` returns `Error::Csrf` instead, which your
     /// handler renders (a plain `403` by default).
     ///
+    /// The closure gets the rejected request's [`Parts`](http::request::Parts) — the URI, headers and
+    /// extensions — so your shell can render the same chrome it renders elsewhere (a theme or display
+    /// zone cookie, the active nav item). Read display preferences from it, not the caller's identity.
+    ///
+    /// ```ignore
+    /// .on_reject(|req| (StatusCode::FORBIDDEN, Html(my_shell(req, "Security check failed", BODY))).into_response())
+    /// ```
+    ///
     /// [`Auth::csrf_rejection`]: crate::auth::Auth::csrf_rejection
     #[cfg(feature = "axum")]
     pub fn on_reject<F>(mut self, render: F) -> Self
     where
-        F: Fn() -> axum::response::Response + Send + Sync + 'static,
+        F: Fn(&http::request::Parts) -> axum::response::Response + Send + Sync + 'static,
     {
         self.reject = Some(std::sync::Arc::new(render));
         self
     }
 
     /// The response for a request that failed the check: the app's [`on_reject`](Csrf::on_reject) page
-    /// if it set one, else a bare, shell-less `403`.
+    /// if it set one, else a bare, shell-less `403`. `req` is the rejected request's head, handed to
+    /// that page.
     #[cfg(feature = "axum")]
-    pub fn reject(&self) -> axum::response::Response {
+    pub fn reject(&self, req: &http::request::Parts) -> axum::response::Response {
         use axum::response::IntoResponse;
         if let Some(render) = &self.reject {
-            return render();
+            return render(req);
         }
         (
             http::StatusCode::FORBIDDEN,
@@ -316,32 +326,33 @@ pub async fn enforce(
     if csrf.verify(req.headers(), None) {
         return next.run(req).await;
     }
+    // From here on the body is either read or refused, and a refusal hands the head to the app's page.
+    let (parts, body) = req.into_parts();
     // How big a body we are willing to hold to find the token in, and how to find it there.
     let content_type =
-        req.headers().get(http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+        parts.headers.get(http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
     let boundary = crate::multipart::boundary(content_type);
-    let cap = match (&boundary, is_urlencoded_form(req.headers())) {
+    let cap = match (&boundary, is_urlencoded_form(&parts.headers)) {
         (Some(_), _) => csrf.max_upload,
         (None, true) => MAX_BUFFERED_FORM,
-        (None, false) => return csrf.reject(), // nothing we know how to look inside
+        (None, false) => return csrf.reject(&parts), // nothing we know how to look inside
     };
 
     // Buffer, read `_csrf`, then rebuild the request so the handler still sees its body.
-    let (parts, body) = req.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, cap).await else {
-        return csrf.reject(); // unreadable or over the cap — either way we can't find a token
+        return csrf.reject(&parts); // unreadable or over the cap — either way we can't find a token
     };
     let token = match &boundary {
         // A malformed multipart body is refused here rather than handed on: the handler would only
         // fail to parse it too, and this way the token check can't be bypassed by breaking the body.
         Some(boundary) => match crate::multipart::field(&bytes, boundary, FIELD) {
             Ok(token) => token,
-            Err(_) => return csrf.reject(),
+            Err(_) => return csrf.reject(&parts),
         },
         None => form_field(&bytes, FIELD),
     };
     if !csrf.verify(&parts.headers, token.as_deref()) {
-        return csrf.reject();
+        return csrf.reject(&parts);
     }
     next.run(axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))).await
 }
@@ -498,12 +509,14 @@ mod tests {
     #[test]
     fn the_rejection_hook_replaces_the_built_in_page() {
         use axum::response::IntoResponse;
-        let default = Csrf::new().reject();
+        let (req, ()) = http::Request::builder().uri("/account/delete").body(()).unwrap().into_parts();
+        let default = Csrf::new().reject(&req);
         assert_eq!(default.status(), http::StatusCode::FORBIDDEN);
 
-        let custom = Csrf::new()
-            .on_reject(|| (http::StatusCode::FORBIDDEN, "in my own shell").into_response());
-        let res = custom.reject();
+        let custom = Csrf::new().on_reject(|req| {
+            (http::StatusCode::FORBIDDEN, format!("in my own shell at {}", req.uri.path())).into_response()
+        });
+        let res = custom.reject(&req);
         assert_eq!(res.status(), http::StatusCode::FORBIDDEN, "still a 403");
         // The hook travels with a clone, which is how it reaches `enforce` and the auth routes.
         assert!(custom.clone().reject.is_some());

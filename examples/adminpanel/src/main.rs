@@ -16,7 +16,8 @@
 use askama::Template;
 use axum::body::Bytes;
 use axum::extract::{Form, Path, State};
-use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::http::request::Parts;
+use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -517,26 +518,37 @@ fn page(body: String, who: &Identity, headers: &HeaderMap, uri: &Uri) -> Respons
     Html(html).into_response()
 }
 
+/// Where the navbar's timezone picker returns to on a page the library rendered: the page itself when
+/// it was a `GET`, else `fallback` — a re-rendered form after a refused `POST` has no URL to go back to.
+fn back_to<'a>(req: &'a Parts, fallback: &'a str) -> &'a str {
+    match req.method {
+        Method::GET => req.uri.path_and_query().map(|p| p.as_str()).unwrap_or(fallback),
+        _ => fallback,
+    }
+}
+
 // The app styles the library's login form: drop it into our shell as a centered card. Anonymous, so
-// the navbar shows no user link.
-fn login_shell(form: &str) -> String {
+// the navbar shows no user link. The library hands us the request, so the navbar's timezone picker
+// shows the caller's zone here as on every other page.
+fn login_shell(form: &str, req: &Parts) -> String {
     let body = format!(
         r#"<div class="card shadow-sm mx-auto" style="max-width:24rem"><div class="card-body">
 <h1 class="h5 mb-3">Log in</h1>{form}
 <p class="text-muted small mt-2 mb-0">Demo: <code>admin</code> / <code>password</code></p>
 </div></div>"#
     );
-    Shell::page("Log in", "", body, &HeaderMap::new(), "/").render().unwrap_or_default()
+    Shell::page("Log in", "", body, &req.headers, back_to(req, "/login")).render().unwrap_or_default()
 }
 
 // The app styles the library's profile/password page the same way. The library hands us the caller's
-// identity, so the navbar shows their username (and Log out) just like the admin page.
-fn profile_shell(fragment: &str, who: &Identity) -> String {
+// identity and the request, so the navbar shows their username (and Log out) and their timezone just
+// like the admin page — on /profile, /profile/totp and a manager's /profile/{id} alike.
+fn profile_shell(fragment: &str, who: &Identity, req: &Parts) -> String {
     let body = format!(
         r#"<div class="card shadow-sm mx-auto" style="max-width:32rem"><div class="card-body">{fragment}
 <a class="d-inline-block mt-3" href="/">&larr; Back to admin</a></div></div>"#
     );
-    Shell::page("Profile", who.username.clone(), body, &HeaderMap::new(), "/profile")
+    Shell::page("Profile", who.username.clone(), body, &req.headers, back_to(req, "/profile"))
         .render()
         .unwrap_or_default()
 }

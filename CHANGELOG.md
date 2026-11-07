@@ -11,6 +11,20 @@ is easy to miss in a diff.
 
 ## Unreleased
 
+### Changed (breaking)
+
+- **`Auth`'s page callbacks get the request.** `login_shell`, `profile_shell` and `csrf_rejection`
+  now receive the request's `http::request::Parts` (URI, method, headers, extensions), so the pages
+  `auth` renders carry the same chrome as the rest of the app: a timezone picker showing the
+  caller's zone, a theme cookie, the active nav item. Before, the navbar's zone indicator vanished
+  on `/profile`, the very page where the zone is chosen. `Csrf::on_reject` gets the same argument,
+  because it shares the hook, and `Csrf::reject` now takes the rejected request's `&Parts`.
+  **Upgrade:** add the argument to each closure, e.g. `|form| …` → `|form, req| …`,
+  `|frag, who| …` → `|frag, who, req| …`, `|| …` → `|req| …`, and pass `&req` to `csrf.reject()`
+  ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#1-auths-page-callbacks-get-the-request)).
+  `examples/adminpanel` renders its timezone picker on the login and profile pages
+  ([TIME.md → The picker](docs/TIME.md#3-the-picker-and-its-handler)).
+
 ## [0.4.3] — 2026-11-05
 
 ### Added

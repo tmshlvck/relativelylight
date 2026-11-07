@@ -160,13 +160,6 @@ impl Shell {
         }
     }
     fn html(self) -> Response { Html(self.render().unwrap_or_default()).into_response() }
-
-    /// For the two pages `auth` renders for us (§3): no request in hand, so no nav highlighting and
-    /// no timezone picker — just the chrome.
-    fn plain(title: &str, user: &str, body: String) -> Self {
-        Self { title: title.into(), user: user.into(), nav: Vec::new(), body,
-               tz_picker: String::new(), css: CSS }
-    }
 }
 
 fn full_path(uri: &Uri) -> &str { uri.path_and_query().map(|p| p.as_str()).unwrap_or("/") }
@@ -214,27 +207,34 @@ recovery codes. You supply the chrome by giving it a closure — the fragment co
 goes out:
 
 ```rust
-fn login_shell(form: &str) -> String {
+fn login_shell(form: &str, req: &Parts) -> String {
     let body = format!(
         r#"<div class="card shadow-sm mx-auto" style="max-width:24rem"><div class="card-body">
              <h1 class="h5 mb-3">Sign in</h1>{form}
            </div></div>"#
     );
-    Shell::plain("Sign in", "", body).render().unwrap_or_default()
+    Shell::new("Sign in", None, &req.uri, &req.headers, body).render().unwrap_or_default()
 }
 
 /// The profile page (password change, 2FA enrolment, recovery codes, "sign out other sessions").
 /// `who` is the caller, so the nav bar can show them.
-fn profile_shell(fragment: &str, who: &Identity) -> String {
-    Shell::plain("Profile", &who.username, fragment.to_string()).render().unwrap_or_default()
+fn profile_shell(fragment: &str, who: &Identity, req: &Parts) -> String {
+    Shell::new("Profile", Some(who), &req.uri, &req.headers, fragment.to_string())
+        .render()
+        .unwrap_or_default()
 }
 ```
 
-Both are **sync** closures returning a `String`: they run inside `auth`'s own handlers, which is why
-they can't await your database — and they get no `Uri` or `HeaderMap`, so a nav bar that needs either
-(the active-page highlight, the timezone picker) wants the simpler `Shell::plain` above.
+Both get the request's `http::request::Parts` (URI, method, headers, extensions), so these pages
+carry the same chrome as the rest of the app: the active nav item, and the timezone picker showing
+the caller's zone. One caveat for the picker's `back`: a form `auth` re-renders after a refused
+`POST` (a wrong password) sits at a URL that only takes a `POST`, so return to the page's `GET`
+(`/login`, `/profile`) when `req.method` isn't `GET` (`examples/adminpanel` does).
 
-`Auth::csrf_rejection(closure)` styles the `403` page the same way. Nothing else about login is
+Both are **sync** closures returning a `String`: they run inside `auth`'s own handlers, which is why
+they can't await your database.
+
+`Auth::csrf_rejection(|req| …)` styles the `403` page the same way, and gets the request too. Nothing else about login is
 yours: `/login`, `/login/totp`, `/logout`, `/profile` and `/profile/{id}` all come from
 `auth.routes()`.
 
@@ -536,4 +536,5 @@ Before a deployment goes out:
 - [AUTH.md](AUTH.md) — sessions, 2FA, SSO, the gate presets, CSRF, lockout.
 - [TIME.md](TIME.md) — the timezone cookie, the picker, configuring the offered zones.
 - [DATAINPUT.md](DATAINPUT.md) — validators you can call from a hand-written form.
+- [MIGRATION-0.5.md](MIGRATION-0.5.md) — upgrading an app to 0.5 (unreleased) from 0.4.
 - [MIGRATION-0.4.md](MIGRATION-0.4.md) — upgrading an app to 0.4.1 from 0.4.0, and to 0.4 from 0.3.

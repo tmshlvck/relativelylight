@@ -55,6 +55,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use async_trait::async_trait;
 use axum::extract::{Form, Path, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -549,7 +550,7 @@ async fn groups_of(db: &DatabaseConnection, user_id: i32) -> Vec<String> {
 
 // ===================== The Auth builder =====================
 
-type LoginShell = Arc<dyn Fn(&str) -> String + Send + Sync>;
+type LoginShell = Arc<dyn Fn(&str, &Parts) -> String + Send + Sync>;
 /// Wraps the profile/password fragment into a full page. Also handed the resolved [`Identity`] so the
 /// app can render its chrome (e.g. the signed-in username in the navbar).
 /// What [`Auth::profile_extra`] hands an app's own profile section.
@@ -569,7 +570,7 @@ pub struct ProfileSection {
     pub headers: HeaderMap,
 }
 
-type ProfileShell = Arc<dyn Fn(&str, &Identity) -> String + Send + Sync>;
+type ProfileShell = Arc<dyn Fn(&str, &Identity, &Parts) -> String + Send + Sync>;
 /// Renders an extra app-owned section appended below the password/2FA fragment on the *self* profile
 /// page (e.g. API-token management). Handed a [`ProfileSection`]; returns an HTML fragment.
 type ProfileExtra = Arc<
@@ -749,9 +750,9 @@ impl Inner {
         who.in_any_group(&self.manager_groups())
     }
 
-    /// A page in the app's profile shell.
-    fn page(&self, who: &Identity, frag: &str) -> Html<String> {
-        Html((self.profile_shell)(frag, who))
+    /// A page in the app's profile shell, handed the request so the shell can render its chrome.
+    fn page(&self, who: &Identity, frag: &str, req: &Parts) -> Html<String> {
+        Html((self.profile_shell)(frag, who, req))
     }
 
     /// Append the app's profile-extra section (if configured) to a self-profile fragment.
@@ -886,18 +887,32 @@ impl Auth {
 
     /// Wrap the login-form fragment into a full page — embed it in your app's shell so *you* style it
     /// (e.g. a Bootstrap page). The closure receives the `<form>…</form>` fragment (which carries
-    /// Bootstrap-friendly classes) and returns the full HTML document.
-    pub fn login_shell(mut self, shell: impl Fn(&str) -> String + Send + Sync + 'static) -> Self {
+    /// Bootstrap-friendly classes) and the request's [`Parts`] — URI, headers, extensions — and returns
+    /// the full HTML document. The request is there for chrome that depends on it, the same chrome the
+    /// rest of your app renders: a theme or display-zone cookie, the active nav item.
+    ///
+    /// ```ignore
+    /// .login_shell(|form, req| page(req, "Log in", form))
+    /// ```
+    pub fn login_shell(
+        mut self,
+        shell: impl Fn(&str, &Parts) -> String + Send + Sync + 'static,
+    ) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().login_shell = Arc::new(shell);
         self
     }
 
     /// Wrap the profile/password fragment into a full page — as [`login_shell`](Auth::login_shell),
     /// but the closure also receives the signed-in [`Identity`] so the app can render its chrome (e.g.
-    /// the username in the navbar) around the fragment.
+    /// the username in the navbar) around the fragment. It wraps every page under the profile path:
+    /// `/profile`, `/profile/totp`, the recovery codes and a manager's `/profile/{id}`.
+    ///
+    /// ```ignore
+    /// .profile_shell(|frag, who, req| page(req, Some(who), "Profile", frag))
+    /// ```
     pub fn profile_shell(
         mut self,
-        shell: impl Fn(&str, &Identity) -> String + Send + Sync + 'static,
+        shell: impl Fn(&str, &Identity, &Parts) -> String + Send + Sync + 'static,
     ) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().profile_shell = Arc::new(shell);
         self
@@ -1062,14 +1077,15 @@ impl Auth {
     /// Applies to every form this module renders *and* to [`csrf::enforce`](crate::csrf::enforce) on your
     /// own routes, because the closure travels on the [`csrf()`](Auth::csrf) handle. Keep the same
     /// discipline the default has: a rejected request hasn't proved it came from your site, so don't name
-    /// the user, don't set cookies, and keep the status a `403`.
+    /// the user, don't set cookies, and keep the status a `403`. The closure gets the request's
+    /// [`Parts`] for display preferences (a theme or zone cookie), not for working out who is asking.
     ///
     /// ```ignore
-    /// .csrf_rejection(|| (StatusCode::FORBIDDEN, Html(my_shell("Security check failed", BODY))).into_response())
+    /// .csrf_rejection(|req| (StatusCode::FORBIDDEN, Html(my_shell(req, "Security check failed", BODY))).into_response())
     /// ```
     pub fn csrf_rejection<F>(mut self, render: F) -> Self
     where
-        F: Fn() -> Response + Send + Sync + 'static,
+        F: Fn(&Parts) -> Response + Send + Sync + 'static,
     {
         Arc::get_mut(&mut self.inner).unwrap().csrf_reject = Some(Arc::new(render));
         self
@@ -1355,31 +1371,33 @@ struct LoginForm {
     csrf: Option<String>,
 }
 
-async fn login_form(State(inner): State<Arc<Inner>>, headers: HeaderMap, jar: CookieJar) -> Response {
-    let (token, jar) = csrf_token(&inner, &headers, jar);
-    (jar, Html((inner.login_shell)(&login_form_html(None, &token)))).into_response()
+async fn login_form(State(inner): State<Arc<Inner>>, req: Parts, jar: CookieJar) -> Response {
+    let headers = &req.headers;
+    let (token, jar) = csrf_token(&inner, headers, jar);
+    (jar, Html((inner.login_shell)(&login_form_html(None, &token), &req))).into_response()
 }
 
 async fn login_submit(
     State(inner): State<Arc<Inner>>,
-    headers: HeaderMap,
+    req: Parts,
     RealIp(client_ip): RealIp,
     jar: CookieJar,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
+    let headers = &req.headers;
+    if !inner.csrf().verify(headers, form.csrf.as_deref()) {
         // Checked before anything else: a forged post does no DB work *and* can't spend the victim's
         // attempt budget (otherwise cross-site requests could lock a user out).
-        return csrf_rejected(&inner);
+        return csrf_rejected(&inner, &req);
     }
     if let Some(retry) = inner.locked_out(&form.username, client_ip).await {
         // Locked: the password is never looked at, so this costs no argon2 and says nothing about
         // whether the account exists.
-        let (token, jar) = csrf_token(&inner, &headers, jar);
+        let (token, jar) = csrf_token(&inner, headers, jar);
         return too_many_attempts(
             retry,
             jar,
-            Html((inner.login_shell)(&login_form_html(Some(&lockout_message(retry)), &token))),
+            Html((inner.login_shell)(&login_form_html(Some(&lockout_message(retry)), &token), &req)),
         );
     }
     let user = match verify_credentials(&inner, &form.username, &form.password).await {
@@ -1396,14 +1414,14 @@ async fn login_submit(
         }
     };
     let Some(user) = user else {
-        return login_rejected(&inner, &headers, jar);
+        return login_rejected(&inner, &req, jar);
     };
     let needs_totp = user.has_totp();
     let token = match create_session(&inner, user.id, needs_totp).await {
         Ok(token) => token,
         Err(e) => {
             inner.report("auth-login", "session create", &e, client_ip).await;
-            return login_rejected(&inner, &headers, jar);
+            return login_rejected(&inner, &req, jar);
         }
     };
     // Credentials accepted → forget this account's failures (the address's are left alone: one valid
@@ -1425,12 +1443,12 @@ async fn login_submit(
 }
 
 /// The one answer to a failed sign-in, whatever failed: `401` and the generic message.
-fn login_rejected(inner: &Inner, headers: &HeaderMap, jar: CookieJar) -> Response {
-    let (token, jar) = csrf_token(inner, headers, jar);
+fn login_rejected(inner: &Inner, req: &Parts, jar: CookieJar) -> Response {
+    let (token, jar) = csrf_token(inner, &req.headers, jar);
     (
         StatusCode::UNAUTHORIZED,
         jar,
-        Html((inner.login_shell)(&login_form_html(Some("Invalid username or password."), &token))),
+        Html((inner.login_shell)(&login_form_html(Some("Invalid username or password."), &token), req)),
     )
         .into_response()
 }
@@ -1439,13 +1457,14 @@ fn login_rejected(inner: &Inner, headers: &HeaderMap, jar: CookieJar) -> Respons
 /// the pending session; if there isn't one, sends the visitor back to /login.
 async fn login_totp_form(
     State(inner): State<Arc<Inner>>,
-    headers: HeaderMap,
+    req: Parts,
     jar: CookieJar,
 ) -> Response {
-    match pending_totp_user(&inner, &headers).await {
+    let headers = &req.headers;
+    match pending_totp_user(&inner, headers).await {
         Some(_) => {
-            let (token, jar) = csrf_token(&inner, &headers, jar);
-            (jar, Html((inner.login_shell)(&totp_login_html(None, &token)))).into_response()
+            let (token, jar) = csrf_token(&inner, headers, jar);
+            (jar, Html((inner.login_shell)(&totp_login_html(None, &token), &req))).into_response()
         }
         None => Redirect::to(&inner.login_path).into_response(),
     }
@@ -1488,39 +1507,40 @@ struct CsrfOnlyForm {
 /// `awaiting_totp` (the session becomes a real login) and land on `/`.
 async fn login_totp_submit(
     State(inner): State<Arc<Inner>>,
-    headers: HeaderMap,
+    req: Parts,
     RealIp(client_ip): RealIp,
     jar: CookieJar,
     Form(form): Form<TotpForm>,
 ) -> Response {
-    if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
-        return csrf_rejected(&inner);
+    let headers = &req.headers;
+    if !inner.csrf().verify(headers, form.csrf.as_deref()) {
+        return csrf_rejected(&inner, &req);
     }
-    let Some((session, user)) = pending_totp_user(&inner, &headers).await else {
+    let Some((session, user)) = pending_totp_user(&inner, headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
     // The second factor shares the account's login bucket: password guessing and code guessing are the
     // same account being attacked, and 6 digits deserve the tighter of the two brakes.
     if let Some(retry) = inner.locked_out(&user.username, client_ip).await {
-        let (token, jar) = csrf_token(&inner, &headers, jar);
+        let (token, jar) = csrf_token(&inner, headers, jar);
         return too_many_attempts(
             retry,
             jar,
-            Html((inner.login_shell)(&totp_login_html(Some(&lockout_message(retry)), &token))),
+            Html((inner.login_shell)(&totp_login_html(Some(&lockout_message(retry)), &token), &req)),
         );
     }
     // An empty submission presents **no credential**, so it is not a failed check and must not spend the
     // account's budget — §5e's rule, and without it an empty form (a stray double-submit, or a forged
     // cross-site post that happens to carry a token) would grief the real user's login.
     if form.code.trim().is_empty() && recovery::normalize(&form.recovery_code).is_empty() {
-        let (token, jar) = csrf_token(&inner, &headers, jar);
+        let (token, jar) = csrf_token(&inner, headers, jar);
         return (
             StatusCode::UNAUTHORIZED,
             jar,
             Html((inner.login_shell)(&totp_login_html(
                 Some("Enter the code from your authenticator app, or a recovery code."),
                 &token,
-            ))),
+            ), &req)),
         )
             .into_response();
     }
@@ -1539,11 +1559,11 @@ async fn login_totp_submit(
     }
     if !ok {
         inner.record_failure(&user.username, client_ip).await;
-        let (token, jar) = csrf_token(&inner, &headers, jar);
+        let (token, jar) = csrf_token(&inner, headers, jar);
         return (
             StatusCode::UNAUTHORIZED,
             jar,
-            Html((inner.login_shell)(&totp_login_html(Some("Invalid code. Try again."), &token))),
+            Html((inner.login_shell)(&totp_login_html(Some("Invalid code. Try again."), &token), &req)),
         )
             .into_response();
     }
@@ -1635,11 +1655,12 @@ async fn identity_of(inner: &Inner, headers: &HeaderMap) -> Option<Identity> {
 #[allow(clippy::result_large_err)] // the `Err` is the handler's response, returned straight away
 async fn self_post(
     inner: &Inner,
-    headers: &HeaderMap,
+    req: &Parts,
     form_csrf: Option<&str>,
 ) -> std::result::Result<(Identity, user::Model, String), Response> {
+    let headers = &req.headers;
     if !inner.csrf().verify(headers, form_csrf) {
-        return Err(csrf_rejected(inner));
+        return Err(csrf_rejected(inner, req));
     }
     let csrf = inner.csrf().token(headers).unwrap_or_default();
     let (who, user) =
@@ -1675,31 +1696,33 @@ async fn managed_target(
 /// SSO account it's a read-only notice: password + 2FA are managed by the identity provider.
 async fn profile_form(
     State(inner): State<Arc<Inner>>,
-    headers: HeaderMap,
+    req: Parts,
     jar: CookieJar,
 ) -> Response {
-    let Some((who, user)) = signed_in(&inner, &headers).await else {
+    let headers = &req.headers;
+    let Some((who, user)) = signed_in(&inner, headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
-    let (token, jar) = csrf_token(&inner, &headers, jar);
+    let (token, jar) = csrf_token(&inner, headers, jar);
     let frag = match user.sso_key() {
         Some(provider) => {
-            inner.with_profile_extra(sso_profile_html(&who, provider), &who, &token, &headers).await
+            inner.with_profile_extra(sso_profile_html(&who, provider), &who, &token, headers).await
         }
-        None => profile_fragment(&inner, &who, &user, None, None, &token, &headers).await,
+        None => profile_fragment(&inner, &who, &user, None, None, &token, headers).await,
     };
-    (jar, inner.page(&who, &frag)).into_response()
+    (jar, inner.page(&who, &frag, &req)).into_response()
 }
 
 /// `POST /profile` — verify the current password, then set the new one for the caller.
 async fn profile_submit(
     State(inner): State<Arc<Inner>>,
-    headers: HeaderMap,
+    req: Parts,
     RealIp(client_ip): RealIp, // for the audit record, not for limiting
     jar: CookieJar,
     Form(form): Form<ChangeForm>,
 ) -> Response {
-    let (who, user, csrf) = match self_post(&inner, &headers, form.csrf.as_deref()).await {
+    let headers = &req.headers;
+    let (who, user, csrf) = match self_post(&inner, &req, form.csrf.as_deref()).await {
         Ok(v) => v,
         Err(res) => return res,
     };
@@ -1722,13 +1745,13 @@ async fn profile_submit(
             .map(|e| format!("Your new password {e}."))
     };
     if let Some(msg) = error {
-        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf, &headers).await;
+        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf, &req).await;
         return (StatusCode::BAD_REQUEST, page).into_response();
     }
 
     if set_password(&inner.db, &who.username, &form.new_password).await.is_err() {
         let msg = "Could not change the password.";
-        let page = profile_page(&inner, &who, &user, Some(msg), None, &csrf, &headers).await;
+        let page = profile_page(&inner, &who, &user, Some(msg), None, &csrf, &req).await;
         return (StatusCode::INTERNAL_SERVER_ERROR, page).into_response();
     }
     // The password is changed, so every session it ever unlocked is void: mint one fresh session for
@@ -1753,26 +1776,27 @@ async fn profile_submit(
             "auth_user",
             Some(who.id.clone()),
             serde_json::json!({ "password_changed": true, "sessions_revoked": true }),
-            &headers,
+            headers,
             client_ip,
         )
         .await;
-    (jar, profile_page(&inner, &who, &user, None, Some(msg), &csrf, &headers).await).into_response()
+    (jar, profile_page(&inner, &who, &user, None, Some(msg), &csrf, &req).await).into_response()
 }
 
 /// `GET /profile/{id}` — a manager's reset form for another user (self → own page; not a manager →
 /// 403; unknown user → 404).
 async fn manage_form(
     State(inner): State<Arc<Inner>>,
-    headers: HeaderMap,
+    req: Parts,
     jar: CookieJar,
     Path(id): Path<String>,
 ) -> Response {
-    let (who, target) = match managed_target(&inner, &headers, &id).await {
+    let headers = &req.headers;
+    let (who, target) = match managed_target(&inner, headers, &id).await {
         Ok(v) => v,
         Err(res) => return res,
     };
-    let (token, jar) = csrf_token(&inner, &headers, jar);
+    let (token, jar) = csrf_token(&inner, headers, jar);
     // The manager's own 2FA state decides whether the confirm-it's-you block offers a code field.
     let manager_totp_on =
         target_user(&inner, &who.id).await.map(|m| m.has_totp()).unwrap_or(false);
@@ -1790,22 +1814,23 @@ async fn manage_form(
             &token,
         ),
     };
-    (jar, inner.page(&who, &frag)).into_response()
+    (jar, inner.page(&who, &frag, &req)).into_response()
 }
 
 /// `POST /profile/{id}` — a manager sets another user's password (no current password required).
 async fn manage_submit(
     State(inner): State<Arc<Inner>>,
-    headers: HeaderMap,
+    req: Parts,
     RealIp(client_ip): RealIp,
     Path(id): Path<String>,
     Form(form): Form<ResetForm>,
 ) -> Response {
-    if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
-        return csrf_rejected(&inner);
+    let headers = &req.headers;
+    if !inner.csrf().verify(headers, form.csrf.as_deref()) {
+        return csrf_rejected(&inner, &req);
     }
-    let csrf = inner.csrf().token(&headers).unwrap_or_default();
-    let (who, target) = match managed_target(&inner, &headers, &id).await {
+    let csrf = inner.csrf().token(headers).unwrap_or_default();
+    let (who, target) = match managed_target(&inner, headers, &id).await {
         Ok(v) => v,
         Err(res) => return res,
     };
@@ -1822,7 +1847,7 @@ async fn manage_submit(
     let page = |error: Option<&str>, success: Option<&str>| {
         let frag =
             reset_form_html(&id, &target.username, totp_on, manager_totp_on, error, success, &csrf);
-        inner.page(&who, &frag)
+        inner.page(&who, &frag, &req)
     };
     if let Err(msg) = inner.reauth(&manager, &form.current_password, &form.totp_code).await {
         return (StatusCode::FORBIDDEN, page(Some(&msg), None)).into_response();
@@ -1872,7 +1897,7 @@ async fn manage_submit(
                 "by": who.username,
                 "sessions_revoked": revoked,
             }),
-            &headers,
+            headers,
             client_ip,
         )
         .await;
@@ -1890,10 +1915,11 @@ async fn manage_submit(
 /// the QR + `otpauth://` URL with a verify form. A new secret is generated on each visit.
 async fn totp_setup_form(
     State(inner): State<Arc<Inner>>,
-    headers: HeaderMap,
+    req: Parts,
     jar: CookieJar,
 ) -> Response {
-    let Some((who, user)) = signed_in(&inner, &headers).await else {
+    let headers = &req.headers;
+    let Some((who, user)) = signed_in(&inner, headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
     if user.is_sso() {
@@ -1908,18 +1934,18 @@ async fn totp_setup_form(
     if am.update(&inner.db).await.is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not start 2FA setup").into_response();
     }
-    let (token, jar) = csrf_token(&inner, &headers, jar);
-    (jar, render_totp_setup(&inner, &who, &secret, totp_on, None, &token)).into_response()
+    let (token, jar) = csrf_token(&inner, headers, jar);
+    (jar, render_totp_setup(&inner, &who, &secret, totp_on, None, &token, &req)).into_response()
 }
 
 /// `POST /profile/totp` — confirm enrolment: verify the code against the pending secret, then promote
 /// it to the active secret (2FA now required at login). On a bad code, re-show the *same* QR.
 async fn totp_setup_submit(
     State(inner): State<Arc<Inner>>,
-    headers: HeaderMap,
+    req: Parts,
     Form(form): Form<TotpForm>,
 ) -> Response {
-    let (who, user, csrf) = match self_post(&inner, &headers, form.csrf.as_deref()).await {
+    let (who, user, csrf) = match self_post(&inner, &req, form.csrf.as_deref()).await {
         Ok(v) => v,
         Err(res) => return res,
     };
@@ -1939,7 +1965,7 @@ async fn totp_setup_submit(
     // either.
     let totp_on = user.has_totp();
     if let Err(msg) = inner.reauth(&user, &form.current_password, &form.totp_code).await {
-        return render_totp_setup(&inner, &who, &pending, totp_on, Some(&msg), &csrf);
+        return render_totp_setup(&inner, &who, &pending, totp_on, Some(&msg), &csrf, &req);
     }
     // Not lockout-limited: enrolling is authenticated, and the code being guessed is the caller's own
     // pending secret — there is nobody else's account to reach by guessing it.
@@ -1951,6 +1977,7 @@ async fn totp_setup_submit(
             totp_on,
             Some("That code didn't match. Try again."),
             &csrf,
+            &req,
         );
     };
     let mut am: user::ActiveModel = user.into();
@@ -1971,12 +1998,12 @@ async fn totp_setup_submit(
                 &codes,
                 "Two-factor authentication is now enabled. Save these recovery codes.",
             );
-            inner.page(&who, &frag).into_response()
+            inner.page(&who, &frag, &req).into_response()
         }
         // 2FA *is* on, so don't imply otherwise; they can generate codes from the profile page.
         Err(_) => {
             let msg = "Two-factor authentication is on, but recovery codes could not be created — generate them below.";
-            profile_page(&inner, &who, &user, Some(msg), None, &csrf, &headers).await.into_response()
+            profile_page(&inner, &who, &user, Some(msg), None, &csrf, &req).await.into_response()
         }
     }
 }
@@ -1986,11 +2013,12 @@ async fn totp_setup_submit(
 /// session must not be able to mint one, and the codes it invalidates are the real user's.
 async fn recovery_regenerate(
     State(inner): State<Arc<Inner>>,
-    headers: HeaderMap,
+    req: Parts,
     RealIp(client_ip): RealIp,
     Form(form): Form<ReauthForm>,
 ) -> Response {
-    let (who, user, csrf) = match self_post(&inner, &headers, form.csrf.as_deref()).await {
+    let headers = &req.headers;
+    let (who, user, csrf) = match self_post(&inner, &req, form.csrf.as_deref()).await {
         Ok(v) => v,
         Err(res) => return res,
     };
@@ -1999,7 +2027,7 @@ async fn recovery_regenerate(
         return Redirect::to(&inner.profile_path).into_response();
     }
     if let Err(msg) = inner.reauth(&user, &form.current_password, &form.totp_code).await {
-        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf, &headers).await;
+        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf, &req).await;
         return (StatusCode::FORBIDDEN, page).into_response();
     }
     match recovery::issue(&inner.db, user.id).await {
@@ -2011,7 +2039,7 @@ async fn recovery_regenerate(
                     "auth_user",
                     Some(who.id.clone()),
                     serde_json::json!({ "recovery_codes_reissued": codes.len() }),
-                    &headers,
+                    headers,
                     client_ip,
                 )
                 .await;
@@ -2019,11 +2047,11 @@ async fn recovery_regenerate(
                 &codes,
                 "Here is your new set. The previous codes no longer work.",
             );
-            inner.page(&who, &frag).into_response()
+            inner.page(&who, &frag, &req).into_response()
         }
         Err(_) => {
             let msg = "Could not generate new recovery codes.";
-            let page = profile_page(&inner, &who, &user, Some(msg), None, &csrf, &headers).await;
+            let page = profile_page(&inner, &who, &user, Some(msg), None, &csrf, &req).await;
             (StatusCode::INTERNAL_SERVER_ERROR, page).into_response()
         }
     }
@@ -2032,17 +2060,18 @@ async fn recovery_regenerate(
 /// `POST /profile/sessions/revoke` — the caller signs out every session **except this one**.
 async fn sessions_revoke(
     State(inner): State<Arc<Inner>>,
-    headers: HeaderMap,
+    req: Parts,
     RealIp(client_ip): RealIp,
     Form(form): Form<CsrfOnlyForm>,
 ) -> Response {
-    let (who, user, csrf) = match self_post(&inner, &headers, form.csrf.as_deref()).await {
+    let headers = &req.headers;
+    let (who, user, csrf) = match self_post(&inner, &req, form.csrf.as_deref()).await {
         Ok(v) => v,
         Err(res) => return res,
     };
     // Spare the caller's own session — identified by the cookie they just used, so a race with their own
     // logout can at worst spare a row that's about to be deleted anyway.
-    let current = CookieJar::from_headers(&headers)
+    let current = CookieJar::from_headers(headers)
         .get(&inner.cookie_name)
         .map(|c| c.value().to_string())
         .unwrap_or_default();
@@ -2054,7 +2083,7 @@ async fn sessions_revoke(
             "auth_user",
             Some(who.id.clone()),
             serde_json::json!({ "sessions_revoked": revoked }),
-            &headers,
+            headers,
             client_ip,
         )
         .await;
@@ -2063,42 +2092,43 @@ async fn sessions_revoke(
         1 => "1 other session signed out.".to_string(),
         n => format!("{n} other sessions signed out."),
     };
-    profile_page(&inner, &who, &user, None, Some(&msg), &csrf, &headers).await.into_response()
+    profile_page(&inner, &who, &user, None, Some(&msg), &csrf, &req).await.into_response()
 }
 
 /// `POST /profile/totp/disable` — the caller turns off their own 2FA. **Re-authenticated** (§5h):
 /// removing the second factor is the first thing an intruder with a stolen session would do.
 async fn totp_self_disable(
     State(inner): State<Arc<Inner>>,
-    headers: HeaderMap,
+    req: Parts,
     Form(form): Form<ReauthForm>,
 ) -> Response {
-    let (who, user, csrf) = match self_post(&inner, &headers, form.csrf.as_deref()).await {
+    let (who, user, csrf) = match self_post(&inner, &req, form.csrf.as_deref()).await {
         Ok(v) => v,
         Err(res) => return res,
     };
     if let Err(msg) = inner.reauth(&user, &form.current_password, &form.totp_code).await {
-        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf, &headers).await;
+        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf, &req).await;
         return (StatusCode::FORBIDDEN, page).into_response();
     }
     let user = clear_totp(&inner, user).await;
     let msg = "Two-factor authentication disabled.";
-    profile_page(&inner, &who, &user, None, Some(msg), &csrf, &headers).await.into_response()
+    profile_page(&inner, &who, &user, None, Some(msg), &csrf, &req).await.into_response()
 }
 
 /// `POST /profile/{id}/totp/disable` — a manager turns off *another* user's 2FA (they can re-enrol).
 /// Managers can disable but never set up 2FA for someone else (enrolment needs the user's device).
 async fn totp_manage_disable(
     State(inner): State<Arc<Inner>>,
-    headers: HeaderMap,
+    req: Parts,
     Path(id): Path<String>,
     Form(form): Form<ReauthForm>,
 ) -> Response {
-    if !inner.csrf().verify(&headers, form.csrf.as_deref()) {
-        return csrf_rejected(&inner);
+    let headers = &req.headers;
+    if !inner.csrf().verify(headers, form.csrf.as_deref()) {
+        return csrf_rejected(&inner, &req);
     }
-    let csrf = inner.csrf().token(&headers).unwrap_or_default();
-    let (who, target) = match managed_target(&inner, &headers, &id).await {
+    let csrf = inner.csrf().token(headers).unwrap_or_default();
+    let (who, target) = match managed_target(&inner, headers, &id).await {
         Ok(v) => v,
         Err(res) => return res,
     };
@@ -2118,13 +2148,13 @@ async fn totp_manage_disable(
             None,
             &csrf,
         );
-        return (StatusCode::FORBIDDEN, inner.page(&who, &frag)).into_response();
+        return (StatusCode::FORBIDDEN, inner.page(&who, &frag, &req)).into_response();
     }
     let target = clear_totp(&inner, target).await;
     let msg = format!("Two-factor authentication disabled for {}.", target.username);
     let frag =
         reset_form_html(&id, &target.username, target.has_totp(), manager_totp_on, None, Some(&msg), &csrf);
-    inner.page(&who, &frag).into_response()
+    inner.page(&who, &frag, &req).into_response()
 }
 
 /// The whole self-service profile fragment for `user`: the password form, the 2FA section, the recovery
@@ -2156,9 +2186,10 @@ async fn profile_page(
     error: Option<&str>,
     success: Option<&str>,
     csrf: &str,
-    headers: &HeaderMap,
+    req: &Parts,
 ) -> Html<String> {
-    inner.page(who, &profile_fragment(inner, who, user, error, success, csrf, headers).await)
+    let frag = profile_fragment(inner, who, user, error, success, csrf, &req.headers).await;
+    inner.page(who, &frag, req)
 }
 
 /// The signed-in caller and their account row; `None` sends them to the login page.
@@ -2194,12 +2225,13 @@ fn render_totp_setup(
     totp_on: bool,
     error: Option<&str>,
     csrf: &str,
+    req: &Parts,
 ) -> Response {
     let Some(prov) = totp::provisioning(&inner.totp_issuer, &who.username, secret) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not build QR code").into_response();
     };
     let frag = totp_setup_html(&prov, totp_on, error, csrf);
-    Html((inner.profile_shell)(&frag, who)).into_response()
+    inner.page(who, &frag, req).into_response()
 }
 
 /// Look up the target user by the (string) id from the URL. `None` if the id isn't an integer or no
@@ -2266,10 +2298,10 @@ fn lockout_message(retry_after: i64) -> String {
 /// The response to an unsafe request whose CSRF token is missing or wrong: a bare `403` page. It is
 /// deliberately shell-less and static — we don't know that the caller is who they claim, so we render
 /// nothing about them and set no cookies. A user who hit it with a stale tab just reloads.
-fn csrf_rejected(inner: &Inner) -> Response {
+fn csrf_rejected(inner: &Inner, req: &Parts) -> Response {
     // The app's page when it set one (`Auth::csrf_rejection`), else the built-in below.
     if let Some(render) = &inner.csrf_reject {
-        return render();
+        return render(req);
     }
     (StatusCode::FORBIDDEN, Html(csrf_rejected_html(&inner.login_path))).into_response()
 }

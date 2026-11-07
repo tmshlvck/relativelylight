@@ -1355,7 +1355,9 @@ async fn the_csrf_layer_guards_an_apps_own_routes() {
     // And the app's own rejection page is used when it set one.
     let custom = crate::csrf::Csrf::new()
         .secure(false)
-        .on_reject(|| (StatusCode::FORBIDDEN, "my own shell").into_response());
+        .on_reject(|req| {
+            (StatusCode::FORBIDDEN, format!("my own shell at {}", req.uri.path())).into_response()
+        });
     let app = axum::Router::new()
         .route("/write", post(|| async { "ok" }))
         .layer(axum::middleware::from_fn_with_state(custom, crate::csrf::enforce));
@@ -1365,15 +1367,16 @@ async fn the_csrf_layer_guards_an_apps_own_routes() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
     let body = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
-    assert_eq!(String::from_utf8_lossy(&body), "my own shell", "the hook renders the refusal");
+    assert_eq!(String::from_utf8_lossy(&body), "my own shell at /write", "the hook renders the refusal");
 }
 
 #[tokio::test]
 async fn the_rejection_hook_covers_the_modules_own_forms() {
     // One closure, both surfaces: an app that styles its 403 shouldn't have to do it twice.
     let fx = Fx::with(|a| {
-        a.csrf_rejection(|| {
-            (StatusCode::FORBIDDEN, Html("<main>app-styled refusal</main>")).into_response()
+        a.csrf_rejection(|req| {
+            let page = format!("<main>app-styled refusal at {}</main>", req.uri.path());
+            (StatusCode::FORBIDDEN, Html(page)).into_response()
         })
     })
     .await;
@@ -1382,7 +1385,7 @@ async fn the_rejection_hook_covers_the_modules_own_forms() {
     // A post with no token to one of *our* routes now renders the app's page, not the built-in one.
     let res = fx.post_raw("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
     assert_eq!(res.status, StatusCode::FORBIDDEN);
-    assert!(res.body.contains("app-styled refusal"), "expected the app's page: {}", res.body);
+    assert!(res.body.contains("app-styled refusal at /login"), "expected the app's page: {}", res.body);
     assert!(!res.body.contains("Security check failed"), "not the built-in one");
     // Still a no-op: a refused login must not have created anything.
     assert_eq!(session::Entity::find().all(&fx.db).await.unwrap().len(), 0, "no session created");
@@ -3476,4 +3479,66 @@ async fn the_profile_extra_section_sees_the_request_it_renders_for() {
     let with_tz = format!("{cookie}; rl_tz=Europe%2FPrague");
     let page = fx.get("/profile", Some(&with_tz)).await;
     assert!(page.body.contains("zone:prague"), "the hook sees this request's cookies: {}", page.body);
+}
+
+/// What the test shells render for the `rl_tz` cookie on the request they are handed — the navbar's
+/// "TZ: …" indicator, reduced to a marker.
+fn tz_marker(req: &Parts) -> &'static str {
+    let cookies = req.headers.get(http::header::COOKIE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    match cookies.contains("rl_tz=Europe%2FPrague") {
+        true => "<nav>tz:prague</nav>",
+        false => "<nav>tz:none</nav>",
+    }
+}
+
+#[tokio::test]
+async fn the_profile_shell_sees_the_request_it_wraps() {
+    // The shell renders the app's chrome, and the chrome depends on the request: without it the zone
+    // indicator vanished on exactly the page where the zone is chosen.
+    let fx = Fx::with(|a| {
+        a.profile_shell(|frag, who, req| {
+            format!("{}<p>shell:{}:{}</p>{frag}", tz_marker(req), who.username, req.uri.path())
+        })
+    })
+    .await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+
+    let page = fx.get("/profile", Some(&cookie)).await;
+    assert!(page.body.contains("tz:none"), "control: no preference cookie, none seen: {}", page.body);
+    assert!(page.body.contains("shell:alice:/profile"), "the shell wraps the profile: {}", page.body);
+
+    let with_tz = format!("{cookie}; rl_tz=Europe%2FPrague");
+    let page = fx.get("/profile", Some(&with_tz)).await;
+    assert!(page.body.contains("tz:prague"), "the shell sees this request's cookies: {}", page.body);
+
+    // Every page under the profile path goes through the same shell: the enrolment page …
+    let page = fx.get("/profile/totp", Some(&with_tz)).await;
+    assert!(page.body.contains("tz:prague"), "/profile/totp: {}", page.body);
+    assert!(page.body.contains("shell:alice:/profile/totp"), "/profile/totp: {}", page.body);
+    // … and a re-rendered form after a refused post.
+    let wrong = form(&[
+        ("current_password", "not-it"),
+        ("new_password", OTHER_PW),
+        ("confirm_password", OTHER_PW),
+    ]);
+    let page = fx.post("/profile", &wrong, Some(&with_tz)).await;
+    assert_eq!(page.status, StatusCode::BAD_REQUEST);
+    assert!(page.body.contains("tz:prague"), "the error page too: {}", page.body);
+}
+
+#[tokio::test]
+async fn the_login_shell_sees_the_request_it_wraps() {
+    let fx = Fx::with(|a| a.login_shell(|form, req| format!("{}{form}", tz_marker(req)))).await;
+    fx.user("alice").await;
+
+    let page = fx.get("/login", None).await;
+    assert!(page.body.contains("tz:none"), "control: {}", page.body);
+    let page = fx.get("/login", Some("rl_tz=Europe%2FPrague")).await;
+    assert!(page.body.contains("tz:prague"), "the login shell sees the cookie: {}", page.body);
+    // The refusal is rendered in the same shell, for the same request.
+    let wrong = form(&[("username", "alice"), ("password", "wrong")]);
+    let res = fx.post("/login", &wrong, Some("rl_tz=Europe%2FPrague")).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    assert!(res.body.contains("tz:prague"), "the 401 page too: {}", res.body);
 }

@@ -161,7 +161,8 @@ manager's reset at `GET/POST /profile/{id}` (set another user's password without
 someone else needs membership in a **profile-manager group** (default the admin group, `"admin"`;
 override with `Auth::profile_managers([..])`); `/profile/{self}` redirects to `/profile`, and
 `Auth::can_manage_others(&who)` tells you whether to show a reset link. The library renders the
-fragment and your `Auth::profile_shell` wraps it, handed the `Identity` for your chrome. Both paths
+fragment and your `Auth::profile_shell` wraps it, handed the `Identity` and the request's
+`http::request::Parts` for your chrome. Both paths
 write only the password hash and revoke sessions (§5f).
 
 **Extending the profile page — `Auth::profile_extra`.** The password/2FA fragment is rarely the whole
@@ -965,9 +966,10 @@ find a token): send the header there, or check it in the handler. `examples/auth
 
 **Your own rejection page.** The built-in `403` is shell-less and static on purpose: a rejected request
 hasn't proved it came from your site, so nothing about the caller is rendered and no cookies are set.
-`Auth::csrf_rejection(|| ..)` (or `Csrf::on_reject`) replaces it with your own, and because the closure
+`Auth::csrf_rejection(|req| ..)` (or `Csrf::on_reject`) replaces it with your own, and because the closure
 travels on the `csrf()` handle, one setting covers the library's forms **and** `csrf::enforce` on your
-routes. Keep the same discipline: don't name the user, don't set cookies, stay a `403`. It deliberately
+routes. The closure gets the request's `http::request::Parts`, for display preferences such as a
+theme or zone cookie. Keep the same discipline: don't name the user, don't set cookies, stay a `403`. It deliberately
 does **not** apply to a hand-written API of yours answering a machine.
 
 **Wiring it up.** `auth`'s own pages need nothing. For the admin UI's writes, hand the engine the same
