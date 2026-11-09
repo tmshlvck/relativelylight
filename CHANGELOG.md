@@ -25,6 +25,28 @@ is easy to miss in a diff.
   `examples/adminpanel` renders its timezone picker on the login and profile pages
   ([TIME.md → The picker](docs/TIME.md#3-the-picker-and-its-handler)).
 
+### Added
+
+- **`Table::range_filter(column)`**: a from/to pair of inputs in the toolbar, `>=` / `<=`, either
+  end optional, carried in the URL as `filter[column][from]` / `[to]`. For a `.datetime()` column
+  the inputs are dates in the viewer's zone and the "to" day is inclusive; number, `Date` and text
+  columns compare as stored. It applies to the listing, the export and "delete all matching"
+  ([CRUD.md → Range filters](docs/CRUD.md#range-filters)).
+- **`Table::fixed_in(column, values)`**: pin a table to `column IN (…)`, with no control. It holds
+  for reads and writes as `fixed_filter` does: a row outside the set is not found, and a create, an
+  update or an imported row must carry a value in the set or is refused beside the field. The form
+  offers only the set. An empty set means no rows, and no create
+  ([CRUD.md → A pinned set](docs/CRUD.md#a-pinned-set)).
+- **`Form::initial(field, value)` / `Table::initial(field, value)`**: pre-fill the create form per
+  request, where `MetaField::default` is fixed. A stored value (Unix seconds for a `.datetime()`, an
+  id for a relation); ignored when editing; naming a field the form doesn't show is a render-time
+  error ([CRUD.md → Initial values](docs/CRUD.md#initial-values)).
+- **`ListQuery::range` and `ListQuery::one_of`**, the engine's half of the two filters, for an app
+  listing through `Engine::list` itself. `ViewState::ranges` holds a URL's ranges as typed.
+- **`Tz::day_bounds(date)`**: a calendar date's first and last second in the zone.
+- `examples/crud`: a date range on `/event`, a views range on `/post`, initial values on
+  `/post/new`, and `/queue`, a post table pinned to the draft and review statuses.
+
 ## [0.4.3] — 2026-11-05
 
 ### Added

@@ -1,7 +1,8 @@
 //! The **URL is the state**: page, sort keys, filters, the search term, which entity is active and
 //! which row is being edited all live in the query string, and nowhere else.
 //!
-//! So every view is a link. The vocabulary: `page`, `per_page`, `q`, `filter[name]`, `sort=a,b:desc`,
+//! So every view is a link. The vocabulary: `page`, `per_page`, `q`, `filter[name]`,
+//! `filter[name][from]` / `filter[name][to]`, `sort=a,b:desc`,
 //! `ids`, `all`, plus `entity`, `new`, `edit`, `show` and `import` for the UI's own navigation, and
 //! `format=csv`.
 
@@ -95,6 +96,11 @@ pub struct ViewState {
     pub sort: Vec<(String, bool)>,
     /// Exact-match filters, `(column-or-relation, value)`.
     pub filters: Vec<(String, String)>,
+    /// Range filters, `(column, from, to)`, **as typed** — a `.datetime()` column's are dates. An
+    /// empty bound is open. Only a table that declared [`Table::range_filter`](super::Table::range_filter)
+    /// for the column applies one, since turning a date into stored seconds needs the column's type
+    /// and the viewer's zone; so [`to_list_query`](ViewState::to_list_query) leaves them out.
+    pub ranges: Vec<(String, String, String)>,
     pub mode: Mode,
     /// `?format=csv` — the app's read handler exports instead of rendering (see `Table::csv`).
     pub csv: bool,
@@ -128,6 +134,25 @@ impl ViewState {
                 // usually nothing at all. Hence one reserved value that can't be a primary key
                 // anyone typed, dropped here so it never reaches a query or a later URL.
                 Some(_) if value == ANY => {}
+                // `filter[col][from]`: `bracketed` leaves `col][from`. An empty bound is an input
+                // left blank — no bound, not "rows with none" as an empty `filter[col]=` is.
+                Some(inner) if inner.contains("][") => {
+                    let Some((name, bound)) = inner.split_once("][") else { continue };
+                    if value.is_empty() || !matches!(bound, "from" | "to") {
+                        continue;
+                    }
+                    let i = match s.ranges.iter().position(|(n, _, _)| n == name) {
+                        Some(i) => i,
+                        None => {
+                            s.ranges.push((name.to_string(), String::new(), String::new()));
+                            s.ranges.len() - 1
+                        }
+                    };
+                    match bound {
+                        "from" => s.ranges[i].1 = value,
+                        _ => s.ranges[i].2 = value,
+                    }
+                }
                 Some(name) => s.filters.push((name.to_string(), value)),
                 None => match key.as_str() {
                     "entity" => s.entity = Some(value),
@@ -175,6 +200,9 @@ impl ViewState {
         for (name, value) in &self.filters {
             out.push((format!("filter[{name}]"), value.clone()));
         }
+        for (key, value) in self.range_pairs() {
+            out.push((key, value));
+        }
         if !self.q.is_empty() {
             out.push(("q".into(), self.q.clone()));
         }
@@ -188,6 +216,38 @@ impl ViewState {
             out.push(("page".into(), self.page.to_string()));
         }
         out
+    }
+
+    /// The ranges as query pairs, open bounds left out.
+    pub(crate) fn range_pairs(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (name, from, to) in &self.ranges {
+            if !from.is_empty() {
+                out.push((format!("filter[{name}][from]"), from.clone()));
+            }
+            if !to.is_empty() {
+                out.push((format!("filter[{name}][to]"), to.clone()));
+            }
+        }
+        out
+    }
+
+    /// The range in force on `name`, as typed: `(from, to)`, either possibly empty.
+    pub(crate) fn range_of(&self, name: &str) -> (String, String) {
+        self.ranges
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, from, to)| (from.clone(), to.clone()))
+            .unwrap_or_default()
+    }
+
+    /// This view without the range on `name` — where its chip's ✕ goes. Back to the first page,
+    /// as any change of filter is.
+    pub(crate) fn href_clear_range(&self, name: &str) -> String {
+        let mut s = self.clone();
+        s.ranges.retain(|(n, _, _)| n != name);
+        s.page = 0;
+        s.href(&[])
     }
 
     /// A relative link to this state with `changes` applied — `?entity=post&page=2`. Always begins
@@ -234,6 +294,7 @@ impl ViewState {
         s.q = String::new();
         s.sort.clear();
         s.filters.retain(|(name, _)| keep(name));
+        s.ranges.clear(); // a range is one table's control, like its search
         let Some(base) = base else {
             return s.href(&[("entity", slug)]);
         };
@@ -510,6 +571,31 @@ mod tests {
             assert!(href.contains("pick=post.tag"), "paging inside the dialog keeps picking: {href}");
         }
         assert_eq!(ViewState::from_query("pick=post").pick, None, "no relation, no pick");
+    }
+
+    #[test]
+    fn a_range_round_trips_and_an_empty_bound_is_open() {
+        let s = ViewState::from_query(
+            "filter[published_at][from]=2026-11-01&filter[published_at][to]=2026-11-30\
+             &filter[views][to]=10&filter[views][from]=&filter[x][sideways]=1",
+        );
+        assert_eq!(
+            s.ranges,
+            vec![
+                ("published_at".to_string(), "2026-11-01".to_string(), "2026-11-30".to_string()),
+                ("views".to_string(), String::new(), "10".to_string()),
+            ],
+            "an unknown bound is ignored, an empty one is no bound"
+        );
+        assert!(s.filters.is_empty(), "a range is not an exact-match filter: {:?}", s.filters);
+        let again = ViewState::from_query(&s.to_query());
+        assert_eq!(again.ranges, s.ranges);
+        assert!(!s.to_query().contains("views%5D%5Bfrom"), "an open bound stays out of the URL");
+
+        let cleared = s.href_clear_range("published_at");
+        assert!(!cleared.contains("published_at") && cleared.contains("views"), "{cleared}");
+        assert!(s.href_entity(None, "tag", |_| true).find("views").is_none(), "one table's control");
+        assert!(s.to_list_query(30).range.is_empty(), "the table converts ranges, not the URL");
     }
 
     #[test]

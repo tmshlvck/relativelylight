@@ -41,6 +41,9 @@
   white-space: nowrap;
 }
 .rl-table .table > thead th { white-space: nowrap; }
+/* A range filter's two inputs keep a date's width instead of stretching across the toolbar. */
+.rl-range { flex-wrap: nowrap; }
+.rl-range > .form-control { flex: 0 0 auto; width: 9.5rem; }
 /* The "add a secondary sort key" affordance: present for the pointer and for the keyboard, but not
    shouting `+` from every header of every table. */
 .rl-table th .rl-add { opacity: 0; transition: opacity .1s; }

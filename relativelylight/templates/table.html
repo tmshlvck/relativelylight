@@ -10,7 +10,7 @@
       {% if !description.is_empty() %}<p class="text-muted small mb-0">{{ description }}</p>{% endif %}
     </div>
     <div class="d-flex gap-2 align-items-center flex-wrap justify-content-end">
-      {%- if search || !controls.is_empty() %}
+      {%- if search || !controls.is_empty() || !ranges.is_empty() %}
       {#- The view's own state travels as hidden inputs: a GET form replaces the query string, so
           anything not restated here would be dropped by the next search. -#}
       <form method="get" class="d-flex gap-2 align-items-center">
@@ -25,6 +25,20 @@
           <option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>
           {%- endfor %}
         </select>
+        {%- endfor %}
+        {%- for r in ranges %}
+        {#- A range is two inputs; a blank one is an open end. They submit on `change` (a date
+            picked, a number entered and left) rather than per keystroke — a half-typed year
+            would be a page load. -#}
+        <div class="input-group input-group-sm w-auto rl-range">
+          <span class="input-group-text">{{ r.label }}</span>
+          <input type="{{ r.kind }}" class="form-control form-control-sm" name="filter[{{ r.name }}][from]"
+                 value="{{ r.from }}"{% if !r.step.is_empty() %} step="{{ r.step }}"{% endif %}
+                 aria-label="{{ r.label }} from" placeholder="from" onchange="this.form.submit()">
+          <input type="{{ r.kind }}" class="form-control form-control-sm" name="filter[{{ r.name }}][to]"
+                 value="{{ r.to }}"{% if !r.step.is_empty() %} step="{{ r.step }}"{% endif %}
+                 aria-label="{{ r.label }} to" placeholder="to" onchange="this.form.submit()">
+        </div>
         {%- endfor %}
         {%- if search %}
         {#- Enter submits at once; otherwise the form goes two seconds after the typing stops. A

@@ -108,19 +108,20 @@ pub async fn import(
     text: &str,
     tz: &Tz,
 ) -> Result<ImportReport> {
-    import_pinned(engine, slug, cols, text, tz, &[]).await
+    import_pinned(engine, slug, cols, text, tz, &text::Pins::default()).await
 }
 
-/// [`import`] through a pinned view (`Table::fixed_filter`): every row is written with `pins`,
-/// whatever its own cells say, and a row naming a primary key outside the view is rejected rather
-/// than updated — an import can't reach further than the table it was posted from.
+/// [`import`] through a pinned view (`Table::fixed_filter`, `Table::fixed_in`): every row is written
+/// with the single-value pins, whatever its own cells say; a row whose set-pinned column holds a
+/// value outside its set is rejected; and a row naming a primary key outside the view is rejected
+/// rather than updated — an import can't reach further than the table it was posted from.
 pub(crate) async fn import_pinned(
     engine: &Engine,
     slug: &str,
     cols: &[Column],
     text: &str,
     tz: &Tz,
-    pins: &[(String, String)],
+    pins: &text::Pins,
 ) -> Result<ImportReport> {
     let pk = engine.pk(slug)?;
     let mut rdr = csv::ReaderBuilder::new().flexible(true).from_reader(text.as_bytes());
@@ -142,8 +143,16 @@ pub(crate) async fn import_pinned(
     if report.failed > 0 {
         return Ok(report); // unparseable CSV: say so, write nothing
     }
-    for (_, body) in &mut rows {
-        text::apply_pins(body, cols, pins, tz);
+    for (i, (key, body)) in rows.iter_mut().enumerate() {
+        pins.apply(body, cols, tz);
+        // A row without a key is a create, and must carry a value in each set.
+        for (name, message) in pins.refusals(body, cols, key.is_none()) {
+            report.failed += 1;
+            report.errors.push(ImportError { row: i + 2, message: format!("{name}: {message}") });
+        }
+    }
+    if report.failed > 0 {
+        return Ok(report);
     }
     let keys: Vec<String> = rows.iter().filter_map(|(key, _)| key.clone()).collect();
     let outside = engine.outside(slug, pins, &keys).await?;

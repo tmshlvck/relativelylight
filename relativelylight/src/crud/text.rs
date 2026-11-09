@@ -53,6 +53,62 @@ pub(crate) fn pinned(col: &Column, raw: &str, tz: &Tz) -> Value {
     }
 }
 
+/// What a pinned view holds its writes to: the columns pinned to one value
+/// (`Table::fixed_filter`), and the columns pinned to a set (`Table::fixed_in`).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Pins {
+    /// `(name, value)`: written into every create, update and import, whatever the body says.
+    pub(crate) eq: Vec<(String, String)>,
+    /// `(name, allowed values)`: a write must carry one of them. Empty allows nothing.
+    pub(crate) sets: Vec<(String, Vec<String>)>,
+}
+
+impl Pins {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.eq.is_empty() && self.sets.is_empty()
+    }
+
+    /// Whether `name` is pinned to one value — and so not the form's to render.
+    #[cfg(feature = "ui")]
+    pub(crate) fn fixes(&self, name: &str) -> bool {
+        self.eq.iter().any(|(n, _)| n == name)
+    }
+
+    /// Write the single-value pins into `body` — see [`apply_pins`].
+    pub(crate) fn apply(&self, body: &mut Value, cols: &[Column], tz: &Tz) {
+        apply_pins(body, cols, &self.eq, tz);
+    }
+
+    /// A message per set-pinned column `body` doesn't hold a value in the set for, as
+    /// `(name, message)`. A **create** must carry one; an update that leaves the column out keeps
+    /// the row's own value, which is in the set already (the row was found in the view).
+    pub(crate) fn refusals(&self, body: &Value, cols: &[Column], creating: bool) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (name, allowed) in &self.sets {
+            let value = match body.get(name) {
+                None if !creating => continue,
+                None => None,
+                Some(v) => Some(text(Some(v))),
+            };
+            if value.as_ref().is_some_and(|v| !v.is_empty() && allowed.contains(v)) {
+                continue;
+            }
+            let col = cols.iter().find(|c| match c {
+                Column::Field { name: n, .. } | Column::Relation { name: n, .. } => n == name,
+            });
+            let message = match (col, allowed.is_empty()) {
+                (_, true) => "nothing may be written here: this view allows no value".to_string(),
+                (Some(Column::Relation { target, .. }), false) => {
+                    format!("must be one of the {target} rows this view allows")
+                }
+                _ => format!("must be one of: {}", allowed.join(", ")),
+            };
+            out.push((name.clone(), message));
+        }
+        out
+    }
+}
+
 /// Write `pins` into a write body, over whatever it carried — a crafted value included.
 pub(crate) fn apply_pins(body: &mut Value, cols: &[Column], pins: &[(String, String)], tz: &Tz) {
     let Some(map) = body.as_object_mut() else { return };

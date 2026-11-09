@@ -287,6 +287,14 @@ pub struct ListQuery {
     pub search: Vec<(Option<String>, String)>,
     /// Exact-match filters `column == value`.
     pub eq: Vec<(String, String)>,
+    /// Range filters `(column, from, to)`: `column >= from` and `column <= to`, either bound left
+    /// out when `None`. Bounds are storage text, read the way an `eq` value is — so a `.datetime()`
+    /// column's bounds are Unix seconds (`Table::range_filter` turns the dates an operator picked
+    /// into those).
+    pub range: Vec<(String, Option<String>, Option<String>)>,
+    /// Set filters `column IN (values…)`. An **empty** set matches no rows — it is a set that
+    /// allows nothing, not a filter that was left out.
+    pub one_of: Vec<(String, Vec<String>)>,
     /// Restrict to these primary-key values (`pk IN (...)`) — e.g. "delete selected".
     pub pk_in: Vec<String>,
     /// Sort keys `(column, descending)`.
@@ -678,7 +686,11 @@ impl Engine {
     /// has to see what was deleted: a set-based `DELETE … WHERE` fires no per-row hook, and by the
     /// time an observer is called the rows are gone.
     pub async fn delete_where(&self, slug: &str, q: &ListQuery) -> Result<Vec<Value>> {
-        let has_filter = !q.search.is_empty() || !q.eq.is_empty() || !q.pk_in.is_empty();
+        let has_filter = !q.search.is_empty()
+            || !q.eq.is_empty()
+            || !q.range.is_empty()
+            || !q.one_of.is_empty()
+            || !q.pk_in.is_empty();
         if !has_filter && !q.all {
             return Err(Error::BadRequest(
                 "refusing to delete every row; say all=true to confirm".into(),
@@ -687,20 +699,27 @@ impl Engine {
         self.accessor(slug)?.delete_many(q).await
     }
 
-    /// Those of `ids` that are not rows of `slug` matching every `pins` filter, in order — what
-    /// keeps a write through a pinned view ([`Table::fixed_filter`](crate::crud::ui::Table::fixed_filter))
-    /// on the rows that view shows. No pins, no query: every id is inside.
+    /// Those of `ids` that are not rows of `slug` matching every pin, in order — what keeps a write
+    /// through a pinned view ([`Table::fixed_filter`](crate::crud::ui::Table::fixed_filter),
+    /// [`Table::fixed_in`](crate::crud::ui::Table::fixed_in)) on the rows that view shows. No pins,
+    /// no query: every id is inside.
     #[cfg(any(feature = "ui", feature = "csv"))]
     pub(crate) async fn outside(
         &self,
         slug: &str,
-        pins: &[(String, String)],
+        pins: &crate::crud::text::Pins,
         ids: &[String],
     ) -> Result<Vec<String>> {
         if pins.is_empty() || ids.is_empty() {
             return Ok(Vec::new());
         }
-        let q = ListQuery { eq: pins.to_vec(), pk_in: ids.to_vec(), all: true, ..Default::default() };
+        let q = ListQuery {
+            eq: pins.eq.clone(),
+            one_of: pins.sets.clone(),
+            pk_in: ids.to_vec(),
+            all: true,
+            ..Default::default()
+        };
         let found: Vec<String> = match self.list(slug, &q, true).await {
             Ok(page) => page.data.iter().map(|it| crate::crud::text::text(Some(&it.id))).collect(),
             // `BadRequest`: an id that can't even be a key here (text for an integer key).

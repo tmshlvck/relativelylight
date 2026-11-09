@@ -4,14 +4,15 @@
 use super::state::ViewState;
 use super::widgets::{self, FieldV, Widget};
 use super::{
-    apply, banner, check_fields, check_widgets, csrf_token, render_err, renders, Outcome, Surface,
-    Writes,
+    apply, banner, check_fields, check_initial, check_widgets, csrf_token, render_err, renders,
+    Outcome, Surface, Writes,
 };
 use crate::authz::{Decision, Operation};
 use crate::crud::engine::{Engine, Error, ListQuery, Result};
 use crate::time::Tz;
 use askama::Template;
 use http::HeaderMap;
+use serde_json::Value;
 use std::net::IpAddr;
 
 #[derive(Template)]
@@ -62,6 +63,7 @@ pub struct Form<'a> {
     cancel_href: Option<String>,
     redirect: Option<String>,
     picker_threshold: u64,
+    initial: Vec<(String, Value)>,
 }
 
 impl<'a> Form<'a> {
@@ -82,6 +84,7 @@ impl<'a> Form<'a> {
             cancel_href: None,
             redirect: None,
             picker_threshold: 50,
+            initial: Vec::new(),
         }
     }
 
@@ -148,6 +151,26 @@ impl<'a> Form<'a> {
         self.redirect = Some(url.into());
         self
     }
+    /// Pre-fill `field` in the **create** form with `value`, for this request — what
+    /// [`MetaField::default`](crate::crud::seaorm::MetaField::default) does once for every form,
+    /// but chosen per page: the ticket's author is the caller, a reply's subject is the original's,
+    /// the parent is the one the page is about.
+    ///
+    /// `value` is a stored value, as `default` takes: Unix seconds for a `.datetime()` column, the
+    /// target's id for a to-one relation (an array of ids for a to-many). It is only a pre-fill —
+    /// the operator can change it, and the write is checked like any other — so the field must be
+    /// one the form renders; one it doesn't is a render-time error naming it. Ignored when editing:
+    /// the row's own values win.
+    ///
+    /// ```ignore
+    /// Form::new(&engine, "ticket").initial("reporter", who.id.parse::<i64>()?).initial("priority", "normal")
+    /// ```
+    pub fn initial(mut self, field: impl Into<String>, value: impl Into<Value>) -> Self {
+        let field = field.into();
+        self.initial.retain(|(n, _)| *n != field);
+        self.initial.push((field, value.into()));
+        self
+    }
     /// See [`Table::picker_threshold`](super::Table::picker_threshold).
     pub fn picker_threshold(mut self, n: u64) -> Self {
         self.picker_threshold = n;
@@ -176,6 +199,8 @@ impl<'a> Form<'a> {
         let cols = self.engine.columns(&self.slug)?;
         check_widgets(&self.slug, &cols)?;
         check_fields(&self.slug, &cols, &self.fields, &self.omit, &[], self.edit_id.is_none())?;
+        let shown = |name: &str| renders(&self.fields, &self.omit, name);
+        check_initial(&self.slug, &cols, &self.initial, &shown)?;
         let tz = Tz::from_headers(headers);
         let row = match &self.edit_id {
             Some(id) => Some(self.engine.get(&self.slug, id).await?),
@@ -184,11 +209,12 @@ impl<'a> Form<'a> {
         let fields = widgets::fields(
             self.engine,
             &cols,
-            &|name| renders(&self.fields, &self.omit, name),
+            &shown,
             row.as_ref(),
             state,
             &tz,
             &widgets::Relations { slug: &self.slug, threshold: self.picker_threshold, headers },
+            &widgets::Presets { initial: &self.initial, ..Default::default() },
         )
         .await?;
         FormTmpl {
@@ -230,7 +256,7 @@ impl<'a> Form<'a> {
             slug: &self.slug,
             renders: &shown,
             query: ListQuery::default(),
-            pins: Vec::new(),
+            pins: Default::default(),
             // A form saves one row. Its query is the whole table, so a posted delete-all or import
             // must not get this far.
             writes: Writes {

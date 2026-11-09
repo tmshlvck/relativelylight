@@ -1294,6 +1294,81 @@ async fn a_standalone_form_redirects_where_it_was_told_to() {
     assert!(html.contains("Saved."), "{html}");
 }
 
+// ---------- initial values for a create ----------
+
+#[tokio::test]
+async fn a_create_form_is_prefilled_with_this_requests_initial_values() {
+    let (e, _) = engine();
+    let form = Form::new(&e, "post")
+        .fields(["title", "slug", "author", "tag", "published_at"])
+        .initial("title", "Re: hello")
+        .initial("slug", "reply") // over the column's static default ("x")
+        .initial("author", 4)
+        .initial("tag", json!([2]))
+        .initial("published_at", 1_733_050_800i64);
+    let html = form.render_for(&zone("Asia/Tokyo"), &list()).await.unwrap();
+    assert!(html.contains(r#"value="Re: hello""#), "{html}");
+    assert!(html.contains(r#"value="reply""#) && !html.contains(r#"value="x""#), "initial beats default: {html}");
+    assert!(html.contains(r#"<option value="4" selected>Grace</option>"#), "a to-one by id: {html}");
+    assert!(html.contains(r#"<option value="2" selected>web</option>"#), "a to-many by ids: {html}");
+    assert!(!html.contains(r#"<option value="1" selected>"#), "and nothing else chosen: {html}");
+    assert!(html.contains(r#"value="2024-12-01T20:00""#), "seconds, shown in the caller's zone: {html}");
+
+    // Control: without it, the column default and nothing chosen.
+    let html = Form::new(&e, "post").fields(["title", "slug", "author"]).render_for(&no_headers(), &list()).await.unwrap();
+    assert!(html.contains(r#"value="x""#) && !html.contains(" selected>"), "{html}");
+}
+
+#[tokio::test]
+async fn an_initial_value_gives_way_to_the_row_and_to_what_was_typed() {
+    let (e, _) = engine();
+    // Editing: the row's own value.
+    let html = Form::new(&e, "post").edit("7").fields(["title"]).initial("title", "Re: hello")
+        .render_for(&no_headers(), &list()).await.unwrap();
+    assert!(html.contains(r#"value="First post""#) && !html.contains("Re: hello"), "{html}");
+
+    // A rejected create: what the operator typed.
+    let mut posted = std::collections::BTreeMap::new();
+    posted.insert("title".to_string(), vec!["typed".to_string()]);
+    let state = list().with_rejection(ValidationErrors::new(), posted, Mode::New);
+    let html = Form::new(&e, "post").fields(["title", "slug"]).initial("title", "Re: hello")
+        .render_for(&no_headers(), &state).await.unwrap();
+    assert!(html.contains(r#"value="typed""#) && !html.contains("Re: hello"), "{html}");
+}
+
+#[tokio::test]
+async fn a_tables_create_dialog_takes_initial_values_and_its_edit_dialog_does_not() {
+    let (e, _) = engine();
+    let table = || Table::new(&e, "post").fields(["title", "slug", "author"]).initial("author", 3).initial("title", "Draft");
+    let html = render(&table(), &ViewState::from_query("new=1")).await;
+    assert!(html.contains(r#"<option value="3" selected>Ada</option>"#) && html.contains(r#"value="Draft""#), "{html}");
+    let html = render(&table(), &ViewState::from_query("edit=7")).await;
+    assert!(html.contains(r#"value="First post""#) && !html.contains("Draft"), "{html}");
+    // Nothing is written from it: the write is the posted body, as from any form.
+    let (e, log) = engine();
+    let table = Table::new(&e, "post").fields(["title", "slug"]).initial("title", "Draft");
+    table.submit(&no_headers(), IP, b"_op=create&title=Mine&slug=s", &list()).await.unwrap();
+    assert_eq!(log.last().1["title"], "Mine");
+}
+
+#[tokio::test]
+async fn an_initial_value_for_a_field_the_form_does_not_show_is_refused_by_name() {
+    let (e, _) = engine();
+    for (field, why) in [("body", "doesn't show"), ("created_at", "doesn't show"), ("nope", "no such column")] {
+        let err = Form::new(&e, "post")
+            .fields(["title", "slug"])
+            .initial(field, "v")
+            .render_for(&no_headers(), &list())
+            .await
+            .expect_err("refused");
+        assert!(err.to_string().contains(&format!("'{field}'")) && err.to_string().contains(why), "{err}");
+    }
+    // A table checks it where it matters — the create dialog — and still lists without one open.
+    let table = Table::new(&e, "post").fields(["title", "slug"]).initial("body", "v");
+    assert!(table.render_for(&no_headers(), &ViewState::from_query("new=1")).await.is_err());
+    assert!(table.render_for(&no_headers(), &list()).await.is_ok());
+}
+
 // ---------- the read-only row ----------
 
 #[tokio::test]

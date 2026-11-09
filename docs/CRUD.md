@@ -385,6 +385,7 @@ parses it; `ViewState::default()` is page 1, unsorted, unfiltered. Every link th
 |---|---|
 | `q=<term>` | naive full-text: `LIKE '%term%'` across text columns |
 | `filter[<name>]=<val>` | **exact** match. `<name>` is a column *or* a to-one relation (`filter[author]=7` → `author_id = 7`); an empty value matches rows that have none (`IS NULL`), and `*` means **no filter** — the value the toolbar's "all" submits, since a `<select>` must submit something and the empty one is taken |
+| `filter[<col>][from]=<v>` / `filter[<col>][to]=<v>` | a **range**, `>=` / `<=`, either end optional; an empty value is an open end. Applied only by a table that declared [`range_filter`](#range-filters) for the column, which reads a `.datetime()` column's bounds as dates in the viewer's zone |
 | `sort=views:desc,title` | whitelisted sort (unknown key → an error). A **relation** sorts by the label its cells show |
 | `page` / `per_page` | pagination (`per_page` defaults to the component's, else 25) |
 | `entity=<slug>` | which panel an [`Admin`](#admin--a-whole-admin-in-one-component) is showing |
@@ -417,7 +418,14 @@ UI knows which headers to make links without guessing.
 **Bulk delete** runs one set-based `DELETE … WHERE` in the backend (plus a subquery to clear N:M
 junctions) — not a per-row loop, so it scales. It refuses to wipe the whole unfiltered table unless
 `ListQuery::all` is set, which is what the table's "Delete all N matching" does and its "Delete
-selected" does not. A `filter[…]` counts as narrowing it. In the UI, "Delete selected" sits under the
+selected" does not. A `filter[…]`, a range or a set pin counts as narrowing it.
+
+**The engine's query.** A UI view becomes a `ListQuery`: `search`, `eq` (the exact filters), `range`
+(`(column, from, to)`, bounds as storage text, so Unix seconds for a `.datetime()` column), `one_of`
+(`column IN (…)`; an **empty set matches no rows**), `pk_in`, `sort` and paging. It is
+`#[non_exhaustive]`: start from `ListQuery::default()` and set what you need. An app listing through
+`Engine::list` itself uses the same fields. `ViewState::to_list_query` fills the URL's part of it but
+leaves ranges out, since reading a date needs the column and the zone; `Table` adds them. In the UI, "Delete selected" sits under the
 rows it acts on, and "Delete all N matching" is in the **⋮ Table operations** menu with the CSV export
 and import — the things that act on the table as a whole, not on the rows you ticked.
 
@@ -822,6 +830,9 @@ and in all three examples.
 | `sort(col)` / `sort_desc(col)` | the default sort, used until the URL says otherwise |
 | `filter(name)` | a filter `<select>` in the toolbar, for a column or a to-one relation |
 | `fixed_filter(name, value)` | a filter **pinned** to one value, with no control — a table *about* that value, whose writes stay inside it ([below](#a-pinned-filter)) |
+| `range_filter(col)` | **from/to** inputs in the toolbar, `>=`/`<=`; dates in the viewer's zone for a `.datetime()` column ([below](#range-filters)) |
+| `fixed_in(name, values)` | a pin to a **set**, `name IN (…)`, with no control; writes must stay in it, and an empty set means no rows ([below](#a-pinned-set)) |
+| `initial(field, value)` | pre-fill the **create** dialog for this request ([`Form::initial`](#initial-values)) |
 | `format_cell(col, closure)` | a custom renderer for the column's cells, `(value, row) -> HTML` |
 | `format_view(col, closure)` | the same for the View dialog — independent of `format_cell` |
 | `picker_threshold(n)` | how many target rows a relation may list as a `<select>` / multi-select before it uses the [picker](#picker--choosing-from-a-large-relation) (default 50) |
@@ -917,6 +928,51 @@ It is still not an authorization boundary: another surface over the same entity 
 unpinned table) isn't pinned, and an app's own handler isn't either. Who may write at all is the
 gate's decision. An `Admin` shared [`filter`](#addressing-a-model) narrows the view only.
 
+<a id="a-pinned-set"></a>**A pinned set.** `fixed_in("zone", ids)` pins a table to rows whose column is
+**one of** a set: the zones this operator manages, the statuses one queue works on. `name` is a field
+or a to-one relation (values are then the target's ids), and the set is usually computed per request:
+
+```rust
+let mine: Vec<String> = managed_zones(&db, &who).await?;      // ["1", "3"]
+Table::new(&engine, "record").fixed_in("zone", mine)
+```
+
+It holds for reads and writes the way `fixed_filter` does: listing, export and bulk deletes act on
+the set's rows; a row outside it is not found (`?edit=`, `?show=`, a one-row delete, an update, an
+import row naming its key). The difference is the form: the column **is** rendered, as a `<select>`
+of the set and nothing else (no blank option; a relation's choices show the target's labels). A
+create, an update or an imported row must carry a value in the set, or it is refused beside the
+field, with the typed input kept — an update can't move a row out of the view. An `Option` column
+pinned to a set never takes `NULL` through this table, since blank isn't in the set.
+
+**An empty set means no rows**, never "no restriction": a permission lookup that comes back empty
+shows an empty table. With nothing a new row could hold, `+ New` and Import are not offered, and a
+posted create is refused (`403`). The chip lists the set (`Zone: one.example., three.example.`) with
+no ✕. A `filter[zone]=` in the URL can narrow inside the set, never widen past it. It is not an
+authorization boundary on its own, any more than `fixed_filter` is.
+
+<a id="range-filters"></a>**Range filters.** `range_filter("published_at")` adds a pair of inputs to
+the toolbar, "from" and "to", narrowing the table to `>=` the one and `<=` the other. Either may be
+left blank for an open end. They ride in the URL like any filter
+(`?filter[published_at][from]=2026-11-01&filter[published_at][to]=2026-11-30`), so the range applies
+to the listing, the export and "delete all matching" alike, and it shows as a chip whose ✕ clears
+both ends.
+
+| Column | Inputs | Compared as |
+|---|---|---|
+| integer with `.datetime()` | dates, **in the viewer's zone** | Unix seconds: "from" is the first second of that day there, "to" the **last** — the day is inclusive |
+| `Int` / `Float` | numbers | numbers |
+| `Date` | dates | stored dates |
+| `Text` | text | the database's collation |
+
+So from 2026-11-01 to 2026-11-30, read by someone whose `rl_tz` is Europe/Prague, is every second
+of November in Prague: a row stamped 23:30 on the 30th is in, one at 00:30 on 1 December is not.
+The same URL in UTC is a different hour of the same days. A DST day is as long as it really is.
+Any other column (a relation, a boolean, JSON, a native `DateTime`) is a render-time error naming
+it. A bound the column can't read (`from=lots` on a number) applies nothing, and gets no chip, rather
+than being compared as something else. A range only applies on a table that declared it: the same
+parameters in another table's URL are ignored, and an `Admin` doesn't carry them between entities.
+
 **The read-only row.** Every table offers a **View** action per row, opening `?show=<pk>` — a dialog
 listing *every* published column, not just the writable ones. It is the only way to see a generated
 id, a hook-stamped `created_at`, or a column `columns([…])` leaves out of the listing, and the only
@@ -976,8 +1032,9 @@ promoted into that banner as `column: message` — otherwise it would be a refus
 marked and no stated reason.
 
 **Refusals, not surprises.** Rendering fails — naming the column — for an unknown or read-only field in
-`fields`/`omit`, an unsortable `sort`, a `filter` on a column that doesn't exist, a widget that can't
-render its column, or a create form that omits a column the engine requires. A control that silently
+`fields`/`omit`, an unsortable `sort`, a `filter` or `fixed_in` on a column that doesn't exist, a
+`range_filter` on a column with no range control, an `initial` for a field the form doesn't show, a
+widget that can't render its column, or a create form that omits a column the engine requires. A control that silently
 did nothing is the bug that gets found in production.
 
 ### `Form` — a standalone create/edit form
@@ -1005,6 +1062,28 @@ default is on if there is a title or description), and `dom_id` namespaces it.
 Note a column `default` pre-fills the *input* — it is never applied server-side — so a required field
 still has to be rendered for its value to be sent. Omitting one is a render-time error saying exactly
 that.
+
+<a id="initial-values"></a>**Initial values.** `initial(field, value)` pre-fills the **create** form
+for this request. `MetaField::default` is fixed for every form; this is chosen per page, because the
+form is built per request: the ticket's reporter is the caller, a reply's subject is the original's,
+the parent is the one the page is about. `Table::initial` does the same for the table's create
+dialog.
+
+```rust
+Form::new(&engine, "ticket")
+    .fields(["subject", "reporter", "priority", "due_at"])
+    .initial("reporter", who.id.parse::<i64>()?)       // a to-one: the target's id
+    .initial("subject", format!("Re: {}", original.subject))
+    .initial("due_at", now + 7 * 86_400)               // a .datetime(): Unix seconds, shown in the viewer's zone
+```
+
+The value is a stored value, as `default` takes: Unix seconds for a `.datetime()` column, the
+target's id for a to-one, an array of ids for a to-many. Precedence is what the operator typed (a
+rejected save) → the row (editing, where `initial` is ignored) → `initial` → `default`. Like
+`default` it is only a pre-fill: nothing is written from it, the operator can change it, and the
+write is checked like any other. It must name a field the form renders; anything else is a
+render-time error naming it, since it would do nothing. For a value the operator must not change,
+pin it instead (`Table::fixed_filter`), or write it in a hook.
 
 ### `Admin` — a whole admin in one component
 

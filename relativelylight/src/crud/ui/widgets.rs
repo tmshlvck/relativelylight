@@ -1,5 +1,6 @@
 //! One `match` from [`Column`] to a form input, and **the value** in it: the operator's own rejected
-//! input if there was one, else the row being edited, else the column's create-default, else nothing.
+//! input if there was one, else the row being edited, else the form's initial value, else the
+//! column's create-default, else nothing.
 
 use super::state::ViewState;
 use crate::authz::Operation;
@@ -53,11 +54,30 @@ pub(crate) struct Relations<'r> {
     pub headers: &'r HeaderMap,
 }
 
+/// What one form, for one request, adds to the columns: initial values for a create
+/// (`Form::initial`, `Table::initial`), and the sets a pinned view's writes must stay in
+/// (`Table::fixed_in`), which narrow those columns' inputs to the set.
+#[derive(Default)]
+pub(crate) struct Presets<'p> {
+    pub initial: &'p [(String, Value)],
+    pub sets: &'p [(String, Vec<String>)],
+}
+
+impl Presets<'_> {
+    fn initial_of(&self, name: &str) -> Option<&Value> {
+        self.initial.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    }
+    fn set_of(&self, name: &str) -> Option<&[String]> {
+        self.sets.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_slice())
+    }
+}
+
 /// Build the form's fields for one entity.
 ///
 /// `row` is the record being edited (`None` when creating). `rendered` decides which columns the form
 /// shows — the same predicate the decoder uses, so a column that isn't rendered is also not accepted
 /// from a posted body.
+#[allow(clippy::too_many_arguments)] // one form's context, passed straight through
 pub(crate) async fn fields(
     engine: &Engine,
     cols: &[Column],
@@ -66,12 +86,17 @@ pub(crate) async fn fields(
     state: &ViewState,
     tz: &Tz,
     rel: &Relations<'_>,
+    presets: &Presets<'_>,
 ) -> Result<Vec<FieldV>> {
     let mut out = Vec::new();
     for col in cols.iter().filter(|c| writable(c) && rendered(super::render::name_of(c))) {
         let name = super::render::name_of(col).to_string();
+        let widget = match presets.set_of(&name) {
+            Some(set) => within(engine, col, row, state, tz, rel, presets, set).await?,
+            None => widget(engine, col, row, state, tz, rel, presets).await?,
+        };
         out.push(FieldV {
-            widget: widget(engine, col, row, state, tz, rel).await?,
+            widget,
             label: super::render::label_of(col),
             required: matches!(col, Column::Field { required: true, .. }),
             help: help_of(col),
@@ -96,6 +121,61 @@ fn help_of(col: &Column) -> String {
     }
 }
 
+/// The input for a column pinned to a set (`Table::fixed_in`): a choice among the set and nothing
+/// else — a value outside it would only be refused. No blank option, since blank isn't in the set.
+/// A relation's choices are the target rows the set names, with their labels when the caller may
+/// list the target, else the ids.
+#[allow(clippy::too_many_arguments)]
+async fn within(
+    engine: &Engine,
+    col: &Column,
+    row: Option<&Value>,
+    state: &ViewState,
+    tz: &Tz,
+    rel: &Relations<'_>,
+    presets: &Presets<'_>,
+    set: &[String],
+) -> Result<Widget> {
+    let name = super::render::name_of(col);
+    let options = match col {
+        Column::Field { display: Some(FieldDisplay::Radio), options, .. } => {
+            let value = field_value(col, row, state, tz, presets);
+            let allowed: Vec<String> = options.iter().filter(|o| set.contains(o)).cloned().collect();
+            return Ok(Widget::Radio { options: choices(&allowed, &value) });
+        }
+        Column::Field { .. } => {
+            let value = field_value(col, row, state, tz, presets);
+            choices(set, &value)
+        }
+        Column::Relation { target, .. } => {
+            let chosen = relation_values(name, row, state, presets);
+            let labels = match engine.permits(target, Operation::List, rel.headers).await {
+                true => {
+                    let q = ListQuery { pk_in: set.to_vec(), all: true, ..Default::default() };
+                    match engine.list(target, &q, true).await {
+                        Ok(page) => page.data,
+                        Err(crate::crud::engine::Error::BadRequest(_)) => Vec::new(),
+                        Err(e) => return Err(e),
+                    }
+                }
+                false => Vec::new(),
+            };
+            set.iter()
+                .map(|id| Opt {
+                    selected: chosen.contains(id),
+                    label: labels
+                        .iter()
+                        .find(|it| super::render::text(Some(&it.id)) == *id)
+                        .map(|it| it.label.clone())
+                        .unwrap_or_else(|| id.clone()),
+                    value: id.clone(),
+                })
+                .collect()
+        }
+    };
+    Ok(Widget::Select { options, blank: false })
+}
+
 async fn widget(
     engine: &Engine,
     col: &Column,
@@ -103,11 +183,12 @@ async fn widget(
     state: &ViewState,
     tz: &Tz,
     rel: &Relations<'_>,
+    presets: &Presets<'_>,
 ) -> Result<Widget> {
     let name = super::render::name_of(col);
     match col {
         Column::Field { logical_type, options, display, nullable, required, write_only, .. } => {
-            let value = field_value(col, row, state, tz);
+            let value = field_value(col, row, state, tz, presets);
             Ok(match (display, logical_type) {
                 (Some(FieldDisplay::Textarea { rows }), _) => {
                     Widget::Textarea { value, rows: *rows }
@@ -151,12 +232,14 @@ async fn widget(
         }
         Column::Relation { target, cardinality, .. } => {
             // Rejected input is ids only; the edited row embeds `{id, label}`, so its labels are free.
-            let linked = match state.posted(name) {
-                Some(_) => None,
-                None => Some(linked_options(name, row)),
+            // (A create has no row to embed labels; its initial ids are looked up instead.)
+            let linked = match (state.posted(name), row) {
+                (None, Some(_)) => Some(linked_options(name, row)),
+                _ => None,
             };
             let many = *cardinality == Cardinality::ToMany;
-            relation(engine, rel, name, target, many, relation_values(name, row, state), linked).await
+            let ids = relation_values(name, row, state, presets);
+            relation(engine, rel, name, target, many, ids, linked).await
         }
     }
 }
@@ -286,8 +369,9 @@ fn choices(options: &[String], value: &str) -> Vec<Opt> {
         .collect()
 }
 
-/// The value for a scalar input: rejected input → the edited row → the column's create-default → empty.
-fn field_value(col: &Column, row: Option<&Value>, state: &ViewState, tz: &Tz) -> String {
+/// The value for a scalar input: rejected input → the edited row → the form's initial value → the
+/// column's create-default → empty.
+fn field_value(col: &Column, row: Option<&Value>, state: &ViewState, tz: &Tz, presets: &Presets<'_>) -> String {
     let name = super::render::name_of(col);
     if let Some(posted) = state.posted(name) {
         return posted.first().cloned().unwrap_or_default();
@@ -301,8 +385,16 @@ fn field_value(col: &Column, row: Option<&Value>, state: &ViewState, tz: &Tz) ->
             _ => super::render::text(raw),
         };
     }
-    // Creating: `MetaField::default` pre-fills the *input* (it is a form default, never applied
-    // server-side), which is why a required column still has to be rendered for its value to be sent.
+    // Creating: the form's initial value, then `MetaField::default`. Both pre-fill the *input*
+    // (neither is applied server-side), which is why a required column still has to be rendered
+    // for its value to be sent.
+    if let Some(v) = presets.initial_of(name) {
+        return match (datetime, v.as_i64()) {
+            (true, Some(secs)) => tz.format_input(secs),
+            (true, None) => String::new(),
+            _ => super::render::text(Some(v)),
+        };
+    }
     match col {
         Column::Field { default: Some(d), .. } if datetime => {
             d.as_i64().map(|s| tz.format_input(s)).unwrap_or_default()
@@ -312,10 +404,18 @@ fn field_value(col: &Column, row: Option<&Value>, state: &ViewState, tz: &Tz) ->
     }
 }
 
-/// The ids currently chosen for a relation — from rejected input, or from the row.
-fn relation_values(name: &str, row: Option<&Value>, state: &ViewState) -> Vec<String> {
+/// The ids currently chosen for a relation — from rejected input, from the row, or (creating) from
+/// the form's initial value: one id, or an array of them for a to-many.
+fn relation_values(name: &str, row: Option<&Value>, state: &ViewState, presets: &Presets<'_>) -> Vec<String> {
     if let Some(posted) = state.posted(name) {
         return posted.iter().filter(|v| !v.is_empty()).cloned().collect();
+    }
+    if row.is_none() {
+        return match presets.initial_of(name) {
+            Some(Value::Array(ids)) => ids.iter().map(|v| super::render::text(Some(v))).collect(),
+            Some(Value::Null) | None => Vec::new(),
+            Some(id) => vec![super::render::text(Some(id))],
+        };
     }
     let Some(raw) = row.and_then(|r| r.get(name)) else { return Vec::new() };
     match raw {

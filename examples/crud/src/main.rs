@@ -1,7 +1,8 @@
 //! crud example — the server-rendered UI, ungated.
 //!
 //! One page per entity (`/{slug}`), the **standalone `Form`** on the app's own pages
-//! (`/post/new`, `/post/{id}/edit`), a row's own page behind View (`/post/{id}`), a table *about one value* at `/author/{id}/posts`, CSV export,
+//! (`/post/new`, `/post/{id}/edit`), a row's own page behind View (`/post/{id}`), a table *about one value* at `/author/{id}/posts`,
+//! a table pinned to a *set* of values at `/queue`, date-range filters on `/event`, CSV export,
 //! and a create/edit `<dialog>` that opens from the URL. No JavaScript framework, no JSON API: the
 //! only script is `crud::ui::JS`, the relation picker's — a post's `author` and `tag` have more rows
 //! than `picker_threshold` (50), so the form shows the selection and edits it in a dialog served by
@@ -11,7 +12,7 @@
 //! renders a fragment into the app's shell, and a `post` that hands the body to the library and
 //! redirects. `examples/adminpanel` is the gated counterpart.
 //!
-//! Try:  open http://127.0.0.1:3000/   ·   /post/new   ·   /author/1/posts   ·   Export CSV
+//! Try:  open http://127.0.0.1:3000/   ·   /post/new   ·   /author/1/posts   ·   /queue   ·   Export CSV
 //!
 //! `/dashboard` is the other half of the story (see docs/APP.md): a page of the app's own, built
 //! from the same engine — counts read straight off `Engine::list`, and a read-only `Table` embedded
@@ -198,6 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/post/{id}", get(post_page))
         .route("/post/{id}/edit", get(edit_post).post(save_post))
         .route("/author/{id}/posts", get(author_posts).post(author_posts_write))
+        .route("/queue", get(queue).post(queue_write))
         // The relation picker's page, which the form's dialog loads in an iframe. One GET handler;
         // static, so it wins over `/{slug}` like the others.
         .route("/pick", get(pick))
@@ -216,6 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("relativelylight on  http://127.0.0.1:3000/");
     println!("Standalone form     http://127.0.0.1:3000/post/new");
     println!("Pinned filter       http://127.0.0.1:3000/author/1/posts");
+    println!("Pinned set          http://127.0.0.1:3000/queue   (drafts and posts in review)");
     println!("Timezones + DST     http://127.0.0.1:3000/event   (pick a zone in the navbar)");
     axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
@@ -239,8 +242,12 @@ fn table<'a>(engine: &'a Engine, slug: &str) -> Table<'a> {
         // not exported.
         "tag" => t.edit(false).export(false),
         // A calendar: events are created, moved and imported (TIME.md's CSV round trip), never
-        // deleted. Listed in time order.
-        "event" => t.delete(false).sort(event::Column::HappensAt.as_str()),
+        // deleted. Listed in time order, and narrowed by a from/to pair of **dates in the zone the
+        // navbar picked** — "to" is inclusive, the whole of that day there.
+        "event" => t
+            .delete(false)
+            .sort(event::Column::HappensAt.as_str())
+            .range_filter(event::Column::HappensAt.as_str()),
         // A profile comes with its user: edited here, never added. Six rows: no search, and no
         // page-size control beside the pager.
         "profile" => t.create(false).search(false).per_page_choices([]),
@@ -267,6 +274,8 @@ fn post_table(t: Table<'_>) -> Table<'_> {
         // the listing, the CSV export and "delete all matching" alike. Sorting by `author` orders
         // by the name shown in the cell rather than the foreign key.
         .filter("author")
+        // A number range beside it: from/to inputs, either end optional, in the URL like the rest.
+        .range_filter(post::Column::Views.as_str())
         .sort(post::Column::Title.as_str())
         // View opens this app's own page for the row (`post_page` below, its own template)
         // rather than the built-in dialog — and `?show=` no longer opens that dialog here.
@@ -475,6 +484,57 @@ async fn author_posts_write(
     }
 }
 
+/// The editorial queue: every post still being worked on, pinned to a **set** of statuses.
+///
+/// `fixed_in` is `fixed_filter` for several values. There is no control to lift it and a chip says
+/// it is there; a post outside it isn't found here; and the form's `status` offers only the two
+/// statuses in the set, so a post can be moved from draft to review here but not published — a
+/// save with any other status is refused beside the field. In a real app the set is usually
+/// computed per request (the zones this operator manages); an empty one shows no rows.
+fn queue_table(engine: &Engine) -> Table<'_> {
+    Table::new(engine, "post")
+        .title("Editorial queue")
+        .description("Drafts and posts in review. Publishing happens on /post.")
+        .fixed_in(post::Column::Status.as_str(), ["draft", "review"])
+        .columns([post::Column::Title.as_str(), post::Column::Status.as_str(), "author"])
+        .fields([
+            post::Column::Title.as_str(),
+            post::Column::Status.as_str(),
+            post::Column::Body.as_str(),
+            post::Column::Views.as_str(), // required, so a create form must show them
+            post::Column::Published.as_str(),
+            "author",
+        ])
+        .sort(post::Column::Title.as_str())
+        .per_page(10)
+}
+
+async fn queue(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
+    let state = ViewState::from_uri(&uri);
+    let html = queue_table(&app.engine).render_for(&headers, &state).await;
+    render(&app, "post", Req { headers: &headers, uri: &uri }, html, true)
+}
+
+async fn queue_write(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    uri: Uri,
+    RealIp(ip): RealIp,
+    body: Bytes,
+) -> Response {
+    let state = ViewState::from_uri(&uri);
+    let table = queue_table(&app.engine);
+    match table.submit(&headers, ip, &body, &state).await {
+        Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
+        Ok(Outcome::Invalid(state)) => {
+            let html = table.render_for(&headers, &state).await;
+            let page = render(&app, "post", Req { headers: &headers, uri: &uri }, html, true);
+            (StatusCode::UNPROCESSABLE_ENTITY, page).into_response()
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
 // ---- the standalone form on the app's own pages (crud::ui::Form) ----
 //
 // The building block the admin table is assembled from, used directly. Note what *isn't* here: no
@@ -504,6 +564,18 @@ fn new_form(engine: &Engine) -> Form<'_> {
         .submit_label("Create post")
         .cancel("/post")
         .redirect("/post/{id}/edit")
+        // Pre-filled for this request, unlike a column's static `default`: a new post starts as a
+        // draft, dated now (Unix seconds, shown in the caller's zone). Only a pre-fill — the
+        // operator can change either, and the save is checked like any other.
+        .initial(post::Column::Status.as_str(), "draft")
+        .initial(post::Column::PublishedAt.as_str(), now_secs())
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 async fn new_post(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {

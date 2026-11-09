@@ -5,10 +5,12 @@ use super::render::{self, Cell, Chip, HeadV, PageLink, Pager, RowV};
 use super::state::{Mode, ViewState};
 use super::widgets::{self, FieldV, Opt, Widget};
 use super::{
-    apply, authorize, banner, check_fields, check_sort, check_widgets, csrf_token, csv_header,
-    is_filterable, render_err, renders, Fmt, Outcome, RowClass, Surface, Writes,
+    apply, authorize, banner, check_fields, check_initial, check_sort, check_widgets, csrf_token,
+    csv_header, is_filterable, range_kind, render_err, renders, Fmt, Outcome, RangeKind, RowClass,
+    Surface, Writes,
 };
 use crate::authz::Operation;
+use crate::crud::text::Pins;
 use crate::crud::engine::{Cardinality, Column, Engine, Error, ListQuery, Result};
 use crate::time::Tz;
 use askama::Template;
@@ -37,6 +39,7 @@ struct TableTmpl {
     keep: Vec<(String, String)>,
     per_page_options: Vec<PageLink>,
     controls: Vec<ControlV>,
+    ranges: Vec<RangeV>,
     chips: Vec<Chip>,
     heads: Vec<HeadV>,
     rows: Vec<RowV>,
@@ -75,6 +78,18 @@ struct ControlV {
     label: String,
     /// The `<select>`'s options: every value, with the one in force marked.
     options: Vec<Opt>,
+}
+
+/// One range control: two inputs, posting `filter[name][from]` and `filter[name][to]`.
+struct RangeV {
+    name: String,
+    label: String,
+    /// The `<input type>`: `date`, `number` or `text`.
+    kind: &'static str,
+    /// The number inputs' `step`; empty for the others.
+    step: &'static str,
+    from: String,
+    to: String,
 }
 
 /// The [`Picker`](super::Picker)'s page: this table's rows with a radio or a checkbox each.
@@ -172,6 +187,12 @@ pub struct Table<'a> {
     detail: bool,
     detail_href: Option<String>,
     pub(super) filters: Vec<FilterSpec>,
+    /// [`range_filter`](Table::range_filter) columns, in toolbar order.
+    ranges: Vec<String>,
+    /// [`fixed_in`](Table::fixed_in) pins: `(name, allowed values)`.
+    sets: Vec<(String, Vec<String>)>,
+    /// [`initial`](Table::initial) values for the create dialog.
+    initial: Vec<(String, Value)>,
     sort: Vec<(String, bool)>,
 }
 
@@ -212,6 +233,9 @@ impl<'a> Table<'a> {
             detail: true,
             detail_href: None,
             filters: Vec::new(),
+            ranges: Vec::new(),
+            sets: Vec::new(),
+            initial: Vec::new(),
             sort: Vec::new(),
         }
     }
@@ -306,15 +330,18 @@ impl<'a> Table<'a> {
         self
     }
 
-    /// The writes this table accepts, before the gate is asked.
+    /// The writes this table accepts, before the gate is asked. A [`fixed_in`](Table::fixed_in)
+    /// set that allows nothing leaves nothing a new row could hold, so creating and importing go
+    /// too — a form whose save can only be refused is not an offer.
     fn writes(&self) -> Writes {
         let on = |switch: bool| switch && !self.read_only;
+        let room = !self.sets.iter().any(|(_, allowed)| allowed.is_empty());
         Writes {
-            create: on(self.create),
+            create: on(self.create) && room,
             update: on(self.edit),
             delete: on(self.delete),
             bulk_delete: on(self.delete && self.bulk_delete),
-            import: on(self.import) && cfg!(feature = "csv"),
+            import: on(self.import) && cfg!(feature = "csv") && room,
         }
     }
 
@@ -483,6 +510,59 @@ impl<'a> Table<'a> {
         });
         self
     }
+    /// A **range** control in the toolbar: a "from" and a "to" input narrowing the table to rows
+    /// whose `column` is `>=` the one and `<=` the other, either left blank for an open end.
+    ///
+    /// For a `.datetime()` column the inputs are **dates in the viewer's zone** (the `rl_tz`
+    /// cookie), and the "to" day is inclusive: from 2026-11-01 to 2026-11-30 is every second of
+    /// November there. A number column takes numbers, a `Date` column dates and a text column text,
+    /// compared as stored. Anything else — a relation, a boolean, JSON — is a render-time error
+    /// naming the column.
+    ///
+    /// Like [`filter`](Table::filter) it lives in the URL (`filter[column][from]=…`), so it applies
+    /// to the listing, the CSV export and "delete all matching" alike. A range only applies where it
+    /// is declared: the same parameters in the URL of a table without this control are ignored.
+    pub fn range_filter(mut self, column: impl Into<String>) -> Self {
+        let column = column.into();
+        if !self.ranges.contains(&column) {
+            self.ranges.push(column);
+        }
+        self
+    }
+    /// Pin the table to rows whose `column` is **one of** `values` — `column IN (…)` — with no
+    /// control to change it: the zones this operator manages, the statuses a queue shows.
+    ///
+    /// It holds for the writes exactly as [`fixed_filter`](Table::fixed_filter) does. A row outside
+    /// the set is not found here (its `?edit=`/`?show=`, a one-row delete, an update or an import
+    /// naming its key), bulk deletes act on the pinned view, and a create, an update or an imported
+    /// row must carry a value in the set, or it is refused beside the field. Unlike a single-value
+    /// pin the form still renders the column — as a choice among the set, and nothing else.
+    ///
+    /// `column` is a field or a to-one relation (whose values are the target's ids). **An empty set
+    /// means no rows**, never "no restriction" — so a list computed from the caller's permissions
+    /// that comes back empty shows an empty table, and offers no way to create a row.
+    ///
+    /// Like `fixed_filter` it is not an authorization boundary on its own: another surface over the
+    /// same entity isn't pinned. Pair it with the gate ([`authz`](crate::authz)).
+    pub fn fixed_in<I, S>(mut self, column: impl Into<String>, values: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let column = column.into();
+        self.sets.retain(|(n, _)| *n != column);
+        self.sets.push((column, values.into_iter().map(Into::into).collect()));
+        self
+    }
+    /// Pre-fill `field` in the **create** dialog with `value`, for this request — see
+    /// [`Form::initial`](super::Form::initial), which this is for the table's own form. The edit
+    /// dialog ignores it.
+    pub fn initial(mut self, field: impl Into<String>, value: impl Into<Value>) -> Self {
+        let field = field.into();
+        self.initial.retain(|(n, _)| *n != field);
+        self.initial.push((field, value.into()));
+        self
+    }
     /// A renderer for the column's **table cells**: `(value, row) -> HTML`, called during render. The
     /// output is inserted verbatim, so wrap database values in [`esc`](super::esc):
     ///
@@ -547,11 +627,11 @@ impl<'a> Table<'a> {
         let can = self.offer(headers).await;
         let tz = Tz::from_headers(headers);
         let state = self.effective_state(state, &cols)?;
-        let page = self.engine.list(&self.slug, &self.list_query(&state), false).await?;
+        let page = self.engine.list(&self.slug, &self.list_query(&state, &cols, &tz)?, false).await?;
         let csrf = csrf_token(self.engine, headers);
         let shown = self.shown_columns(&cols)?;
         let per_page_options = self.per_page_options(&state);
-        let (controls, chips) = self.filter_views(&cols, &state).await?;
+        let (controls, ranges, chips) = self.filter_views(&cols, &state, &tz).await?;
         let pins = self.pins(&cols)?;
 
         let dialog = match state.mode() {
@@ -585,6 +665,7 @@ impl<'a> Table<'a> {
             keep: self.keep(&state),
             per_page_options,
             controls,
+            ranges,
             chips,
             heads: render::heads(&shown, &state),
             rows: render::rows(
@@ -628,7 +709,7 @@ impl<'a> Table<'a> {
         authorize(self.engine, Operation::List, &self.slug, headers).await?;
         let tz = Tz::from_headers(headers);
         let state = self.effective_state(state, &cols)?;
-        let page = self.engine.list(&self.slug, &self.list_query(&state), false).await?;
+        let page = self.engine.list(&self.slug, &self.list_query(&state, &cols, &tz)?, false).await?;
         // A to-many column is a stack of badges per row — every post an author wrote — which says
         // nothing about which author to choose and makes each row a screen tall.
         let mut shown = self.shown_columns(&cols)?;
@@ -662,7 +743,7 @@ impl<'a> Table<'a> {
             engine: self.engine,
             slug: &self.slug,
             renders: &renders,
-            query: self.list_query(&state),
+            query: self.list_query(&state, &cols, &Tz::from_headers(headers))?,
             pins: pins.clone(),
             writes: self.writes(),
         };
@@ -680,14 +761,9 @@ impl<'a> Table<'a> {
         authorize(self.engine, Operation::List, &self.slug, headers).await?;
         let cols = self.engine.columns(&self.slug)?;
         let state = self.effective_state(state, &cols)?;
-        crate::crud::csv_io::export(
-            self.engine,
-            &self.slug,
-            &cols,
-            &self.list_query(&state),
-            &Tz::from_headers(headers),
-        )
-        .await
+        let tz = Tz::from_headers(headers);
+        crate::crud::csv_io::export(self.engine, &self.slug, &cols, &self.list_query(&state, &cols, &tz)?, &tz)
+            .await
     }
 
     /// The URL state as this table will actually act on it: pinned filters forced on, the default
@@ -707,6 +783,12 @@ impl<'a> Table<'a> {
         // they don't have, and passing it to the backend would refuse the whole listing. Dropping
         // it here is the other half of `applicable_filters` dropping the control.
         out.filters.retain(|(name, _)| is_filterable(cols, name));
+        // A range applies only where it is declared: reading one needs the column's kind, and an
+        // undeclared one would narrow the table with no control on screen saying so.
+        for name in &self.ranges {
+            range_kind(&self.slug, cols, name)?;
+        }
+        out.ranges.retain(|(name, _, _)| self.ranges.contains(name));
         for f in self.applicable_filters(cols)? {
             if let Some(value) = f.fixed {
                 out.filters.retain(|(n, _)| *n != f.name);
@@ -716,10 +798,25 @@ impl<'a> Table<'a> {
         Ok(out)
     }
 
-    fn list_query(&self, state: &ViewState) -> ListQuery {
+    /// The backend query for this (effective) state: the URL's search, filters and sort, the
+    /// ranges read for their columns in the viewer's zone, and the set pins.
+    fn list_query(&self, state: &ViewState, cols: &[Column], tz: &Tz) -> Result<ListQuery> {
         let mut q = state.to_list_query(self.per_page);
-        q.per_page = q.per_page.min(self.per_page_max);
-        q
+        q.per_page = self.page_size(state);
+        for (name, from, to) in &state.ranges {
+            let (from, to) = range_bounds(range_kind(&self.slug, cols, name)?, from, to, tz);
+            if from.is_some() || to.is_some() {
+                q.range.push((name.clone(), from, to));
+            }
+        }
+        q.one_of = self.applicable_sets(cols)?;
+        Ok(q)
+    }
+
+    /// The page size in force: the URL's, else the table's, never past [`per_page_max`](Table::per_page_max).
+    fn page_size(&self, state: &ViewState) -> u64 {
+        let asked = if state.per_page > 0 { state.per_page } else { self.per_page };
+        asked.min(self.per_page_max)
     }
 
     /// The page sizes offered beside the pager, as links — no form, no script, and the one in
@@ -729,7 +826,7 @@ impl<'a> Table<'a> {
         if !self.pagination || self.per_page_choices.is_empty() {
             return Vec::new();
         }
-        let in_force = self.list_query(state).per_page;
+        let in_force = self.page_size(state);
         let mut sizes = self.per_page_choices.clone();
         for extra in [self.per_page, in_force] {
             if !sizes.contains(&extra) {
@@ -811,9 +908,65 @@ impl<'a> Table<'a> {
         &self,
         cols: &[Column],
         state: &ViewState,
-    ) -> Result<(Vec<ControlV>, Vec<Chip>)> {
+        tz: &Tz,
+    ) -> Result<(Vec<ControlV>, Vec<RangeV>, Vec<Chip>)> {
         let mut controls = Vec::new();
         let mut chips = Vec::new();
+
+        // A set pin narrows the table as much as a single-value one, so it gets a chip too — with
+        // no ✕, since it isn't the operator's to lift.
+        for (name, allowed) in self.applicable_sets(cols)? {
+            let col = cols.iter().find(|c| render::name_of(c) == name);
+            let value = match (col, allowed.is_empty()) {
+                (_, true) => "none".to_string(),
+                (Some(Column::Relation { target, .. }), false) => {
+                    self.labels_of(target, &allowed).await?.join(", ")
+                }
+                _ => allowed.join(", "),
+            };
+            chips.push(Chip {
+                label: col.map(render::label_of).unwrap_or_else(|| name.clone()),
+                value,
+                clear_href: None,
+            });
+        }
+
+        // The ranges: two inputs each, and a chip for whichever bounds are in force. A bound the
+        // column can't read (a date that isn't one) applies nothing, so it gets no chip either —
+        // a chip claiming a filter the query isn't using is worse than none.
+        let mut ranges = Vec::new();
+        for name in &self.ranges {
+            let kind = range_kind(&self.slug, cols, name)?;
+            let col = cols.iter().find(|c| render::name_of(c) == name);
+            let label = col.map(render::label_of).unwrap_or_else(|| name.clone());
+            let (from, to) = state.range_of(name);
+            let (lo, hi) = range_bounds(kind, &from, &to, tz);
+            let shown = match (lo.is_some(), hi.is_some()) {
+                (true, true) => Some(format!("{from} – {to}")),
+                (true, false) => Some(format!("from {from}")),
+                (false, true) => Some(format!("to {to}")),
+                (false, false) => None,
+            };
+            if let Some(value) = shown {
+                chips.push(Chip {
+                    label: label.clone(),
+                    value,
+                    clear_href: Some(state.href_clear_range(name)),
+                });
+            }
+            ranges.push(RangeV {
+                name: name.clone(),
+                label,
+                kind: kind.input(),
+                step: match kind {
+                    RangeKind::Int => "1",
+                    RangeKind::Float => "any",
+                    _ => "",
+                },
+                from,
+                to,
+            });
+        }
 
         // A filter can reach a table without the table declaring a control for it — an `Admin`
         // shared one, or a hand-written URL. It still narrows what is on screen, so it still needs
@@ -905,7 +1058,27 @@ impl<'a> Table<'a> {
 
             controls.push(ControlV { name: f.name, label, options });
         }
-        Ok((controls, chips))
+        Ok((controls, ranges, chips))
+    }
+
+    /// The labels of several target rows, in the order of `ids` — one lookup, as `label_of`'s.
+    async fn labels_of(&self, target: &str, ids: &[String]) -> Result<Vec<String>> {
+        let q = ListQuery { pk_in: ids.to_vec(), all: true, ..Default::default() };
+        let found = match self.engine.list(target, &q, true).await {
+            Ok(page) => page.data,
+            Err(Error::BadRequest(_)) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        Ok(ids
+            .iter()
+            .map(|id| {
+                found
+                    .iter()
+                    .find(|it| render::text(Some(&it.id)) == *id)
+                    .map(|it| it.label.clone())
+                    .unwrap_or_else(|| id.clone())
+            })
+            .collect())
     }
 
     /// One target row's label, for a filter value. `ids=` is an exact primary-key lookup, so this
@@ -930,7 +1103,7 @@ impl<'a> Table<'a> {
     async fn dialog(
         &self,
         cols: &[Column],
-        pins: &[(String, String)],
+        pins: &Pins,
         mode: &Mode,
         state: &ViewState,
         headers: &HeaderMap,
@@ -938,8 +1111,12 @@ impl<'a> Table<'a> {
     ) -> Result<String> {
         let creating = *mode == Mode::New;
         let tz = Tz::from_headers(headers);
-        let pinned: Vec<String> = pins.iter().map(|(name, _)| name.clone()).collect();
+        let pinned: Vec<String> = pins.eq.iter().map(|(name, _)| name.clone()).collect();
         check_fields(&self.slug, cols, &self.fields, &self.omit, &pinned, creating)?;
+        let shown = |name: &str| self.form_renders(pins, name);
+        if creating {
+            check_initial(&self.slug, cols, &self.initial, &shown)?;
+        }
         let row = match mode {
             Mode::Edit(id) => Some(self.engine.get(&self.slug, id).await?),
             _ => None,
@@ -947,11 +1124,12 @@ impl<'a> Table<'a> {
         let fields = widgets::fields(
             self.engine,
             cols,
-            &|name| self.form_renders(pins, name),
+            &shown,
             row.as_ref(),
             state,
             &tz,
             &widgets::Relations { slug: &self.slug, threshold: self.picker_threshold, headers },
+            &widgets::Presets { initial: &self.initial, sets: &pins.sets },
         )
         .await?;
         let title = self.title.clone().unwrap_or_else(|| self.slug.clone());
@@ -1052,25 +1230,42 @@ impl<'a> Table<'a> {
         renders(&self.fields, &self.omit, name)
     }
 
-    /// The pinned filters ([`fixed_filter`](Table::fixed_filter)) this entity can honour, as
-    /// `(name, value)` — what every write through this table carries.
-    fn pins(&self, cols: &[Column]) -> Result<Vec<(String, String)>> {
-        Ok(self
-            .applicable_filters(cols)?
-            .into_iter()
-            .filter_map(|f| f.fixed.map(|value| (f.name, value)))
-            .collect())
+    /// The [`fixed_in`](Table::fixed_in) sets, each checked against the entity like a filter: a
+    /// column it doesn't have is an error naming it, not a pin silently dropped.
+    fn applicable_sets(&self, cols: &[Column]) -> Result<Vec<(String, Vec<String>)>> {
+        for (name, _) in &self.sets {
+            if !is_filterable(cols, name) {
+                return Err(Error::BadRequest(format!(
+                    "crud::ui({}): cannot pin '{name}' to a set: no such column or to-one relation",
+                    self.slug
+                )));
+            }
+        }
+        Ok(self.sets.clone())
     }
 
-    /// Whether the form renders `name`: as [`renders`](Self::renders), except a pinned column, which
-    /// isn't the operator's to change — the write path supplies it.
-    fn form_renders(&self, pins: &[(String, String)], name: &str) -> bool {
-        self.renders(name) && !pins.iter().any(|(pinned, _)| pinned == name)
+    /// What every write through this table is held to: the [`fixed_filter`](Table::fixed_filter)
+    /// values this entity can honour, and the [`fixed_in`](Table::fixed_in) sets.
+    fn pins(&self, cols: &[Column]) -> Result<Pins> {
+        Ok(Pins {
+            eq: self
+                .applicable_filters(cols)?
+                .into_iter()
+                .filter_map(|f| f.fixed.map(|value| (f.name, value)))
+                .collect(),
+            sets: self.applicable_sets(cols)?,
+        })
     }
 
-    /// Refuse a row the pinned filters leave out, as not found: `?edit=` or `?show=` with another
-    /// parent's id must not open it here.
-    async fn in_view(&self, pins: &[(String, String)], id: &str) -> Result<()> {
+    /// Whether the form renders `name`: as [`renders`](Self::renders), except a column pinned to one
+    /// value, which isn't the operator's to change — the write path supplies it.
+    fn form_renders(&self, pins: &Pins, name: &str) -> bool {
+        self.renders(name) && !pins.fixes(name)
+    }
+
+    /// Refuse a row the pins leave out, as not found: `?edit=` or `?show=` with another parent's id
+    /// must not open it here.
+    async fn in_view(&self, pins: &Pins, id: &str) -> Result<()> {
         match self.engine.outside(&self.slug, pins, &[id.to_string()]).await?.is_empty() {
             true => Ok(()),
             false => Err(Error::NotFound),
@@ -1078,3 +1273,27 @@ impl<'a> Table<'a> {
     }
 }
 
+/// A range's typed bounds as storage bounds for its column's kind. A bound the column can't read is
+/// dropped — `None` — rather than handed to the database to compare as something else.
+fn range_bounds(kind: RangeKind, from: &str, to: &str, tz: &Tz) -> (Option<String>, Option<String>) {
+    let read = |raw: &str, upper: bool| -> Option<String> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        match kind {
+            RangeKind::Day => tz
+                .day_bounds(raw)
+                .map(|(first, last)| if upper { last } else { first }.to_string()),
+            RangeKind::Int => raw.parse::<i64>().ok().map(|n| n.to_string()),
+            RangeKind::Float => raw.parse::<f64>().ok().filter(|f| f.is_finite()).map(|f| f.to_string()),
+            RangeKind::Date => raw
+                .parse::<jiff::civil::Date>()
+                .ok()
+                .map(|d| d.to_string())
+                .filter(|d| d == raw),
+            RangeKind::Text => Some(raw.to_string()),
+        }
+    };
+    (read(from, false), read(to, true))
+}

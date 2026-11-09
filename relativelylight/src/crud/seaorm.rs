@@ -1135,6 +1135,30 @@ where
                 c.eq(str_to_db(c.def().get_column_type(), val))
             });
         }
+        for (name, from, to) in &q.range {
+            let col_name = self.fk_column_of(name).unwrap_or_else(|| name.clone());
+            let c = column::<E>(&col_name)
+                .ok_or_else(|| Error::BadRequest(format!("unknown column: {name}")))?;
+            let ct = c.def().get_column_type().clone();
+            if let Some(from) = from {
+                cond = cond.add(c.gte(str_to_db(&ct, from)));
+            }
+            if let Some(to) = to {
+                cond = cond.add(c.lte(str_to_db(&ct, to)));
+            }
+        }
+        for (name, values) in &q.one_of {
+            let col_name = self.fk_column_of(name).unwrap_or_else(|| name.clone());
+            let c = column::<E>(&col_name)
+                .ok_or_else(|| Error::BadRequest(format!("unknown column: {name}")))?;
+            let ct = c.def().get_column_type().clone();
+            // An empty set allows nothing. Said outright rather than left to how a backend renders
+            // `IN ()`, which is a syntax error on some and "no condition" in a careless builder.
+            cond = cond.add(match values.is_empty() {
+                true => Expr::cust("1 = 0"),
+                false => c.is_in(values.iter().map(|v| str_to_db(&ct, v)).collect::<Vec<DbValue>>()),
+            });
+        }
         if !q.pk_in.is_empty() {
             let name = self.model.pk.first().cloned().unwrap_or_default();
             let c = column::<E>(&name)

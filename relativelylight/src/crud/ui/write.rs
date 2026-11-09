@@ -21,10 +21,10 @@ pub(crate) struct Surface<'a> {
     pub(crate) renders: &'a (dyn Fn(&str) -> bool + Send + Sync),
     /// The view's own query, so a bulk delete can only ever hit the rows on screen.
     pub(crate) query: ListQuery,
-    /// The view's pinned filters (`Table::fixed_filter`), as `(name, value)`. Every create, update
-    /// and import writes them; an update or delete of one row is refused unless the row matches
-    /// them — the other half of the form not rendering them.
-    pub(crate) pins: Vec<(String, String)>,
+    /// The view's pins: `Table::fixed_filter` values every create, update and import writes, and
+    /// `Table::fixed_in` sets each one must hold a value in. An update or delete of one row is
+    /// refused unless the row is inside them — the other half of the form not rendering them.
+    pub(crate) pins: crate::crud::text::Pins,
     /// The writes this surface offers. Anything else is refused before the gate is asked: a
     /// control the page doesn't draw must not be reachable by posting its name.
     pub(crate) writes: Writes,
@@ -72,7 +72,7 @@ pub(crate) async fn apply(
         Op::Create | Op::Update => {
             let id = posted.one("_id").unwrap_or("").to_string();
             let mut write_body = decode::to_write_body(cols, s.renders, &posted, &tz);
-            crate::crud::text::apply_pins(&mut write_body, cols, &s.pins, &tz);
+            s.pins.apply(&mut write_body, cols, &tz);
             if matches!(op, Op::Update) {
                 in_view(s, &id).await?;
             }
@@ -81,6 +81,17 @@ pub(crate) async fn apply(
             } else {
                 Mode::Edit(id.clone())
             };
+            // A set pin refuses a value outside it the way a validator would: beside the field,
+            // with the operator's input kept. Checked before the backend sees the body, so a
+            // write that would move a row out of the view never happens.
+            let outside = s.pins.refusals(&write_body, cols, matches!(op, Op::Create));
+            if !outside.is_empty() {
+                let mut errors = ValidationErrors::new();
+                for (name, message) in outside {
+                    errors.field(&name, message);
+                }
+                return Ok(Outcome::Invalid(state.with_rejection(errors, posted.values(), mode)));
+            }
             let unknown = unknown_references(s.engine, cols, &write_body, &posted).await?;
             if !unknown.is_empty() {
                 return Ok(Outcome::Invalid(state.with_rejection(unknown, posted.values(), mode)));

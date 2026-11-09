@@ -69,7 +69,8 @@ pub use state::{Done, Mode, ViewState};
 pub use table::Table;
 
 pub(crate) use checks::{
-    banner, check_fields, check_sort, check_widgets, csv_header, is_filterable, render_err, renders,
+    banner, check_fields, check_initial, check_sort, check_widgets, csv_header, is_filterable,
+    range_kind, render_err, renders, RangeKind,
 };
 pub(crate) use write::{apply, authorize, csrf_token, Surface, Writes};
 

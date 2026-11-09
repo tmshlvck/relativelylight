@@ -125,6 +125,22 @@ impl Tz {
         Some(dt.to_zoned(self.zone()).ok()?.timestamp().as_second())
     }
 
+    /// A calendar date (`YYYY-MM-DD`, what an `<input type="date">` posts) → the Unix seconds of
+    /// its first and last second **in this zone**, so a range "to" that day takes in the whole of
+    /// it. `None` if it isn't a date. A day that a DST change shortens or lengthens is as long as
+    /// it really is; a midnight that doesn't exist starts the day at the first moment that does.
+    pub fn day_bounds(&self, input: &str) -> Option<(i64, i64)> {
+        // Strictly a date: jiff would also read the date out of `2026-11-01T10:00`, and a bound
+        // that silently dropped its time of day is a range nobody asked for.
+        let date: civil::Date = input.trim().parse().ok()?;
+        if date.to_string() != input.trim() {
+            return None;
+        }
+        let start = date.to_zoned(self.zone()).ok()?.timestamp().as_second();
+        let next = date.tomorrow().ok()?.to_zoned(self.zone()).ok()?.timestamp().as_second();
+        Some((start, next - 1))
+    }
+
     /// This selection as a `Set-Cookie` value, for the handler behind a [`TzPicker`]. A year, path
     /// `/`, `SameSite=Lax` — a display preference, so nothing is `HttpOnly` or `Secure`-only about it.
     pub fn cookie(&self) -> String {
@@ -418,6 +434,21 @@ impl Default for TzPicker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_day_runs_from_its_first_second_to_its_last_in_the_zone() {
+        let prague = Tz::named("Europe/Prague");
+        // 1 November 2026 in Prague (CET, UTC+1) starts at 23:00 UTC the evening before.
+        assert_eq!(prague.day_bounds("2026-11-01"), Some((1_793_487_600, 1_793_487_600 + 86_400 - 1)));
+        assert_eq!(Tz::UTC.day_bounds("2026-11-01"), Some((1_793_491_200, 1_793_491_200 + 86_400 - 1)));
+        // The spring-forward day is 23 hours long, and the bounds say so.
+        let (first, last) = prague.day_bounds("2026-03-29").unwrap();
+        assert_eq!((first, last), (1_774_738_800, 1_774_821_600 - 1));
+        assert_eq!(last - first + 1, 23 * 3600);
+        for bad in ["", "2026-02-30", "yesterday", "2026-11-01T10:00"] {
+            assert_eq!(prague.day_bounds(bad), None, "{bad:?} is not a date");
+        }
+    }
 
     #[test]
     fn with_no_cookie_the_picker_shows_utc_selected() {

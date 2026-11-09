@@ -119,6 +119,82 @@ pub(crate) fn check_fields(
     Ok(())
 }
 
+/// Refuse an initial value the form can't show, naming the field — it is a pre-fill, never written
+/// server-side, so one for a column the form doesn't render would do nothing at all.
+pub(crate) fn check_initial(
+    slug: &str,
+    cols: &[Column],
+    initial: &[(String, serde_json::Value)],
+    rendered: &dyn Fn(&str) -> bool,
+) -> Result<()> {
+    for (name, _) in initial {
+        match cols.iter().find(|c| render::name_of(c) == name) {
+            Some(c) if widgets::writable(c) && rendered(name) => {}
+            Some(_) => {
+                return Err(Error::BadRequest(format!(
+                    "crud::ui({slug}): initial value for '{name}', which this form doesn't show —                      an initial value only pre-fills an input, so the field has to be rendered"
+                )))
+            }
+            None => {
+                return Err(Error::BadRequest(format!(
+                    "crud::ui({slug}): initial value for '{name}': no such column or relation"
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// How a [`range_filter`](super::Table::range_filter) column is entered and read.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum RangeKind {
+    /// A `.datetime()` column: dates picked in the viewer's zone, bounds in Unix seconds, the
+    /// "to" day inclusive.
+    Day,
+    /// A native `Date` column: dates compared as stored.
+    Date,
+    Int,
+    Float,
+    Text,
+}
+
+impl RangeKind {
+    /// The `<input type>` for its bounds.
+    pub(crate) fn input(self) -> &'static str {
+        match self {
+            RangeKind::Day | RangeKind::Date => "date",
+            RangeKind::Int | RangeKind::Float => "number",
+            RangeKind::Text => "text",
+        }
+    }
+}
+
+/// What a range filter on `name` is, or the error naming why it can't be one: an unknown column,
+/// a relation (ids in a row have no order anyone means), or a type with no ordering to give.
+pub(crate) fn range_kind(slug: &str, cols: &[Column], name: &str) -> Result<RangeKind> {
+    use crate::crud::engine::LogicalType as T;
+    let refuse = |why: &str| {
+        Error::BadRequest(format!("crud::ui({slug}): cannot range-filter by '{name}': {why}"))
+    };
+    match cols.iter().find(|c| render::name_of(c) == name) {
+        Some(Column::Field { display: Some(d), logical_type: T::Int, .. }) if d.is_datetime() => {
+            Ok(RangeKind::Day)
+        }
+        Some(Column::Field { logical_type, .. }) => match logical_type {
+            T::Int => Ok(RangeKind::Int),
+            T::Float => Ok(RangeKind::Float),
+            T::Text => Ok(RangeKind::Text),
+            T::Date => Ok(RangeKind::Date),
+            other => Err(refuse(&format!(
+                "a {other:?} column has no range control (an integer `.datetime()`, a number, a \
+                 date or text has)"
+            ))),
+        },
+        Some(Column::Relation { .. }) => Err(refuse("it is a relation")),
+        None => Err(refuse("no such column")),
+    }
+}
+
 /// The CSV header the import placeholder shows — the columns an import would read.
 pub(crate) fn csv_header(cols: &[Column]) -> String {
     cols.iter()
