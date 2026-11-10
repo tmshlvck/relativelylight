@@ -32,6 +32,7 @@
     {%- if blank %}<option value="">—</option>{% endif %}
     {%- for o in options %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
   </select>
+  {%- if !f.create.is_empty() %}{% include "_new.html" %}{% endif %}
   {%- when Widget::Radio with { options } %}
   {%- for o in options %}
   <div class="form-check">
@@ -49,13 +50,16 @@
           name="{{ f.name }}" multiple size="6">
     {%- for o in options %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
   </select>
+  {%- if !f.create.is_empty() %}{% include "_new.html" %}{% endif %}
   {%- when Widget::Picked with { chosen, many, src, note } %}
   {#- Too many target rows to list. The selection is shown, not edited here: the hidden inputs post it
       exactly as a `<select>` would, so a save without scripting keeps it unchanged. The button
       (hidden until `crud::ui::JS` runs) opens the picker at `src`, and only its OK rewrites the
-      badges and the inputs. -#}
+      badges and the inputs. With "+" (`data-rl-new`), the "New" button is in the picker's dialog,
+      and the row it creates joins the dialog's working selection. -#}
   <div class="rl-picked d-flex gap-2 align-items-start" data-rl-src="{{ src }}"
-       data-rl-many="{{ many }}" data-rl-name="{{ f.name }}" data-rl-title="{{ f.label }}">
+       data-rl-many="{{ many }}" data-rl-name="{{ f.name }}" data-rl-title="{{ f.label }}"
+       {%- if !f.create.is_empty() %} data-rl-new="{{ f.create }}"{% endif %}>
     <div class="rl-picked-list form-control{% if !f.error.is_empty() %} is-invalid{% endif %}" id="f-{{ f.name }}">
       {%- for o in chosen %}<span class="badge text-bg-secondary" data-id="{{ o.value }}">{{ o.label }}</span>{% endfor %}
       {%- if chosen.is_empty() %}<span class="text-muted">None</span>{% endif %}

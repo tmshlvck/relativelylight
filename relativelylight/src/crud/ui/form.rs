@@ -64,6 +64,9 @@ pub struct Form<'a> {
     redirect: Option<String>,
     picker_threshold: u64,
     initial: Vec<(String, Value)>,
+    /// Only ever creates: a posted `_op=update` is refused. The picker's create form, whose page is
+    /// reachable by anyone allowed to create the target, must not become a way to edit its rows.
+    only_create: bool,
 }
 
 impl<'a> Form<'a> {
@@ -85,6 +88,7 @@ impl<'a> Form<'a> {
             redirect: None,
             picker_threshold: 50,
             initial: Vec::new(),
+            only_create: false,
         }
     }
 
@@ -176,6 +180,10 @@ impl<'a> Form<'a> {
         self.picker_threshold = n;
         self
     }
+    pub(crate) fn only_create(mut self) -> Self {
+        self.only_create = true;
+        self
+    }
     /// Namespaces the fragment's DOM id, so two forms for the same entity can share a page.
     pub fn dom_id(mut self, id: impl Into<String>) -> Self {
         self.dom_id = Some(id.into());
@@ -261,7 +269,7 @@ impl<'a> Form<'a> {
             // must not get this far.
             writes: Writes {
                 create: true,
-                update: true,
+                update: !self.only_create,
                 delete: false,
                 bulk_delete: false,
                 import: false,

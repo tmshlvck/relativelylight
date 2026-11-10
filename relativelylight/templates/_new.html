@@ -1,0 +1,9 @@
+{#- A relation field's "+ New", below its `<select>`: a new target row, made in a dialog over this
+    form (`Crud::picker_create`). Hidden until `crud::ui::JS` runs — without it there is no dialog to
+    open. The script fills the `<select>` in the same field. (A field past the picker threshold has
+    no button here: its "New" is in the picker's dialog.) -#}
+<button class="btn btn-primary btn-sm mt-1 rl-new" type="button" hidden data-rl-src="{{ f.create }}"
+        data-rl-title="New {{ f.label }}" title="New {{ f.label }}">
+  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 2a1 1 0 0 1 1 1v4h4a1 1 0 1 1 0 2H9v4a1 1 0 1 1-2 0V9H3a1 1 0 0 1 0-2h4V3a1 1 0 0 1 1-1"/></svg>
+  New
+</button>

@@ -16,6 +16,9 @@ pub(crate) struct FieldV {
     pub help: String,
     pub error: String,
     pub widget: Widget,
+    /// Where this relation field's **"+"** opens a create form for a new target row — the picker
+    /// path with `?pick=<slug>.<relation>&new=1`. Empty: no "+" (see [`create_src`]).
+    pub create: String,
 }
 
 pub(crate) struct Opt {
@@ -91,12 +94,20 @@ pub(crate) async fn fields(
     let mut out = Vec::new();
     for col in cols.iter().filter(|c| writable(c) && rendered(super::render::name_of(c))) {
         let name = super::render::name_of(col).to_string();
-        let widget = match presets.set_of(&name) {
-            Some(set) => within(engine, col, row, state, tz, rel, presets, set).await?,
-            None => widget(engine, col, row, state, tz, rel, presets).await?,
+        let (widget, create) = match presets.set_of(&name) {
+            // A pinned set is a choice among rows the view already names; a new row isn't one.
+            Some(set) => (within(engine, col, row, state, tz, rel, presets, set).await?, String::new()),
+            None => {
+                let create = match col {
+                    Column::Relation { target, .. } => create_src(engine, rel, &name, target).await,
+                    Column::Field { .. } => String::new(),
+                };
+                (widget(engine, col, row, state, tz, rel, presets).await?, create)
+            }
         };
         out.push(FieldV {
             widget,
+            create,
             label: super::render::label_of(col),
             required: matches!(col, Column::Field { required: true, .. }),
             help: help_of(col),
@@ -305,6 +316,21 @@ pub(crate) async fn relation(
     }
 }
 
+/// Where a relation field's "+" opens, or empty for none. Offered only when the app turned it on
+/// (`Crud::picker_create`) and the caller may both **create** the target and **list** it — the
+/// page that reports the new row shows its label, which is a read. Each nested form asks again for
+/// its own relations, so how deep the dialogs go is the gates' answer (and the script's cap).
+pub(crate) async fn create_src(engine: &Engine, rel: &Relations<'_>, relation: &str, target: &str) -> String {
+    let Some(path) = engine.picker_create_path() else { return String::new() };
+    if !engine.permits(target, Operation::Create, rel.headers).await
+        || !engine.permits(target, Operation::List, rel.headers).await
+    {
+        return String::new();
+    }
+    let pick = format!("{}.{relation}", rel.slug);
+    format!("{path}?{}", crate::urlform::query(&[("pick".into(), pick), ("new".into(), "1".into())]))
+}
+
 /// The `{id, label}` pairs an edited row embeds for a relation.
 fn linked_options(name: &str, row: Option<&Value>) -> Vec<Opt> {
     let items: Vec<&Value> = match row.and_then(|r| r.get(name)) {
@@ -326,7 +352,7 @@ fn linked_options(name: &str, row: Option<&Value>) -> Vec<Opt> {
 /// already has them (the row being edited), else looked up for `ids` (a rejected save, or an app's
 /// own form). Not looked up when the caller may not list the target (`listable` false): the ids
 /// someone posted are no reason to tell them what those rows are called, so they show as ids.
-async fn chosen_options(
+pub(crate) async fn chosen_options(
     engine: &Engine,
     target: &str,
     ids: &[String],

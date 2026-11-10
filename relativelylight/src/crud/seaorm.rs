@@ -1757,6 +1757,16 @@ impl Crud {
         self
     }
 
+    /// Offer **"+ New"** on relation fields: create the missing target row in a dialog over the
+    /// form, and come back with it chosen. Off by default. Needs [`picker_path`](Crud::picker_path),
+    /// and the picker route must answer `POST` too ([`Picker::submit`](crate::crud::ui::Picker::submit))
+    /// — see `docs/CRUD.md` → "Creating the missing row".
+    #[cfg(feature = "ui")]
+    pub fn picker_create(&mut self, on: bool) -> &mut Self {
+        self.engine.set_picker_create(on);
+        self
+    }
+
     /// The underlying backend-agnostic engine — what the UI components render from, and what an app
     /// publishing its own JSON API would call.
     pub fn engine(&self) -> &Engine {

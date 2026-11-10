@@ -115,6 +115,9 @@ pub struct ViewState {
     /// entity and the relation's name. It rides in every link the picker renders, so paging and
     /// searching inside the dialog keep choosing for the same field.
     pub pick: Option<(String, String)>,
+    /// `?created=7` — the row a picker's create form just made, which its page reports so the
+    /// dialog can choose it in the form underneath (see [`Picker::submit`](super::Picker::submit)).
+    pub created: Option<String>,
     /// Set by `submit` when a write was rejected: the messages, and what the operator had typed, so
     /// the dialog can re-render with both in place instead of losing the input.
     pub(crate) rejected: Option<ValidationErrors>,
@@ -167,6 +170,7 @@ impl ViewState {
                     "format" => s.csv = value == "csv",
                     "saved" => s.saved = true,
                     "done" => s.done = Done::parse(&value),
+                    "created" if !value.is_empty() => s.created = Some(value),
                     "pick" => {
                         s.pick = value.split_once('.').map(|(a, b)| (a.to_string(), b.to_string()))
                     }

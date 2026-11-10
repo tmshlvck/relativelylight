@@ -744,7 +744,8 @@ Feature `ui`. One implementation behind every component:
 - [`Form`](#form--a-standalone-createedit-form) — the same form standalone, for your own pages.
 - [`Admin`](#admin--a-whole-admin-in-one-component) — a side panel over many `Table`s.
 - [`Picker`](#picker--choosing-from-a-large-relation) — the page inside the dialog that edits a
-  relation too large for a `<select>`.
+  relation too large for a `<select>`, and that [creates the missing row](#creating-the-missing-row)
+  behind a relation field's "+ New".
 - [`RelationField`](#relationfield--the-relation-input-in-a-form-of-your-own) — one relation's input
   (a `<select>`, or the picker past the threshold) for a `<form>` you write yourself.
 
@@ -1188,6 +1189,91 @@ be browsed. The rows are a `Table` render of the target, refused (`401`/`403`) w
 list it. A picker leaves out the target's to-many columns: a stack of badges per row says nothing
 about which row to choose. `Picker::per_page(n)` sets the dialog's page size (default 10). Both
 `examples/crud` and `examples/adminpanel` serve one; their seed has 56 authors and 56 tags.
+
+### Creating the missing row
+
+Halfway through a work order, the airline it is for doesn't exist yet. With **`picker_create`**,
+every relation field the operator may create the target of gets a small blue **"+ New"** button. It
+opens a dialog with the target's create form. Saving it chooses the new row, and the work order's
+form underneath was never reloaded, so what was typed in it is still there.
+
+Where the button is depends on the field:
+
+- A `<select>` or multi-select (a small target): below the field. The new row becomes the
+  selected option; a to-many **adds** it to what was selected.
+- A field past `picker_threshold`: inside the [picker](#picker--choosing-from-a-large-relation)'s
+  dialog, at the bottom left, not in the form. The new row joins the dialog's working selection
+  as a chip, and OK writes it into the field like any other choice (Cancel drops it from the
+  field; the row itself stays).
+
+```rust
+crud.picker_path("/pick");
+crud.picker_create(true);                // "+ New" for relation fields; off by default
+// …
+.route("/pick", get(pick).post(pick_write))
+
+async fn pick_write(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri,
+                    RealIp(ip): RealIp, body: Bytes) -> Response {
+    let state = ViewState::from_uri(&uri);
+    let picker = Picker::new(&app.engine);
+    match picker.submit(&headers, ip, &body, &state).await {
+        Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
+        Ok(Outcome::Invalid(state)) => match picker.render_for(&headers, &state).await {
+            Ok(html) => (StatusCode::UNPROCESSABLE_ENTITY, Html(bare_shell(&html))).into_response(),
+            Err(e) => e.into_response(),
+        },
+        Err(e) => e.into_response(),
+    }
+}
+```
+
+How it works, on the same `/pick` route as the picker:
+
+1. "+ New" opens `/pick?pick=workorder.airline&new=1` in a dialog: the target's create form, which
+   posts back to that URL.
+2. `Picker::submit` creates the row. A refused save comes back as `Invalid`: render it, and the
+   form reappears in the dialog with its messages and the typed input.
+3. A saved row redirects to `/pick?pick=workorder.airline&created=<id>`, with the id the database
+   gave it. That page carries the row's id and label, which `crud::ui::JS` reads to choose the row
+   as above, and then it closes the dialog.
+
+**Dialogs nest.** The form in the dialog is an ordinary form of the target, so its own relations
+have their "+ New" (and 🔍): a new airline gets a new HQ address, then the address dialog closes
+onto the airline form, then the airline dialog onto the work order. The heading shows the trail
+(`New Airline › New HQ`). The script stops at **four** create forms deep: the fourth one's "+ New"
+is hidden, in its form and in any picker opened from it. Esc, ✕ or Cancel closes only the top
+dialog.
+
+**It follows the direction of the foreign key.** "+ New" appears on the record that holds the link:
+`workorder.airline_id`, `airline.hq_address_id`. An airline's list of work orders (the other side
+of a 1:N) is shown read-only, not edited, so it has no "+". An N:M relation (`relate`) has its "+"
+on each side that declares it: the new row is saved first, and the junction row is written when the
+outer form saves.
+
+**What it refuses.**
+
+- "+" is drawn only when the caller may **create** and **list** the target, by the target's own
+  gate. The page that reports the new row shows its label, which is a read.
+- The create form and its `POST` are refused (`401`/`403`) by the same gates, whatever "+" showed.
+- It only ever **creates**: a posted update or delete is refused, so the page can't edit the
+  target's existing rows. CSRF is checked as on every write.
+- `?new=1` and `?created=` answer `400` while `picker_create` is off.
+- A [pinned set](#a-pinned-set) has no "+": a new row could never be in the set.
+
+**Which fields.** By default the create form shows every writable column of the target. Narrow it
+per target with `Picker::create_fields("airline", ["name", "hq"])`, as `Form::fields` does. A field
+that doesn't exist is a render-time error naming it.
+
+**Things to know.**
+
+- Each dialog saves its row when its form is saved. Abandon the work order after creating the
+  airline, and the airline stays: it is a real row, just not linked to anything yet.
+- It needs the script. Without it "+ New" stays hidden and the field works as before.
+- The picker's bare shell needs nothing new. The window that opened the first dialog drives every
+  page loaded into the dialogs, so those pages need no script of their own.
+
+`examples/crud` turns it on: a profile's user (a `<select>`), and a post's author and tags and a
+tag's posts (in the picker).
 
 ### `RelationField` — the relation input in a form of your own
 

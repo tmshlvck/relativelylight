@@ -55,6 +55,14 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 - **One implementation of the UI.** `Form`, `Table` and `Admin` share their code, and a filter governs
   the listing, the export and the bulk delete alike, so no control acts on a wider set than the one
   on screen. A hidden control is a refused write, not just a missing button.
+- **"+ New" creates in a dialog, never in a draft.** A relation field's "+ New" (`picker_create`) opens
+  the target's create form in an iframe over the form being filled in, and the script adds the
+  saved row to the field. The outer form is never posted or reloaded, so nothing has to be kept on
+  the server. Keeping a half-filled form there instead would break "the URL is the state" and work
+  without JavaScript only at that cost. The price: each dialog's row is saved when its form is, so
+  an abandoned outer form leaves it unlinked. "+" follows the foreign key, so it never creates child
+  rows (the other side of a 1:N); those are the app's own pages, as inline child rows were
+  decided against. The nesting cap (four forms) is the script's; each level is gated on its own.
 - **Display and storage are separate.** `format_cell`/`format_view` are display only; `on_read` /
   `on_write` are an inverse codec on the column's own type.
 

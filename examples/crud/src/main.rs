@@ -6,7 +6,9 @@
 //! and a create/edit `<dialog>` that opens from the URL. No JavaScript framework, no JSON API: the
 //! only script is `crud::ui::JS`, the relation picker's — a post's `author` and `tag` have more rows
 //! than `picker_threshold` (50), so the form shows the selection and edits it in a dialog served by
-//! `/pick`. Delete six authors and `author` is a plain `<select>` again.
+//! `/pick`. Delete six authors and `author` is a plain `<select>` again. Beside each relation is a
+//! "+": the author you need doesn't exist yet, so create it in a dialog over the half-filled post
+//! and come back with it chosen.
 //!
 //! The shape to copy is the **two handlers per surface** at the bottom of this file: a `get` that
 //! renders a fragment into the app's shell, and a `post` that hands the body to the library and
@@ -183,6 +185,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Where the relation picker is served (the `/pick` route below). Without it a relation past
     // `picker_threshold` stays a `<select>` of every row.
     crud.picker_path("/pick");
+    // And "+ New" for every relation field the operator may create the target of: a new author or
+    // tag made in a dialog over the half-filled post form, and chosen in it when saved. Below a
+    // `<select>`, or in the picker's dialog for a large relation. The `/pick` route answers `POST`
+    // for it (`pick_write` below).
+    crud.picker_create(true);
 
     let engine = Arc::new(crud.into_engine());
     let entities = engine.tables();
@@ -200,9 +207,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/post/{id}/edit", get(edit_post).post(save_post))
         .route("/author/{id}/posts", get(author_posts).post(author_posts_write))
         .route("/queue", get(queue).post(queue_write))
-        // The relation picker's page, which the form's dialog loads in an iframe. One GET handler;
-        // static, so it wins over `/{slug}` like the others.
-        .route("/pick", get(pick))
+        // The relation picker's page, which the form's dialog loads in an iframe — and, for "+",
+        // the target's create form, which posts back here. Static, so it wins over `/{slug}`.
+        .route("/pick", get(pick).post(pick_write))
         // The timezone picker's handler — four lines, and the whole of this app's side of the
         // feature. Everything the library renders then follows the cookie.
         .route("/tz", post(set_tz))
@@ -298,6 +305,32 @@ async fn pick(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Resp
         Ok(body) => match (Bare { body, css: CSS }).render() {
             Ok(html) => Html(html).into_response(),
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        },
+        Err(e) => e.into_response(),
+    }
+}
+
+/// The "+" dialog's create form posts here. Saved: a `303` into the same iframe, onto a page that
+/// reports the new row, which the dialog's script chooses in the form underneath. Rejected: the
+/// form again, with its messages.
+async fn pick_write(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    uri: Uri,
+    RealIp(ip): RealIp,
+    body: Bytes,
+) -> Response {
+    let state = ViewState::from_uri(&uri);
+    let picker = Picker::new(&app.engine);
+    let bare = |body: String| match (Bare { body, css: CSS }).render() {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match picker.submit(&headers, ip, &body, &state).await {
+        Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
+        Ok(Outcome::Invalid(state)) => match picker.render_for(&headers, &state).await {
+            Ok(body) => (StatusCode::UNPROCESSABLE_ENTITY, bare(body)).into_response(),
+            Err(e) => e.into_response(),
         },
         Err(e) => e.into_response(),
     }

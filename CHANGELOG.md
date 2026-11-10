@@ -44,6 +44,16 @@ is easy to miss in a diff.
 - **`ListQuery::range` and `ListQuery::one_of`**, the engine's half of the two filters, for an app
   listing through `Engine::list` itself. `ViewState::ranges` holds a URL's ranges as typed.
 - **`Tz::day_bounds(date)`**: a calendar date's first and last second in the zone.
+- **"+ New" on relation fields: create the missing row without leaving the form**
+  (`Crud::picker_create(true)`). It opens the target's create form in a dialog over the form being
+  filled in. Saving it chooses the new row, by the id the database gave it: the selected option of a
+  `<select>` (the button is below it), or a chip of the picker dialog's selection (the button is in
+  that dialog). Dialogs nest (a new airline gets a new
+  address), up to four create forms deep. Offered only when the caller may create and list the
+  target; the form only ever creates, and is gated and CSRF-checked like every write. The picker
+  route answers `POST` too, with the new `Picker::submit`; `Picker::create_fields` narrows the form
+  per target. Off by default ([CRUD.md → Creating the missing row](docs/CRUD.md#creating-the-missing-row)).
+- `examples/crud`: "+ New" for a profile's user, a post's author and tags, and a tag's posts.
 - `examples/crud`: a date range on `/event`, a views range on `/post`, initial values on
   `/post/new`, and `/queue`, a post table pinned to the draft and review statuses.
 

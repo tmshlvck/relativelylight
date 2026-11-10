@@ -42,7 +42,8 @@ URL, verified (and re-authenticated) before it's on.</sub></td>
 
 - **A web admin** (`crud::ui`): `Table` (sortable headers, filters, search, pager, bulk delete, CSV,
   a create/edit `<dialog>`), `Form` for your own pages, and `Admin` composing many tables behind one
-  side panel. Every view is a URL.
+  side panel. Every view is a URL. A relation field can create its missing row in a dialog
+  (nesting), without losing the form.
 - **A typed `Engine`** per entity — list/get/create/update/delete, relations by name, validation.
   Publish your own JSON API over it if you need one.
 - **Auth** (`auth`): sessions, login, TOTP 2FA with recovery codes, lockout, CSRF, OIDC SSO, and a

@@ -155,6 +155,7 @@ impl<'a> RelationField<'a> {
         let rel = widgets::Relations { slug: &self.slug, threshold: self.picker_threshold, headers };
         let widget: Widget =
             widgets::relation(self.engine, &rel, &self.relation, &target, many, ids, None).await?;
+        let create = widgets::create_src(self.engine, &rel, &self.relation, &target).await;
         FieldTmpl {
             f: FieldV {
                 name: self.input_name().to_string(),
@@ -163,6 +164,7 @@ impl<'a> RelationField<'a> {
                 help: self.help.clone().unwrap_or(description),
                 error: self.error.clone(),
                 widget,
+                create,
             },
         }
         .render()

@@ -509,6 +509,9 @@ pub struct Engine {
     /// UI renders. `None`: no picker, so a relation too large for its threshold stays a `<select>`.
     #[cfg(feature = "ui")]
     picker_path: Option<String>,
+    /// Whether a relation field offers "+" — a new target row, made in a dialog over the form.
+    #[cfg(feature = "ui")]
+    picker_create: bool,
 }
 
 impl Engine {
@@ -523,6 +526,8 @@ impl Engine {
             csrf: None,
             #[cfg(feature = "ui")]
             picker_path: None,
+            #[cfg(feature = "ui")]
+            picker_create: false,
         }
     }
 
@@ -536,6 +541,20 @@ impl Engine {
     #[cfg(feature = "ui")]
     pub(crate) fn picker_path(&self) -> Option<&str> {
         self.picker_path.as_deref()
+    }
+
+    /// Offer "+ New" on relation fields: a new target row, created in a dialog over the form. Needs
+    /// a picker path, and the app's picker route to answer `POST` as well. Usually set via
+    /// `Crud::picker_create`.
+    #[cfg(feature = "ui")]
+    pub fn set_picker_create(&mut self, on: bool) {
+        self.picker_create = on;
+    }
+
+    /// The path "+" opens, when it is on: `None` without a picker path.
+    #[cfg(feature = "ui")]
+    pub(crate) fn picker_create_path(&self) -> Option<&str> {
+        self.picker_path().filter(|_| self.picker_create)
     }
 
     /// Register an audit sink fired after each committed write (create/update/delete). See
