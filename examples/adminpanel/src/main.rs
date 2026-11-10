@@ -6,7 +6,8 @@
 //!
 //! The whole stack composed by the app: **two handlers** for the panel (`GET /` renders, `POST /`
 //! writes), the `auth` routes merged in, one address-resolving layer, an askama shell, a timezone
-//! cookie, and the authn/authz gates. (The `crud-example` is the ungated counterpart.)
+//! cookie, and the authn/authz gates. (The `crud-example` is the ungated counterpart.) A relation
+//! field's "+ New" creates a missing author or tag in a dialog over the form, for the admin only.
 //!
 //! Try:  open http://127.0.0.1:3000/   ·   each model has its own path (/admin/post, /admin/tag)
 //!
@@ -376,6 +377,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A post's author and tags outnumber `picker_threshold` (50), so the form edits them in a dialog
     // over this route. Its rows are the target's own table, so they answer to the target's gate.
     crud.picker_path("/pick");
+    // "+ New" for a relation whose target doesn't have the row yet: a new author made in a dialog
+    // over the half-filled post, and chosen in it. The target's gate decides, so the editor
+    // (read-only) never sees the button. `user` is shown read-only in the panel (see `build_admin`),
+    // so it is never created this way either: a table-level switch is a view's choice, which only
+    // the gate or this list carries over to "+ New".
+    crud.picker_create(true);
+    crud.picker_create_except(["user"]);
 
     // One shared engine, rendered from *per request*, so write controls hide for users who can't
     // write — and a forged write is refused by the same gate regardless.
@@ -388,7 +396,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // (see `home`). `/` sends you to the first panel.
         .route("/", get(|| async { Redirect::to("/admin/post") }))
         .route("/admin/{entity}", get(home).post(save))
-        .route("/pick", get(pick))
+        .route("/pick", get(pick).post(pick_write))
         .route("/tz", post(set_tz))
         .with_state(app);
 
@@ -428,6 +436,31 @@ async fn pick(headers: HeaderMap, uri: Uri, State(app): State<Arc<App>>) -> Resp
         Ok(body) => match (Bare { body, css: CSS }).render() {
             Ok(html) => Html(html).into_response(),
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        },
+        Err(e) => e.into_response(),
+    }
+}
+
+/// The "+ New" dialog's create form posts here: a `303` into the same iframe when saved (the dialog's
+/// script then chooses the new row), the form again with its messages when not. Gated and
+/// CSRF-checked like the panel's own writes.
+async fn pick_write(
+    headers: HeaderMap,
+    uri: Uri,
+    RealIp(ip): RealIp,
+    State(app): State<Arc<App>>,
+    body: Bytes,
+) -> Response {
+    let state = ViewState::from_uri(&uri);
+    let picker = Picker::new(&app.engine);
+    match picker.submit(&headers, ip, &body, &state).await {
+        Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
+        Ok(Outcome::Invalid(state)) => match picker.render_for(&headers, &state).await {
+            Ok(body) => match (Bare { body, css: CSS }).render() {
+                Ok(html) => (StatusCode::UNPROCESSABLE_ENTITY, Html(html)).into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            },
+            Err(e) => e.into_response(),
         },
         Err(e) => e.into_response(),
     }

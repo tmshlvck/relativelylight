@@ -1767,6 +1767,20 @@ impl Crud {
         self
     }
 
+    /// Never offer "+ New" for these target entities (slugs), though
+    /// [`picker_create`](Crud::picker_create) is on and their gates would allow a create — for a
+    /// table your own pages show read-only, or rows that need more than a form to make. The
+    /// picker's create URLs for them answer `400`, as when it is off.
+    #[cfg(feature = "ui")]
+    pub fn picker_create_except<I, S>(&mut self, targets: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.engine.set_picker_create_except(targets.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// The underlying backend-agnostic engine — what the UI components render from, and what an app
     /// publishing its own JSON API would call.
     pub fn engine(&self) -> &Engine {

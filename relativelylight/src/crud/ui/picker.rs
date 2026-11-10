@@ -91,7 +91,7 @@ impl<'a> Picker<'a> {
     pub async fn render_for(&self, headers: &HeaderMap, state: &ViewState) -> Result<String> {
         let picked = self.picked(state)?;
         if let Some(id) = &state.created {
-            self.creating()?;
+            self.creating(&picked.target)?;
             // The label is a read of the target; "+" is only offered to who may list it.
             authorize(self.engine, Operation::List, &picked.target, headers).await?;
             let found =
@@ -101,7 +101,7 @@ impl<'a> Picker<'a> {
             return CreatedTmpl { id: id.clone(), label }.render().map_err(render_err);
         }
         if state.mode == Mode::New {
-            self.creating()?;
+            self.creating(&picked.target)?;
             authorize(self.engine, Operation::List, &picked.target, headers).await?;
             return self.form(&picked.target).render_for(headers, state).await;
         }
@@ -124,7 +124,7 @@ impl<'a> Picker<'a> {
         state: &ViewState,
     ) -> Result<Outcome> {
         let picked = self.picked(state)?;
-        self.creating()?;
+        self.creating(&picked.target)?;
         if state.mode != Mode::New {
             return Err(Error::BadRequest("crud::ui::Picker: a write needs ?new=1".into()));
         }
@@ -150,10 +150,12 @@ impl<'a> Picker<'a> {
         }
     }
 
-    fn creating(&self) -> Result<()> {
-        match self.engine.picker_create_path() {
+    fn creating(&self, target: &str) -> Result<()> {
+        match self.engine.picker_create_path(target) {
             Some(_) => Ok(()),
-            None => Err(Error::BadRequest("crud::ui::Picker: creating is off (Crud::picker_create)".into())),
+            None => Err(Error::BadRequest(format!(
+                "crud::ui::Picker: creating {target} is off (Crud::picker_create / picker_create_except)"
+            ))),
         }
     }
 

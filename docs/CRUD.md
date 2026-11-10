@@ -1258,7 +1258,12 @@ outer form saves.
 - It only ever **creates**: a posted update or delete is refused, so the page can't edit the
   target's existing rows. CSRF is checked as on every write.
 - `?new=1` and `?created=` answer `400` while `picker_create` is off.
-- A [pinned set](#a-pinned-set) has no "+": a new row could never be in the set.
+- A [pinned set](#a-pinned-set) has no "+ New": a new row could never be in the set.
+- **The gate decides, not a table's switches.** A `Table` with `create(false)` or `read_only(true)`
+  is a choice about that view; "+ New" on another table's relation field is a different surface,
+  and the target's gate is what it asks. To keep a target out of "+ New" while its gate allows
+  creating (say, a table your panel shows read-only), list it:
+  `crud.picker_create_except(["user"])`. Its button isn't drawn and its create URLs answer `400`.
 
 **Which fields.** By default the create form shows every writable column of the target. Narrow it
 per target with `Picker::create_fields("airline", ["name", "hq"])`, as `Form::fields` does. A field
@@ -1273,7 +1278,8 @@ that doesn't exist is a render-time error naming it.
   page loaded into the dialogs, so those pages need no script of their own.
 
 `examples/crud` turns it on: a profile's user (a `<select>`), and a post's author and tags and a
-tag's posts (in the picker).
+tag's posts (in the picker). `examples/adminpanel` does too, gated: the admin gets "+ New", the
+read-only editor doesn't, and `user`, read-only in that panel, is excepted.
 
 ### `RelationField` — the relation input in a form of your own
 

@@ -512,6 +512,9 @@ pub struct Engine {
     /// Whether a relation field offers "+" — a new target row, made in a dialog over the form.
     #[cfg(feature = "ui")]
     picker_create: bool,
+    /// Targets "+ New" never creates, whatever their gates allow.
+    #[cfg(feature = "ui")]
+    picker_create_except: Vec<String>,
 }
 
 impl Engine {
@@ -528,6 +531,8 @@ impl Engine {
             picker_path: None,
             #[cfg(feature = "ui")]
             picker_create: false,
+            #[cfg(feature = "ui")]
+            picker_create_except: Vec::new(),
         }
     }
 
@@ -551,10 +556,19 @@ impl Engine {
         self.picker_create = on;
     }
 
-    /// The path "+" opens, when it is on: `None` without a picker path.
+    /// Entities (slugs) "+ New" never creates, though it is on. Usually set via
+    /// `Crud::picker_create_except`.
     #[cfg(feature = "ui")]
-    pub(crate) fn picker_create_path(&self) -> Option<&str> {
-        self.picker_path().filter(|_| self.picker_create)
+    pub fn set_picker_create_except(&mut self, targets: Vec<String>) {
+        self.picker_create_except = targets;
+    }
+
+    /// The path "+ New" opens for a new row of `target`: `None` when it is off, without a picker
+    /// path, or for a target excepted.
+    #[cfg(feature = "ui")]
+    pub(crate) fn picker_create_path(&self, target: &str) -> Option<&str> {
+        let excepted = self.picker_create_except.iter().any(|t| t == target);
+        self.picker_path().filter(|_| self.picker_create && !excepted)
     }
 
     /// Register an audit sink fired after each committed write (create/update/delete). See

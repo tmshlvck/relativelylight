@@ -113,6 +113,7 @@ impl Authz for Gate {
 
 struct Setup {
     on: bool,
+    except: Vec<&'static str>,
     airline_gate: Gate,
     #[cfg(feature = "csrf")]
     csrf: Option<crate::csrf::Csrf>,
@@ -122,6 +123,7 @@ impl Default for Setup {
     fn default() -> Self {
         Self {
             on: true,
+            except: Vec::new(),
             airline_gate: Gate::Open,
             #[cfg(feature = "csrf")]
             csrf: None,
@@ -145,6 +147,7 @@ async fn fixture(setup: Setup) -> (Engine, DatabaseConnection) {
     let mut crud = Crud::new(db.clone());
     crud.picker_path("/pick");
     crud.picker_create(setup.on);
+    crud.picker_create_except(setup.except);
     #[cfg(feature = "csrf")]
     if let Some(csrf) = setup.csrf {
         crud.csrf(csrf);
@@ -356,8 +359,11 @@ async fn a_relation_past_the_threshold_puts_its_new_button_in_the_picker() {
     assert!(html.contains(r#"data-rl-new="/pick?pick=workorder.airline&#38;new=1""#), "{html}");
 
     let (off, _db) = fixture(Setup { on: false, ..Default::default() }).await;
-    let html =
-        Form::new(&off, "workorder").picker_threshold(0).render_for(&h(), &ViewState::default()).await.unwrap();
+    let html = Form::new(&off, "workorder")
+        .picker_threshold(0)
+        .render_for(&h(), &ViewState::default())
+        .await
+        .unwrap();
     assert!(html.contains("rl-picked") && !html.contains("data-rl-new"), "control: off, none: {html}");
 }
 
@@ -379,4 +385,20 @@ async fn the_create_form_checks_csrf_like_every_write() {
     let r = Picker::new(&e).submit(&headers, IP, body.as_bytes(), &state).await;
     assert!(matches!(r, Ok(Outcome::Done(_))), "control: with the token: {r:?}");
     assert_eq!(airlines(&db).await, ["KLM", "Yes"]);
+}
+
+#[tokio::test]
+async fn an_excepted_target_gets_no_plus_whatever_its_gate_allows() {
+    let (e, db) = fixture(Setup { except: vec!["airline"], ..Default::default() }).await;
+    let html = workorder_form(&e).await;
+    assert!(!html.contains(PLUS_AIRLINE), "excepted: {html}");
+    let state = q("pick=workorder.airline&new=1");
+    let r = Picker::new(&e).render_for(&h(), &state).await;
+    assert!(matches!(r, Err(Error::BadRequest(_))), "its create form is not served: {r:?}");
+    let r = Picker::new(&e).submit(&h(), IP, b"_op=create&name=Sneaky&hq=1", &state).await;
+    assert!(matches!(r, Err(Error::BadRequest(_))), "nor written: {r:?}");
+    assert_eq!(airlines(&db).await, ["KLM"]);
+    // Control: the airline form's own relation, to an address, still has its "+ New".
+    let airline = Form::new(&e, "airline").render_for(&h(), &ViewState::default()).await.unwrap();
+    assert!(airline.contains(r#"data-rl-src="/pick?pick=airline.hq&#38;new=1""#), "{airline}");
 }

@@ -321,7 +321,7 @@ pub(crate) async fn relation(
 /// page that reports the new row shows its label, which is a read. Each nested form asks again for
 /// its own relations, so how deep the dialogs go is the gates' answer (and the script's cap).
 pub(crate) async fn create_src(engine: &Engine, rel: &Relations<'_>, relation: &str, target: &str) -> String {
-    let Some(path) = engine.picker_create_path() else { return String::new() };
+    let Some(path) = engine.picker_create_path(target) else { return String::new() };
     if !engine.permits(target, Operation::Create, rel.headers).await
         || !engine.permits(target, Operation::List, rel.headers).await
     {
