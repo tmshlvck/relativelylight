@@ -19,6 +19,8 @@ use std::net::IpAddr;
 #[template(path = "form.html")]
 struct FormTmpl {
     dom_id: String,
+    /// Re-rendering a refused write: what is in the fields was typed (`data-rl-rejected`).
+    rejected: bool,
     has_header: bool,
     title: String,
     description: String,
@@ -65,12 +67,10 @@ pub struct Form<'a> {
     redirect: Option<String>,
     picker_threshold: u64,
     initial: Vec<(String, Value)>,
-    /// Only ever creates: a posted `_op=update` is refused. The picker's create form, whose page is
-    /// reachable by anyone allowed to create the target, must not become a way to edit its rows.
-    only_create: bool,
-    /// Only ever updates: the picker's edit form for a linked row, which must not create.
-    only_update: bool,
-    bare: bool,
+    /// Inside a [`Picker`](super::Picker)'s dialog: no card (the dialog is one), and it writes only
+    /// what it is — a create form only creates, an edit form only updates. Its page is reachable by
+    /// anyone the target's gate lets in, so neither may become a way to do the other.
+    embedded: bool,
 }
 
 impl<'a> Form<'a> {
@@ -92,9 +92,7 @@ impl<'a> Form<'a> {
             redirect: None,
             picker_threshold: 50,
             initial: Vec::new(),
-            only_create: false,
-            only_update: false,
-            bare: false,
+            embedded: false,
         }
     }
 
@@ -186,17 +184,8 @@ impl<'a> Form<'a> {
         self.picker_threshold = n;
         self
     }
-    pub(crate) fn only_create(mut self) -> Self {
-        self.only_create = true;
-        self
-    }
-    /// Without its card, for a picker's dialog (see `form.html`).
-    pub(crate) fn bare(mut self) -> Self {
-        self.bare = true;
-        self
-    }
-    pub(crate) fn only_update(mut self) -> Self {
-        self.only_update = true;
+    pub(crate) fn embedded(mut self) -> Self {
+        self.embedded = true;
         self
     }
     /// Namespaces the fragment's DOM id, so two forms for the same entity can share a page.
@@ -236,12 +225,13 @@ impl<'a> Form<'a> {
             row.as_ref(),
             state,
             &tz,
-            &widgets::Relations { slug: &self.slug, threshold: self.picker_threshold, headers },
+            &widgets::Relations::new(&self.slug, self.picker_threshold, headers),
             &widgets::Presets { initial: &self.initial, ..Default::default() },
         )
         .await?;
         FormTmpl {
             dom_id: self.dom_id.clone().unwrap_or_default(),
+            rejected: state.rejected.is_some(),
             has_header: self
                 .heading
                 .unwrap_or(self.title.is_some() || self.description.is_some()),
@@ -258,7 +248,7 @@ impl<'a> Form<'a> {
             fields,
             cancel_href: self.cancel_href.clone().unwrap_or_default(),
             submit_label: self.submit_label.clone().unwrap_or_else(|| "Save".into()),
-            bare: self.bare,
+            bare: self.embedded,
         }
         .render()
         .map_err(render_err)
@@ -284,8 +274,8 @@ impl<'a> Form<'a> {
             // A form saves one row. Its query is the whole table, so a posted delete-all or import
             // must not get this far.
             writes: Writes {
-                create: !self.only_update,
-                update: !self.only_create,
+                create: !self.embedded || self.edit_id.is_none(),
+                update: !self.embedded || self.edit_id.is_some(),
                 delete: false,
                 bulk_delete: false,
                 import: false,

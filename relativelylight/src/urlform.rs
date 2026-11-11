@@ -49,6 +49,13 @@ pub(crate) fn encode(s: &str) -> String {
     out
 }
 
+/// A URL template with `{id}` filled in, the id encoded for a path segment or a query value (a space
+/// as `%20`, which both read the same). The UI's (a View link, a relation link).
+#[cfg(feature = "ui")]
+pub(crate) fn fill_id(template: &str, id: &str) -> String {
+    template.replace("{id}", &encode(id).replace('+', "%20"))
+}
+
 /// Split a query string or form body into decoded `(key, value)` pairs, in order.
 ///
 /// Only the UI splits whole bodies — `csrf` looks for one field and stops.

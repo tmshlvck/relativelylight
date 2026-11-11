@@ -398,21 +398,30 @@ async fn a_relation_past_the_threshold_puts_its_new_button_in_the_picker() {
     assert!(html.contains("rl-picked") && !html.contains("data-rl-new"), "control: off, none: {html}");
 }
 
+/// A CSRF checker, and headers carrying its cookie with the token `TOKEN`.
+#[cfg(feature = "csrf")]
+fn csrf_cookie() -> (crate::csrf::Csrf, HeaderMap) {
+    let csrf = crate::csrf::Csrf::new().secure(false);
+    let mut headers = HeaderMap::new();
+    headers.insert(http::header::COOKIE, format!("{}={TOKEN}", csrf.cookie()).parse().unwrap());
+    (csrf, headers)
+}
+
+#[cfg(feature = "csrf")]
+const TOKEN: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
 #[cfg(feature = "csrf")]
 #[tokio::test]
 async fn the_create_form_checks_csrf_like_every_write() {
-    let csrf = crate::csrf::Csrf::new().secure(false);
-    let jar = format!("{}={}", csrf.cookie(), "c".repeat(64));
+    let (csrf, headers) = csrf_cookie();
     let (e, db) = fixture(Setup { csrf: Some(csrf), ..Default::default() }).await;
-    let mut headers = HeaderMap::new();
-    headers.insert(http::header::COOKIE, jar.parse().unwrap());
     let state = q("pick=workorder.airline&new=1");
 
     let form = Picker::new(&e).render_for(&headers, &state).await.unwrap();
-    assert!(form.contains(&format!(r#"name="_csrf" value="{}""#, "c".repeat(64))), "{form}");
+    assert!(form.contains(&format!(r#"name="_csrf" value="{}""#, TOKEN)), "{form}");
     let r = Picker::new(&e).submit(&headers, IP, b"_op=create&name=Nope&hq=1", &state).await;
     assert!(matches!(r, Err(Error::Csrf)), "{r:?}");
-    let body = format!("_op=create&name=Yes&hq=1&_csrf={}", "c".repeat(64));
+    let body = format!("_op=create&name=Yes&hq=1&_csrf={}", TOKEN);
     let r = Picker::new(&e).submit(&headers, IP, body.as_bytes(), &state).await;
     assert!(matches!(r, Ok(Outcome::Done(_))), "control: with the token: {r:?}");
     assert_eq!(airlines(&db).await, ["KLM", "Yes"]);
@@ -579,15 +588,12 @@ async fn a_links_label_is_escaped_and_so_is_the_saved_report() {
 #[cfg(feature = "csrf")]
 #[tokio::test]
 async fn an_edit_checks_csrf_like_every_write() {
-    let csrf = crate::csrf::Csrf::new().secure(false);
-    let jar = format!("{}={}", csrf.cookie(), "c".repeat(64));
+    let (csrf, headers) = csrf_cookie();
     let (e, db) = fixture(Setup { csrf: Some(csrf), ..viewing() }).await;
-    let mut headers = HeaderMap::new();
-    headers.insert(http::header::COOKIE, jar.parse().unwrap());
     let state = q("pick=workorder.airline&edit=1");
     let r = Picker::new(&e).submit(&headers, IP, b"_op=update&_id=1&name=Nope&hq=1", &state).await;
     assert!(matches!(r, Err(Error::Csrf)), "{r:?}");
-    let body = format!("_op=update&_id=1&name=Yes&hq=1&_csrf={}", "c".repeat(64));
+    let body = format!("_op=update&_id=1&name=Yes&hq=1&_csrf={}", TOKEN);
     let r = Picker::new(&e).submit(&headers, IP, body.as_bytes(), &state).await;
     assert!(matches!(r, Ok(Outcome::Done(_))), "control: with the token: {r:?}");
     assert_eq!(airlines(&db).await, ["Yes"]);

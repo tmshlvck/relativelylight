@@ -34,7 +34,7 @@
         <hr class="flex-grow-1 my-0">
       </div>
 
-      <form method="post">
+      <form method="post"{% if !errors.is_empty() %} data-rl-rejected{% endif %}>
         <input type="hidden" name="_op" value="import">
         {%- if !csrf.is_empty() %}<input type="hidden" name="_csrf" value="{{ csrf }}">{% endif %}
         <h6 class="text-uppercase text-body-secondary small fw-semibold mb-2">Direct text import</h6>

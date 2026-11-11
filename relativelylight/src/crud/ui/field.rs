@@ -154,7 +154,7 @@ impl<'a> RelationField<'a> {
         if !many {
             ids.truncate(1);
         }
-        let rel = widgets::Relations { slug: &self.slug, threshold: self.picker_threshold, headers };
+        let rel = widgets::Relations::new(&self.slug, self.picker_threshold, headers);
         let widget: Widget =
             widgets::relation(self.engine, &rel, &self.relation, &target, many, ids, None).await?;
         let create = widgets::create_src(self.engine, &rel, &self.relation, &target, explicit).await;

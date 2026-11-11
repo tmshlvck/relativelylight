@@ -66,26 +66,29 @@
 
   // ---- Esc and a changed form ----
 
-  // A form's values as one string — what "changed" is measured against. A file counts by name.
-  function snapshot(form) {
+  // The values of every form that posts under `root`, as one string — what "changed" is measured
+  // against. A file counts by name.
+  function snapshot(root) {
     const parts = [];
-    for (const [k, v] of new FormData(form)) parts.push(k + '=' + (typeof v === 'string' ? v : v.name));
+    for (const form of root.querySelectorAll('form[method="post"]')) {
+      for (const [k, v] of new FormData(form)) parts.push(k + '=' + (typeof v === 'string' ? v : v.name));
+    }
     return parts.join('&');
   }
 
-  // What a dialog's Esc guard reads: the form in it now (or null), whether it has changed since
-  // `reset` last looked at it, and where its note goes.
-  function tracker(formOf, footerOf) {
-    const t = { baseline: null, dirty: false };
+  // What a dialog's Esc guard reads about the forms under `rootOf()` (the dialog, or its page):
+  // whether they changed since `reset` last looked, and where the note goes. A form the server
+  // re-rendered from a refused save (`data-rl-rejected`) holds what was typed: changed from the start.
+  function tracker(rootOf, footerOf) {
+    const t = { baseline: '', dirty: false };
     t.reset = () => {
-      const f = formOf();
-      t.baseline = f ? snapshot(f) : null;
-      // Back with errors: it holds what was typed before the save was refused.
-      t.dirty = !!(f && f.querySelector('.is-invalid, .alert-danger'));
+      const root = rootOf();
+      t.baseline = root ? snapshot(root) : '';
+      t.dirty = !!root?.querySelector('form[data-rl-rejected]');
     };
     t.changed = () => {
-      const f = formOf();
-      return !!f && (t.dirty || snapshot(f) !== t.baseline);
+      const root = rootOf();
+      return !!root && (t.dirty || snapshot(root) !== t.baseline);
     };
     t.footer = footerOf;
     return t;
@@ -143,9 +146,8 @@
       d.close();
       d.classList.add('rl-modal');
       d.showModal();
-      const form = d.querySelector('form[method="post"]');
       const card = d.querySelector('.card');
-      const t = tracker(() => form, () => d.querySelector('.card-footer') || card || d);
+      const t = tracker(() => d, () => d.querySelector('.card-footer') || card || d);
       t.reset();
       let leaving = false;
       guard(d, t, () => { if (!leaving) { leaving = true; location.href = exit.href; } }, () => leaving);
@@ -183,27 +185,29 @@
     }
   }
 
-  // A row "New" created, chosen where it was asked for: the pick dialog's working selection, or
-  // the `<select>` beside the button.
-  function deliver(level, id, label) {
-    const into = level.into;
-    if (into.kind === 'pick') {
-      if (!into.many) into.chosen.clear();
-      into.chosen.set(id, label);
-      showChips(into);
-      tick(into);
-      return;
+  // Where a row "New" created goes: chosen in the `<select>` beside the button…
+  const intoSelect = (select) => (id, label) => {
+    let option = [...select.options].find((o) => o.value === id);
+    if (!option) {
+      option = el('option', '', label, select.ownerDocument);
+      option.value = id;
+      select.append(option);
     }
-      let option = [...into.options].find((o) => o.value === id);
-      if (!option) {
-        option = el('option', '', label, into.ownerDocument);
-        option.value = id;
-        into.append(option);
-      }
-      if (!into.multiple) into.value = id;
-      option.selected = true;
-    into.dispatchEvent(new Event('change', { bubbles: true }));
-  }
+    if (!select.multiple) select.value = id;
+    option.selected = true;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
+  // …or added to a pick dialog's working selection, which its OK then writes back as usual.
+  const intoPick = (pick) => (id, label) => {
+    if (!pick.many) pick.chosen.clear();
+    pick.chosen.set(id, label);
+    showChips(pick);
+    tick(pick);
+  };
+
+  // A level's title trail, from the bottom dialog to it.
+  const trail = (level) => stack.slice(0, stack.indexOf(level) + 1).map((l) => l.title).join(' › ');
 
   // How many create forms and viewed rows are open (a pick dialog opens no further levels).
   function depth() {
@@ -263,7 +267,7 @@
     if (trigger.classList.contains('rl-new')) {
       push({
         kind: 'new',
-        into: trigger.parentElement.querySelector('select'),
+        deliver: intoSelect(trigger.parentElement.querySelector('select')),
         title: trigger.dataset.rlTitle,
         src: trigger.dataset.rlSrc,
       });
@@ -287,7 +291,7 @@
     build(level);
     stack.push(level);
     level.dialog.style.setProperty('--rl-depth', stack.length - 1);
-    level.heading.textContent = stack.map((l) => l.title).join(' › ');
+    level.heading.textContent = trail(level);
     if (kind === 'pick') showChips(level);
     level.frame.src = level.src;
     level.dialog.showModal();
@@ -317,7 +321,7 @@
     if (level.kind === 'pick' && level.create && depth() < MAX_DEPTH) {
       const add = button('btn btn-primary btn-sm', '+ New', () => push({
         kind: 'new',
-        into: level,
+        deliver: intoPick(level),
         title: 'New ' + level.title,
         src: level.create,
       }));
@@ -339,10 +343,7 @@
     dialog.append(card);
     // Esc, ✕, Cancel, OK and a delivered row all end here: the dialog is the top one, so it leaves
     // the stack and the page — unless it was Esc on a changed form (`guard`).
-    level.tracker = tracker(
-      () => level.frame.contentDocument?.querySelector('form[method="post"]') || null,
-      () => level.right,
-    );
+    level.tracker = tracker(() => level.frame.contentDocument, () => level.right);
     guard(dialog, level.tracker, () => {
       const i = stack.indexOf(level);
       if (i >= 0) stack.splice(i, 1);
@@ -359,7 +360,7 @@
     if (level.kind === 'new') {
       const made = doc.querySelector('.rl-created');
       if (made) {
-        deliver(level, made.dataset.id, made.dataset.label);
+        level.deliver(made.dataset.id, made.dataset.label);
         level.exit();
         return;
       }
@@ -370,7 +371,7 @@
       if (saved) {
         relabel(saved.dataset.rlKey, saved.dataset.label);
         level.title = saved.dataset.label;
-        level.heading.textContent = stack.slice(0, stack.indexOf(level) + 1).map((l) => l.title).join(' › ');
+        level.heading.textContent = trail(level);
       }
     }
     if (level.kind === 'pick') sync(level, doc);
@@ -390,7 +391,7 @@
     let ownCancel = false;
     if (foot) {
       for (const b of foot.querySelectorAll('a.btn, button.btn')) {
-        if (b.classList.contains('btn-secondary')) ownCancel = true;
+        if (b.dataset.rlRole === 'cancel') ownCancel = true;
         mirrored.push(button(b.className, b.textContent.trim(), () => b.click()));
       }
       foot.hidden = true;

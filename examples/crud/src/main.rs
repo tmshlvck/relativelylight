@@ -312,15 +312,18 @@ struct Bare {
     css: &'static str,
 }
 
-async fn pick(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
-    let state = ViewState::from_uri(&uri);
-    match Picker::new(&app.engine).render_for(&headers, &state).await {
-        Ok(body) => match (Bare { body, css: CSS }).render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-        },
+/// A picker page (the list, a form, a row) in the bare shell, or the library's error.
+fn bare(status: StatusCode, page: CrudResult<String>) -> Response {
+    match page.map(|body| Bare { body, css: CSS }.render()) {
+        Ok(Ok(html)) => (status, Html(html)).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         Err(e) => e.into_response(),
     }
+}
+
+async fn pick(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
+    let state = ViewState::from_uri(&uri);
+    bare(StatusCode::OK, Picker::new(&app.engine).render_for(&headers, &state).await)
 }
 
 /// The "+" dialog's create form posts here. Saved: a `303` into the same iframe, onto a page that
@@ -335,16 +338,11 @@ async fn pick_write(
 ) -> Response {
     let state = ViewState::from_uri(&uri);
     let picker = Picker::new(&app.engine);
-    let bare = |body: String| match (Bare { body, css: CSS }).render() {
-        Ok(html) => Html(html).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
     match picker.submit(&headers, ip, &body, &state).await {
         Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
-        Ok(Outcome::Invalid(state)) => match picker.render_for(&headers, &state).await {
-            Ok(body) => (StatusCode::UNPROCESSABLE_ENTITY, bare(body)).into_response(),
-            Err(e) => e.into_response(),
-        },
+        Ok(Outcome::Invalid(state)) => {
+            bare(StatusCode::UNPROCESSABLE_ENTITY, picker.render_for(&headers, &state).await)
+        }
         Err(e) => e.into_response(),
     }
 }

@@ -14,6 +14,16 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
   `.datetime()`, number, `Date` and text columns; a naive `DateTime` has no zone to read the day in.
 - [ ] **More filter operators** (`filter[ttl][gt]=300`, `[is_null]`). `[from]`/`[to]` ranges and the
   `fixed_in` set pin have shipped; the URL grammar nests for the rest. Wait for a real need.
+- [ ] **Ask each gate once per request.** A built-in gate resolves the caller (session, user,
+  groups: a few queries) on every `permits`/`decide`. One render asks several: the table's
+  controls, each linked relation's Read, a form's relation fields (memoised per form since the
+  relation dialogs; not across the table, its links and its dialog). A per-request memo keyed by
+  `(slug, op)`, or resolving the identity once and handing it to `Authz`, would make it one. Cheap on
+  SQLite; it adds up on a busy list page with a remote database.
+- [ ] **A standalone `Form` writes only what it is.** `Form::new` still accepts a posted update and
+  `Form::edit(id)` a create, or an update of another `_id`; the picker's forms are already strict
+  (`Form::embedded`). Making every `Form` strict closes it for app pages too, but breaks an app that
+  renders `.edit(id)` and submits with a plain `Form::new`: a minor bump with a migration step.
 - [ ] **Cross-document view transitions** for POST → 303 → GET. Cheap to try, easy to get wrong (a 422
   re-render animated as a navigation).
 - **`Table`'s API is stable for 0.4** — no split into `List`/`Search`/… pieces; the per-action

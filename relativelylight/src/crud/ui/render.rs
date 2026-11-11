@@ -39,11 +39,14 @@ pub(crate) struct LinkV {
 /// read, when the relation says so (`MetaRelation::links`) or else `Crud::picker_view` does.
 /// Resolved once per render, so a page of rows asks each target's gate once, not once per row.
 #[derive(Default)]
-pub(crate) struct Links {
-    /// `(relation, target, "<picker>?pick=<slug>.<relation>&show=")`.
-    linked: Vec<(String, String, String)>,
-    /// `(target, its view_path)` for the targets above that have one.
-    pages: Vec<(String, String)>,
+pub(crate) struct Links(Vec<Linked>);
+
+/// One relation that links: the picker page for its rows, and the app's own page for them if any.
+struct Linked {
+    relation: String,
+    target: String,
+    picker: String,
+    page: Option<String>,
 }
 
 impl Links {
@@ -53,7 +56,7 @@ impl Links {
         cols: &[Column],
         headers: &http::HeaderMap,
     ) -> Links {
-        let mut out = Links::default();
+        let mut out = Vec::new();
         let mut readable: Vec<(String, bool)> = Vec::new();
         for col in cols {
             let Column::Relation { name, target, links, .. } = col else { continue };
@@ -67,36 +70,36 @@ impl Links {
                     ok
                 }
             };
-            if !ok {
-                continue;
-            }
-            let pick = format!("{slug}.{name}");
-            let base = format!("{path}?{}&show=", crate::urlform::query(&[("pick".into(), pick)]));
-            out.linked.push((name.clone(), target.clone(), base));
-            if let Some(page) = engine.view_path(target) {
-                out.pages.push((target.clone(), page.to_string()));
+            if ok {
+                out.push(Linked {
+                    relation: name.clone(),
+                    target: target.clone(),
+                    picker: super::picker::pick_href(path, slug, name, None),
+                    page: engine.view_path(target).map(str::to_string),
+                });
             }
         }
-        out
+        Links(out)
     }
 
     /// `col`'s cell as links, or `None` when it doesn't link (not a relation, or not readable).
     fn cell(&self, col: &Column, raw: Option<&Value>) -> Option<Cell> {
         let Column::Relation { name, cardinality, .. } = col else { return None };
-        let (_, target, base) = self.linked.iter().find(|(n, _, _)| n == name)?;
-        let page = self.pages.iter().find(|(t, _)| t == target).map(|(_, p)| p.as_str());
+        let l = self.0.iter().find(|l| l.relation == *name)?;
         let link = |item: &Value| -> LinkV {
             if let Some(n) = item.get("more").and_then(Value::as_u64) {
                 let label = format!("+{n} more");
                 return LinkV { label, href: String::new(), view: String::new(), key: String::new() };
             }
             let id = text(item.get("id"));
-            let encoded = crate::urlform::encode(&id).replace('+', "%20");
-            let view = format!("{base}{encoded}");
+            let view = crate::urlform::fill_id(&format!("{}&show={{id}}", l.picker), &id);
             LinkV {
                 label: text(item.get("label")),
-                href: page.map(|p| p.replace("{id}", &encoded)).unwrap_or_else(|| view.clone()),
-                key: format!("{target}:{id}"),
+                href: match &l.page {
+                    Some(page) => crate::urlform::fill_id(page, &id),
+                    None => view.clone(),
+                },
+                key: format!("{}:{id}", l.target),
                 view,
             }
         };

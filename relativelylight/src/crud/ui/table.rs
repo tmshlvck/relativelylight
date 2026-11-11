@@ -108,6 +108,8 @@ struct PickTmpl {
 #[derive(Template)]
 #[template(path = "dialog.html")]
 struct DialogTmpl {
+    /// Re-rendering a refused write: what is in the fields was typed (`data-rl-rejected`).
+    rejected: bool,
     op: &'static str,
     id: String,
     csrf: String,
@@ -118,15 +120,16 @@ struct DialogTmpl {
     fields: Vec<FieldV>,
 }
 
-/// One labelled value in the detail view.
-/// How a row's read-only view is shown.
-enum Detail {
-    /// The table's View dialog: its Close and Edit links.
-    Dialog { close: String, edit: String },
-    /// Inside a [`Picker`](super::Picker) dialog: Edit (or empty), and whether an edit just saved.
-    Linked { edit: String, saved: bool },
+/// What surrounds a row's read-only view: Close (`Some`: the table's own dialog; `None`: a
+/// [`Picker`](super::Picker)'s, which has its own), Edit (empty: none), and a saved edit's
+/// `(target:id, label)` for the picker's script.
+struct DetailChrome {
+    close: Option<String>,
+    edit: String,
+    saved: Option<(String, String)>,
 }
 
+/// One labelled value in the detail view.
 struct DetailV {
     label: String,
     value: Cell,
@@ -407,7 +410,7 @@ impl<'a> Table<'a> {
     fn show_href(&self, state: &ViewState, id: &str) -> String {
         match (&self.detail_href, self.detail) {
             (_, false) => String::new(),
-            (Some(t), true) => t.replace("{id}", &crate::urlform::encode(id).replace('+', "%20")),
+            (Some(t), true) => crate::urlform::fill_id(t, id),
             (None, true) => state.href_show(id),
         }
     }
@@ -652,8 +655,8 @@ impl<'a> Table<'a> {
             Mode::Show(id) if self.detail_dialog_on() => {
                 self.in_view(&pins, id).await?;
                 let edit = if can.edit { state.href_edit(id) } else { String::new() };
-                let how = Detail::Dialog { close: state.href_list(), edit };
-                self.detail_view(&cols, id, &tz, &links, how).await?
+                let chrome = DetailChrome { close: Some(state.href_list()), edit, saved: None };
+                self.detail_view(&cols, id, &tz, &links, chrome).await?
             }
             Mode::New if can.create => {
                 self.dialog(&cols, &pins, state.mode(), &state, headers, &csrf).await?
@@ -1109,7 +1112,7 @@ impl<'a> Table<'a> {
 
     /// One target row's label, for a filter value. `ids=` is an exact primary-key lookup, so this
     /// costs one row however large the target is.
-    async fn label_of(&self, target: &str, value: &str) -> Result<String> {
+    pub(super) async fn label_of(&self, target: &str, value: &str) -> Result<String> {
         let q = ListQuery {
             pk_in: vec![value.to_string()],
             per_page: 1,
@@ -1154,13 +1157,14 @@ impl<'a> Table<'a> {
             row.as_ref(),
             state,
             &tz,
-            &widgets::Relations { slug: &self.slug, threshold: self.picker_threshold, headers },
+            &widgets::Relations::new(&self.slug, self.picker_threshold, headers),
             &widgets::Presets { initial: &self.initial, sets: &pins.sets },
         )
         .await?;
         let title = self.title.clone().unwrap_or_else(|| self.slug.clone());
         let errors = banner(state, &fields);
         DialogTmpl {
+            rejected: state.rejected.is_some(),
             op: if creating { "create" } else { "update" },
             id: match mode {
                 Mode::Edit(id) => id.clone(),
@@ -1179,19 +1183,19 @@ impl<'a> Table<'a> {
 
     /// One row, read-only, as a [`Picker`](super::Picker) shows a linked row: the same fields as
     /// this table's View dialog, with relation links, and Edit at `edit` (empty: none). `saved`
-    /// reports the edit that redirected here, as data the dialog's script reads. Read is the
-    /// caller's to authorize.
+    /// reports the edit that redirected here, `(target:id, label)`, as data the dialog's script
+    /// reads. Read is the caller's to authorize.
     pub(super) async fn render_linked(
         &self,
         headers: &HeaderMap,
         id: &str,
         edit: String,
-        saved: bool,
+        saved: Option<(String, String)>,
     ) -> Result<String> {
         let cols = self.engine.columns(&self.slug)?;
         let tz = Tz::from_headers(headers);
         let links = render::Links::resolve(self.engine, &self.slug, &cols, headers).await;
-        self.detail_view(&cols, id, &tz, &links, Detail::Linked { edit, saved }).await
+        self.detail_view(&cols, id, &tz, &links, DetailChrome { close: None, edit, saved }).await
     }
 
     /// One row, read-only: every published column, rendered by the same code as the table's cells.
@@ -1201,7 +1205,7 @@ impl<'a> Table<'a> {
         id: &str,
         tz: &Tz,
         links: &render::Links,
-        how: Detail,
+        chrome: DetailChrome,
     ) -> Result<String> {
         // `render_for` has already authorized `Read` for this caller (every non-list mode does),
         // with their real headers — there is nothing left to check here.
@@ -1223,23 +1227,12 @@ impl<'a> Table<'a> {
                 ),
             })
             .collect();
-        let (framed, cancel_href, edit_href, saved) = match how {
-            Detail::Dialog { close, edit } => (true, close, edit, None),
-            Detail::Linked { edit, saved: false } => (false, String::new(), edit, None),
-            Detail::Linked { edit, saved: true } => {
-                // The label as every relation shows it, so the links underneath read the same.
-                let ids = [id.to_string()];
-                let found = widgets::chosen_options(self.engine, &self.slug, &ids, None, true).await?;
-                let label = found.into_iter().next().map(|o| o.label).unwrap_or_else(|| id.to_string());
-                (false, String::new(), edit, Some((format!("{}:{id}", self.slug), label)))
-            }
-        };
         DetailTmpl {
             title: format!("{} #{id}", self.title.clone().unwrap_or_else(|| self.slug.clone())),
-            framed,
-            cancel_href,
-            edit_href,
-            saved,
+            framed: chrome.close.is_some(),
+            cancel_href: chrome.close.unwrap_or_default(),
+            edit_href: chrome.edit,
+            saved: chrome.saved,
             fields,
         }
         .render()

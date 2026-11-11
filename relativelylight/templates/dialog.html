@@ -4,7 +4,7 @@
     server-side in the same response as the list, so `?edit=7` is a URL you can link to — and a
     rejected write re-renders this with the messages and the typed values already in place. -#}
 <dialog open class="rl-dialog">
-  <form method="post" class="card" autocomplete="off">
+  <form method="post" class="card" autocomplete="off"{% if rejected %} data-rl-rejected{% endif %}>
     <input type="hidden" name="_op" value="{{ op }}">
     {%- if !id.is_empty() %}<input type="hidden" name="_id" value="{{ id }}">{% endif %}
     {%- if !csrf.is_empty() %}<input type="hidden" name="_csrf" value="{{ csrf }}">{% endif %}

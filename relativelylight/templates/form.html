@@ -9,7 +9,7 @@
     {%- if !description.is_empty() %}<div class="small text-muted">{{ description }}</div>{% endif %}
   </div>
   {%- endif %}
-  <form method="post" autocomplete="off">
+  <form method="post" autocomplete="off"{% if rejected %} data-rl-rejected{% endif %}>
     <input type="hidden" name="_op" value="{{ op }}">
     {%- if !id.is_empty() %}<input type="hidden" name="_id" value="{{ id }}">{% endif %}
     {%- if !csrf.is_empty() %}<input type="hidden" name="_csrf" value="{{ csrf }}">{% endif %}
@@ -21,7 +21,7 @@
       {% include "_fields.html" %}
     </div>
     <div class="{% if bare %}rl-foot{% else %}card-footer{% endif %} text-end">
-      {%- if !cancel_href.is_empty() %}<a class="btn btn-secondary" href="{{ cancel_href }}">Cancel</a>{% endif %}
+      {%- if !cancel_href.is_empty() %}<a class="btn btn-secondary" data-rl-role="cancel" href="{{ cancel_href }}">Cancel</a>{% endif %}
       <button class="btn btn-primary" type="submit">{{ submit_label }}</button>
     </div>
   </form>

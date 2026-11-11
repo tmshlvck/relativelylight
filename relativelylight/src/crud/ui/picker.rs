@@ -3,7 +3,6 @@
 
 use super::decode::Posted;
 use super::state::{Mode, ViewState};
-use super::widgets;
 use super::{authorize, render, render_err, Form, Outcome, Table};
 use crate::authz::Operation;
 use crate::crud::engine::{Cardinality, Column, Engine, Error, Result};
@@ -61,13 +60,30 @@ pub struct Picker<'a> {
     create_fields: Vec<(String, Vec<String>)>,
 }
 
-/// The relation a `?pick=` names: its target, and whether it is a to-many.
+/// The relation a `?pick=` names, its target, and what it allows here: viewing (and editing) its
+/// rows, creating one. The two switches are resolved once: the relation's own choice
+/// (`MetaRelation::links` / `create`), else the app's.
 struct Picked {
+    slug: String,
+    relation: String,
     target: String,
     many: bool,
-    /// The relation's own choices (`MetaRelation::links` / `create`); `None` follows the app's.
-    links: Option<bool>,
-    create: Option<bool>,
+    view: bool,
+    create: bool,
+}
+
+impl Picked {
+    /// `?pick=<this relation>&<key>=<value>`, relative: the next page in the same dialog.
+    fn href(&self, key: &str, value: &str) -> String {
+        pick_href("", &self.slug, &self.relation, Some((key, value)))
+    }
+}
+
+/// `<path>?pick=<slug>.<relation>` and one more pair: every URL into the picker is this shape.
+pub(crate) fn pick_href(path: &str, slug: &str, relation: &str, extra: Option<(&str, &str)>) -> String {
+    let mut pairs = vec![("pick".to_string(), format!("{slug}.{relation}"))];
+    pairs.extend(extra.map(|(k, v)| (k.to_string(), v.to_string())));
+    format!("{path}?{}", crate::urlform::query(&pairs))
 }
 
 impl<'a> Picker<'a> {
@@ -95,62 +111,58 @@ impl<'a> Picker<'a> {
         self
     }
 
-    /// Render the picker for the relation `?pick=` names: the target's rows, or with `&new=1` its
-    /// create form, or with `&created=<id>` the row that form just made. `400` if it names none, or
-    /// no relation of that entity, or asks for a create the app didn't turn on.
+    /// Render the picker for the relation `?pick=` names: the target's rows; with `&new=1` its
+    /// create form, with `&created=<id>` the row that form just made; with `&show=<id>` a linked
+    /// row, with `&edit=<id>` its edit form. `400` if it names no relation of that entity, or asks
+    /// for a page the relation doesn't offer.
     pub async fn render_for(&self, headers: &HeaderMap, state: &ViewState) -> Result<String> {
-        let picked = self.picked(state)?;
-        if let Some(id) = &state.created {
-            self.creating(&picked)?;
-            // The label is a read of the target; "+" is only offered to who may list it.
-            authorize(self.engine, Operation::List, &picked.target, headers).await?;
-            let found =
-                widgets::chosen_options(self.engine, &picked.target, std::slice::from_ref(id), None, true)
-                    .await?;
-            let label = found.into_iter().next().map(|o| o.label).unwrap_or_else(|| id.clone());
-            return CreatedTmpl { id: id.clone(), label }.render().map_err(render_err);
-        }
-        match &state.mode {
-            Mode::New => {
-                self.creating(&picked)?;
-                authorize(self.engine, Operation::List, &picked.target, headers).await?;
-                return self.form(&picked.target).render_for(headers, state).await;
+        let p = self.picked(state)?;
+        match (&state.created, &state.mode) {
+            (Some(id), _) => {
+                // The label is a read of the target; "+" is only offered to who may list it.
+                self.open(&p, p.create, Operation::List, headers).await?;
+                let label = Table::new(self.engine, &p.target).label_of(&p.target, id).await?;
+                CreatedTmpl { id: id.clone(), label }.render().map_err(render_err)
             }
-            Mode::Show(id) => {
-                self.viewing(&picked)?;
-                authorize(self.engine, Operation::Read, &picked.target, headers).await?;
-                let edit = match self.engine.permits(&picked.target, Operation::Update, headers).await {
-                    true => self.href(state, "edit", id),
+            (None, Mode::New) => {
+                self.open(&p, p.create, Operation::List, headers).await?;
+                self.form(&p.target).render_for(headers, state).await
+            }
+            (None, Mode::Show(id)) => {
+                self.open(&p, p.view, Operation::Read, headers).await?;
+                let table = Table::new(self.engine, &p.target);
+                let edit = match self.engine.permits(&p.target, Operation::Update, headers).await {
+                    true => p.href("edit", id),
                     false => String::new(),
                 };
-                return Table::new(self.engine, &picked.target)
-                    .render_linked(headers, id, edit, state.saved)
-                    .await;
+                let saved = match state.saved {
+                    true => Some((format!("{}:{id}", p.target), table.label_of(&p.target, id).await?)),
+                    false => None,
+                };
+                table.render_linked(headers, id, edit, saved).await
             }
-            Mode::Edit(id) => {
-                self.viewing(&picked)?;
-                authorize(self.engine, Operation::Read, &picked.target, headers).await?;
-                return Form::new(self.engine, &picked.target)
+            (None, Mode::Edit(id)) => {
+                self.open(&p, p.view, Operation::Read, headers).await?;
+                Form::new(self.engine, &p.target)
                     .edit(id.clone())
-                    .only_update()
-                    .bare()
-                    .cancel(self.href(state, "show", id))
+                    .embedded()
+                    .cancel(p.href("show", id))
                     .render_for(headers, state)
-                    .await;
+                    .await
             }
-            _ => {}
+            _ => {
+                let table = Table::new(self.engine, &p.target).per_page(self.per_page);
+                table.render_pick(headers, state, p.many).await
+            }
         }
-        Table::new(self.engine, picked.target)
-            .per_page(self.per_page)
-            .render_pick(headers, state, picked.many)
-            .await
     }
 
-    /// Apply the create form's posted body (`?pick=…&new=1`). Saved: `Done` with
-    /// `?pick=…&created=<id>` — redirect there (`303`), into the same dialog. Rejected:
-    /// `Invalid` — answer `422` with [`render_for`](Picker::render_for) of that state, the form with
-    /// its messages. It only ever **creates**: the target's create gate decides, CSRF is checked
-    /// as on every write, and a posted update is refused.
+    /// Apply a posted form: the create form (`&new=1`) or a linked row's edit (`&edit=<id>`).
+    /// Saved: `Done` — redirect there (`303`), into the same dialog: `&created=<id>`, or the row
+    /// with `&saved=1`. Rejected: `Invalid` — answer `422` with [`render_for`](Picker::render_for)
+    /// of that state, the form with its messages. The create form only creates and the edit only
+    /// updates the row its URL names; the target's gates decide, and CSRF is checked as on every
+    /// write.
     pub async fn submit(
         &self,
         headers: &HeaderMap,
@@ -158,81 +170,49 @@ impl<'a> Picker<'a> {
         body: &[u8],
         state: &ViewState,
     ) -> Result<Outcome> {
-        let picked = self.picked(state)?;
-        if let Mode::Edit(id) = &state.mode {
-            return self.save_edit(&picked, id, headers, client_ip, body, state).await;
-        }
-        self.creating(&picked)?;
-        if state.mode != Mode::New {
-            return Err(Error::BadRequest("crud::ui::Picker: a write needs ?new=1 or ?edit=<id>".into()));
-        }
-        authorize(self.engine, Operation::List, &picked.target, headers).await?;
-        match self.form(&picked.target).redirect("{id}").submit(headers, client_ip, body, state).await? {
-            Outcome::Done(id) => {
-                let (slug, relation) = state.pick.as_ref().expect("picked() checked it");
-                let pick = format!("{slug}.{relation}");
-                Ok(Outcome::Done(format!(
-                    "?{}",
-                    crate::urlform::query(&[("pick".into(), pick), ("created".into(), id)])
-                )))
+        let p = self.picked(state)?;
+        match &state.mode {
+            Mode::New => {
+                self.open(&p, p.create, Operation::List, headers).await?;
+                match self.form(&p.target).redirect("{id}").submit(headers, client_ip, body, state).await? {
+                    Outcome::Done(id) => Ok(Outcome::Done(p.href("created", &id))),
+                    invalid => Ok(invalid),
+                }
             }
-            invalid => Ok(invalid),
+            Mode::Edit(id) => {
+                self.open(&p, p.view, Operation::Read, headers).await?;
+                // The form posts the row's id as `_id`; one naming another row is not this page's.
+                if Posted::read(headers, body)?.one("_id") != Some(id) {
+                    return Err(Error::BadRequest("crud::ui::Picker: the posted row is not the URL's".into()));
+                }
+                let form = Form::new(self.engine, &p.target).edit(id.clone()).embedded().redirect("{id}");
+                match form.submit(headers, client_ip, body, state).await? {
+                    Outcome::Done(_) => Ok(Outcome::Done(format!("{}&saved=1", p.href("show", id)))),
+                    invalid => Ok(invalid),
+                }
+            }
+            _ => Err(Error::BadRequest("crud::ui::Picker: a write needs ?new=1 or ?edit=<id>".into())),
         }
     }
 
-    /// The linked row's edit form, posted: an update of exactly the row the URL names, under the
-    /// target's Update gate (and Read, as for the page), back to the row with `saved=1`.
-    async fn save_edit(
-        &self,
-        picked: &Picked,
-        id: &str,
-        headers: &HeaderMap,
-        client_ip: IpAddr,
-        body: &[u8],
-        state: &ViewState,
-    ) -> Result<Outcome> {
-        self.viewing(picked)?;
-        authorize(self.engine, Operation::Read, &picked.target, headers).await?;
-        // The form posts the row's id as `_id`; one naming another row is not this page's write.
-        if Posted::read(headers, body)?.one("_id") != Some(id) {
-            return Err(Error::BadRequest("crud::ui::Picker: the posted row is not the URL's".into()));
+    /// The prelude of every page past the plain picker: the relation offers it (`on`, else `400`,
+    /// as when the app has it off), and the caller passes the target's `op` gate.
+    async fn open(&self, p: &Picked, on: bool, op: Operation, headers: &HeaderMap) -> Result<()> {
+        if !on {
+            return Err(Error::BadRequest(format!(
+                "crud::ui::Picker: {}.{} offers no such page (Crud::picker_create / picker_view, \
+                 MetaRelation::create / links)",
+                p.slug, p.relation
+            )));
         }
-        let form = Form::new(self.engine, &picked.target).edit(id.to_string()).only_update().redirect("{id}");
-        match form.submit(headers, client_ip, body, state).await? {
-            Outcome::Done(_) => Ok(Outcome::Done(format!("{}&saved=1", self.href(state, "show", id)))),
-            invalid => Ok(invalid),
-        }
-    }
-
-    /// `?pick=<this relation>&<key>=<id>`.
-    fn href(&self, state: &ViewState, key: &str, id: &str) -> String {
-        let (slug, relation) = state.pick.as_ref().expect("picked() checked it");
-        let pairs = [("pick".to_string(), format!("{slug}.{relation}")), (key.to_string(), id.to_string())];
-        format!("?{}", crate::urlform::query(&pairs))
-    }
-
-    fn viewing(&self, picked: &Picked) -> Result<()> {
-        match self.engine.picker_view_path(picked.links) {
-            Some(_) => Ok(()),
-            None => Err(Error::BadRequest("crud::ui::Picker: linked rows are off (Crud::picker_view)".into())),
-        }
+        authorize(self.engine, op, &p.target, headers).await
     }
 
     fn form(&self, target: &str) -> Form<'a> {
-        let form = Form::new(self.engine, target).only_create().bare().submit_label("Create");
+        let form = Form::new(self.engine, target).embedded().submit_label("Create");
         match self.create_fields.iter().find(|(t, _)| t == target) {
             Some((_, names)) => form.fields(names.clone()),
             None => form,
-        }
-    }
-
-    fn creating(&self, picked: &Picked) -> Result<()> {
-        let target = &picked.target;
-        match self.engine.picker_create_path(target, picked.create) {
-            Some(_) => Ok(()),
-            None => Err(Error::BadRequest(format!(
-                "crud::ui::Picker: creating {target} is off (Crud::picker_create / picker_create_except)"
-            ))),
         }
     }
 
@@ -246,10 +226,12 @@ impl<'a> Picker<'a> {
             return Err(Error::BadRequest(format!("crud::ui::Picker: {slug} has no relation '{relation}'")));
         };
         Ok(Picked {
+            view: self.engine.picker_view_path(*links).is_some(),
+            create: self.engine.picker_create_path(target, *create).is_some(),
+            slug: slug.clone(),
+            relation: relation.clone(),
             target: target.clone(),
             many: *cardinality == Cardinality::ToMany,
-            links: *links,
-            create: *create,
         })
     }
 }

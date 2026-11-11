@@ -55,6 +55,29 @@ pub(crate) struct Relations<'r> {
     pub slug: &'r str,
     pub threshold: u64,
     pub headers: &'r HeaderMap,
+    /// The gates' answers so far in this render, `(target, op, allowed)`: a gate may cost a session
+    /// lookup, and a form asks the same target's List for its input and its "+ New", and again for
+    /// a second relation to the same table.
+    gates: std::sync::Mutex<Vec<(String, Operation, bool)>>,
+}
+
+impl<'r> Relations<'r> {
+    pub fn new(slug: &'r str, threshold: u64, headers: &'r HeaderMap) -> Self {
+        Self { slug, threshold, headers, gates: Default::default() }
+    }
+
+    /// `engine.permits(target, op, headers)`, asked once per render.
+    async fn permits(&self, engine: &Engine, target: &str, op: Operation) -> bool {
+        let known = |g: &Vec<(String, Operation, bool)>| {
+            g.iter().find(|(t, o, _)| t == target && *o == op).map(|(_, _, ok)| *ok)
+        };
+        if let Some(ok) = known(&self.gates.lock().unwrap()) {
+            return ok;
+        }
+        let ok = engine.permits(target, op, self.headers).await;
+        self.gates.lock().unwrap().push((target.to_string(), op, ok));
+        ok
+    }
 }
 
 /// What one form, for one request, adds to the columns: initial values for a create
@@ -272,7 +295,7 @@ pub(crate) async fn relation(
     ids: Vec<String>,
     linked: Option<Vec<Opt>>,
 ) -> Result<Widget> {
-    let listable = engine.permits(target, Operation::List, rel.headers).await;
+    let listable = rel.permits(engine, target, Operation::List).await;
     let as_options = |page: &crate::crud::engine::Page| -> Vec<Opt> {
         page.data
             .iter()
@@ -304,7 +327,7 @@ pub(crate) async fn relation(
         (Some(page), Some(path)) => Ok(Widget::Picked {
             chosen: chosen_options(engine, target, &ids, linked, true).await?,
             many,
-            src: format!("{path}?pick={}.{relation}", rel.slug),
+            src: super::picker::pick_href(path, rel.slug, relation, None),
             note: format!("{} {target} rows — too many to list here.", page.total),
         }),
         // The caller may not list the target: what this row already links to (the row's
@@ -331,13 +354,12 @@ pub(crate) async fn create_src(
     explicit: Option<bool>,
 ) -> String {
     let Some(path) = engine.picker_create_path(target, explicit) else { return String::new() };
-    if !engine.permits(target, Operation::Create, rel.headers).await
-        || !engine.permits(target, Operation::List, rel.headers).await
-    {
+    let allowed = rel.permits(engine, target, Operation::Create).await
+        && rel.permits(engine, target, Operation::List).await;
+    if !allowed {
         return String::new();
     }
-    let pick = format!("{}.{relation}", rel.slug);
-    format!("{path}?{}", crate::urlform::query(&[("pick".into(), pick), ("new".into(), "1".into())]))
+    super::picker::pick_href(path, rel.slug, relation, Some(("new", "1")))
 }
 
 /// The `{id, label}` pairs an edited row embeds for a relation.
@@ -361,7 +383,7 @@ fn linked_options(name: &str, row: Option<&Value>) -> Vec<Opt> {
 /// already has them (the row being edited), else looked up for `ids` (a rejected save, or an app's
 /// own form). Not looked up when the caller may not list the target (`listable` false): the ids
 /// someone posted are no reason to tell them what those rows are called, so they show as ids.
-pub(crate) async fn chosen_options(
+async fn chosen_options(
     engine: &Engine,
     target: &str,
     ids: &[String],
