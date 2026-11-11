@@ -130,6 +130,7 @@ impl<'a> Picker<'a> {
                 return Form::new(self.engine, &picked.target)
                     .edit(id.clone())
                     .only_update()
+                    .bare()
                     .cancel(self.href(state, "show", id))
                     .render_for(headers, state)
                     .await;
@@ -215,7 +216,7 @@ impl<'a> Picker<'a> {
     }
 
     fn form(&self, target: &str) -> Form<'a> {
-        let form = Form::new(self.engine, target).only_create().submit_label("Create");
+        let form = Form::new(self.engine, target).only_create().bare().submit_label("Create");
         match self.create_fields.iter().find(|(t, _)| t == target) {
             Some((_, names)) => form.fields(names.clone()),
             None => form,

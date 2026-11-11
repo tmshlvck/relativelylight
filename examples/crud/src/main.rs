@@ -192,9 +192,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.picker_create(true);
     // And each relation's label is a link: a post's author opens that author in a dialog over the
     // table, with Edit, and closing it is back where you were. Without the script (or in a new
-    // tab) the link goes to the entity's own page here.
+    // tab) the link goes to the entity's own page here — where it has one: the author table has
+    // no View (`detail(false)` below), so an author's link falls back to the dialog's page.
     crud.picker_view(true);
-    for slug in ["author", "tag", "user", "profile", "event"] {
+    for slug in ["tag", "user", "profile", "event"] {
         crud.view_path(slug, format!("/{slug}?show={{id}}"));
     }
     crud.view_path("post", "/post/{id}");

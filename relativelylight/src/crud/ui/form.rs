@@ -30,6 +30,7 @@ struct FormTmpl {
     fields: Vec<FieldV>,
     cancel_href: String,
     submit_label: String,
+    bare: bool,
 }
 
 /// A standalone create/edit form for one registered entity — the same form [`Table`](super::Table) shows in its
@@ -69,6 +70,7 @@ pub struct Form<'a> {
     only_create: bool,
     /// Only ever updates: the picker's edit form for a linked row, which must not create.
     only_update: bool,
+    bare: bool,
 }
 
 impl<'a> Form<'a> {
@@ -92,6 +94,7 @@ impl<'a> Form<'a> {
             initial: Vec::new(),
             only_create: false,
             only_update: false,
+            bare: false,
         }
     }
 
@@ -187,6 +190,11 @@ impl<'a> Form<'a> {
         self.only_create = true;
         self
     }
+    /// Without its card, for a picker's dialog (see `form.html`).
+    pub(crate) fn bare(mut self) -> Self {
+        self.bare = true;
+        self
+    }
     pub(crate) fn only_update(mut self) -> Self {
         self.only_update = true;
         self
@@ -250,6 +258,7 @@ impl<'a> Form<'a> {
             fields,
             cancel_href: self.cancel_href.clone().unwrap_or_default(),
             submit_label: self.submit_label.clone().unwrap_or_else(|| "Save".into()),
+            bare: self.bare,
         }
         .render()
         .map_err(render_err)

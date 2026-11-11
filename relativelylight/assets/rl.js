@@ -204,14 +204,18 @@
       }));
       foot.append(add);
     }
-    const cancel = button('btn btn-secondary ms-auto', level.kind === 'view' ? 'Close' : 'Cancel', () => dialog.close());
-    foot.append(cancel);
+    // The buttons on the right: Cancel and OK for a pick; for a form or a row, the page's own
+    // buttons and this dialog's Cancel / Close, rebuilt on each page load (`actions`).
+    level.right = el('div', 'ms-auto d-flex gap-2');
+    level.dismiss = button('btn btn-secondary', level.kind === 'view' ? 'Close' : 'Cancel', () => dialog.close());
+    level.right.append(level.dismiss);
     if (level.kind === 'pick') {
-      foot.append(button('btn btn-primary', 'OK', () => {
+      level.right.append(button('btn btn-primary', 'OK', () => {
         commit(level.field, level.chosen);
         dialog.close();
       }));
     }
+    foot.append(level.right);
     card.append(head, frame, foot);
     dialog.append(card);
     // Esc, ✕, Cancel, OK and a delivered row all end here: the dialog is the top one, so it leaves
@@ -236,17 +240,40 @@
         level.dialog.close();
         return;
       }
-    } else if (level.kind === 'view') {
+    }
+    if (level.kind !== 'pick') actions(level, doc);
+    if (level.kind === 'view') {
       const saved = doc.querySelector('.rl-saved');
       if (saved) {
         relabel(saved.dataset.rlKey, saved.dataset.label);
         level.title = saved.dataset.label;
         level.heading.textContent = stack.slice(0, stack.indexOf(level) + 1).map((l) => l.title).join(' › ');
       }
-    } else {
-      sync(level, doc);
     }
+    if (level.kind === 'pick') sync(level, doc);
     wire(doc);
+  }
+
+  // A form's or a row's page puts its buttons in `.rl-foot` (Edit; Cancel and Save). They belong in
+  // this dialog's footer, as in the table's own dialogs: hide them there and put a button here
+  // that clicks each one. The page's own Cancel replaces this dialog's (it goes back to the row,
+  // not out); otherwise Close follows a row's buttons, as in the table's View, and Cancel comes
+  // before a form's Create, as in its New.
+  function actions(level, doc) {
+    const foot = doc.querySelector('.rl-foot');
+    const mirrored = [];
+    let ownCancel = false;
+    if (foot) {
+      for (const b of foot.querySelectorAll('a.btn, button.btn')) {
+        if (b.classList.contains('btn-secondary')) ownCancel = true;
+        mirrored.push(button(b.className, b.textContent.trim(), () => b.click()));
+      }
+      foot.hidden = true;
+    }
+    level.right.replaceChildren();
+    if (ownCancel) level.right.append(...mirrored);
+    else if (level.kind === 'view') level.right.append(...mirrored, level.dismiss);
+    else level.right.append(level.dismiss, ...mirrored);
   }
 
   // An edit in a view dialog renamed a row: every link to it says so now, without a reload (which

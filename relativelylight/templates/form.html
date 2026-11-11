@@ -1,7 +1,9 @@
 {#- The standalone create/edit form: the same widgets and the same decoding as the table's dialog,
     without the table. For an app's own pages, where the admin's shape is wrong. -#}
-<div class="card rl-form"{% if !dom_id.is_empty() %} id="{{ dom_id }}"{% endif %}>
-  {%- if has_header %}
+{#- `bare`: inside a picker's dialog, which has its own card — no card here, and the buttons in an
+    `.rl-foot` that `crud::ui::JS` moves into the dialog's footer. -#}
+<div class="{% if bare %}p-2{% else %}card{% endif %} rl-form"{% if !dom_id.is_empty() %} id="{{ dom_id }}"{% endif %}>
+  {%- if has_header && !bare %}
   <div class="card-header">
     <h5 class="mb-0">{{ title }}</h5>
     {%- if !description.is_empty() %}<div class="small text-muted">{{ description }}</div>{% endif %}
@@ -11,14 +13,14 @@
     <input type="hidden" name="_op" value="{{ op }}">
     {%- if !id.is_empty() %}<input type="hidden" name="_id" value="{{ id }}">{% endif %}
     {%- if !csrf.is_empty() %}<input type="hidden" name="_csrf" value="{{ csrf }}">{% endif %}
-    <div class="card-body">
+    <div class="{% if !bare %}card-body{% endif %}">
       {%- if !saved.is_empty() %}<div class="alert alert-success">{{ saved }}</div>{% endif %}
       {%- if !errors.is_empty() %}
       <div class="alert alert-danger">{% for e in errors %}<div>{{ e }}</div>{% endfor %}</div>
       {%- endif %}
       {% include "_fields.html" %}
     </div>
-    <div class="card-footer text-end">
+    <div class="{% if bare %}rl-foot{% else %}card-footer{% endif %} text-end">
       {%- if !cancel_href.is_empty() %}<a class="btn btn-secondary" href="{{ cancel_href }}">Cancel</a>{% endif %}
       <button class="btn btn-primary" type="submit">{{ submit_label }}</button>
     </div>

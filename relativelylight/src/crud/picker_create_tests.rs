@@ -494,6 +494,19 @@ async fn the_rows_page_has_edit_and_links_of_its_own() {
     let form = Picker::new(&e).render_for(&h(), &q("pick=workorder.airline&edit=1")).await.unwrap();
     assert!(form.contains(r#"value="KLM""#) && form.contains(r#"name="_id" value="1""#), "{form}");
     assert!(form.contains(r#"href="?pick=workorder.airline&#38;show=1">Cancel<"#), "back to the row: {form}");
+
+    // The dialog is the card: these pages draw none, and put their buttons where the script moves
+    // them into the dialog's footer.
+    let new = Picker::new(&e).render_for(&h(), &q("pick=workorder.airline&new=1")).await.unwrap();
+    for html in [&page, &form, &new] {
+        assert!(!html.contains(r#"class="card"#) && html.contains(r#"class="rl-foot"#), "{html}");
+    }
+    // Control: the table's own View dialog and a standalone form keep theirs.
+    let own = Table::new(&e, "airline").render_for(&h(), &q("show=1")).await.unwrap();
+    let standalone = Form::new(&e, "airline").render_for(&h(), &ViewState::default()).await.unwrap();
+    for html in [&own, &standalone] {
+        assert!(html.contains(r#"<div class="card"#) && !html.contains("rl-foot"), "{html}");
+    }
 }
 
 #[tokio::test]

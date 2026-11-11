@@ -1322,6 +1322,10 @@ How it works, on the picker route again:
 - `?show=` and `?edit=` on the picker answer `400` while `picker_view` is off.
 - No delete in the dialog: deleting a row from a link to it is too easy to do by accident.
 
+The dialog looks like the table's own View and edit dialogs: the page inside it draws no card of
+its own, and the script moves its buttons (Edit; Cancel and Save; Create) into the dialog's footer.
+Without the script they stay under the fields.
+
 Links are not drawn in forms, where a click means choosing, nor in the picker's list. A cell with a
 `format_cell` closure is the closure's: it gets no link.
 
