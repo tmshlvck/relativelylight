@@ -81,6 +81,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tag_mm = MetaModel::new(tag::Entity);
     post_mm.relate(&tag_mm);
     tag_mm.relate(&post_mm);
+    // Per relation: "+ New" is on app-wide (below), but a whole post is too much to write from a
+    // tag's form, so a tag's `post` field offers only existing posts. (Its labels still link.)
+    tag_mm.relation("post").create(false);
 
     // Label author rows by their name — and, because the column is *declared* rather than computed in
     // a closure, `post` can be sorted by its `author` column: the engine turns `?sort=author` into an

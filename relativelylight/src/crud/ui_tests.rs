@@ -255,6 +255,8 @@ fn post_columns() -> Vec<Column> {
             label: Some("Author".into()),
             description: None,
             sortable: true,
+            links: None,
+            create: None,
         },
         Column::Relation {
             name: "tag".into(),
@@ -265,6 +267,8 @@ fn post_columns() -> Vec<Column> {
             label: Some("Tags".into()),
             description: None,
             sortable: false,
+            links: None,
+            create: None,
         },
     ]
 }
@@ -346,6 +350,8 @@ fn engine_with(gate: Arc<dyn Authz>) -> (Engine, Arc<Log>) {
                         label: Some("Author".into()),
                         description: None,
                         sortable: true,
+                        links: None,
+                        create: None,
                     },
                 ],
             )
@@ -2018,6 +2024,8 @@ async fn a_picker_leaves_out_the_targets_to_many_columns() {
         label: None,
         description: None,
         sortable: false,
+        links: None,
+        create: None,
     };
     e.add(Arc::new(Mock::new("comment", vec![field("id", false, true, None), to_post])), Arc::new(Open));
     let state = ViewState::from_query("pick=comment.post");

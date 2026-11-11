@@ -36,8 +36,8 @@ pub(crate) struct LinkV {
 }
 
 /// Which of one entity's relations link to their rows, for one caller: those whose target they may
-/// read, when `Crud::picker_view` is on. Resolved once per render, so a page of rows asks each
-/// target's gate once, not once per row.
+/// read, when the relation says so (`MetaRelation::links`) or else `Crud::picker_view` does.
+/// Resolved once per render, so a page of rows asks each target's gate once, not once per row.
 #[derive(Default)]
 pub(crate) struct Links {
     /// `(relation, target, "<picker>?pick=<slug>.<relation>&show=")`.
@@ -54,10 +54,11 @@ impl Links {
         headers: &http::HeaderMap,
     ) -> Links {
         let mut out = Links::default();
-        let Some(path) = engine.picker_view_path() else { return out };
         let mut readable: Vec<(String, bool)> = Vec::new();
         for col in cols {
-            let Column::Relation { name, target, .. } = col else { continue };
+            let Column::Relation { name, target, links, .. } = col else { continue };
+            // The relation's own choice, else the app's.
+            let Some(path) = engine.picker_view_path(*links) else { continue };
             let ok = match readable.iter().find(|(t, _)| t == target) {
                 Some((_, ok)) => *ok,
                 None => {

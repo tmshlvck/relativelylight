@@ -126,14 +126,16 @@ impl<'a> RelationField<'a> {
         self.name.as_deref().unwrap_or(&self.relation)
     }
 
-    fn column(&self) -> Result<(String, Cardinality, String, String)> {
+    /// The relation's target, cardinality, label, description and own "+ New" choice.
+    fn column(&self) -> Result<(String, Cardinality, String, String, Option<bool>)> {
         let cols = self.engine.columns(&self.slug)?;
         match cols.iter().find(|c| render::name_of(c) == self.relation) {
-            Some(col @ Column::Relation { target, cardinality, description, .. }) => Ok((
+            Some(col @ Column::Relation { target, cardinality, description, create, .. }) => Ok((
                 target.clone(),
                 *cardinality,
                 render::label_of(col),
                 description.clone().unwrap_or_default(),
+                *create,
             )),
             _ => Err(Error::BadRequest(format!(
                 "crud::ui::RelationField: {} has no relation '{}'",
@@ -146,7 +148,7 @@ impl<'a> RelationField<'a> {
     /// for the inside of your `<form>`. `400` when `slug` has no relation by that name, `404` when
     /// there is no entity `slug`.
     pub async fn render_for(&self, headers: &HeaderMap) -> Result<String> {
-        let (target, cardinality, label, description) = self.column()?;
+        let (target, cardinality, label, description, explicit) = self.column()?;
         let many = cardinality == Cardinality::ToMany;
         let mut ids = self.selected.clone();
         if !many {
@@ -155,7 +157,7 @@ impl<'a> RelationField<'a> {
         let rel = widgets::Relations { slug: &self.slug, threshold: self.picker_threshold, headers };
         let widget: Widget =
             widgets::relation(self.engine, &rel, &self.relation, &target, many, ids, None).await?;
-        let create = widgets::create_src(self.engine, &rel, &self.relation, &target).await;
+        let create = widgets::create_src(self.engine, &rel, &self.relation, &target, explicit).await;
         FieldTmpl {
             f: FieldV {
                 name: self.input_name().to_string(),
@@ -196,7 +198,7 @@ impl<'a> RelationField<'a> {
     /// may link it, or write whatever you write with it, is your handler's check.
     /// URL-encoded and multipart bodies; `400` for a multipart body that can't be parsed.
     pub async fn read(&self, headers: &HeaderMap, body: &[u8]) -> Result<Vec<String>> {
-        let (target, _, _, _) = self.column()?;
+        let (target, ..) = self.column()?;
         let ids = self.posted(headers, body)?;
         let missing = missing_ids(self.engine, &target, &ids).await?;
         if !missing.is_empty() {

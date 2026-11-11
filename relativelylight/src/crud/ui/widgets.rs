@@ -99,7 +99,9 @@ pub(crate) async fn fields(
             Some(set) => (within(engine, col, row, state, tz, rel, presets, set).await?, String::new()),
             None => {
                 let create = match col {
-                    Column::Relation { target, .. } => create_src(engine, rel, &name, target).await,
+                    Column::Relation { target, create, .. } => {
+                        create_src(engine, rel, &name, target, *create).await
+                    }
                     Column::Field { .. } => String::new(),
                 };
                 (widget(engine, col, row, state, tz, rel, presets).await?, create)
@@ -316,12 +318,19 @@ pub(crate) async fn relation(
     }
 }
 
-/// Where a relation field's "+" opens, or empty for none. Offered only when the app turned it on
-/// (`Crud::picker_create`) and the caller may both **create** the target and **list** it — the
-/// page that reports the new row shows its label, which is a read. Each nested form asks again for
+/// Where a relation field's "+" opens, or empty for none. Offered only when the relation turned it
+/// on (`MetaRelation::create`, `explicit`) or else the app did (`Crud::picker_create`), and the
+/// caller may both **create** the target and **list** it — the page that reports the new row
+/// shows its label, which is a read. Each nested form asks again for
 /// its own relations, so how deep the dialogs go is the gates' answer (and the script's cap).
-pub(crate) async fn create_src(engine: &Engine, rel: &Relations<'_>, relation: &str, target: &str) -> String {
-    let Some(path) = engine.picker_create_path(target) else { return String::new() };
+pub(crate) async fn create_src(
+    engine: &Engine,
+    rel: &Relations<'_>,
+    relation: &str,
+    target: &str,
+    explicit: Option<bool>,
+) -> String {
+    let Some(path) = engine.picker_create_path(target, explicit) else { return String::new() };
     if !engine.permits(target, Operation::Create, rel.headers).await
         || !engine.permits(target, Operation::List, rel.headers).await
     {

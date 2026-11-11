@@ -314,8 +314,14 @@ pub struct MetaRelation {
     pub hidden: bool,
     pub label: Option<String>,
     pub description: Option<String>,
+    pub links: Option<bool>,         // label links to the row; None = as Crud::picker_view says
+    pub create: Option<bool>,        // "+ New" on the field; None = as Crud::picker_create says
 }
 ```
+
+`links` and `create` are this relation's own answer to the two app-wide switches, set with
+`model.relation("author").links(true)` / `.create(false)`: see
+[Per relation](#per-relation-one-switch-each).
 
 ## Reading and writing
 
@@ -1331,6 +1337,28 @@ Links are not drawn in forms, where a click means choosing, nor in the picker's 
 
 Both examples turn it on: in `examples/adminpanel` the editor (read-only) can open a post's author
 but gets no Edit, and the admin can edit it in place.
+
+### Per relation: one switch each
+
+`picker_view` and `picker_create` are the app's defaults. Each relation can answer for itself on
+its model, and its answer wins either way:
+
+```rust
+// Only this relation links and offers "+ New"; the app-wide switches stay off.
+workorder.relation("airline").links(true).create(true);
+
+// Everything links and offers "+ New", except this one field: the invoicing contact must be
+// an existing one.
+crud.picker_view(true);
+crud.picker_create(true);
+workorder.relation("invoice_contact").create(false);
+```
+
+A relation's own `create(true)` also wins over `picker_create_except`, which is a default for every
+relation pointing at those targets. What no switch overrides is the target's gate: a link still
+needs Read, Edit still needs Update, "+ New" still needs Create and List, per caller. Either
+feature needs `picker_path`, and "+ New" or Edit a `POST` on its route. With a feature off for a
+relation, its picker URLs answer `400`, as when the app has it off.
 
 ### `RelationField` — the relation input in a form of your own
 

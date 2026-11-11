@@ -274,6 +274,14 @@ pub enum Column {
         /// [`MetaModel::label_column`](crate::crud::seaorm::MetaModel::label_column)). A to-many has
         /// many labels per row, so there is no ordering to give.
         sortable: bool,
+        /// This relation's own choice about linking its labels to their rows
+        /// ([`MetaRelation::links`](crate::crud::seaorm::MetaRelation::links)); `None` follows
+        /// `Crud::picker_view`.
+        links: Option<bool>,
+        /// This relation's own choice about "+ New"
+        /// ([`MetaRelation::create`](crate::crud::seaorm::MetaRelation::create)); `None` follows
+        /// `Crud::picker_create` and `picker_create_except`.
+        create: Option<bool>,
     },
 }
 
@@ -590,10 +598,11 @@ impl Engine {
         self.view_paths.push((slug, template.into()));
     }
 
-    /// The picker path, when relation links are on.
+    /// The picker path, when a relation's labels link to their rows: its own choice (`explicit`),
+    /// else the app-wide `picker_view`.
     #[cfg(feature = "ui")]
-    pub(crate) fn picker_view_path(&self) -> Option<&str> {
-        self.picker_path().filter(|_| self.picker_view)
+    pub(crate) fn picker_view_path(&self, explicit: Option<bool>) -> Option<&str> {
+        self.picker_path().filter(|_| explicit.unwrap_or(self.picker_view))
     }
 
     #[cfg(feature = "ui")]
@@ -601,12 +610,13 @@ impl Engine {
         self.view_paths.iter().find(|(s, _)| s == slug).map(|(_, t)| t.as_str())
     }
 
-    /// The path "+ New" opens for a new row of `target`: `None` when it is off, without a picker
-    /// path, or for a target excepted.
+    /// The path "+ New" opens for a new row of `target`, through a relation whose own choice is
+    /// `explicit`: that choice when it made one, else the app-wide `picker_create` unless the
+    /// target is excepted. `None` when off, or without a picker path.
     #[cfg(feature = "ui")]
-    pub(crate) fn picker_create_path(&self, target: &str) -> Option<&str> {
+    pub(crate) fn picker_create_path(&self, target: &str, explicit: Option<bool>) -> Option<&str> {
         let excepted = self.picker_create_except.iter().any(|t| t == target);
-        self.picker_path().filter(|_| self.picker_create && !excepted)
+        self.picker_path().filter(|_| explicit.unwrap_or(self.picker_create && !excepted))
     }
 
     /// Register an audit sink fired after each committed write (create/update/delete). See

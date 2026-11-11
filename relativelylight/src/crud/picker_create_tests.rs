@@ -126,6 +126,9 @@ struct Setup {
     except: Vec<&'static str>,
     view: bool,
     view_path: Option<&'static str>,
+    /// `workorder.airline`'s own choices (`MetaRelation::links` / `create`).
+    airline_links: Option<bool>,
+    airline_create: Option<bool>,
     airline_gate: Gate,
     #[cfg(feature = "csrf")]
     csrf: Option<crate::csrf::Csrf>,
@@ -138,6 +141,8 @@ impl Default for Setup {
             except: Vec::new(),
             view: false,
             view_path: None,
+            airline_links: None,
+            airline_create: None,
             airline_gate: Gate::Open,
             #[cfg(feature = "csrf")]
             csrf: None,
@@ -175,7 +180,14 @@ async fn fixture(setup: Setup) -> (Engine, DatabaseConnection) {
     let mut airline = MetaModel::new(airline::Entity);
     airline.field("name").validate_str(|s| if s.trim().is_empty() { Err("required".into()) } else { Ok(()) });
     crud.register(airline, setup.airline_gate);
-    crud.register(MetaModel::new(workorder::Entity), Open);
+    let mut workorder = MetaModel::new(workorder::Entity);
+    if let Some(on) = setup.airline_links {
+        workorder.relation("airline").links(on);
+    }
+    if let Some(on) = setup.airline_create {
+        workorder.relation("airline").create(on);
+    }
+    crud.register(workorder, Open);
     (crud.into_engine(), db)
 }
 
@@ -579,4 +591,71 @@ async fn an_edit_checks_csrf_like_every_write() {
     let r = Picker::new(&e).submit(&headers, IP, body.as_bytes(), &state).await;
     assert!(matches!(r, Ok(Outcome::Done(_))), "control: with the token: {r:?}");
     assert_eq!(airlines(&db).await, ["Yes"]);
+}
+
+// ---- one relation's own choice ----
+
+/// Whether `html` offers each feature for `workorder.airline` (a link to KLM, a "+ New").
+fn offers(html: &str) -> (bool, bool) {
+    (html.contains(r#"data-rl-key="airline:1""#), html.contains(PLUS_AIRLINE))
+}
+
+#[tokio::test]
+async fn one_relation_can_switch_both_on_with_the_app_wide_switches_off() {
+    let setup =
+        Setup { on: false, airline_links: Some(true), airline_create: Some(true), ..Default::default() };
+    let (e, _db) = fixture(setup).await;
+    assert_eq!(offers(&workorders(&e, "").await), (true, false), "the cell links");
+    assert_eq!(offers(&workorder_form(&e).await), (false, true), "the field has + New");
+    for query in ["pick=workorder.airline&show=1", "pick=workorder.airline&new=1"] {
+        Picker::new(&e).render_for(&h(), &q(query)).await.unwrap_or_else(|e| panic!("{query}: {e}"));
+    }
+    // Control: the airline's own relation follows the app, which is off.
+    let airline = Form::new(&e, "airline").render_for(&h(), &ViewState::default()).await.unwrap();
+    assert!(!airline.contains(PLUS_HQ), "{airline}");
+    for query in ["pick=airline.hq&show=1", "pick=airline.hq&new=1"] {
+        let r = Picker::new(&e).render_for(&h(), &q(query)).await;
+        assert!(matches!(r, Err(Error::BadRequest(_))), "{query}: {r:?}");
+    }
+}
+
+#[tokio::test]
+async fn one_relation_can_switch_both_off_with_the_app_wide_switches_on() {
+    let setup = Setup { airline_links: Some(false), airline_create: Some(false), ..viewing() };
+    let (e, db) = fixture(setup).await;
+    assert_eq!(offers(&workorders(&e, "").await), (false, false), "no link");
+    assert_eq!(offers(&workorder_form(&e).await), (false, false), "no + New");
+    let r = Picker::new(&e)
+        .submit(&h(), IP, b"_op=create&name=Sneaky&hq=1", &q("pick=workorder.airline&new=1"))
+        .await;
+    assert!(matches!(r, Err(Error::BadRequest(_))), "and nothing written through it: {r:?}");
+    let r = Picker::new(&e)
+        .submit(&h(), IP, b"_op=update&_id=1&name=Sneaky&hq=1", &q("pick=workorder.airline&edit=1"))
+        .await;
+    assert!(matches!(r, Err(Error::BadRequest(_))), "{r:?}");
+    assert_eq!(airlines(&db).await, ["KLM"]);
+    // Control: the airline's own relation still follows the app, which is on.
+    let airline = Form::new(&e, "airline").render_for(&h(), &ViewState::default()).await.unwrap();
+    assert!(airline.contains(PLUS_HQ), "{airline}");
+}
+
+#[tokio::test]
+async fn a_relations_own_choice_wins_over_the_except_list_but_never_over_the_gate() {
+    let setup = Setup { except: vec!["airline"], airline_create: Some(true), ..Default::default() };
+    let (e, _db) = fixture(setup).await;
+    assert!(offers(&workorder_form(&e).await).1, "the relation said yes, for itself");
+
+    let gated = Setup {
+        airline_links: Some(true),
+        airline_create: Some(true),
+        airline_gate: Gate::NoRead,
+        ..Default::default()
+    };
+    let (e, _db) = fixture(gated).await;
+    assert!(!offers(&workorders(&e, "").await).0, "on, but the caller may not read airlines");
+    let r = Picker::new(&e).render_for(&h(), &q("pick=workorder.airline&show=1")).await;
+    assert!(matches!(r, Err(Error::Forbidden)), "{r:?}");
+    let gated = Setup { airline_create: Some(true), airline_gate: Gate::NoCreate, ..Default::default() };
+    let (e, _db) = fixture(gated).await;
+    assert!(!offers(&workorder_form(&e).await).1, "on, but the caller may not create airlines");
 }

@@ -60,6 +60,11 @@ is easy to miss in a diff.
   updates only the row its URL names, gated and CSRF-checked. `Crud::view_path(slug, template)`
   gives the link's `href` for a new tab or no script. Same picker route, `?show=` and `?edit=`
   ([CRUD.md → Viewing the linked row](docs/CRUD.md#viewing-the-linked-row)).
+- **Per relation: `MetaRelation::links(bool)` and `MetaRelation::create(bool)`.** The two app-wide
+  switches are defaults; one relation can turn either on for itself alone
+  (`workorder.relation("airline").links(true).create(true)`) or off while the rest have it. The
+  target's gate still decides per caller ([CRUD.md → Per relation](docs/CRUD.md#per-relation-one-switch-each)).
+  `Column::Relation` gains `links` and `create` (`None`: follow the app).
 - `examples/crud` and `examples/adminpanel`: relation labels link to their rows.
 - `examples/crud`: "+ New" for a profile's user, a post's author and tags, and a tag's posts.
   `examples/adminpanel`: the same, for the admin only, with `user` excepted.

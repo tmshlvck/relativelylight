@@ -321,9 +321,46 @@ pub struct MetaRelation {
     pub hidden: bool,
     pub label: Option<String>,
     pub description: Option<String>,
+    /// Whether this relation's labels link to their rows, viewed in a dialog — see
+    /// [`links`](MetaRelation::links). `None`: as `Crud::picker_view` says.
+    pub links: Option<bool>,
+    /// Whether this relation's field offers "+ New" — see [`create`](MetaRelation::create).
+    /// `None`: as `Crud::picker_create` (and `picker_create_except`) say.
+    pub create: Option<bool>,
     from_col: String,
     to_col: String,
     is_nm: bool,
+}
+
+impl MetaRelation {
+    /// Link this relation's labels to their rows (a dialog with the row, and Edit), or not —
+    /// whatever `Crud::picker_view` says for the rest. `true` turns it on for this relation alone,
+    /// with the app-wide switch off; `false` keeps it off here while it is on elsewhere. Either way
+    /// the target's gate still decides per caller (read for the link, update for Edit), and it
+    /// needs `Crud::picker_path`.
+    ///
+    /// ```ignore
+    /// post.relation("author").links(true);   // only a post's author links, nothing else does
+    /// ```
+    pub fn links(&mut self, on: bool) -> &mut Self {
+        self.links = Some(on);
+        self
+    }
+
+    /// Offer "+ New" on this relation's field, or not — whatever `Crud::picker_create` and
+    /// `picker_create_except` say for the rest. `true` turns it on here alone; `false` keeps it off
+    /// here (say, an invoicing contact that must be an existing one) while the airline beside it
+    /// has it. The target's gate still decides per caller (create and list), and it needs
+    /// `Crud::picker_path` and a `POST` on its route.
+    ///
+    /// ```ignore
+    /// workorder.relation("airline").create(true);
+    /// workorder.relation("invoice_contact").create(false);
+    /// ```
+    pub fn create(&mut self, on: bool) -> &mut Self {
+        self.create = Some(on);
+        self
+    }
 }
 
 // ---- Introspection helpers ----
@@ -662,6 +699,8 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                 hidden: false,
                 label: None,
                 description: None,
+                links: None,
+                create: None,
                 name: r.name,
                 target: r.target,
                 cardinality: r.cardinality,
@@ -792,6 +831,8 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
             hidden: false,
             label: None,
             description: None,
+            links: None,
+            create: None,
             from_col: self.pk.first().cloned().unwrap_or_default(),
             to_col: String::new(),
             is_nm: true,
@@ -967,6 +1008,8 @@ fn relation_column(r: &MetaRelation) -> Column {
         // Filled in by `SeaAccessor::columns`, which can ask the registry whether the *target* has a
         // label column. A bare `MetaModel` can't know: the target is another model entirely.
         sortable: false,
+        links: r.links,
+        create: r.create,
     }
 }
 
@@ -1434,6 +1477,8 @@ where
                     read_only,
                     label,
                     description,
+                    links,
+                    create,
                     ..
                 } => Column::Relation {
                     // Sortable exactly when the cell's label can be turned into an `ORDER BY`: one
@@ -1450,6 +1495,8 @@ where
                     read_only,
                     label,
                     description,
+                    links,
+                    create,
                 },
                 other => other,
             })

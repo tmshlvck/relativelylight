@@ -65,6 +65,9 @@ pub struct Picker<'a> {
 struct Picked {
     target: String,
     many: bool,
+    /// The relation's own choices (`MetaRelation::links` / `create`); `None` follows the app's.
+    links: Option<bool>,
+    create: Option<bool>,
 }
 
 impl<'a> Picker<'a> {
@@ -98,7 +101,7 @@ impl<'a> Picker<'a> {
     pub async fn render_for(&self, headers: &HeaderMap, state: &ViewState) -> Result<String> {
         let picked = self.picked(state)?;
         if let Some(id) = &state.created {
-            self.creating(&picked.target)?;
+            self.creating(&picked)?;
             // The label is a read of the target; "+" is only offered to who may list it.
             authorize(self.engine, Operation::List, &picked.target, headers).await?;
             let found =
@@ -109,12 +112,12 @@ impl<'a> Picker<'a> {
         }
         match &state.mode {
             Mode::New => {
-                self.creating(&picked.target)?;
+                self.creating(&picked)?;
                 authorize(self.engine, Operation::List, &picked.target, headers).await?;
                 return self.form(&picked.target).render_for(headers, state).await;
             }
             Mode::Show(id) => {
-                self.viewing()?;
+                self.viewing(&picked)?;
                 authorize(self.engine, Operation::Read, &picked.target, headers).await?;
                 let edit = match self.engine.permits(&picked.target, Operation::Update, headers).await {
                     true => self.href(state, "edit", id),
@@ -125,7 +128,7 @@ impl<'a> Picker<'a> {
                     .await;
             }
             Mode::Edit(id) => {
-                self.viewing()?;
+                self.viewing(&picked)?;
                 authorize(self.engine, Operation::Read, &picked.target, headers).await?;
                 return Form::new(self.engine, &picked.target)
                     .edit(id.clone())
@@ -159,7 +162,7 @@ impl<'a> Picker<'a> {
         if let Mode::Edit(id) = &state.mode {
             return self.save_edit(&picked, id, headers, client_ip, body, state).await;
         }
-        self.creating(&picked.target)?;
+        self.creating(&picked)?;
         if state.mode != Mode::New {
             return Err(Error::BadRequest("crud::ui::Picker: a write needs ?new=1 or ?edit=<id>".into()));
         }
@@ -188,7 +191,7 @@ impl<'a> Picker<'a> {
         body: &[u8],
         state: &ViewState,
     ) -> Result<Outcome> {
-        self.viewing()?;
+        self.viewing(picked)?;
         authorize(self.engine, Operation::Read, &picked.target, headers).await?;
         // The form posts the row's id as `_id`; one naming another row is not this page's write.
         if Posted::read(headers, body)?.one("_id") != Some(id) {
@@ -208,8 +211,8 @@ impl<'a> Picker<'a> {
         format!("?{}", crate::urlform::query(&pairs))
     }
 
-    fn viewing(&self) -> Result<()> {
-        match self.engine.picker_view_path() {
+    fn viewing(&self, picked: &Picked) -> Result<()> {
+        match self.engine.picker_view_path(picked.links) {
             Some(_) => Ok(()),
             None => Err(Error::BadRequest("crud::ui::Picker: linked rows are off (Crud::picker_view)".into())),
         }
@@ -223,8 +226,9 @@ impl<'a> Picker<'a> {
         }
     }
 
-    fn creating(&self, target: &str) -> Result<()> {
-        match self.engine.picker_create_path(target) {
+    fn creating(&self, picked: &Picked) -> Result<()> {
+        let target = &picked.target;
+        match self.engine.picker_create_path(target, picked.create) {
             Some(_) => Ok(()),
             None => Err(Error::BadRequest(format!(
                 "crud::ui::Picker: creating {target} is off (Crud::picker_create / picker_create_except)"
@@ -238,9 +242,14 @@ impl<'a> Picker<'a> {
         };
         let cols = self.engine.columns(slug)?;
         let found = cols.iter().find(|c| render::name_of(c) == relation);
-        let Some(Column::Relation { target, cardinality, .. }) = found else {
+        let Some(Column::Relation { target, cardinality, links, create, .. }) = found else {
             return Err(Error::BadRequest(format!("crud::ui::Picker: {slug} has no relation '{relation}'")));
         };
-        Ok(Picked { target: target.clone(), many: *cardinality == Cardinality::ToMany })
+        Ok(Picked {
+            target: target.clone(),
+            many: *cardinality == Cardinality::ToMany,
+            links: *links,
+            create: *create,
+        })
     }
 }
