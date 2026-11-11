@@ -770,8 +770,10 @@ let html = Table::new(&engine, "post")
 ```
 
 **What to put in your shell:** Bootstrap 5's CSS, and `crud::ui::CSS` — a few dozen lines Bootstrap
-doesn't cover (mostly the `<dialog>`, whose own `.modal` assumes Bootstrap's JavaScript). If you serve
-a [picker](#picker--choosing-from-a-large-relation), also `crud::ui::JS`, its script:
+doesn't cover (mostly the `<dialog>`, whose own `.modal` assumes Bootstrap's JavaScript). And, on
+every page with a table or a form, `crud::ui::JS`: it makes the dialogs real modals (see
+[Dialogs and Esc](#dialogs-and-esc)) and drives the [picker](#picker--choosing-from-a-large-relation).
+Everything works without it, only plainer:
 
 ```html
 <link href="…/bootstrap.min.css" rel="stylesheet">
@@ -788,10 +790,11 @@ Three rules, and the rest follows.
 which entity is active and which row is being edited all live in the query string, so every view is a
 link you can bookmark, mail, or put in a runbook.
 
-**Modals are `<dialog open>`, rendered server-side.** `?edit=7` renders the list *and* the open dialog
-in one response; the browser supplies the backdrop, ESC-to-close and the top layer with no script. A
-rejected write re-renders the same dialog with the messages beside the fields and the operator's input
-still in them.
+**Dialogs are `<dialog open>`, rendered server-side.** `?edit=7` renders the list *and* the open
+dialog in one response. A rejected write re-renders the same dialog with the messages beside the
+fields and the operator's input still in them. `<dialog open>` is displayed, not modal: without a
+script there is no Esc and the page behind stays clickable (the backdrop is `crud::ui::CSS`'s).
+`crud::ui::JS` makes it a real modal ([below](#dialogs-and-esc)).
 
 **Writes are POST → 303 → GET.** `submit` returns a relative target (`?page=2#row-7`), so the browser
 lands back on the row that changed.
@@ -801,6 +804,29 @@ lands back on the row that changed.
 above the table and then forgets — a refresh doesn't repeat it, and a second tab can't see it,
 because there is no server-side flash to get out of step. A create or an update reports nothing: the
 redirect already lands on the row it changed, and an alert on every save is noise.
+
+### Dialogs and Esc
+
+With `crud::ui::JS` on the page, every dialog the crate draws is a real modal: the table's own
+(`?new`, `?edit=7`, `?show=7`, `?import=1`) and the ones over a relation (the picker, "+ New", a
+linked row and its Edit). That means:
+
+- **On top, and the page behind is out of reach** until it closes.
+- **Focus starts where the work is:** the first field of a form, else Close.
+- **Esc closes the top dialog**, as its ✕ does. For the table's own, that follows the ✕ link back to
+  the list, since the dialog is in the URL. Esc inside a dialog's page (the iframe of a relation
+  dialog) works the same.
+- **A changed form is guarded.** If anything in the dialog's form differs from when it loaded, or
+  it came back with errors (so it holds what was typed before), the first Esc keeps it open and the
+  footer says *Unsaved changes — press Esc again to discard*. A second Esc within 3 seconds
+  discards. Cancel and ✕ always close at once. A select's open list, a date picker or autofill take
+  their own Esc first and close only themselves.
+
+Without the script, the dialogs work as before: displayed, closed by ✕ or Cancel.
+
+**If it conflicts with your page**, for example your own Esc handler or a Bootstrap JS modal that
+should stay on top, mark an ancestor of the table `data-rl-modal="off"`. Its dialogs then stay as
+rendered; the relation dialogs are unaffected.
 
 ### The two handlers
 

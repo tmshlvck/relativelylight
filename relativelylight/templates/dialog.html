@@ -1,7 +1,8 @@
-{#- The create/edit form, as a native `<dialog open>`: the browser gives the backdrop, ESC-to-close,
-    the top layer and focus containment with no script. Rendered server-side in the same response as
-    the list, so `?edit=7` is a URL you can link to — and a rejected write re-renders this with the
-    messages and the typed values already in place. -#}
+{#- The create/edit form, as a native `<dialog open>`: displayed, not modal — the backdrop is
+    `crud::ui::CSS`'s. `crud::ui::JS` reopens it as a real modal (top layer, focus kept inside, Esc
+    follows ✕, guarded when the form has changed); without the script it works as it is. Rendered
+    server-side in the same response as the list, so `?edit=7` is a URL you can link to — and a
+    rejected write re-renders this with the messages and the typed values already in place. -#}
 <dialog open class="rl-dialog">
   <form method="post" class="card" autocomplete="off">
     <input type="hidden" name="_op" value="{{ op }}">

@@ -48,7 +48,7 @@ struct Shell {
     user: String, // signed-in username (empty when anonymous) → navbar link to /profile
     body: String,
     css: &'static str, // the library's few CSS rules (crud::ui::CSS)
-    js: &'static str,  // the relation picker's script (crud::ui::JS)
+    js: &'static str,  // crud::ui::JS: modal dialogs with Esc, and the relation dialogs
     tz_picker: String, // the navbar timezone form (time::TzPicker), posting to /tz
 }
 

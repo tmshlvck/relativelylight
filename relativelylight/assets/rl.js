@@ -26,7 +26,18 @@
    Dialogs stack: a create form's own relations have their 🔍 and "+", a viewed row's relations
    are links, and each opens a new dialog over the last. Only the top window runs this; it wires
    up each iframe's page when it loads (that page needs no script of its own). Create forms and
-   viewed rows stop at MAX_DEPTH deep: the deepest one's "+" stays hidden and its links are text. (No closing script tag anywhere in this file, comments included: an app inlines
+   viewed rows stop at MAX_DEPTH deep: the deepest one's "+" stays hidden and its links are text.
+
+   The table's own dialogs (`?new`, `?edit=7`, `?show=7`, `?import=1`) arrive as `<dialog open>`:
+   shown, not modal. This script reopens each as a real modal, so it is on top of everything, the
+   page behind is out of reach, focus starts in its first field, and Esc does what its ✕ does —
+   follows the link back to the list, since the dialog is in the URL. A page that wants none of
+   that marks an ancestor `data-rl-modal="off"`.
+
+   Esc and a changed form: in every dialog with a form, here or in a dialog's page, Esc closes
+   only if nothing was changed since the form loaded (a form that came back with errors counts as
+   changed: it holds what was typed). Otherwise the first Esc keeps it open and says so in the
+   footer, and a second one within ESC_WINDOW discards. Cancel and ✕ always close at once. (No closing script tag anywhere in this file, comments included: an app inlines
    it.) */
 (() => {
   // A copy of this script inside one of our own iframes (an app whose bare shell includes it)
@@ -37,6 +48,7 @@
   window.__rlPicker = true;
 
   const MAX_DEPTH = 4;
+  const ESC_WINDOW = 3000; // ms in which a second Esc discards a changed form
   const stack = []; // the open dialogs, bottom first
 
   const el = (tag, cls, text, doc = document) => {
@@ -51,6 +63,97 @@
     b.onclick = onclick;
     return b;
   };
+
+  // ---- Esc and a changed form ----
+
+  // A form's values as one string — what "changed" is measured against. A file counts by name.
+  function snapshot(form) {
+    const parts = [];
+    for (const [k, v] of new FormData(form)) parts.push(k + '=' + (typeof v === 'string' ? v : v.name));
+    return parts.join('&');
+  }
+
+  // What a dialog's Esc guard reads: the form in it now (or null), whether it has changed since
+  // `reset` last looked at it, and where its note goes.
+  function tracker(formOf, footerOf) {
+    const t = { baseline: null, dirty: false };
+    t.reset = () => {
+      const f = formOf();
+      t.baseline = f ? snapshot(f) : null;
+      // Back with errors: it holds what was typed before the save was refused.
+      t.dirty = !!(f && f.querySelector('.is-invalid, .alert-danger'));
+    };
+    t.changed = () => {
+      const f = formOf();
+      return !!f && (t.dirty || snapshot(f) !== t.baseline);
+    };
+    t.footer = footerOf;
+    return t;
+  }
+
+  // Esc on `dialog`: `leave()` unless its form changed, when the first Esc stays (with a note) and
+  // a second within ESC_WINDOW leaves. A browser that won't let `cancel` be stopped (Chrome, after
+  // a while without a click) closes the dialog anyway; it is then reopened, which comes to the
+  // same. `intent()` is true when the close was ours (a button), which is never second-guessed.
+  function guard(dialog, t, leave, intent) {
+    let armed = 0, lastCancel = 0, kept = false, note = null;
+    const stay = () => {
+      if (!t.changed() || Date.now() - armed < ESC_WINDOW) return false;
+      armed = Date.now();
+      if (!note) note = el('span', 'rl-esc-note text-warning-emphasis me-2', 'Unsaved changes — press Esc again to discard', dialog.ownerDocument);
+      const footer = t.footer();
+      footer.prepend(note);
+      note.hidden = false;
+      setTimeout(() => { note.hidden = true; }, ESC_WINDOW);
+      return true;
+    };
+    dialog.addEventListener('cancel', (e) => {
+      lastCancel = Date.now();
+      kept = stay();
+      if (kept) e.preventDefault();
+    });
+    dialog.addEventListener('close', () => {
+      // Late news: `close()` queues this event, so the one from making a dialog modal (close, then
+      // showModal) arrives with the dialog open again. Nothing has closed.
+      if (dialog.open) return;
+      if (intent()) return leave();
+      const viaCancel = Date.now() - lastCancel < 500;
+      if (viaCancel ? kept : stay()) {
+        dialog.showModal();
+        return;
+      }
+      leave();
+    });
+  }
+
+  // Focus where the work is: the first field, else `fallback`.
+  function focusIn(root, fallback) {
+    const field = root && root.querySelector(
+      'input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled])');
+    (field || fallback)?.focus();
+  }
+
+  // ---- the table's own dialogs, made modal ----
+
+  function upgrade() {
+    for (const d of document.querySelectorAll('dialog.rl-dialog[open]')) {
+      if (d.closest('[data-rl-modal="off"]')) continue;
+      const exit = d.querySelector('a.btn-close');
+      if (!exit) continue;
+      d.close();
+      d.classList.add('rl-modal');
+      d.showModal();
+      const form = d.querySelector('form[method="post"]');
+      const card = d.querySelector('.card');
+      const t = tracker(() => form, () => d.querySelector('.card-footer') || card || d);
+      t.reset();
+      let leaving = false;
+      guard(d, t, () => { if (!leaving) { leaving = true; location.href = exit.href; } }, () => leaving);
+      // ✕ and Cancel are links back to the list already; a navigation is never a stray Esc.
+      d.addEventListener('click', (e) => { if (e.target.closest('a[href]')) leaving = true; });
+      focusIn(d.querySelector('.card-body'), d.querySelector('.card-footer .btn-secondary'));
+    }
+  }
 
   // The current selection of a `.rl-picked` field, from its badges.
   function selection(field) {
@@ -121,6 +224,21 @@
       }
       open(b);
     });
+    // Esc pressed inside a dialog's page never reaches the dialog around it (the browser keeps
+    // each document's Esc to itself), so pass it on: the same `cancel` the browser would send,
+    // and the same guard. A select's open list or a date picker takes its own Esc first, and
+    // never gets here.
+    if (doc !== document) {
+      doc.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
+        const level = stack[stack.length - 1];
+        if (!level || level.frame.contentDocument !== doc) return;
+        e.preventDefault();
+        const cancel = new Event('cancel', { cancelable: true });
+        level.dialog.dispatchEvent(cancel);
+        if (!cancel.defaultPrevented) level.dialog.close();
+      });
+    }
     const deep = depth() >= MAX_DEPTH;
     for (const b of doc.querySelectorAll('.rl-pick')) b.hidden = false;
     for (const b of doc.querySelectorAll('.rl-new')) b.hidden = deep;
@@ -181,7 +299,8 @@
     const head = el('div', 'card-header');
     const top = el('div', 'd-flex justify-content-between align-items-center mb-1');
     level.heading = el('h5', 'mb-0');
-    const close = button('btn-close', undefined, () => dialog.close());
+    level.exit = () => { level.closing = true; dialog.close(); };
+    const close = button('btn-close', undefined, () => level.exit());
     close.setAttribute('aria-label', 'Cancel');
     top.append(level.heading, close);
     head.append(top);
@@ -207,24 +326,28 @@
     // The buttons on the right: Cancel and OK for a pick; for a form or a row, the page's own
     // buttons and this dialog's Cancel / Close, rebuilt on each page load (`actions`).
     level.right = el('div', 'ms-auto d-flex gap-2');
-    level.dismiss = button('btn btn-secondary', level.kind === 'view' ? 'Close' : 'Cancel', () => dialog.close());
+    level.dismiss = button('btn btn-secondary', level.kind === 'view' ? 'Close' : 'Cancel', () => level.exit());
     level.right.append(level.dismiss);
     if (level.kind === 'pick') {
       level.right.append(button('btn btn-primary', 'OK', () => {
         commit(level.field, level.chosen);
-        dialog.close();
+        level.exit();
       }));
     }
     foot.append(level.right);
     card.append(head, frame, foot);
     dialog.append(card);
     // Esc, ✕, Cancel, OK and a delivered row all end here: the dialog is the top one, so it leaves
-    // the stack and the page.
-    dialog.addEventListener('close', () => {
+    // the stack and the page — unless it was Esc on a changed form (`guard`).
+    level.tracker = tracker(
+      () => level.frame.contentDocument?.querySelector('form[method="post"]') || null,
+      () => level.right,
+    );
+    guard(dialog, level.tracker, () => {
       const i = stack.indexOf(level);
       if (i >= 0) stack.splice(i, 1);
       dialog.remove();
-    });
+    }, () => level.closing);
     level.dialog = dialog;
     level.frame = frame;
     document.body.append(dialog);
@@ -237,7 +360,7 @@
       const made = doc.querySelector('.rl-created');
       if (made) {
         deliver(level, made.dataset.id, made.dataset.label);
-        level.dialog.close();
+        level.exit();
         return;
       }
     }
@@ -252,6 +375,8 @@
     }
     if (level.kind === 'pick') sync(level, doc);
     wire(doc);
+    level.tracker.reset();
+    if (level.kind !== 'pick') focusIn(doc.querySelector('form[method="post"]'), level.dismiss);
   }
 
   // A form's or a row's page puts its buttons in `.rl-foot` (Edit; Cancel and Save). They belong in
@@ -327,6 +452,7 @@
     }
   }
 
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => wire(document));
-  else wire(document);
+  const start = () => { wire(document); upgrade(); };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
 })();

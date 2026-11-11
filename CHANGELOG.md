@@ -65,6 +65,12 @@ is easy to miss in a diff.
   (`workorder.relation("airline").links(true).create(true)`) or off while the rest have it. The
   target's gate still decides per caller ([CRUD.md → Per relation](docs/CRUD.md#per-relation-one-switch-each)).
   `Column::Relation` gains `links` and `create` (`None`: follow the app).
+- **The table's dialogs are real modals, with Esc.** With `crud::ui::JS` on the page, `?new`,
+  `?edit=`, `?show=` and `?import=` open as modals: on top, the page behind out of reach, focus in
+  the first field, and Esc does what ✕ does. In every dialog with a form, including those over a
+  relation, Esc on a changed form keeps it open with a note and a second Esc within 3 s discards.
+  Opt out with `data-rl-modal="off"` on an ancestor ([CRUD.md → Dialogs and Esc](docs/CRUD.md#dialogs-and-esc)).
+  The docs no longer claim a bare `<dialog open>` closes on Esc; it never did.
 - `examples/crud` and `examples/adminpanel`: relation labels link to their rows.
 - `examples/crud`: "+ New" for a profile's user, a post's author and tags, and a tag's posts.
   `examples/adminpanel`: the same, for the admin only, with `user` excepted.

@@ -48,7 +48,8 @@ struct Shell {
     current: String,
     body: String,
     css: &'static str,
-    /// The relation picker's script (`crud::ui::JS`), once per page that renders a form.
+    /// `crud::ui::JS` on every page: the dialogs become real modals (Esc closes) and the relation
+    /// dialogs (picker, "+ New", linked rows) work.
     js: &'static str,
     /// The navbar timezone form (`time::TzPicker`), posting to our own `/tz`.
     tz_picker: String,
