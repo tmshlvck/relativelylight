@@ -71,6 +71,14 @@ is easy to miss in a diff.
   relation, Esc on a changed form keeps it open with a note and a second Esc within 3 s discards.
   Opt out with `data-rl-modal="off"` on an ancestor ([CRUD.md → Dialogs and Esc](docs/CRUD.md#dialogs-and-esc)).
   The docs no longer claim a bare `<dialog open>` closes on Esc; it never did.
+- **Option labels: show an enum value by a label, store it as is.** `MetaField::options_from_display::<E>()`
+  takes the options and their labels from a string-backed enum (its `Display`, e.g. SeaORM's
+  `DeriveDisplay` with `display_value = "In-Progress"`); `MetaField::option_labels([(value, label)])`
+  sets them by hand. Labels appear in forms, cells, the View dialog, filter menus and chips; the
+  database, URLs, posted forms, CSV and the write check keep the stored value
+  ([CRUD.md → Showing an option by a label](docs/CRUD.md#option-labels)). `Column::Field` gains
+  `option_labels`.
+- `examples/crud`: a post's `review` status reads "In review".
 - `examples/crud` and `examples/adminpanel`: relation labels link to their rows.
 - `examples/crud`: "+ New" for a profile's user, a post's author and tags, and a tag's posts.
   `examples/adminpanel`: the same, for the admin only, with `user` excepted.

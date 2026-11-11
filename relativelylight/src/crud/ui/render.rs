@@ -163,6 +163,17 @@ pub(crate) struct Pager {
 
 pub(crate) use crate::crud::text::text;
 
+/// How `col` shows a stored `value`: its option label (`MetaField::option_labels`), else the
+/// value itself. Display only — what is posted, linked and exported stays `value`.
+pub(crate) fn option_label<'a>(col: &'a Column, value: &'a str) -> &'a str {
+    match col {
+        Column::Field { option_labels, .. } => {
+            option_labels.iter().find(|(v, _)| v == value).map_or(value, |(_, l)| l.as_str())
+        }
+        Column::Relation { .. } => value,
+    }
+}
+
 /// One cell of one row. A `format` closure wins over everything; then a relation's [`Links`].
 pub(crate) fn cell(col: &Column, row: &Value, fmt: Option<&Fmt>, tz: &Tz, links: Option<&Links>) -> Cell {
     let name = name_of(col);
@@ -183,7 +194,7 @@ pub(crate) fn cell(col: &Column, row: &Value, fmt: Option<&Fmt>, tz: &Tz, links:
             Some(secs) => Cell::Text(tz.format(secs)),
             None => Cell::Text(String::new()),
         },
-        Column::Field { .. } => Cell::Text(text(raw)),
+        Column::Field { .. } => Cell::Text(option_label(col, &text(raw)).to_string()),
         // The backend already resolved relations to `{id, label}` — there is nothing to fetch.
         Column::Relation { cardinality: Cardinality::ToOne, .. } => {
             Cell::Text(text(raw.and_then(|r| r.get("label"))))

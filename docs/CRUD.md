@@ -218,6 +218,7 @@ pub struct MetaField {
     pub nullable:  bool,        // from the entity: does the column accept NULL? (read-only info)
     pub required:  bool,        // NOT NULL + no default + not the PK → a create must carry it
     pub options: Vec<String>,   // allowed values; introspected from an enum column, or set (options_from / by hand)
+    pub option_labels: Vec<(String, String)>, // how options are shown, (value, label); display only
     pub blank_is_null: bool,    // nullable + empty string submitted → store NULL (default true)
     pub on_write:  Option<Box<dyn Fn(Value) -> Value + ...>>,   // storage codec, inbound  (e.g. hash)
     pub on_read:   Option<Box<dyn Fn(&Value) -> Value + ...>>,  // storage codec, outbound: on_write's inverse
@@ -655,6 +656,36 @@ list, not the logical type, so it is also how you close a set that isn't an enum
 ```rust
 post.field("status").options = vec!["draft".into(), "review".into(), "published".into()];
 ```
+
+<a id="option-labels"></a>**Showing an option by a label.** The UI shows an option as stored —
+`in_progress` — unless the field says how to show it. A label is display only: it appears in the
+form's select or radios, table cells, the View dialog, filter menus and their chips, and a pinned
+set's choices. The database, the URL (`filter[state]=in_progress`), the posted form, the CSV (both
+ways) and the write check's message keep the stored value, so a label can be reworded without a
+migration.
+
+From the enum itself, with SeaORM's `DeriveDisplay` (each variant's name, or its `display_value`):
+
+```rust
+#[derive(…, DeriveActiveEnum, DeriveDisplay)]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "order_state")]
+pub enum State {
+    #[sea_orm(string_value = "new")] New,                                           // "New"
+    #[sea_orm(string_value = "in_progress", display_value = "In-Progress")] InProgress,
+    #[sea_orm(string_value = "done")] Done,                                         // "Done"
+}
+
+order.field("state").options_from_display::<State>();   // the options and their labels
+```
+
+Or by hand, on any closed set; an option left out shows as stored:
+
+```rust
+order.field("state").option_labels([("in_progress", "In-Progress")]);
+```
+
+`examples/crud` shows a post's `review` status as "In review" this way. A `Table::format_cell`
+closure still gets the stored value, and wins over the label in its column.
 
 ## Columns
 

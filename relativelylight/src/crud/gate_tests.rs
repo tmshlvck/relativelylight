@@ -66,6 +66,7 @@ impl Accessor for Stub {
         let field = |name: &str, nullable: bool| Column::Field {
             required: !nullable,
             options: Vec::new(),
+            option_labels: Vec::new(),
             name: name.into(),
             logical_type: crate::crud::LogicalType::Text,
             read_only: false,

@@ -38,6 +38,11 @@ mod pin_tests;
 #[cfg(all(test, feature = "ui"))]
 mod transform_tests;
 
+/// Option labels (`MetaField::options_from_display` / `option_labels`) over a real database: shown
+/// wherever a value is, never what is stored, posted or exported.
+#[cfg(all(test, feature = "ui"))]
+mod option_label_tests;
+
 /// "+" on a relation field (`Crud::picker_create`) over a real database: offered by the target's
 /// gates, the picker's create form refused by them, create-only, CSRF-checked, the new row reported.
 #[cfg(all(test, feature = "ui"))]

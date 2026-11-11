@@ -30,13 +30,18 @@ pub struct Model {
 ///
 /// The serde names must match the `string_value`s: the admin reads rows through `Serialize`, so a variant
 /// serialized as `"Draft"` would match none of the options.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, serde::Serialize, serde::Deserialize)]
+///
+/// `DeriveDisplay` gives each variant a display text, its name unless `display_value` says otherwise.
+/// An app that wants the UI to show those (`MetaField::options_from_display`) gets "In review"
+/// where the database, URLs and CSV keep `review`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, DeriveDisplay)]
+#[derive(serde::Serialize, serde::Deserialize)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "post_status")]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     #[sea_orm(string_value = "draft")]
     Draft,
-    #[sea_orm(string_value = "review")]
+    #[sea_orm(string_value = "review", display_value = "In review")]
     Review,
     #[sea_orm(string_value = "published")]
     Published,

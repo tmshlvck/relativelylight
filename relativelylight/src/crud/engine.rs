@@ -249,6 +249,9 @@ pub enum Column {
         /// form, `enum` in the OpenAPI schema, and a membership check on write. See
         /// [`MetaField::options`](crate::crud::seaorm::MetaField::options).
         options: Vec<String>,
+        /// How options are shown, `(value, label)`; one not listed shows as stored. Display only —
+        /// see [`MetaField::option_labels`](crate::crud::seaorm::MetaField::option_labels).
+        option_labels: Vec<(String, String)>,
         label: Option<String>,
         description: Option<String>,
         default: Option<Value>,

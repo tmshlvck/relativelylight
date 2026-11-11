@@ -177,11 +177,11 @@ async fn within(
         Column::Field { display: Some(FieldDisplay::Radio), options, .. } => {
             let value = field_value(col, row, state, tz, presets);
             let allowed: Vec<String> = options.iter().filter(|o| set.contains(o)).cloned().collect();
-            return Ok(Widget::Radio { options: choices(&allowed, &value) });
+            return Ok(Widget::Radio { options: choices(col, &allowed, &value) });
         }
         Column::Field { .. } => {
             let value = field_value(col, row, state, tz, presets);
-            choices(set, &value)
+            choices(col, set, &value)
         }
         Column::Relation { target, .. } => {
             let chosen = relation_values(name, row, state, presets);
@@ -239,7 +239,7 @@ async fn widget(
                     step: *step,
                 },
                 (Some(FieldDisplay::Radio), _) => Widget::Radio {
-                    options: choices(options, &value),
+                    options: choices(col, options, &value),
                 },
                 (Some(FieldDisplay::Email), _) => {
                     Widget::Text { value, kind: "email", placeholder: String::new() }
@@ -250,7 +250,7 @@ async fn widget(
                 // A closed set of values → a dropdown: the choices are discoverable and a typo is
                 // impossible. The blank option appears only where the column accepts one.
                 _ if !options.is_empty() => Widget::Select {
-                    options: choices(options, &value),
+                    options: choices(col, options, &value),
                     blank: *nullable || !*required,
                 },
                 (_, LogicalType::Bool) => Widget::Switch { on: value == "true" },
@@ -418,11 +418,15 @@ async fn chosen_options(
         .collect())
 }
 
-/// A closed option set, with the current value marked.
-fn choices(options: &[String], value: &str) -> Vec<Opt> {
+/// A closed option set of `col`'s, with the current value marked and each shown by its label.
+fn choices(col: &Column, options: &[String], value: &str) -> Vec<Opt> {
     options
         .iter()
-        .map(|o| Opt { value: o.clone(), label: o.clone(), selected: o == value })
+        .map(|o| Opt {
+            value: o.clone(),
+            label: super::render::option_label(col, o).to_string(),
+            selected: o == value,
+        })
         .collect()
 }
 

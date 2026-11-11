@@ -68,6 +68,11 @@ pub struct MetaField {
     ///
     /// Values are matched **exactly**; database enums are case-sensitive.
     pub options: Vec<String>,
+    /// How an option is **shown**, `(stored value, label)` — `in_progress` as "In-Progress" — in
+    /// forms, cells, the View dialog and filters. Display only: the database, URLs, CSV and the
+    /// write check keep the stored value. An option without one shows as stored. See
+    /// [`option_labels`](Self::option_labels) and [`options_from_display`](Self::options_from_display).
+    pub option_labels: Vec<(String, String)>,
     /// Whether a write must carry a value for this column. Introspected as **NOT NULL, no default
     /// declared on the entity, and not the primary key** — the three facts that make an omission a
     /// database error rather than a legitimate blank.
@@ -214,6 +219,47 @@ impl MetaField {
         E: sea_orm::ActiveEnum<Value = String>,
     {
         self.options = E::values();
+        self
+    }
+
+    /// Show these options as these labels — `("in_progress", "In-Progress")` — in forms, table
+    /// cells, the View dialog, filter menus and chips. Display only: what is stored, put in a URL,
+    /// exported and checked stays the value. Options left out show as stored. Replaces any labels
+    /// set before.
+    ///
+    /// ```ignore
+    /// order.field("state").option_labels([("new", "New"), ("in_progress", "In-Progress")]);
+    /// ```
+    pub fn option_labels<I, V, L>(&mut self, labels: I) -> &mut Self
+    where
+        I: IntoIterator<Item = (V, L)>,
+        V: Into<String>,
+        L: Into<String>,
+    {
+        self.option_labels = labels.into_iter().map(|(v, l)| (v.into(), l.into())).collect();
+        self
+    }
+
+    /// The options **and** their labels from one string-backed enum: each variant's `string_value`,
+    /// shown as its `Display`. SeaORM's `DeriveDisplay` writes that `Display`, with
+    /// `#[sea_orm(display_value = "…")]` for a variant whose name won't do:
+    ///
+    /// ```ignore
+    /// #[derive(Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum, DeriveDisplay)]
+    /// #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "order_state")]
+    /// pub enum State {
+    ///     #[sea_orm(string_value = "new")] New,                                         // "New"
+    ///     #[sea_orm(string_value = "in_progress", display_value = "In-Progress")] InProgress,
+    ///     #[sea_orm(string_value = "done")] Done,                                       // "Done"
+    /// }
+    /// order.field("state").options_from_display::<State>();
+    /// ```
+    pub fn options_from_display<E>(&mut self) -> &mut Self
+    where
+        E: sea_orm::ActiveEnum<Value = String> + std::fmt::Display,
+    {
+        self.options = E::values();
+        self.option_labels = E::iter().map(|v| (v.to_value(), v.to_string())).collect();
         self
     }
 
@@ -670,6 +716,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                 MetaField {
                     logical_type: logical_type(def.get_column_type()),
                     options: enum_variants(def.get_column_type()),
+                    option_labels: Vec::new(),
                     // NOT NULL, nothing to fall back on, and not the key the database assigns.
                     required: !def.is_null() && def.get_column_default().is_none() && !is_pk,
                     nullable: def.is_null(),
@@ -863,6 +910,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                     // flipping `read_only` after `MetaModel::new` does the right thing.
                     required: f.required && !f.read_only && !f.hidden,
                     options: f.options.clone(),
+                    option_labels: f.option_labels.clone(),
                     label: f.label.clone(),
                     description: f.description.clone(),
                     default: f.default.clone(),
@@ -2416,6 +2464,7 @@ mod tests {
             is_fk: false,
             required: true,
             options: Vec::new(),
+            option_labels: Vec::new(),
             nullable: false,
             blank_is_null: true,
             read_only: false,

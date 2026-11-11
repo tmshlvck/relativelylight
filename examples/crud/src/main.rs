@@ -112,6 +112,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("Editorial state — a closed set.".into());
     // Shown as a **radio group** rather than the default dropdown: four choices worth seeing at once.
     post_mm.field(post::Column::Status.as_str()).radio();
+    // **Shown by label, stored by value**: the enum's `Display` (`DeriveDisplay`), so `review` reads
+    // "In review" in the form, the cells, the filter and its chip — and stays `review` in the
+    // database, the URL and the CSV.
+    post_mm.field(post::Column::Status.as_str()).options_from_display::<post::Status>();
     post_mm.field(post::Column::Published.as_str()).label = Some("Published".into());
     post_mm.field(post::Column::Published.as_str()).default = Some(serde_json::json!(true));
     // An int column holding **Unix seconds** → a datetime picker in the form and a readable cell in

@@ -951,6 +951,9 @@ impl<'a> Table<'a> {
                 (Some(Column::Relation { target, .. }), false) => {
                     self.labels_of(target, &allowed).await?.join(", ")
                 }
+                (Some(col), false) => {
+                    allowed.iter().map(|v| render::option_label(col, v)).collect::<Vec<_>>().join(", ")
+                }
                 _ => allowed.join(", "),
             };
             chips.push(Chip {
@@ -1010,7 +1013,8 @@ impl<'a> Table<'a> {
             let col = cols.iter().find(|c| render::name_of(c) == name);
             let shown = match col {
                 Some(Column::Relation { target, .. }) => self.label_of(target, value).await?,
-                _ => value.clone(),
+                Some(col) => render::option_label(col, value).to_string(),
+                None => value.clone(),
             };
             chips.push(Chip {
                 label: col.map(render::label_of).unwrap_or_else(|| name.clone()),
@@ -1039,6 +1043,7 @@ impl<'a> Table<'a> {
                 (Some(Column::Relation { target, .. }), false) => {
                     self.label_of(target, &chosen).await?
                 }
+                (Some(col), false) => render::option_label(col, &chosen).to_string(),
                 _ => chosen.clone(),
             };
 
@@ -1072,9 +1077,13 @@ impl<'a> Table<'a> {
                         })
                         .collect()
                 }
-                Some(Column::Field { options, .. }) => options
+                Some(col @ Column::Field { options, .. }) => options
                     .iter()
-                    .map(|o| Opt { value: o.clone(), label: o.clone(), selected: *o == chosen })
+                    .map(|o| Opt {
+                        value: o.clone(),
+                        label: render::option_label(col, o).to_string(),
+                        selected: *o == chosen,
+                    })
                     .collect(),
                 _ => Vec::new(),
             };
