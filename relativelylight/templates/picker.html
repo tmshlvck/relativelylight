@@ -43,6 +43,7 @@
             {%- when Cell::Bool with (Some(false)) %}<span class="badge text-bg-danger">No</span>
             {%- when Cell::Bool with (None) %}<span class="text-muted">—</span>
             {%- when Cell::Badges with (labels) %}{% for l in labels %}<span class="badge text-bg-secondary">{{ l }}</span> {% endfor %}
+            {%- when Cell::Links with { links, badges } %}{% include "_links.html" %}
             {%- when Cell::Raw with (html) %}{{ html|safe }}
             {%- endmatch %}
           </td>

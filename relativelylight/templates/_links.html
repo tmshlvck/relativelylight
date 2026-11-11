@@ -1,0 +1,8 @@
+{#- A relation's labels as links to their rows (`Cell::Links`, `Crud::picker_view`). `crud::ui::JS`
+    opens `data-rl-view` in a dialog over the page; without it, or in a new tab, the link is just
+    `href`. A link with no `href` ("+3 more") is text. -#}
+{%- for l in links %}
+{%- if l.href.is_empty() %}<span class="{% if badges %}badge text-bg-secondary{% else %}text-muted{% endif %}">{{ l.label }}</span>
+{%- else %}<a class="rl-view{% if badges %} badge text-bg-secondary text-decoration-none{% endif %}" href="{{ l.href }}" data-rl-view="{{ l.view }}" data-rl-key="{{ l.key }}">{{ l.label }}</a>
+{%- endif %}{% if badges %} {% endif %}
+{%- endfor %}

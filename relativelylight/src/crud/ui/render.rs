@@ -17,7 +17,99 @@ pub(crate) enum Cell {
     Text(String),
     Bool(Option<bool>),
     Badges(Vec<String>),
+    /// A relation whose rows the caller may read ([`Links`]): each label a link to its row —
+    /// plain text for a to-one, badges for a to-many.
+    Links { links: Vec<LinkV>, badges: bool },
     Raw(String),
+}
+
+/// One linked row in a [`Cell::Links`]. `view` is the picker page that shows it in a dialog (what
+/// `crud::ui::JS` opens); `href` is where the link goes without the script: the app's own page for
+/// the target (`Crud::view_path`), else that same picker page. `key` (`target:id`) is how the
+/// script finds every link to a row whose label an edit just changed. An empty `href` is no link:
+/// the "+3 more" at the end of a cut list.
+pub(crate) struct LinkV {
+    pub label: String,
+    pub href: String,
+    pub view: String,
+    pub key: String,
+}
+
+/// Which of one entity's relations link to their rows, for one caller: those whose target they may
+/// read, when `Crud::picker_view` is on. Resolved once per render, so a page of rows asks each
+/// target's gate once, not once per row.
+#[derive(Default)]
+pub(crate) struct Links {
+    /// `(relation, target, "<picker>?pick=<slug>.<relation>&show=")`.
+    linked: Vec<(String, String, String)>,
+    /// `(target, its view_path)` for the targets above that have one.
+    pages: Vec<(String, String)>,
+}
+
+impl Links {
+    pub(crate) async fn resolve(
+        engine: &crate::crud::engine::Engine,
+        slug: &str,
+        cols: &[Column],
+        headers: &http::HeaderMap,
+    ) -> Links {
+        let mut out = Links::default();
+        let Some(path) = engine.picker_view_path() else { return out };
+        let mut readable: Vec<(String, bool)> = Vec::new();
+        for col in cols {
+            let Column::Relation { name, target, .. } = col else { continue };
+            let ok = match readable.iter().find(|(t, _)| t == target) {
+                Some((_, ok)) => *ok,
+                None => {
+                    let ok = engine.permits(target, crate::authz::Operation::Read, headers).await;
+                    readable.push((target.clone(), ok));
+                    ok
+                }
+            };
+            if !ok {
+                continue;
+            }
+            let pick = format!("{slug}.{name}");
+            let base = format!("{path}?{}&show=", crate::urlform::query(&[("pick".into(), pick)]));
+            out.linked.push((name.clone(), target.clone(), base));
+            if let Some(page) = engine.view_path(target) {
+                out.pages.push((target.clone(), page.to_string()));
+            }
+        }
+        out
+    }
+
+    /// `col`'s cell as links, or `None` when it doesn't link (not a relation, or not readable).
+    fn cell(&self, col: &Column, raw: Option<&Value>) -> Option<Cell> {
+        let Column::Relation { name, cardinality, .. } = col else { return None };
+        let (_, target, base) = self.linked.iter().find(|(n, _, _)| n == name)?;
+        let page = self.pages.iter().find(|(t, _)| t == target).map(|(_, p)| p.as_str());
+        let link = |item: &Value| -> LinkV {
+            if let Some(n) = item.get("more").and_then(Value::as_u64) {
+                let label = format!("+{n} more");
+                return LinkV { label, href: String::new(), view: String::new(), key: String::new() };
+            }
+            let id = text(item.get("id"));
+            let encoded = crate::urlform::encode(&id).replace('+', "%20");
+            let view = format!("{base}{encoded}");
+            LinkV {
+                label: text(item.get("label")),
+                href: page.map(|p| p.replace("{id}", &encoded)).unwrap_or_else(|| view.clone()),
+                key: format!("{target}:{id}"),
+                view,
+            }
+        };
+        Some(match cardinality {
+            Cardinality::ToOne => Cell::Links {
+                links: raw.filter(|v| !v.is_null()).map(|v| vec![link(v)]).unwrap_or_default(),
+                badges: false,
+            },
+            Cardinality::ToMany => Cell::Links {
+                links: raw.and_then(Value::as_array).map(|a| a.iter().map(link).collect()).unwrap_or_default(),
+                badges: true,
+            },
+        })
+    }
 }
 
 pub(crate) struct RowV {
@@ -67,12 +159,15 @@ pub(crate) struct Pager {
 
 pub(crate) use crate::crud::text::text;
 
-/// One cell of one row.
-pub(crate) fn cell(col: &Column, row: &Value, fmt: Option<&Fmt>, tz: &Tz) -> Cell {
+/// One cell of one row. A `format` closure wins over everything; then a relation's [`Links`].
+pub(crate) fn cell(col: &Column, row: &Value, fmt: Option<&Fmt>, tz: &Tz, links: Option<&Links>) -> Cell {
     let name = name_of(col);
     let raw = row.get(name);
     if let Some(f) = fmt {
         return Cell::Raw(f(raw.unwrap_or(&Value::Null), row));
+    }
+    if let Some(cell) = links.and_then(|l| l.cell(col, raw)) {
+        return cell;
     }
     match col {
         Column::Field { logical_type: LogicalType::Bool, .. } => {
@@ -126,6 +221,7 @@ pub(crate) fn sortable(col: &Column) -> bool {
 }
 
 /// Every row of the page, with its edit link — and its View link from `show`, if it has one.
+#[allow(clippy::too_many_arguments)] // one page's context, passed straight through
 pub(crate) fn rows(
     page: &Page,
     cols: &[Column],
@@ -134,6 +230,7 @@ pub(crate) fn rows(
     state: &ViewState,
     tz: &Tz,
     show: Option<&dyn Fn(&str) -> String>,
+    links: Option<&Links>,
 ) -> Vec<RowV> {
     page.data
         .iter()
@@ -148,7 +245,7 @@ pub(crate) fn rows(
                     .iter()
                     .map(|c| {
                         let fmt = fmts.iter().find(|(n, _)| n == name_of(c)).map(|(_, f)| f);
-                        cell(c, &row, fmt, tz)
+                        cell(c, &row, fmt, tz, links)
                     })
                     .collect(),
                 label: item.label.clone(),

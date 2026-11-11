@@ -745,7 +745,8 @@ Feature `ui`. One implementation behind every component:
 - [`Admin`](#admin--a-whole-admin-in-one-component) — a side panel over many `Table`s.
 - [`Picker`](#picker--choosing-from-a-large-relation) — the page inside the dialog that edits a
   relation too large for a `<select>`, and that [creates the missing row](#creating-the-missing-row)
-  behind a relation field's "+ New".
+  behind a relation field's "+ New", and that [shows the linked row](#viewing-the-linked-row) behind a
+  relation's label.
 - [`RelationField`](#relationfield--the-relation-input-in-a-form-of-your-own) — one relation's input
   (a `<select>`, or the picker past the threshold) for a `<form>` you write yourself.
 
@@ -1280,6 +1281,52 @@ that doesn't exist is a render-time error naming it.
 `examples/crud` turns it on: a profile's user (a `<select>`), and a post's author and tags and a
 tag's posts (in the picker). `examples/adminpanel` does too, gated: the admin gets "+ New", the
 read-only editor doesn't, and `user`, read-only in that panel, is excepted.
+
+### Viewing the linked row
+
+With **`picker_view`**, a relation's label is a link to the row it names: in a table's cells, in
+its View dialog, and in the rows those open. Click a post's author and the author opens in a dialog
+over the table, with an **Edit** button if you may update authors. Save, and every link to that
+author on the page shows the new name. Close, and you are where you were: same page, same sort,
+nothing reloaded.
+
+```rust
+crud.picker_path("/pick");
+crud.picker_view(true);                              // relation labels link to their rows
+crud.view_path("author", "/admin/author?show={id}"); // optional: the link's href without the script
+// …
+.route("/pick", get(pick).post(pick_write))          // the same two handlers as "+ New"
+```
+
+How it works, on the picker route again:
+
+1. The link opens `/pick?pick=post.author&show=3` in a dialog: author 3, read-only, the same
+   fields the target's View dialog shows. Its own relations are links too, so you can go on from
+   the author to one of their posts. Like "+ New", dialogs stop at **four** deep; past that a link
+   is plain text.
+2. **Edit** is `&edit=3`, the target's form for that row, posting back to the same URL; a refused
+   save comes back with its messages. A saved one lands on `&show=3&saved=1`, whose page carries
+   the row's new label for the script to update the links underneath.
+3. Without the script, or with a click that opens a new tab, the link is an ordinary link to its
+   `href`: the target's `view_path` when you set one (your page for that row), else the dialog's
+   page itself.
+
+**What it refuses.**
+
+- A link is drawn only when the caller may **read** the target, by its own gate; otherwise the
+  label is text, as before. The page answers `401`/`403` the same way.
+- **Edit** is offered only to who may **update** the target, and the form and its `POST` are
+  refused otherwise.
+- The edit form only ever updates **the row its URL names**: a posted create, delete, or `_id` of
+  another row is refused. CSRF is checked as on every write.
+- `?show=` and `?edit=` on the picker answer `400` while `picker_view` is off.
+- No delete in the dialog: deleting a row from a link to it is too easy to do by accident.
+
+Links are not drawn in forms, where a click means choosing, nor in the picker's list. A cell with a
+`format_cell` closure is the closure's: it gets no link.
+
+Both examples turn it on: in `examples/adminpanel` the editor (read-only) can open a post's author
+but gets no Edit, and the admin can edit it in place.
 
 ### `RelationField` — the relation input in a form of your own
 

@@ -190,6 +190,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `<select>`, or in the picker's dialog for a large relation. The `/pick` route answers `POST`
     // for it (`pick_write` below).
     crud.picker_create(true);
+    // And each relation's label is a link: a post's author opens that author in a dialog over the
+    // table, with Edit, and closing it is back where you were. Without the script (or in a new
+    // tab) the link goes to the entity's own page here.
+    crud.picker_view(true);
+    for slug in ["author", "tag", "user", "profile", "event"] {
+        crud.view_path(slug, format!("/{slug}?show={{id}}"));
+    }
+    crud.view_path("post", "/post/{id}");
 
     let engine = Arc::new(crud.into_engine());
     let entities = engine.tables();

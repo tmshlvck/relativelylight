@@ -119,6 +119,14 @@ struct DialogTmpl {
 }
 
 /// One labelled value in the detail view.
+/// How a row's read-only view is shown.
+enum Detail {
+    /// The table's View dialog: its Close and Edit links.
+    Dialog { close: String, edit: String },
+    /// Inside a [`Picker`](super::Picker) dialog: Edit (or empty), and whether an edit just saved.
+    Linked { edit: String, saved: bool },
+}
+
 struct DetailV {
     label: String,
     value: Cell,
@@ -128,6 +136,10 @@ struct DetailV {
 #[template(path = "detail.html")]
 struct DetailTmpl {
     title: String,
+    /// In the table's own `<dialog>` (`?show=`), or bare for the picker's dialog, which has its own.
+    framed: bool,
+    /// `(target:id, label)` after an edit saved, for the script to update the links underneath.
+    saved: Option<(String, String)>,
     cancel_href: String,
     /// Empty when this caller may not write, so a reader is offered no button they'd be refused.
     edit_href: String,
@@ -633,12 +645,15 @@ impl<'a> Table<'a> {
         let per_page_options = self.per_page_options(&state);
         let (controls, ranges, chips) = self.filter_views(&cols, &state, &tz).await?;
         let pins = self.pins(&cols)?;
+        let links = render::Links::resolve(self.engine, &self.slug, &cols, headers).await;
 
         let dialog = match state.mode() {
             // A read-only row is a *read*: a caller who may not write still gets it.
             Mode::Show(id) if self.detail_dialog_on() => {
                 self.in_view(&pins, id).await?;
-                self.detail_dialog(&cols, id, &state, &tz, can.edit).await?
+                let edit = if can.edit { state.href_edit(id) } else { String::new() };
+                let how = Detail::Dialog { close: state.href_list(), edit };
+                self.detail_view(&cols, id, &tz, &links, how).await?
             }
             Mode::New if can.create => {
                 self.dialog(&cols, &pins, state.mode(), &state, headers, &csrf).await?
@@ -676,6 +691,7 @@ impl<'a> Table<'a> {
                 &state,
                 &tz,
                 Some(&|id: &str| self.show_href(&state, id)),
+                Some(&links),
             ),
             detail: self.detail,
             pager: if self.pagination {
@@ -720,7 +736,17 @@ impl<'a> Table<'a> {
             q: state.q.clone(),
             keep: self.keep(&state),
             heads: render::heads(&shown, &state),
-            rows: render::rows(&page, &shown, &self.formatters_for(Scope::Cell), None, &state, &tz, None),
+            // No links here: a click in the picker's list chooses a row, it doesn't open one.
+            rows: render::rows(
+                &page,
+                &shown,
+                &self.formatters_for(Scope::Cell),
+                None,
+                &state,
+                &tz,
+                None,
+                None,
+            ),
             pager: render::pager(&page, &state),
         }
         .render()
@@ -1151,14 +1177,31 @@ impl<'a> Table<'a> {
         .map_err(render_err)
     }
 
+    /// One row, read-only, as a [`Picker`](super::Picker) shows a linked row: the same fields as
+    /// this table's View dialog, with relation links, and Edit at `edit` (empty: none). `saved`
+    /// reports the edit that redirected here, as data the dialog's script reads. Read is the
+    /// caller's to authorize.
+    pub(super) async fn render_linked(
+        &self,
+        headers: &HeaderMap,
+        id: &str,
+        edit: String,
+        saved: bool,
+    ) -> Result<String> {
+        let cols = self.engine.columns(&self.slug)?;
+        let tz = Tz::from_headers(headers);
+        let links = render::Links::resolve(self.engine, &self.slug, &cols, headers).await;
+        self.detail_view(&cols, id, &tz, &links, Detail::Linked { edit, saved }).await
+    }
+
     /// One row, read-only: every published column, rendered by the same code as the table's cells.
-    async fn detail_dialog(
+    async fn detail_view(
         &self,
         cols: &[Column],
         id: &str,
-        state: &ViewState,
         tz: &Tz,
-        edit: bool,
+        links: &render::Links,
+        how: Detail,
     ) -> Result<String> {
         // `render_for` has already authorized `Read` for this caller (every non-list mode does),
         // with their real headers — there is nothing left to check here.
@@ -1176,13 +1219,27 @@ impl<'a> Table<'a> {
                     &row,
                     fmts.iter().find(|(n, _)| n == render::name_of(c)).map(|(_, f)| f),
                     tz,
+                    Some(links),
                 ),
             })
             .collect();
+        let (framed, cancel_href, edit_href, saved) = match how {
+            Detail::Dialog { close, edit } => (true, close, edit, None),
+            Detail::Linked { edit, saved: false } => (false, String::new(), edit, None),
+            Detail::Linked { edit, saved: true } => {
+                // The label as every relation shows it, so the links underneath read the same.
+                let ids = [id.to_string()];
+                let found = widgets::chosen_options(self.engine, &self.slug, &ids, None, true).await?;
+                let label = found.into_iter().next().map(|o| o.label).unwrap_or_else(|| id.to_string());
+                (false, String::new(), edit, Some((format!("{}:{id}", self.slug), label)))
+            }
+        };
         DetailTmpl {
             title: format!("{} #{id}", self.title.clone().unwrap_or_else(|| self.slug.clone())),
-            cancel_href: state.href_list(),
-            edit_href: if edit { state.href_edit(id) } else { String::new() },
+            framed,
+            cancel_href,
+            edit_href,
+            saved,
             fields,
         }
         .render()

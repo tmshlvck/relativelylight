@@ -515,6 +515,13 @@ pub struct Engine {
     /// Targets "+ New" never creates, whatever their gates allow.
     #[cfg(feature = "ui")]
     picker_create_except: Vec<String>,
+    /// Whether a relation's label links to the linked row, viewed (and edited) in a dialog.
+    #[cfg(feature = "ui")]
+    picker_view: bool,
+    /// Where each entity's rows are viewed as a page, `(slug, "/author?show={id}")` — the link's
+    /// `href`, followed without the script.
+    #[cfg(feature = "ui")]
+    view_paths: Vec<(String, String)>,
 }
 
 impl Engine {
@@ -533,6 +540,10 @@ impl Engine {
             picker_create: false,
             #[cfg(feature = "ui")]
             picker_create_except: Vec::new(),
+            #[cfg(feature = "ui")]
+            picker_view: false,
+            #[cfg(feature = "ui")]
+            view_paths: Vec::new(),
         }
     }
 
@@ -561,6 +572,33 @@ impl Engine {
     #[cfg(feature = "ui")]
     pub fn set_picker_create_except(&mut self, targets: Vec<String>) {
         self.picker_create_except = targets;
+    }
+
+    /// Link each relation's label to the linked row, opened in a dialog over the page. Usually set
+    /// via `Crud::picker_view`.
+    #[cfg(feature = "ui")]
+    pub fn set_picker_view(&mut self, on: bool) {
+        self.picker_view = on;
+    }
+
+    /// The page where `slug`'s rows are viewed, `{id}` standing for the row's id. Usually set via
+    /// `Crud::view_path`.
+    #[cfg(feature = "ui")]
+    pub fn set_view_path(&mut self, slug: impl Into<String>, template: impl Into<String>) {
+        let slug = slug.into();
+        self.view_paths.retain(|(s, _)| *s != slug);
+        self.view_paths.push((slug, template.into()));
+    }
+
+    /// The picker path, when relation links are on.
+    #[cfg(feature = "ui")]
+    pub(crate) fn picker_view_path(&self) -> Option<&str> {
+        self.picker_path().filter(|_| self.picker_view)
+    }
+
+    #[cfg(feature = "ui")]
+    pub(crate) fn view_path(&self, slug: &str) -> Option<&str> {
+        self.view_paths.iter().find(|(s, _)| s == slug).map(|(_, t)| t.as_str())
     }
 
     /// The path "+ New" opens for a new row of `target`: `None` when it is off, without a picker

@@ -53,6 +53,14 @@ is easy to miss in a diff.
   target; the form only ever creates, and is gated and CSRF-checked like every write. The picker
   route answers `POST` too, with the new `Picker::submit`; `Picker::create_fields` narrows the form
   per target, and `Crud::picker_create_except` keeps targets out of it. Off by default ([CRUD.md → Creating the missing row](docs/CRUD.md#creating-the-missing-row)).
+- **Relation labels link to their rows** (`Crud::picker_view(true)`). In a table's cells and View
+  dialog, a post's author opens that author in a dialog over the page, with Edit for whoever may
+  update it. A saved edit renames every link to the row on the page, and closing the dialog
+  returns to exactly where you were. The link is drawn only for who may read the target; the edit
+  updates only the row its URL names, gated and CSRF-checked. `Crud::view_path(slug, template)`
+  gives the link's `href` for a new tab or no script. Same picker route, `?show=` and `?edit=`
+  ([CRUD.md → Viewing the linked row](docs/CRUD.md#viewing-the-linked-row)).
+- `examples/crud` and `examples/adminpanel`: relation labels link to their rows.
 - `examples/crud`: "+ New" for a profile's user, a post's author and tags, and a tag's posts.
   `examples/adminpanel`: the same, for the admin only, with `user` excepted.
 - `examples/crud`: a date range on `/event`, a views range on `/post`, initial values on

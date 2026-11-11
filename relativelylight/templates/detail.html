@@ -1,14 +1,23 @@
-{#- One row, read-only (`?show=7`): every published column, including the ones a form never shows —
+{#- One row, read-only (`?show=7`, or bare inside a picker's dialog for a linked row): every published column, including the ones a form never shows —
     a generated id, a hook-stamped `created_at`, a column the listing leaves out. The
     values come from the same renderer as the table's cells, so a datetime is in the caller's zone,
     a relation shows its label, a bool shows its badge, and a `Table::format` closure applies. -#}
+{%- if framed %}
 <dialog open class="rl-dialog">
+{%- endif %}
   <div class="card">
+    {%- if framed %}
     <div class="card-header d-flex justify-content-between align-items-center">
       <h5 class="mb-0">{{ title }}</h5>
       <a class="btn-close" href="{{ cancel_href }}" aria-label="Close"></a>
     </div>
+    {%- endif %}
     <div class="card-body">
+      {%- match saved %}
+      {%- when Some with ((key, label)) %}
+      <div class="alert alert-success rl-saved" data-rl-key="{{ key }}" data-label="{{ label }}">Saved.</div>
+      {%- when None %}
+      {%- endmatch %}
       <dl class="row mb-0">
         {%- for f in fields %}
         <dt class="col-sm-4 text-body-secondary fw-normal">{{ f.label }}</dt>
@@ -19,15 +28,20 @@
           {%- when Cell::Bool with (Some(false)) %}<span class="badge text-bg-danger">No</span>
           {%- when Cell::Bool with (None) %}<span class="text-body-tertiary">—</span>
           {%- when Cell::Badges with (labels) %}{% for l in labels %}<span class="badge text-bg-secondary">{{ l }}</span> {% endfor %}
+          {%- when Cell::Links with { links, badges } %}{% include "_links.html" %}
           {%- when Cell::Raw with (html) %}{{ html|safe }}
           {%- endmatch -%}
         </dd>
         {%- endfor %}
       </dl>
     </div>
+    {%- if framed || !edit_href.is_empty() %}
     <div class="card-footer text-end">
       {%- if !edit_href.is_empty() %}<a class="btn btn-primary" href="{{ edit_href }}">Edit</a>{% endif %}
-      <a class="btn btn-secondary" href="{{ cancel_href }}">Close</a>
+      {%- if framed %}<a class="btn btn-secondary" href="{{ cancel_href }}">Close</a>{% endif %}
     </div>
+    {%- endif %}
   </div>
+{%- if framed %}
 </dialog>
+{%- endif %}

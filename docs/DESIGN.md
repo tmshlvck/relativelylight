@@ -63,6 +63,11 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
   an abandoned outer form leaves it unlinked. "+" follows the foreign key, so it never creates child
   rows (the other side of a 1:N); those are the app's own pages, as inline child rows were
   decided against. The nesting cap (four forms) is the script's; each level is gated on its own.
+- **A linked row opens over the page, not instead of it.** `picker_view` reuses the dialog stack:
+  the row and its edit form are pages of the picker route, reached through a relation
+  (`?pick=post.author&show=3`), so a link can't name an unrelated table, and each is gated on the
+  target as the target's own table would be. After an edit the script renames the links in place
+  rather than reloading, since a reload would lose a form being filled in underneath.
 - **Display and storage are separate.** `format_cell`/`format_view` are display only; `on_read` /
   `on_write` are an inverse codec on the column's own type.
 

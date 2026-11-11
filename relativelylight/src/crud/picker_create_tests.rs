@@ -1,8 +1,12 @@
-//! "+" on a relation field (`Crud::picker_create`) over a real database: the button is offered only
+//! The picker's two ways past choosing, over a real database. **"+ New"** on a relation field
+//! (`Crud::picker_create`): the button is offered only
 //! when switched on and when the caller may create **and** list the target; the picker's create form
 //! is the target's own, refused by the same gates, only ever creates, and checks CSRF; a save lands
 //! on a page that reports the new row's id and label; and the form inside the dialog has its own
-//! "+", which is how the dialogs nest. Each refusal has a control that passes.
+//! "+", which is how the dialogs nest. **Relation links** (`Crud::picker_view`): a relation's label
+//! links to the row when the caller may read it; the row's page shows it with Edit only for who may
+//! update it; the edit updates exactly the row the URL names and reports its new label. Each
+//! refusal has a control that passes.
 //!
 //! The fixture is CLIMB's shape: a `workorder` points at an `airline`, which points at its `hq`
 //! `address`. Creating a work order for an airline that doesn't exist yet means creating the
@@ -98,6 +102,10 @@ enum Gate {
     NoCreate,
     /// Creating and editing, but no listing: "+" would make a row whose label they may not read.
     WriteOnly,
+    /// Listing but not reading one row: no link to open.
+    NoRead,
+    /// Reading but not updating: the row's page, without Edit.
+    NoUpdate,
 }
 
 #[async_trait]
@@ -106,6 +114,8 @@ impl Authz for Gate {
         match (self, op) {
             (Gate::NoCreate, Operation::Create) => Decision::Denied,
             (Gate::WriteOnly, Operation::List | Operation::Read) => Decision::Denied,
+            (Gate::NoRead, Operation::Read) => Decision::Denied,
+            (Gate::NoUpdate, Operation::Update) => Decision::Denied,
             _ => Decision::Allow,
         }
     }
@@ -114,6 +124,8 @@ impl Authz for Gate {
 struct Setup {
     on: bool,
     except: Vec<&'static str>,
+    view: bool,
+    view_path: Option<&'static str>,
     airline_gate: Gate,
     #[cfg(feature = "csrf")]
     csrf: Option<crate::csrf::Csrf>,
@@ -124,6 +136,8 @@ impl Default for Setup {
         Self {
             on: true,
             except: Vec::new(),
+            view: false,
+            view_path: None,
             airline_gate: Gate::Open,
             #[cfg(feature = "csrf")]
             csrf: None,
@@ -141,6 +155,7 @@ async fn fixture(setup: Setup) -> (Engine, DatabaseConnection) {
            airline_id INTEGER NOT NULL REFERENCES airline(id))",
         "INSERT INTO address (id, street) VALUES (1, 'Amsterdamseweg 55')",
         "INSERT INTO airline (id, name, code, hq_id) VALUES (1, 'KLM', 'KL', 1)",
+        "INSERT INTO workorder (id, title, airline_id) VALUES (1, 'Engine check', 1)",
     ] {
         db.execute_unprepared(stmt).await.unwrap();
     }
@@ -148,6 +163,10 @@ async fn fixture(setup: Setup) -> (Engine, DatabaseConnection) {
     crud.picker_path("/pick");
     crud.picker_create(setup.on);
     crud.picker_create_except(setup.except);
+    crud.picker_view(setup.view);
+    if let Some(path) = setup.view_path {
+        crud.view_path("airline", path);
+    }
     #[cfg(feature = "csrf")]
     if let Some(csrf) = setup.csrf {
         crud.csrf(csrf);
@@ -401,4 +420,150 @@ async fn an_excepted_target_gets_no_plus_whatever_its_gate_allows() {
     // Control: the airline form's own relation, to an address, still has its "+ New".
     let airline = Form::new(&e, "airline").render_for(&h(), &ViewState::default()).await.unwrap();
     assert!(airline.contains(r#"data-rl-src="/pick?pick=airline.hq&#38;new=1""#), "{airline}");
+}
+
+// ---- relation links: viewing (and editing) the linked row ----
+
+fn viewing() -> Setup {
+    Setup { view: true, ..Default::default() }
+}
+
+const KLM_LINK: &str = concat!(
+    r#"<a class="rl-view" href="/pick?pick=workorder.airline&#38;show=1" "#,
+    r#"data-rl-view="/pick?pick=workorder.airline&#38;show=1" data-rl-key="airline:1">KLM</a>"#
+);
+
+async fn workorders(e: &Engine, query: &str) -> String {
+    Table::new(e, "workorder").render_for(&h(), &q(query)).await.expect("renders")
+}
+
+#[tokio::test]
+async fn a_relation_links_to_its_row_only_when_switched_on() {
+    let (off, _db) = fixture(Setup::default()).await;
+    let html = workorders(&off, "").await;
+    assert!(html.contains("KLM") && !html.contains("rl-view"), "off by default: {html}");
+    for query in ["pick=workorder.airline&show=1", "pick=workorder.airline&edit=1"] {
+        let r = Picker::new(&off).render_for(&h(), &q(query)).await;
+        assert!(matches!(r, Err(Error::BadRequest(_))), "{query} is not served when off: {r:?}");
+    }
+
+    let (on, _db) = fixture(viewing()).await;
+    assert!(workorders(&on, "").await.contains(KLM_LINK), "control: on, the cell links");
+    assert!(workorders(&on, "show=1").await.contains(KLM_LINK), "and so does the View dialog");
+    // In the picker's list a click chooses a row; it doesn't open one.
+    let pick = Picker::new(&on).render_for(&h(), &q("pick=airline.hq")).await.unwrap();
+    assert!(!pick.contains("rl-view"), "{pick}");
+}
+
+#[tokio::test]
+async fn without_the_script_a_link_goes_to_the_apps_own_page_for_the_target() {
+    let (e, _db) = fixture(Setup { view_path: Some("/airlines?show={id}"), ..viewing() }).await;
+    let html = workorders(&e, "").await;
+    assert!(
+        html.contains(r#"href="/airlines?show=1" data-rl-view="/pick?pick=workorder.airline&#38;show=1""#),
+        "{html}"
+    );
+}
+
+#[tokio::test]
+async fn a_link_follows_the_targets_read_gate_and_edit_its_update_gate() {
+    let (e, db) = fixture(Setup { airline_gate: Gate::NoRead, ..viewing() }).await;
+    let html = workorders(&e, "").await;
+    assert!(html.contains("KLM") && !html.contains("rl-view"), "may not read: text: {html}");
+    let r = Picker::new(&e).render_for(&h(), &q("pick=workorder.airline&show=1")).await;
+    assert!(matches!(r, Err(Error::Forbidden)), "{r:?}");
+
+    let (e, _) = fixture(Setup { airline_gate: Gate::NoUpdate, ..viewing() }).await;
+    let page = Picker::new(&e).render_for(&h(), &q("pick=workorder.airline&show=1")).await.unwrap();
+    assert!(page.contains("KLM") && !page.contains(">Edit<"), "may read, not update: no Edit: {page}");
+    let state = q("pick=workorder.airline&edit=1");
+    let r = Picker::new(&e).render_for(&h(), &state).await;
+    assert!(matches!(r, Err(Error::Forbidden)), "the form is refused: {r:?}");
+    let r = Picker::new(&e).submit(&h(), IP, b"_op=update&_id=1&name=Renamed&hq=1", &state).await;
+    assert!(matches!(r, Err(Error::Forbidden)), "and the write: {r:?}");
+    assert_eq!(airlines(&db).await, ["KLM"]);
+}
+
+#[tokio::test]
+async fn the_rows_page_has_edit_and_links_of_its_own() {
+    let (e, _db) = fixture(viewing()).await;
+    let page = Picker::new(&e).render_for(&h(), &q("pick=workorder.airline&show=1")).await.unwrap();
+    assert!(!page.contains("<dialog"), "bare: the picker's dialog is the frame: {page}");
+    assert!(page.contains(r#"href="?pick=workorder.airline&#38;edit=1">Edit<"#), "{page}");
+    assert!(page.contains(r#"data-rl-view="/pick?pick=airline.hq&#38;show=1""#), "its HQ links on: {page}");
+    let form = Picker::new(&e).render_for(&h(), &q("pick=workorder.airline&edit=1")).await.unwrap();
+    assert!(form.contains(r#"value="KLM""#) && form.contains(r#"name="_id" value="1""#), "{form}");
+    assert!(form.contains(r#"href="?pick=workorder.airline&#38;show=1">Cancel<"#), "back to the row: {form}");
+}
+
+#[tokio::test]
+async fn an_edit_saves_that_row_and_reports_its_new_label() {
+    let (e, db) = fixture(viewing()).await;
+    let state = q("pick=workorder.airline&edit=1");
+    let outcome =
+        Picker::new(&e).submit(&h(), IP, b"_op=update&_id=1&name=KLM+Royal&hq=1", &state).await.unwrap();
+    let Outcome::Done(to) = outcome else { panic!("saved: {outcome:?}") };
+    assert_eq!(to, "?pick=workorder.airline&show=1&saved=1");
+    assert_eq!(airlines(&db).await, ["KLM Royal"]);
+    let page = Picker::new(&e).render_for(&h(), &q(&to)).await.unwrap();
+    assert!(
+        page.contains(
+            r#"class="alert alert-success rl-saved" data-rl-key="airline:1" data-label="KLM Royal""#
+        ),
+        "{page}"
+    );
+    // Control: a plain view reports nothing.
+    let page = Picker::new(&e).render_for(&h(), &q("pick=workorder.airline&show=1")).await.unwrap();
+    assert!(!page.contains("rl-saved"), "{page}");
+}
+
+#[tokio::test]
+async fn the_edit_form_updates_only_the_row_its_url_names() {
+    let (e, db) = fixture(viewing()).await;
+    db.execute_unprepared("INSERT INTO airline (id, name, code, hq_id) VALUES (2, 'Delta', 'DL', 1)")
+        .await
+        .unwrap();
+    let state = q("pick=workorder.airline&edit=1");
+    for body in ["_op=update&_id=2&name=Hijacked&hq=1", "_op=create&name=Sneaky&hq=1", "_op=delete&_id=1"] {
+        let r = Picker::new(&e).submit(&h(), IP, body.as_bytes(), &state).await;
+        assert!(r.is_err(), "{body}: {r:?}");
+    }
+    assert_eq!(airlines(&db).await, ["KLM", "Delta"], "nothing written");
+    // A rejected edit comes back as the form, with its messages.
+    let outcome = Picker::new(&e).submit(&h(), IP, b"_op=update&_id=1&name=&hq=1", &state).await.unwrap();
+    let Outcome::Invalid(again) = outcome else { panic!("refused: {outcome:?}") };
+    let html = Picker::new(&e).render_for(&h(), &again).await.unwrap();
+    assert!(html.contains("is-invalid"), "{html}");
+}
+
+#[tokio::test]
+async fn a_links_label_is_escaped_and_so_is_the_saved_report() {
+    let (e, _db) = fixture(viewing()).await;
+    let state = q("pick=workorder.airline&edit=1");
+    let body = b"_op=update&_id=1&name=%3Cscript%3Ex%3C%2Fscript%3E&hq=1";
+    let Outcome::Done(to) = Picker::new(&e).submit(&h(), IP, body, &state).await.unwrap() else {
+        panic!("saved")
+    };
+    let page = Picker::new(&e).render_for(&h(), &q(&to)).await.unwrap();
+    let table = workorders(&e, "").await;
+    for html in [page, table] {
+        assert!(!html.contains("<script>x") && html.contains("&#60;script&#62;x"), "{html}");
+    }
+}
+
+#[cfg(feature = "csrf")]
+#[tokio::test]
+async fn an_edit_checks_csrf_like_every_write() {
+    let csrf = crate::csrf::Csrf::new().secure(false);
+    let jar = format!("{}={}", csrf.cookie(), "c".repeat(64));
+    let (e, db) = fixture(Setup { csrf: Some(csrf), ..viewing() }).await;
+    let mut headers = HeaderMap::new();
+    headers.insert(http::header::COOKIE, jar.parse().unwrap());
+    let state = q("pick=workorder.airline&edit=1");
+    let r = Picker::new(&e).submit(&headers, IP, b"_op=update&_id=1&name=Nope&hq=1", &state).await;
+    assert!(matches!(r, Err(Error::Csrf)), "{r:?}");
+    let body = format!("_op=update&_id=1&name=Yes&hq=1&_csrf={}", "c".repeat(64));
+    let r = Picker::new(&e).submit(&headers, IP, body.as_bytes(), &state).await;
+    assert!(matches!(r, Ok(Outcome::Done(_))), "control: with the token: {r:?}");
+    assert_eq!(airlines(&db).await, ["Yes"]);
 }

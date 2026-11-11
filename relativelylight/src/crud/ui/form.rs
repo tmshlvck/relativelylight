@@ -67,6 +67,8 @@ pub struct Form<'a> {
     /// Only ever creates: a posted `_op=update` is refused. The picker's create form, whose page is
     /// reachable by anyone allowed to create the target, must not become a way to edit its rows.
     only_create: bool,
+    /// Only ever updates: the picker's edit form for a linked row, which must not create.
+    only_update: bool,
 }
 
 impl<'a> Form<'a> {
@@ -89,6 +91,7 @@ impl<'a> Form<'a> {
             picker_threshold: 50,
             initial: Vec::new(),
             only_create: false,
+            only_update: false,
         }
     }
 
@@ -184,6 +187,10 @@ impl<'a> Form<'a> {
         self.only_create = true;
         self
     }
+    pub(crate) fn only_update(mut self) -> Self {
+        self.only_update = true;
+        self
+    }
     /// Namespaces the fragment's DOM id, so two forms for the same entity can share a page.
     pub fn dom_id(mut self, id: impl Into<String>) -> Self {
         self.dom_id = Some(id.into());
@@ -268,7 +275,7 @@ impl<'a> Form<'a> {
             // A form saves one row. Its query is the whole table, so a posted delete-all or import
             // must not get this far.
             writes: Writes {
-                create: true,
+                create: !self.only_update,
                 update: !self.only_create,
                 delete: false,
                 bulk_delete: false,

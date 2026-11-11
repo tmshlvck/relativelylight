@@ -17,10 +17,16 @@
      then writes back as usual — and closes the dialog. The form underneath was never reloaded, so
      what was typed in it is still there.
 
-   Dialogs stack: a create form's own relations have their 🔍 and "+", and each opens a new dialog
-   over the last. Only the top window runs this; it wires up each iframe's page when it loads (that
-   page needs no script of its own). Create forms stop at MAX_FORMS deep: the deepest one's "+"
-   stays hidden. (No closing script tag anywhere in this file, comments included: an app inlines
+   - **view** (a relation's label, `a.rl-view`, with Crud::picker_view): the iframe is the linked
+     row, read-only, with Edit when the caller may update it. A saved edit's page carries
+     `.rl-saved` with the row's key and new label; this script updates every link to that row,
+     in the page and in the dialogs under it. Close returns to exactly where the operator was. A
+     click with a modifier (a new tab) follows the link's own `href` instead.
+
+   Dialogs stack: a create form's own relations have their 🔍 and "+", a viewed row's relations
+   are links, and each opens a new dialog over the last. Only the top window runs this; it wires
+   up each iframe's page when it loads (that page needs no script of its own). Create forms and
+   viewed rows stop at MAX_DEPTH deep: the deepest one's "+" stays hidden and its links are text. (No closing script tag anywhere in this file, comments included: an app inlines
    it.) */
 (() => {
   // A copy of this script inside one of our own iframes (an app whose bare shell includes it)
@@ -30,7 +36,7 @@
   } catch (e) { /* a cross-origin parent: we are the top */ }
   window.__rlPicker = true;
 
-  const MAX_FORMS = 4;
+  const MAX_DEPTH = 4;
   const stack = []; // the open dialogs, bottom first
 
   const el = (tag, cls, text, doc = document) => {
@@ -96,24 +102,46 @@
     into.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  function forms() {
-    return stack.filter((l) => l.kind === 'new').length;
+  // How many create forms and viewed rows are open (a pick dialog opens no further levels).
+  function depth() {
+    return stack.filter((l) => l.kind !== 'pick').length;
   }
 
-  // Each page of a dialog's iframe, and the top page once: let its buttons open dialogs, and show
-  // them — all but "+" when the forms are already MAX_FORMS deep.
+  // Each page of a dialog's iframe, and the top page once: let its buttons and links open dialogs,
+  // and show the buttons — all but "+" when the dialogs are already MAX_DEPTH deep, where a
+  // relation link is text too (following it would load the app's page inside the dialog).
   function wire(doc) {
     doc.addEventListener('click', (e) => {
-      const b = e.target.closest && e.target.closest('.rl-pick, .rl-new');
-      if (b) open(b);
+      const b = e.target.closest && e.target.closest('.rl-pick, .rl-new, a.rl-view');
+      if (!b) return;
+      if (b.matches('a.rl-view')) {
+        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+        e.preventDefault();
+        if (!b.hasAttribute('href')) return;
+      }
+      open(b);
     });
-    const deep = forms() >= MAX_FORMS;
+    const deep = depth() >= MAX_DEPTH;
     for (const b of doc.querySelectorAll('.rl-pick')) b.hidden = false;
     for (const b of doc.querySelectorAll('.rl-new')) b.hidden = deep;
+    if (deep && doc !== document) {
+      for (const a of doc.querySelectorAll('a.rl-view')) a.removeAttribute('href');
+    }
   }
 
-  // A 🔍 or a "+ New" was clicked, in the page or in a dialog's page.
+  // Every document a link to a row may be in: the page, and each open dialog's page.
+  function documents() {
+    const docs = [document];
+    for (const l of stack) if (l.frame.contentDocument) docs.push(l.frame.contentDocument);
+    return docs;
+  }
+
+  // A 🔍, a "+ New" or a relation link was clicked, in the page or in a dialog's page.
   function open(trigger) {
+    if (trigger.classList.contains('rl-view')) {
+      push({ kind: 'view', title: trigger.textContent.trim(), src: trigger.dataset.rlView });
+      return;
+    }
     if (trigger.classList.contains('rl-new')) {
       push({
         kind: 'new',
@@ -137,7 +165,7 @@
 
   function push(level) {
     const kind = level.kind;
-    if (kind === 'new' && forms() >= MAX_FORMS) return;
+    if (kind !== 'pick' && depth() >= MAX_DEPTH) return;
     build(level);
     stack.push(level);
     level.dialog.style.setProperty('--rl-depth', stack.length - 1);
@@ -166,8 +194,8 @@
     frame.addEventListener('load', () => loaded(level));
     const foot = el('div', 'card-footer d-flex align-items-center gap-2');
     // A pick dialog over a field with "+": create a row and add it to this selection. Not past
-    // MAX_FORMS create forms, as for the "+ New" buttons inside them.
-    if (level.kind === 'pick' && level.create && forms() < MAX_FORMS) {
+    // MAX_DEPTH, as for the "+ New" buttons inside the dialogs.
+    if (level.kind === 'pick' && level.create && depth() < MAX_DEPTH) {
       const add = button('btn btn-primary btn-sm', '+ New', () => push({
         kind: 'new',
         into: level,
@@ -176,7 +204,7 @@
       }));
       foot.append(add);
     }
-    const cancel = button('btn btn-secondary ms-auto', 'Cancel', () => dialog.close());
+    const cancel = button('btn btn-secondary ms-auto', level.kind === 'view' ? 'Close' : 'Cancel', () => dialog.close());
     foot.append(cancel);
     if (level.kind === 'pick') {
       foot.append(button('btn btn-primary', 'OK', () => {
@@ -208,10 +236,27 @@
         level.dialog.close();
         return;
       }
+    } else if (level.kind === 'view') {
+      const saved = doc.querySelector('.rl-saved');
+      if (saved) {
+        relabel(saved.dataset.rlKey, saved.dataset.label);
+        level.title = saved.dataset.label;
+        level.heading.textContent = stack.slice(0, stack.indexOf(level) + 1).map((l) => l.title).join(' › ');
+      }
     } else {
       sync(level, doc);
     }
     wire(doc);
+  }
+
+  // An edit in a view dialog renamed a row: every link to it says so now, without a reload (which
+  // would lose a form being filled in underneath).
+  function relabel(key, label) {
+    for (const doc of documents()) {
+      for (const a of doc.querySelectorAll('a.rl-view')) {
+        if (a.dataset.rlKey === key) a.textContent = label;
+      }
+    }
   }
 
   // The working selection, as removable chips: how a row is dropped without finding it again in

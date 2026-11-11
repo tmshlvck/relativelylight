@@ -1767,6 +1767,28 @@ impl Crud {
         self
     }
 
+    /// Make each relation's label a **link to the linked row**: in a table's cells and its View
+    /// dialog, a post's author opens that author's details in a dialog over the page, with Edit when
+    /// the caller may update it, and closing it returns to where they were. Off by default. Needs
+    /// [`picker_path`](Crud::picker_path), whose route serves those pages and (for Edit) answers
+    /// `POST`. A link is drawn only when the caller may read the target — see `docs/CRUD.md` →
+    /// "Viewing the linked row".
+    #[cfg(feature = "ui")]
+    pub fn picker_view(&mut self, on: bool) -> &mut Self {
+        self.engine.set_picker_view(on);
+        self
+    }
+
+    /// Where `slug`'s rows are viewed as a page of your app — `"/admin/author?show={id}"`, `{id}`
+    /// replaced with the row's id. A relation link's `href`, followed without the script (or
+    /// opened in a new tab); with it, the link opens the row in a dialog instead. Without one,
+    /// the `href` is the dialog's own page.
+    #[cfg(feature = "ui")]
+    pub fn view_path(&mut self, slug: impl Into<String>, template: impl Into<String>) -> &mut Self {
+        self.engine.set_view_path(slug, template);
+        self
+    }
+
     /// Never offer "+ New" for these target entities (slugs), though
     /// [`picker_create`](Crud::picker_create) is on and their gates would allow a create — for a
     /// table your own pages show read-only, or rows that need more than a form to make. The

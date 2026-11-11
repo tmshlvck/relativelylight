@@ -384,6 +384,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the gate or this list carries over to "+ New".
     crud.picker_create(true);
     crud.picker_create_except(["user"]);
+    // Each relation's label links to its row, opened in a dialog (with Edit for the admin). Without
+    // the script, or in a new tab, the link is the row's View in this panel.
+    crud.picker_view(true);
+    for slug in ["post", "tag", "author", "user", "profile", "auth_user", "auth_group"] {
+        crud.view_path(slug, format!("/admin/{slug}?show={{id}}"));
+    }
 
     // One shared engine, rendered from *per request*, so write controls hide for users who can't
     // write — and a forged write is refused by the same gate regardless.
