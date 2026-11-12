@@ -46,8 +46,43 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
   `Auth::password_check`; the question is whether a helper earns a feature flag.
 - [ ] **SSO leftovers:** refresh tokens, `userinfo`, RP-initiated logout, a real-IdP smoke test at
   release.
-- [ ] **PassKeys / WebAuthn**, when an app faces real-time phishing (TOTP doesn't stop a relaying
-  proxy). Likely adds an assurance level to the session and a field to `Identity`.
+- [ ] **Passkeys (WebAuthn)**, feature `passkeys`, on branch `passkeys`. The design is in
+  [DESIGN.md → auth](DESIGN.md#auth). Phases:
+  - [ ] **0. Spike.** Confirm in `webauthn-rs` 0.6 that an `AttestedPasskey` can be used for a
+    discoverable login, that the backup flags are exposed when a passkey is registered, and that
+    `webauthn-authenticator-rs`'s software authenticator can produce synced, device-bound and
+    attested credentials for the tests.
+  - [ ] **1. Schema:**
+    - `auth_passkey` (owner with cascade, label, credential id, credential JSON, class, AAGUID,
+      backup flags, created, last used);
+    - `auth_webauthn_challenge` (single-use, five minutes, pruned by `auth.prune()`);
+    - `auth_user.passkey_handle`;
+    - the authentication method on `auth_session`.
+
+    Migration steps go in the current `MIGRATION-x.y.md`.
+  - [ ] **2. Enrolment** on `/profile`, re-authenticated. Enrolling a passkey switches the account
+    to passwordless: the password and TOTP are removed and recovery codes are issued. With
+    `second_factor(true)` the user can instead keep the password and use the passkey after it.
+    Enrolment is refused for SSO accounts and for a class below the policy.
+  - [ ] **3. Sign-in:**
+    - passwordless, from a button on `/login`;
+    - the second-factor step beside TOTP, when enabled;
+    - the class checked on every use, and the backup-eligible flag re-checked;
+    - lockout on the address for passwordless, on the account for the second factor.
+  - [ ] **4. Re-authentication.** `reauthenticate` and every re-auth form accept a passkey, and a
+    passkey counts as a local factor, so a passwordless account no longer passes re-auth with
+    nothing.
+  - [ ] **5. The rest:**
+    - a manager removes a user's passkeys;
+    - a manager's password reset of a passwordless user removes their passkeys;
+    - `passkey::meta_model()` for the admin panel;
+    - rejection tests with positive controls;
+    - `examples/auth`, AUTH.md §5l, the changelog, and the MSRV bump to 1.89.
+  - [ ] **Later:**
+    - mandatory passkeys, with a restricted "enrol now" session;
+    - browser autofill of passkeys on the login page;
+    - device names from FIDO metadata;
+    - an AAGUID allowlist.
 - **No scopes on API keys.** A key is its owner (AUTH.md §5k); narrower access is an account of its
   own in a narrower group. Revisit only for a third-party OAuth client, which is a different design.
 - **Expired API keys are not pruned.** They stay listed as expired, as evidence, until someone

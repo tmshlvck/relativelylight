@@ -93,6 +93,27 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 - **A key never opens the UI.** `identify` reads only the session cookie, and keys have their own
   entry point, `identify_key`, which the app calls on the routes that take one. The crate doesn't
   read the header itself: where the credential arrives is the app's choice.
+- **Passkeys (planned, feature `passkeys`, `webauthn-rs`).** The policy is **app-wide**. It sets
+  the lowest class of passkey accepted, `Any < DeviceBound < Attested`, and whether a passkey may be
+  a second factor after a password.
+  - *Device-bound* means the authenticator reports itself non-backup-eligible. That is cheap, but
+    self-reported.
+  - *Attested* means the authenticator proves its make and model with a manufacturer certificate
+    chain. That is the only hardware binding a server can verify. Synced passkeys never attest.
+
+  Each credential's class is recorded when it is registered and checked on every use, so a policy
+  made stricter takes effect at the next sign-in.
+- **A passkey replaces the password.** An account is either passwordless (passkeys, recovery codes,
+  no password, no TOTP) or password-based, with TOTP or, when the app allows it, a passkey as the
+  second factor. The mode follows from whether the account has a password, so no flag records it.
+  A password beside a passwordless passkey would be a weaker way into the same account. A passkey is
+  a local factor for re-authentication, so a passwordless account must present it there.
+- **WebAuthn needs a script, and it posts a form.** The page embeds the challenge options. The
+  script runs the browser ceremony, puts the result in a hidden field and submits; the server
+  answers with the usual 303. There is no JSON API and no `fetch`. The script is served by
+  `auth::routes()` as a file, so a strict CSP can allow it. Challenge state is a server-side row,
+  single-use and short-lived. It is created when the user asks for a challenge, not on every
+  `GET /login`, so anonymous traffic can't write rows.
 - **Not here, on purpose:** a registration page, request logging, scoped keys. Each is product
   policy; the gate receives the headers, so an app's own credential needs no change here.
 
