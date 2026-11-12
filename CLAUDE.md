@@ -30,9 +30,15 @@ the design is [docs/DESIGN.md](docs/DESIGN.md) and open work [docs/TODO.md](docs
 - **The password policy covers typed input only.** Wire the same policy into an admin form's password
   field too, or that form is the way around it (`examples/adminpanel`).
 - **Never register `auth_totp_recovery` in an admin panel** (every row is a credential hash), and hide
-  `auth_user.totp_last_step`.
+  `auth_user.totp_last_step`. Register `auth_api_key` only through `auth::api_key::meta_model()`, which
+  hides the hash and pins the owner (moving a key to another account hands it that account's rights).
+- **An API key never opens the UI.** `Auth::identify` reads only the session cookie; keys are checked
+  only by `Auth::identify_key`, called by the machine endpoints that take one. Keep it that way: a gate
+  or page that accepted a key would let a credential that skips 2FA into the UI
+  ([AUTH.md §5k](docs/AUTH.md#5k-api-keys)).
 - **Lockout counters are shared**: an app checking credentials itself uses `auth.username_lockout()` /
-  `auth.ip_lockout()`, not a second limiter. Pruning (`auth.prune()`) is scheduled by the app; the
+  `auth.ip_lockout()`, not a second limiter. `identify_key` already counts a bad key on the address
+  counter; an app must not count it again. Pruning (`auth.prune()`) is scheduled by the app; the
   crate spawns no tasks and writes nothing to stdout or stderr.
 - **Configure `Auth` fully before `Sso::new(&auth)`** clones it.
 - Entities need a single-column primary key and single-column to-one FKs; N:M junction tables are
@@ -65,11 +71,11 @@ Don't run `rustfmt` over the whole repo; format only what you touch.
 
 **Security behaviour is tested by rejection.** `auth/security_tests.rs`, `auth/sso_tests.rs` (a fake
 IdP) and `crud/gate_tests.rs` assert the negative cases over in-memory SQLite: bad credentials,
-unusable sessions, replayed codes, non-manager profile writes, each gate's decision, refused reads,
+unusable sessions and API keys, replayed codes, non-manager profile writes, each gate's decision, refused reads,
 CSRF on every write. `crud/ui_tests.rs` covers escaping and form decoding; `crud/transform_tests.rs`
 covers a value's way through form, CSV and the codec against a real database. `files/tests.rs` covers
 the CSRF token required before the first file, limits holding while streaming, and escaping in the
-components. Touching login, sessions, 2FA, the profile pages, a gate or the upload
+components. Touching login, sessions, 2FA, API keys, the profile pages, a gate or the upload
 path means extending them, with a positive control so the negatives can't
 pass vacuously ([AUTH.md §9](docs/AUTH.md#9-tests--the-negative-paths)).
 
