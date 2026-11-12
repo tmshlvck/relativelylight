@@ -48,10 +48,30 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
   release.
 - [ ] **Passkeys (WebAuthn)**, feature `passkeys`, on branch `passkeys`. The design is in
   [DESIGN.md → auth](DESIGN.md#auth). Phases:
-  - [ ] **0. Spike.** Confirm in `webauthn-rs` 0.6 that an `AttestedPasskey` can be used for a
-    discoverable login, that the backup flags are exposed when a passkey is registered, and that
-    `webauthn-authenticator-rs`'s software authenticator can produce synced, device-bound and
-    attested credentials for the tests.
+  - [x] **0. Spike (done).** Findings with `webauthn-rs` 0.6.2:
+    - **Crates.** `webauthn-rs` with features `conditional-ui` (username-less login),
+      `danger-allow-state-serialisation` (the ceremony state goes in our server-side row) and
+      `danger-credential-internals` (to read the backup flags at registration through
+      `Credential`).
+    - **Login.** A username-less login finishes with `finish_discoverable_authentication_v2`, given
+      the one stored credential. The v1 call is deprecated. Look the credential up by the
+      response's credential ID: `userHandle` is optional, and the software authenticator sends
+      none. Check it against `passkey_handle` when it is present.
+    - **Attested credentials.** An `AttestedPasskey` registers against an app-supplied CA list
+      (`AttestationCaListBuilder::insert_device_pem(pem, aaguid, desc)`). It works in the
+      username-less login, and is refused against a CA list that lacks its CA. A wrong origin is
+      refused too.
+    - **The backup flag.** The library refuses an assertion whose backup-eligible flag went from
+      true to false (`CredentialBackupEligibilityInconsistent`). False to true is allowed by the
+      spec, so a device-bound credential that starts reporting backup-eligible must be reclassified
+      as synced at that login.
+    - **Tests.** `webauthn-authenticator-rs` (`softpasskey`, `softtoken`) works as a dev-dependency.
+      It only answers when the request names a credential, so the tests put the credential into the
+      request options. It always reports device-bound, and `SoftToken` attests with its own CA. A
+      synced credential for the registration tests is made by rewriting the response: set the
+      backup flags in `authData` and change the format to `none`. Logging in with such a credential
+      is impossible, because the assertion is signed, so the login class checks use a row whose
+      class was edited.
   - [ ] **1. Schema:**
     - `auth_passkey` (owner with cascade, label, credential id, credential JSON, class, AAGUID,
       backup flags, created, last used);
