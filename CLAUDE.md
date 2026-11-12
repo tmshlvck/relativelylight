@@ -30,7 +30,7 @@ the design is [docs/DESIGN.md](docs/DESIGN.md) and open work [docs/TODO.md](docs
 - **The password policy covers typed input only.** Wire the same policy into an admin form's password
   field too, or that form is the way around it (`examples/adminpanel`).
 - **Never register `auth_totp_recovery` in an admin panel** (every row is a credential hash), and hide
-  `auth_user.totp_last_step`. Register `auth_api_key` only through `auth::api_key::meta_model()`, which
+  `auth_user.totp_last_step` and `auth_user.passkey_handle`. Register `auth_api_key` only through `auth::api_key::meta_model()`, which
   hides the hash and pins the owner (moving a key to another account hands it that account's rights).
 - **An API key never opens the UI.** `Auth::identify` reads only the session cookie; keys are checked
   only by `Auth::identify_key`, called by the machine endpoints that take one. Keep it that way: a gate

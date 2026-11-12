@@ -35,6 +35,8 @@ pub mod group;
 pub mod lockout;
 /// The HTML pages, as Askama templates in `templates/auth/`.
 mod pages;
+/// Passkeys (WebAuthn): the credential and challenge tables, and the hardware-binding [`passkey::Class`].
+pub mod passkey;
 /// TOTP **recovery codes** (§5i): single-use codes that get a user back in when the authenticator is
 /// gone, issued at enrolment and regenerable from the profile page.
 pub mod recovery;
@@ -271,7 +273,8 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
 // ===================== Setup helpers =====================
 
 /// The `CREATE TABLE` statements for the auth tables — `auth_user`, `auth_group`, `auth_user_group`,
-/// `auth_session`, the two lockout tables, `auth_totp_recovery` and `auth_api_key` (in that order). Use these to fold the auth schema into your own **`sea-orm-migration`**
+/// `auth_session`, the two lockout tables, `auth_totp_recovery`, `auth_api_key`, `auth_passkey` and
+/// `auth_webauthn_challenge` (in that order). Use these to fold the auth schema into your own **`sea-orm-migration`**
 /// migration so it's versioned alongside your app tables — the recommended approach for anything
 /// long-lived (see `docs/AUTH.md`):
 ///
@@ -292,6 +295,8 @@ pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> 
         schema.create_table_from_entity(lockout::ip_entity::Entity),
         schema.create_table_from_entity(recovery::entity::Entity),
         schema.create_table_from_entity(api_key::entity::Entity),
+        schema.create_table_from_entity(passkey::entity::Entity),
+        schema.create_table_from_entity(passkey::challenge::Entity),
     ]
 }
 
@@ -320,7 +325,8 @@ pub async fn prune(db: &DatabaseConnection, lockout: &lockout::Lockout) -> Resul
     let ips = lockout::IpLockout::new(db.clone(), lockout.ip_after, lockout.ip_duration_secs, vec![])
         .prune()
         .await?;
-    Ok(sessions + usernames + ips)
+    let challenges = passkey::prune_challenges(db).await?;
+    Ok(sessions + usernames + ips + challenges)
 }
 
 /// Create the auth tables **if they don't already exist** — a bootstrap convenience for a fresh DB or
@@ -1260,7 +1266,7 @@ impl Auth {
     }
 
     /// Housekeeping for **this** `Auth`'s configuration: delete dead sessions — on either clock, so
-    /// idle-expired rows go too — and expired lockout rows. Returns the total deleted.
+    /// idle-expired rows go too — expired lockout rows and expired WebAuthn challenges. Returns the total deleted.
     ///
     /// Prefer this over the free [`prune`] function, which knows only the absolute deadline (it takes no
     /// `Auth`, so it can't see [`session_idle_secs`](Auth::session_idle_secs)). **Nothing here is
@@ -1275,7 +1281,8 @@ impl Auth {
             session::Entity::delete_many().filter(cond).exec(&self.inner.db).await?.rows_affected;
         let usernames = self.inner.usernames.prune().await?;
         let ips = self.inner.ips.prune().await?;
-        Ok(sessions + usernames + ips)
+        let challenges = passkey::prune_challenges(&self.inner.db).await?;
+        Ok(sessions + usernames + ips + challenges)
     }
 
     /// The auth pages, to merge into your router:
@@ -1370,8 +1377,14 @@ async fn verify_credentials(
 }
 
 /// Create a session row and return its token. `awaiting_totp` marks it half-authenticated (password
-/// ok, TOTP pending) — [`identity_from`] rejects such sessions until the code is confirmed.
-async fn create_session(inner: &Inner, user_id: i32, awaiting_totp: bool) -> Result<String, DbErr> {
+/// ok, TOTP pending) — [`identity_from`] rejects such sessions until the code is confirmed. `method`
+/// records how it was authenticated so far.
+async fn create_session(
+    inner: &Inner,
+    user_id: i32,
+    awaiting_totp: bool,
+    method: session::Method,
+) -> Result<String, DbErr> {
     let token = new_token();
     let now = now_secs();
     session::ActiveModel {
@@ -1380,6 +1393,8 @@ async fn create_session(inner: &Inner, user_id: i32, awaiting_totp: bool) -> Res
         expires_at: Set(now + inner.ttl_secs),
         last_seen_at: Set(now),
         awaiting_totp: Set(awaiting_totp),
+        method: Set(method.as_str().to_string()),
+        passkey_class: Set(None),
     }
     .insert(&inner.db)
     .await?;
@@ -1393,8 +1408,11 @@ async fn create_session(inner: &Inner, user_id: i32, awaiting_totp: bool) -> Res
 /// "someone else is in my account". Rotating only the caller's own id would leave the intruder's
 /// session untouched; deleting every session including the caller's own would sign them out of the page
 /// they are reading. So: mint one, drop the rest.
-async fn resession(inner: &Inner, user_id: i32) -> Option<String> {
-    let token = create_session(inner, user_id, false).await.ok()?;
+///
+/// The new session keeps the method the caller's own session was authenticated with (`method`): a
+/// password change proves the password again, not the second factor.
+async fn resession(inner: &Inner, user_id: i32, method: session::Method) -> Option<String> {
+    let token = create_session(inner, user_id, false, method).await.ok()?;
     inner.revoke_sessions(user_id, Some(&token)).await;
     Some(token)
 }
@@ -1409,8 +1427,10 @@ async fn resession(inner: &Inner, user_id: i32) -> Option<String> {
 /// `Secure` nor `SameSite` prevents that), point them at `/login/totp`, and inherit a fully
 /// authenticated session the moment the victim typed their own code. A new id leaves the attacker
 /// holding a token that was deleted.
-async fn rotate_session(inner: &Inner, old: session::Model) -> Option<String> {
-    let token = create_session(inner, old.user_id, false).await.ok()?;
+///
+/// `method` is how the session is authenticated now that the second factor is in.
+async fn rotate_session(inner: &Inner, old: session::Model, method: session::Method) -> Option<String> {
+    let token = create_session(inner, old.user_id, false, method).await.ok()?;
     // Best-effort: a surviving old row is half-authenticated, so it grants nothing either way.
     let _ = session::Entity::delete_by_id(old.id).exec(&inner.db).await;
     Some(token)
@@ -1470,7 +1490,7 @@ async fn login_submit(
         return login_rejected(&inner, &req, jar);
     };
     let needs_totp = user.has_totp();
-    let token = match create_session(&inner, user.id, needs_totp).await {
+    let token = match create_session(&inner, user.id, needs_totp, session::Method::Password).await {
         Ok(token) => token,
         Err(e) => {
             inner.report("auth-login", "session create", &e, client_ip).await;
@@ -1623,7 +1643,11 @@ async fn login_totp_submit(
     // The second factor is confirmed, so the session gains full privilege — which means a **new id**
     // (see `rotate_session`), a new CSRF token, and the spent step recorded so this code can't be used
     // again inside its ±1-step window.
-    let Some(token) = rotate_session(&inner, session).await else {
+    let method = match used_recovery {
+        true => session::Method::PasswordRecovery,
+        false => session::Method::PasswordTotp,
+    };
+    let Some(token) = rotate_session(&inner, session, method).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
     };
     stamp_login(&inner.db, user.id, step).await;
@@ -1693,6 +1717,12 @@ struct ReauthForm {
     totp_code: String,
     #[serde(default, rename = "_csrf")]
     csrf: Option<String>,
+}
+
+/// The session row the request's cookie names, live or not — for reading what it records.
+async fn current_session(inner: &Inner, headers: &HeaderMap) -> Option<session::Model> {
+    let token = CookieJar::from_headers(headers).get(&inner.cookie_name)?.value().to_string();
+    session::Entity::find_by_id(token).one(&inner.db).await.ok()?
 }
 
 /// Resolve the caller from the request cookie ([`Auth::identify`] is this, for the app).
@@ -1807,7 +1837,11 @@ async fn profile_submit(
     // leaves that someone else logged in — the cookie outlives the credential that produced it.
     // The rendered form must carry whichever token the response's cookie ends up holding, or the next
     // post fails its own double-submit check.
-    let (msg, jar, csrf) = match resession(&inner, user.id).await {
+    let method = current_session(&inner, headers)
+        .await
+        .and_then(|s| s.method())
+        .unwrap_or(session::Method::Password);
+    let (msg, jar, csrf) = match resession(&inner, user.id, method).await {
         Some(token) => {
             let (csrf, csrf_cookie) = inner.csrf().issue(); // new session ⇒ new CSRF token
             let jar = jar.add(session_cookie(&inner, token)).add(csrf_cookie);
@@ -2482,8 +2516,9 @@ mod tests {
         let stmts = table_create_statements(DbBackend::Sqlite);
         assert_eq!(
             stmts.len(),
-            8,
-            "user, group, user_group, session, the two lockout tables, totp recovery + api keys"
+            10,
+            "user, group, user_group, session, the two lockout tables, totp recovery, api keys, \
+             passkeys + webauthn challenges"
         );
         for mut stmt in stmts {
             stmt.if_not_exists();

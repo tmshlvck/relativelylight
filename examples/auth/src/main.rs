@@ -433,10 +433,13 @@ fn accounts_engine(db: DatabaseConnection, auth: &Auth) -> Arc<Engine> {
     // Secrets and machinery: the 2FA columns are managed from /profile, never from a form. Note
     // `totp_last_step` is not a secret but is still hidden — it is the replay guard, and an operator
     // editing it either lets a code be replayed or locks the user out of their own authenticator.
+    // `passkey_handle` is the WebAuthn user handle the authenticators hold; an edited one orphans
+    // every passkey on the account.
     for f in [
         UserCol::TotpSecret.as_str(),
         UserCol::TotpPending.as_str(),
         UserCol::TotpLastStep.as_str(),
+        UserCol::PasskeyHandle.as_str(),
     ] {
         user.field(f).hidden = true;
     }

@@ -323,6 +323,8 @@ async fn create_session_row_seen(
         expires_at: Set(expires_at),
         last_seen_at: Set(last_seen_at),
         awaiting_totp: Set(awaiting_totp),
+        method: Set(session::Method::Password.as_str().into()),
+        passkey_class: Set(None),
     }
     .insert(db)
     .await
@@ -3349,7 +3351,8 @@ async fn downgrade_schema_to_pre_cascade(db: &DatabaseConnection) {
         "DROP TABLE auth_totp_recovery",
         // No FK at all — what these two looked like before.
         r#"CREATE TABLE "auth_session" ( "id" varchar NOT NULL PRIMARY KEY, "user_id" integer NOT NULL,
-             "expires_at" bigint NOT NULL, "last_seen_at" bigint NOT NULL, "awaiting_totp" boolean NOT NULL )"#,
+             "expires_at" bigint NOT NULL, "last_seen_at" bigint NOT NULL, "awaiting_totp" boolean NOT NULL,
+             "method" varchar NOT NULL DEFAULT '', "passkey_class" varchar NULL )"#,
         r#"CREATE TABLE "auth_totp_recovery" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
              "user_id" integer NOT NULL, "code_hash" varchar NOT NULL, "created_at" bigint NOT NULL,
              "used_at" bigint NULL )"#,
@@ -3831,4 +3834,210 @@ async fn minting_and_revoking_are_audited_without_the_key() {
         assert!(!body.contains(&raw), "never the key: {body}");
         assert!(!body.contains(&row.hashed_key), "never its hash: {body}");
     }
+}
+
+// ===================== Passkeys: the schema (phase 1) =====================
+
+/// A passkey row for `user_id`, straight into the table (enrolment arrives with the feature).
+async fn passkey_row(db: &DatabaseConnection, user_id: i32, credential_id: &str) {
+    passkey::entity::ActiveModel {
+        user_id: Set(user_id),
+        name: Set("key".into()),
+        credential_id: Set(credential_id.into()),
+        credential: Set("{}".into()),
+        class: Set(passkey::Class::DeviceBound.as_str().into()),
+        aaguid: Set(None),
+        backup_eligible: Set(false),
+        backup_state: Set(false),
+        created_at: Set(now_secs()),
+        last_used_at: Set(None),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .expect("insert passkey");
+}
+
+/// A challenge row for `user_id`, expiring at `expires_at`; returns its id.
+async fn challenge_row(db: &DatabaseConnection, user_id: Option<i32>, expires_at: i64) -> String {
+    let id = new_token();
+    passkey::challenge::ActiveModel {
+        id: Set(id.clone()),
+        purpose: Set("login".into()),
+        user_id: Set(user_id),
+        state: Set("{}".into()),
+        expires_at: Set(expires_at),
+    }
+    .insert(db)
+    .await
+    .expect("insert challenge");
+    id
+}
+
+/// The method the session `token` records.
+async fn method_of(fx: &Fx, token: &str) -> String {
+    fx.session_row(token).await.expect("session row").method
+}
+
+#[tokio::test]
+async fn every_session_records_how_it_was_authenticated() {
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let res = fx.try_login("alice").await;
+    let token = res.session_token(fx.auth.session_cookie_name()).unwrap();
+    assert_eq!(method_of(&fx, &token).await, "password");
+
+    // With 2FA: the pending session says password, the rotated one password+totp…
+    fx.user("bob").await;
+    let bob = fx.cookie(&fx.session_for("bob").await);
+    let (secret, codes) = enrol_with_codes(&fx, "bob", &bob).await;
+    // Enrolment spent the current step; forget it so the same step's code can log in here.
+    fx.update_user("bob", |am| am.totp_last_step = Set(None)).await;
+    let res = fx.try_login("bob").await;
+    let pending = res.session_token(fx.auth.session_cookie_name()).unwrap();
+    assert_eq!(method_of(&fx, &pending).await, "password");
+    let code = totp::current_code(&secret);
+    let res = fx.post("/login/totp", &form(&[("code", &code)]), Some(&fx.cookie(&pending))).await;
+    let full = res.session_token(fx.auth.session_cookie_name()).expect("rotated");
+    assert_eq!(method_of(&fx, &full).await, "password+totp");
+
+    // …and a password change keeps it: the new session proved the password, not less.
+    let change = form(&[
+        ("current_password", PW),
+        ("new_password", OTHER_PW),
+        ("confirm_password", OTHER_PW),
+    ]);
+    let res = fx.post("/profile", &change, Some(&fx.cookie(&full))).await;
+    let renewed = res.session_token(fx.auth.session_cookie_name()).expect("resessioned");
+    assert_eq!(method_of(&fx, &renewed).await, "password+totp");
+
+    // A recovery code in place of the second factor says so.
+    let res = fx.post("/login", &form(&[("username", "bob"), ("password", OTHER_PW)]), None).await;
+    let pending = res.session_token(fx.auth.session_cookie_name()).unwrap();
+    let res = fx
+        .post("/login/totp", &form(&[("recovery_code", &codes[0])]), Some(&fx.cookie(&pending)))
+        .await;
+    let token = res.session_token(fx.auth.session_cookie_name()).expect("recovered");
+    assert_eq!(method_of(&fx, &token).await, "password+recovery");
+    assert_eq!(fx.session_row(&token).await.unwrap().passkey_class, None);
+}
+
+#[tokio::test]
+async fn prune_removes_expired_challenges_only() {
+    let fx = Fx::new().await;
+    let alice = fx.user("alice").await;
+    let stale = challenge_row(&fx.db, Some(alice), now_secs() - 1).await;
+    let live = challenge_row(&fx.db, None, now_secs() + 300).await;
+    fx.auth.prune().await.expect("prune");
+    let left: Vec<String> =
+        passkey::challenge::Entity::find().all(&fx.db).await.unwrap().into_iter().map(|c| c.id).collect();
+    assert_eq!(left, vec![live], "the expired one went, the live one stayed (not {stale})");
+}
+
+#[tokio::test]
+async fn deleting_a_user_takes_their_passkeys_and_challenges() {
+    let fx = Fx::new().await;
+    let alice = fx.user("alice").await;
+    let bob = fx.user("bob").await;
+    passkey_row(&fx.db, alice, "a1").await;
+    passkey_row(&fx.db, bob, "b1").await;
+    challenge_row(&fx.db, Some(alice), now_secs() + 300).await;
+    challenge_row(&fx.db, Some(bob), now_secs() + 300).await;
+
+    user::Entity::delete_by_id(alice).exec(&fx.db).await.expect("delete");
+    let keys = passkey::entity::Entity::find().all(&fx.db).await.unwrap();
+    assert_eq!(keys.iter().map(|k| k.user_id).collect::<Vec<_>>(), vec![bob], "only alice's went");
+    let chals = passkey::challenge::Entity::find().all(&fx.db).await.unwrap();
+    assert_eq!(chals.iter().map(|c| c.user_id).collect::<Vec<_>>(), vec![Some(bob)]);
+}
+
+#[tokio::test]
+async fn a_credential_id_and_a_user_handle_belong_to_one_row_each() {
+    let fx = Fx::new().await;
+    let alice = fx.user("alice").await;
+    let bob = fx.user("bob").await;
+    passkey_row(&fx.db, alice, "same").await;
+    let dup = passkey::entity::ActiveModel {
+        user_id: Set(bob),
+        name: Set("k".into()),
+        credential_id: Set("same".into()),
+        credential: Set("{}".into()),
+        class: Set("synced".into()),
+        aaguid: Set(None),
+        backup_eligible: Set(true),
+        backup_state: Set(true),
+        created_at: Set(0),
+        last_used_at: Set(None),
+        ..Default::default()
+    };
+    assert!(dup.insert(&fx.db).await.is_err(), "a credential can't be registered to two accounts");
+
+    fx.update_user("alice", |am| am.passkey_handle = Set(Some("h".into()))).await;
+    let mut am: user::ActiveModel = fx.row("bob").await.into();
+    am.passkey_handle = Set(Some("h".into()));
+    assert!(am.update(&fx.db).await.is_err(), "nor can a user handle");
+}
+
+/// The schema as it stood before passkeys: `auth_user` without `passkey_handle`, `auth_session`
+/// without `method` / `passkey_class`, and neither passkey table.
+async fn downgrade_schema_to_pre_passkey(db: &DatabaseConnection) {
+    let backend = db.get_database_backend();
+    let user_sql = backend.build(&Schema::new(backend).create_table_from_entity(user::Entity)).sql;
+    let old_user = user_sql.replace(r#", "passkey_handle" varchar UNIQUE"#, "");
+    assert_ne!(old_user, user_sql, "the fixture must actually remove the column: {user_sql}");
+    for sql in [
+        "PRAGMA foreign_keys = OFF".to_string(),
+        "DROP TABLE auth_passkey".into(),
+        "DROP TABLE auth_webauthn_challenge".into(),
+        "DROP TABLE auth_session".into(),
+        "DROP TABLE auth_user".into(),
+        old_user,
+        r#"CREATE TABLE "auth_session" ( "id" varchar NOT NULL PRIMARY KEY, "user_id" integer NOT NULL,
+             "expires_at" bigint NOT NULL, "last_seen_at" bigint NOT NULL, "awaiting_totp" boolean NOT NULL,
+             FOREIGN KEY ("user_id") REFERENCES "auth_user" ("id") ON DELETE CASCADE )"#
+            .into(),
+        "PRAGMA foreign_keys = ON".into(),
+    ] {
+        db.execute_raw(sea_orm::Statement::from_string(backend, sql)).await.expect("downgrade");
+    }
+}
+
+#[tokio::test]
+async fn the_upgrade_statements_bring_a_pre_passkey_database_up_to_date() {
+    let fx = Fx::new().await;
+    downgrade_schema_to_pre_passkey(&fx.db).await;
+
+    // What an app meets if it upgrades the crate and skips the migration: every read of an account
+    // names the new column, so nobody can sign in. That is the break the migration step fixes.
+    create_user(&fx.db, "carol", PW).await.expect("an insert leaves the column out and still works");
+    assert!(user::Entity::find().all(&fx.db).await.is_err(), "but reading an account fails");
+    let res = fx.post("/login", &form(&[("username", "carol"), ("password", PW)]), None).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED, "so login fails");
+    assert!(res.session_token(fx.auth.session_cookie_name()).is_none());
+
+    let backend = fx.db.get_database_backend();
+    for stmt in passkey::table_create_statements(backend) {
+        fx.db.execute(&stmt).await.expect("create");
+    }
+    for stmt in passkey::table_alter_statements() {
+        fx.db.execute(&stmt).await.expect("alter");
+    }
+    for stmt in passkey::index_create_statements() {
+        fx.db.execute(&stmt).await.expect("index");
+    }
+
+    // Everything works again: an account, a login, a session that records its method.
+    fx.user("alice").await;
+    let res = fx.try_login("alice").await;
+    let token = res.session_token(fx.auth.session_cookie_name()).expect("logged in");
+    assert_eq!(fx.identify_token(&token).await.map(|w| w.username), Some("alice".into()));
+    assert_eq!(method_of(&fx, &token).await, "password");
+    passkey_row(&fx.db, fx.row("alice").await.id, "c1").await;
+
+    // And the handle is unique through the index, as it is inline on a fresh install.
+    fx.user("bob").await;
+    fx.update_user("alice", |am| am.passkey_handle = Set(Some("h".into()))).await;
+    let mut am: user::ActiveModel = fx.row("bob").await.into();
+    am.passkey_handle = Set(Some("h".into()));
+    assert!(am.update(&fx.db).await.is_err(), "the index holds");
 }

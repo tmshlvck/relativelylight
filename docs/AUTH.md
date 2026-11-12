@@ -116,19 +116,25 @@ to `/logout` signs the user out. `SameSite=None` is not offered.
 The tables, all ordinary SeaORM entities an admin panel can register (§5j):
 
 - **`auth_user`** — `id`, `username` (unique), `password_hash` (argon2id), `is_active`,
-  `sso_provider` (§5b), the 2FA columns `totp_secret` / `totp_pending` / `totp_last_step` (§5a), and
-  timestamps (§5c). Every creation path validates the username with `auth::valid_username`
+  `sso_provider` (§5b), the 2FA columns `totp_secret` / `totp_pending` / `totp_last_step` (§5a),
+  `passkey_handle` (the WebAuthn user handle, set at the first passkey enrolment), and timestamps
+  (§5c). Every creation path validates the username with `auth::valid_username`
   (non-empty, ≤ 254 bytes, no spaces or control characters); wire the same check into an admin form
   with `user_mm.field("username").validate_str(auth::valid_username)`.
 - **`auth_group`** + **`auth_user_group`** (N:M) — group membership drives the gates.
 - **`auth_session`** — the opaque id, `user_id`, `expires_at` (absolute deadline), `last_seen_at`
-  (idle clock, §5f) and `awaiting_totp` (password accepted, second factor pending).
+  (idle clock, §5f), `awaiting_totp` (password accepted, second factor pending), and `method` /
+  `passkey_class`: how the session was authenticated (`password`, `password+totp`,
+  `password+recovery`, `sso`) and the class of the passkey when one was used. Empty for a row from
+  before the column existed.
 - **`auth_totp_recovery`** — hashed single-use recovery codes (§5i).
 - **`auth_api_key`** — hashed API keys (§5k).
+- **`auth_passkey`**, **`auth_webauthn_challenge`** — passkeys and the WebAuthn ceremonies in flight
+  (in progress: [TODO.md](TODO.md#auth)). Expired challenges are pruned by `auth.prune()`.
 - **`auth_username_lockout`**, **`auth_ip_lockout`** — the lockout counters (§5e).
 
-Deleting an account **cascades** to its sessions, recovery codes, API keys and memberships, whoever
-deletes it.
+Deleting an account **cascades** to its sessions, recovery codes, API keys, passkeys, challenges and
+memberships, whoever deletes it.
 The lockout tables key on a submitted name and an address, so they have no foreign key.
 
 ### Database schema & migrations
@@ -766,7 +772,7 @@ let mut group = MetaModel::new(auth::group::Entity);
 user.field("password_hash").password();          // write-only, argon2 on write, never read back
 user.field("password_hash")                       // the *same* policy Auth applies to /profile
     .validate_str(validate::optional(Box::new(validate::password(policy))));
-for f in ["totp_secret", "totp_pending", "totp_last_step"] { user.field(f).hidden = true; }
+for f in ["totp_secret", "totp_pending", "totp_last_step", "passkey_handle"] { user.field(f).hidden = true; }
 
 user.label_column("username");
 group.label_column("name");
@@ -788,9 +794,10 @@ Four things are load-bearing:
    enforced: a non-admin gets `403`, not a page with the buttons greyed out.
 3. **`field("password_hash").password()` plus the policy** — wire the policy into `Auth` *and* this form, or
    the form becomes the way around it (§5g).
-4. **Hide the TOTP columns.** The secret and the pending secret are credentials; `totp_last_step` is
-   the replay guard, and hand-editing it either lets a code be replayed or locks the user out of their
-   own authenticator. 2FA is managed from `/profile`, never from a CRUD form. **Never register
+4. **Hide the TOTP columns and `passkey_handle`.** The secret and the pending secret are credentials;
+   `totp_last_step` is the replay guard, and hand-editing it either lets a code be replayed or locks
+   the user out of their own authenticator. `passkey_handle` is held by the user's authenticators,
+   so an edited one orphans every passkey. 2FA is managed from `/profile`, never from a CRUD form. **Never register
    `auth::recovery::entity`** at all — every row of it is a credential hash.
 
 Register `lockout::username_entity` / `lockout::ip_entity` in the same panel (§5e) and the unlock

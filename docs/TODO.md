@@ -72,14 +72,15 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
       backup flags in `authData` and change the format to `none`. Logging in with such a credential
       is impossible, because the assertion is signed, so the login class checks use a row whose
       class was edited.
-  - [ ] **1. Schema:**
-    - `auth_passkey` (owner with cascade, label, credential id, credential JSON, class, AAGUID,
-      backup flags, created, last used);
-    - `auth_webauthn_challenge` (single-use, five minutes, pruned by `auth.prune()`);
-    - `auth_user.passkey_handle`;
-    - the authentication method on `auth_session`.
-
-    Migration steps go in the current `MIGRATION-x.y.md`.
+  - [x] **1. Schema (done).**
+    - `auth_passkey` and `auth_webauthn_challenge`, in `auth::passkey`, compiled without the
+      feature;
+    - `auth_user.passkey_handle`, unique;
+    - `auth_session.method` / `passkey_class`, recorded by every login path;
+    - expired challenges pruned;
+    - the upgrade statements (`passkey::table_alter_statements` and friends), tested against a
+      pre-passkey database;
+    - MIGRATION-0.5.md §3.
   - [ ] **2. Enrolment** on `/profile`, re-authenticated. Enrolling a passkey switches the account
     to passwordless: the password and TOTP are removed and recovery codes are issued. With
     `second_factor(true)` the user can instead keep the password and use the passkey after it.

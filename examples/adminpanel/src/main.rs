@@ -302,6 +302,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // but nothing an operator should see or edit — the library maintains it, and hand-editing it either
     // lets a code be replayed or locks the user out of their own authenticator for a while.
     auth_user_mm.field(UserCol::TotpLastStep.as_str()).hidden = true;
+    // The WebAuthn user handle: the authenticators hold it, so an edited one orphans every passkey.
+    auth_user_mm.field(UserCol::PasskeyHandle.as_str()).hidden = true;
     // Note what is *not* registered: `auth::recovery::entity` (the TOTP recovery codes). Every row is a
     // hash of a credential, and there is nothing an operator can usefully do to one — a user who needs a
     // fresh set generates it from /profile, and a user who has lost their authenticator is helped by the

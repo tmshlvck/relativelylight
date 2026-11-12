@@ -406,8 +406,10 @@ async fn a_full_sso_login_signs_in_maps_groups_and_marks_the_account_external() 
     let res = fx.login_with(recipe).await;
 
     assert_eq!(res.status, StatusCode::SEE_OTHER, "expected a redirect: {}", res.body);
-    assert!(res.session_token(fx.auth.session_cookie_name()).is_some(), "a session cookie is set");
+    let token = res.session_token(fx.auth.session_cookie_name()).expect("a session cookie is set");
     assert_eq!(fx.session_count().await, 1);
+    let session = crate::auth::session::Entity::find_by_id(token).one(&fx.db).await.unwrap().unwrap();
+    assert_eq!(session.method(), Some(crate::auth::session::Method::Sso), "the session says how");
 
     let row = fx.row("staff-alice").await.expect("auto-registered");
     assert_eq!(row.sso_key(), Some(PROVIDER), "the account is marked external");

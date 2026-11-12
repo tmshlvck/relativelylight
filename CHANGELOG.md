@@ -13,6 +13,18 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
+- **Schema: three new columns and two new tables, needed before the upgraded crate runs**, whether
+  or not the app uses passkeys. The new columns are `auth_user.passkey_handle` (the WebAuthn user
+  handle), `auth_session.method` and `auth_session.passkey_class` (how a session was authenticated).
+  The new tables are `auth_passkey` and `auth_webauthn_challenge`. Every read of an account selects
+  the new column, so an unmigrated database refuses every login. `auth::migrate` creates the tables
+  but never alters one. **Upgrade:** a migration step applying
+  `auth::passkey::table_create_statements`, `table_alter_statements` and `index_create_statements`
+  ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#3-new-auth-columns-for-passkeys)). Hide
+  `passkey_handle` in an accounts panel, as the TOTP columns are hidden. Each session now records
+  its method (`password`, `password+totp`, `password+recovery`, `sso`), and `auth.prune()` deletes
+  expired challenges. The passkeys themselves are in progress ([TODO.md](docs/TODO.md#auth)).
+
 - **`Auth`'s page callbacks get the request.** `login_shell`, `profile_shell` and `csrf_rejection`
   now receive the request's `http::request::Parts` (URI, method, headers, extensions), so the pages
   `auth` renders carry the same chrome as the rest of the app: a timezone picker showing the

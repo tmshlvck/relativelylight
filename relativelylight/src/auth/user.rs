@@ -37,6 +37,11 @@ pub struct Model {
     /// a re-enrolment never inherits a stale ceiling. See [`Model::totp_step_ok`].
     pub totp_last_step: Option<i64>,
     pub sso_provider: Option<String>,
+    /// The WebAuthn **user handle**: a random UUID, set when the account registers its first passkey
+    /// and kept for its life, so an authenticator can tell this account's credentials apart. Opaque on
+    /// purpose — the spec forbids anything identifying here. `None` until the first enrolment.
+    #[sea_orm(unique)]
+    pub passkey_handle: Option<String>,
     /// Row lifecycle timestamps — Unix seconds, **UTC**. `created_at`/`updated_at` are maintained by
     /// the `before_save` hook; `last_login_at` is stamped by the login flow (`None` until first login).
     pub created_at: i64,

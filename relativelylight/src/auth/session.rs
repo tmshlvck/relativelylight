@@ -13,6 +13,10 @@
 //! isn't logged in until the code is confirmed — at which point the session id is **rotated** (a new
 //! row, the old one deleted), so a planted half-authenticated cookie can't be elevated into a real
 //! login.
+//!
+//! `method` records **how** the session was authenticated ([`Method`]), and `passkey_class` the class
+//! of the passkey when one was used, so a policy made stricter can refuse sessions a weaker passkey
+//! opened.
 
 use sea_orm::entity::prelude::*;
 
@@ -28,6 +32,56 @@ pub struct Model {
     /// (at most once a minute) so resolving an identity stays a read on all but the occasional request.
     pub last_seen_at: i64,
     pub awaiting_totp: bool,
+    /// How the session was authenticated — [`Method`] as stored. Empty for a session created before the
+    /// column existed, which reads as `None` from [`Model::method`].
+    #[sea_orm(default_value = "")]
+    pub method: String,
+    /// The [`Class`](super::passkey::Class) of the passkey that opened the session, when one did.
+    pub passkey_class: Option<String>,
+}
+
+/// How a session was authenticated. `#[non_exhaustive]`: the passkey methods arrive with sign-in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Method {
+    /// A password alone, or a password with the second factor still pending (`awaiting_totp`).
+    Password,
+    /// A password and a TOTP code.
+    PasswordTotp,
+    /// A password and a recovery code in place of the second factor.
+    PasswordRecovery,
+    /// An OIDC identity provider.
+    Sso,
+}
+
+impl Method {
+    /// The stored form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Method::Password => "password",
+            Method::PasswordTotp => "password+totp",
+            Method::PasswordRecovery => "password+recovery",
+            Method::Sso => "sso",
+        }
+    }
+
+    /// The stored form back; `None` for an empty or unknown value.
+    pub fn parse(s: &str) -> Option<Method> {
+        match s {
+            "password" => Some(Method::Password),
+            "password+totp" => Some(Method::PasswordTotp),
+            "password+recovery" => Some(Method::PasswordRecovery),
+            "sso" => Some(Method::Sso),
+            _ => None,
+        }
+    }
+}
+
+impl Model {
+    /// How this session was authenticated; `None` for a row from before the column existed.
+    pub fn method(&self) -> Option<Method> {
+        Method::parse(&self.method)
+    }
 }
 
 /// `user_id` is a real foreign key onto `auth_user`, **cascading on delete**: deleting an account
