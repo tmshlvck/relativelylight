@@ -87,6 +87,7 @@ pass vacuously ([AUTH.md §9](docs/AUTH.md#9-tests--the-negative-paths)).
   future ideas, the guides describe what ships. `README.md` is the starting point; this file is
   orientation. Cross-link rather than copy.
 
-**Releasing:** rename `## Unreleased` to `## [x.y.z] — YYYY-MM-DD` with its compare link, bump
-`relativelylight/Cargo.toml`, commit `Release vx.y.z`, tag, push the tag. Pre-1.0, a behaviour break
-bumps the minor.
+**Releasing:** run the feature matrix above, rename `## Unreleased` to `## [x.y.z] — YYYY-MM-DD`
+with its compare link (keep an empty `## Unreleased` above it), bump `relativelylight/Cargo.toml`,
+commit `Release vx.y.z`, tag, push `main` and the tag, then `cargo publish -p relativelylight` from
+the clean tagged tree. Pre-1.0, a behaviour break bumps the minor.
