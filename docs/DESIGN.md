@@ -12,7 +12,7 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 |---|---|---|
 | `crud` | SeaORM entities → a typed engine: list/read/write/validate/gate | [CRUD.md](CRUD.md) |
 | `crud::ui` | the web UI: form, table, admin panel, relation picker, CSV | [CRUD.md → Web UI](CRUD.md#web-ui-ui) |
-| `auth` | users/groups, sessions, login, TOTP 2FA, OIDC SSO, gate presets | [AUTH.md](AUTH.md) |
+| `auth` | users/groups, sessions, login, TOTP 2FA, OIDC SSO, API keys, gate presets | [AUTH.md](AUTH.md) |
 | `middleware` | `resolve_real_ip` — required; the caller's address, resolved once | [AUTH.md §4](AUTH.md#4-middleware-the-module-provides) |
 | `observe` | the write observer for audit logging, and the error observer for failures a response hides | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
 | `time` | integer-UTC timestamps rendered in the request's zone | [TIME.md](TIME.md) |
@@ -30,7 +30,7 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
    unused feature costs no dependencies. The one required piece is `middleware::resolve_real_ip`, so
    the lockout, audit events and the app's log agree about who called.
 4. **Authorization is a per-model gate handed the request headers.** It resolves identity itself, so
-   it needs no middleware and works for credentials this crate doesn't know (an app's API tokens).
+   it needs no middleware and works for credentials this crate doesn't know.
    Row-level access is out of scope; an app expresses it by shape (a table per document kind) or in
    its own handler.
 5. **The app owns its database.** Modules describe their tables (`table_create_statements`); the app's
@@ -85,8 +85,16 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
   `X-Forwarded-For` hop behind one trusted proxy. Anything stranger is the app's own middleware
   inserting `RealIp`; there is no hook.
 - **Sensitive changes re-authenticate per request**, with no grace window to inherit.
-- **Not here, on purpose:** a registration page, API tokens, request logging. Each is product policy;
-  the gate receives the headers, so an app's own tokens need no change here.
+- **An API key is its owner.** It stores no scope: the resolver returns the owner's identity with
+  the groups read on that request, so narrower access means an account of its own. Keys were first
+  left to the apps as product policy. They moved here when two apps (teleddns, CLIMB) had settled on
+  the same policy and the same table, and both had to wire the resolver to this crate's lockout
+  counters by hand. Since a key names no account, the address counter is the brake.
+- **A key never opens the UI.** `identify` reads only the session cookie, and keys have their own
+  entry point, `identify_key`, which the app calls on the routes that take one. The crate doesn't
+  read the header itself: where the credential arrives is the app's choice.
+- **Not here, on purpose:** a registration page, request logging, scoped keys. Each is product
+  policy; the gate receives the headers, so an app's own credential needs no change here.
 
 ## files
 

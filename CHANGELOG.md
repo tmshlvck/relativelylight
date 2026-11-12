@@ -27,6 +27,21 @@ is easy to miss in a diff.
 
 ### Added
 
+- **API keys** (`auth::api_key`, [AUTH.md §5k](docs/AUTH.md#5k-api-keys)): bearer keys for an app's
+  machine endpoints. A key is its owner: `Auth::identify_key(token, ip)` returns the owner's
+  `Identity` with the groups read on that request, plus the key's id, name and prefix, so removing a
+  membership or deactivating the account disarms the key at once. `identify` never accepts a key,
+  so a key can't open the UI. The app reads the token from the request (`auth::bearer_token` reads
+  `Authorization: Bearer`). A rejected key counts against the source address on the same
+  `IpLockout` as `/login`, and a locked address is refused before the lookup.
+  `Auth::api_keys(ApiKeys::new("app_"))` adds a card to `/profile`: list, mint (re-authenticated,
+  raw key shown once, optional expiry) and
+  revoke, each audited without the key or its hash. `api_key::meta_model()` registers the table in
+  an accounts panel with the hash hidden and the owner read-only. **Schema:** a new table,
+  `auth_api_key`, in `table_create_statements`. `auth::migrate` creates it; an app with its own
+  migrations adds `api_key::table_create_statement` when it starts using keys
+  ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#2-optional-api-keys-move-into-auth)). `examples/auth`
+  mints keys on `/profile` and accepts them on `/api/whoami`.
 - **`Table::range_filter(column)`**: a from/to pair of inputs in the toolbar, `>=` / `<=`, either
   end optional, carried in the URL as `filter[column][from]` / `[to]`. For a `.datetime()` column
   the inputs are dates in the viewer's zone and the "to" day is inclusive; number, `Date` and text

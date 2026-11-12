@@ -3151,7 +3151,7 @@ async fn a_second_factor_page_carries_a_token_and_logout_clears_the_cookie() {
 #[tokio::test]
 async fn a_bearer_request_is_exempt_from_the_csrf_check() {
     // No ambient cookie → no CSRF vector, so the check must not stand in an API client's way. The
-    // request still gets no further than authn (there is no Bearer identity source yet).
+    // request still gets no further than authn: a bearer credential never opens the UI (§5k).
     let fx = Fx::new().await;
     fx.user("alice").await;
     let req = fx
@@ -3541,4 +3541,294 @@ async fn the_login_shell_sees_the_request_it_wraps() {
     let res = fx.post("/login", &wrong, Some("rl_tz=Europe%2FPrague")).await;
     assert_eq!(res.status, StatusCode::UNAUTHORIZED);
     assert!(res.body.contains("tz:prague"), "the 401 page too: {}", res.body);
+}
+
+// ===================== API keys (§5k) =====================
+
+/// The address the key tests call from.
+fn key_ip() -> std::net::IpAddr {
+    "192.0.2.7".parse().unwrap()
+}
+
+/// A fixture with self-service keys on, prefix `test_`.
+async fn key_fx() -> Fx {
+    Fx::with(|a| a.api_keys(api_key::ApiKeys::new("test_"))).await
+}
+
+/// Mint a key for `username` straight through the module (not the page), returning the raw key.
+async fn mint_for(fx: &Fx, username: &str) -> String {
+    let id = fx.row(username).await.id;
+    api_key::mint(&fx.db, id, "test_", "k", None).await.expect("mint").1
+}
+
+/// The raw key on a "key created" page.
+fn minted_key(body: &str) -> String {
+    let start = body.find("test_").unwrap_or_else(|| panic!("no key on the page: {body}"));
+    body[start..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect()
+}
+
+fn key_rows_count(rows: &[api_key::entity::Model]) -> usize {
+    rows.len()
+}
+
+async fn keys(fx: &Fx) -> Vec<api_key::entity::Model> {
+    api_key::entity::Entity::find().all(&fx.db).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_minted_key_identifies_its_owner_with_their_current_groups() {
+    let fx = key_fx().await;
+    fx.user_in("alice", "dns").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+
+    // Positive control: the page mints, re-authenticated, and shows the key once.
+    let res = fx
+        .post("/profile/api-keys", &form(&[("name", "router"), ("current_password", PW)]), Some(&cookie))
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    let raw = minted_key(&res.body);
+    assert_eq!(raw.len(), "test_".len() + 40, "{raw}");
+
+    let row = &keys(&fx).await[0];
+    assert_eq!(row.hashed_key, api_key::hash(&raw), "only the hash is stored");
+    assert_eq!(row.prefix, raw[..11], "the visible prefix is the app prefix and six more");
+    assert_eq!(row.name, "router");
+    assert!(row.last_used_at.is_none());
+
+    let k = fx.auth.identify_key(&raw, key_ip()).await.expect("the key works");
+    assert_eq!(k.identity.username, "alice");
+    assert_eq!(k.identity.groups, vec!["dns".to_string()]);
+    assert_eq!((k.key_id, k.key_name.as_str()), (row.id, "router"));
+    assert!(keys(&fx).await[0].last_used_at.is_some(), "a use is recorded");
+
+    // The listing never shows the key again, only its prefix.
+    let page = fx.get("/profile", Some(&cookie)).await;
+    assert!(page.body.contains("router") && page.body.contains(&row.prefix), "{}", page.body);
+    assert!(!page.body.contains(&raw), "the raw key is shown once only");
+
+    // Groups are read per request: a membership removed disarms the key's use of it at once.
+    remove_from_group(&fx.db, "alice", "dns").await.unwrap();
+    let k = fx.auth.identify_key(&raw, key_ip()).await.expect("still alice");
+    assert!(k.identity.groups.is_empty(), "the key carried no rights of its own");
+}
+
+#[tokio::test]
+async fn a_key_never_opens_the_ui() {
+    let fx = key_fx().await;
+    fx.user_in("alice", "admin").await;
+    let raw = mint_for(&fx, "alice").await;
+    assert!(fx.auth.identify_key(&raw, key_ip()).await.is_ok(), "control: the key is good");
+
+    let mut bearer = HeaderMap::new();
+    bearer.insert(header::AUTHORIZATION, format!("Bearer {raw}").parse().unwrap());
+    assert!(fx.auth.identify(&bearer).await.is_none(), "identify ignores Authorization");
+    assert!(fx.identify_token(&raw).await.is_none(), "a key presented as the session cookie is nobody");
+    let gate = GroupReadWrite::new(&fx.auth, ["admin"]);
+    assert_eq!(gate.authorize(Operation::Read, &bearer).await, Decision::NeedsLogin);
+
+    let req = fx.req("GET", "/profile", None).header(header::AUTHORIZATION, format!("Bearer {raw}"));
+    fx.send(req.body(Body::empty()).unwrap()).await.assert_redirect("/login");
+    // …and it can't mint itself a sibling: the mint route wants a session.
+    let req = fx
+        .req("POST", "/profile/api-keys", None)
+        .header(header::AUTHORIZATION, format!("Bearer {raw}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(form(&[("current_password", PW)])))
+        .unwrap();
+    fx.send(req).await.assert_redirect("/login");
+    assert_eq!(key_rows_count(&keys(&fx).await), 1, "no key was minted");
+}
+
+#[tokio::test]
+async fn an_unusable_key_is_invalid_and_counted_against_the_address() {
+    let fx = key_fx().await;
+    let alice = fx.user("alice").await;
+    let ip_rows = |fx: &Fx| {
+        let db = fx.db.clone();
+        async move { lockout::ip_entity::Entity::find().all(&db).await.unwrap() }
+    };
+
+    // An empty token presents nothing: refused, not counted.
+    assert_eq!(fx.auth.identify_key("  ", key_ip()).await.unwrap_err(), api_key::KeyError::Invalid);
+    assert!(ip_rows(&fx).await.is_empty(), "an empty token is not a failed check");
+
+    let unknown = fx.auth.identify_key("test_nope", key_ip()).await;
+    assert_eq!(unknown.unwrap_err(), api_key::KeyError::Invalid);
+    assert_eq!(ip_rows(&fx).await[0].failures, 1, "an unknown key counts once");
+
+    // Each way a real key can be no good, each with its positive control first.
+    let expired = mint_for(&fx, "alice").await;
+    let disabled = mint_for(&fx, "alice").await;
+    for raw in [&expired, &disabled] {
+        assert!(fx.auth.identify_key(raw, key_ip()).await.is_ok(), "control");
+    }
+    let set = |raw: &str, f: fn(&mut api_key::entity::ActiveModel)| {
+        let (db, hash) = (fx.db.clone(), api_key::hash(raw));
+        async move {
+            let row = api_key::entity::Entity::find()
+                .filter(api_key::entity::Column::HashedKey.eq(hash))
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut am: api_key::entity::ActiveModel = row.into();
+            f(&mut am);
+            am.update(&db).await.unwrap();
+        }
+    };
+    set(&expired, |am| am.expires_at = Set(Some(now_secs() - 1))).await;
+    set(&disabled, |am| am.disabled = Set(true)).await;
+    for (what, raw) in [("expired", &expired), ("disabled", &disabled)] {
+        let res = fx.auth.identify_key(raw, key_ip()).await;
+        assert_eq!(res.unwrap_err(), api_key::KeyError::Invalid, "{what}");
+    }
+
+    let live = mint_for(&fx, "alice").await;
+    assert!(fx.auth.identify_key(&live, key_ip()).await.is_ok(), "control");
+    fx.deactivate("alice").await;
+    let res = fx.auth.identify_key(&live, key_ip()).await;
+    assert_eq!(res.unwrap_err(), api_key::KeyError::Invalid, "a deactivated owner's key");
+    assert_eq!(ip_rows(&fx).await[0].failures, 4, "every rejected key counted");
+    let _ = alice;
+}
+
+#[tokio::test]
+async fn a_locked_address_is_refused_before_the_key_is_looked_at() {
+    let fx = Fx::build(Lockout::default().addresses(3, 900), |a| a).await;
+    fx.user("alice").await;
+    let raw = mint_for(&fx, "alice").await;
+    for _ in 0..3 {
+        let _ = fx.auth.identify_key("test_wrong", key_ip()).await;
+    }
+    match fx.auth.identify_key(&raw, key_ip()).await {
+        Err(api_key::KeyError::Locked(retry)) => assert!(retry > 0),
+        other => panic!("a locked address must not get to the key: {other:?}"),
+    }
+    // The address is what's braked, not the key: another address still gets in.
+    let elsewhere: std::net::IpAddr = "198.51.100.1".parse().unwrap();
+    assert!(fx.auth.identify_key(&raw, elsewhere).await.is_ok(), "control");
+    // …and the counter is the login form's: the same address can't log in either.
+    let res = fx.post_from("/login", &form(&[("username", "alice"), ("password", PW)]), None, "192.0.2.7:1").await;
+    assert_eq!(res.status, StatusCode::TOO_MANY_REQUESTS, "one budget across both surfaces");
+}
+
+#[tokio::test]
+async fn minting_needs_a_session_csrf_and_reauthentication() {
+    let fx = key_fx().await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+
+    let res = fx.post("/profile/api-keys", &form(&[("name", "x")]), Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "no factor given");
+    let res = fx
+        .post("/profile/api-keys", &form(&[("name", "x"), ("current_password", "wrong")]), Some(&cookie))
+        .await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "a wrong password");
+    assert!(res.body.contains("incorrect"), "{}", res.body);
+    let res = fx.post_raw("/profile/api-keys", &form(&[("current_password", PW)]), Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "no CSRF token");
+    let res = fx.post("/profile/api-keys", &form(&[("current_password", PW)]), None).await;
+    res.assert_redirect("/login");
+    let res = fx
+        .post(
+            "/profile/api-keys",
+            &form(&[("expires_days", "0"), ("current_password", PW)]),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST, "a bad expiry");
+    assert!(keys(&fx).await.is_empty(), "none of those minted a key");
+
+    // Control: the same post with the password mints, with the expiry asked for.
+    let res = fx
+        .post(
+            "/profile/api-keys",
+            &form(&[("expires_days", "2"), ("current_password", PW)]),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    let row = &keys(&fx).await[0];
+    assert_eq!(row.name, "key", "a blank label gets a default");
+    assert!(row.expires_at.unwrap() > now_secs() + 86_400, "expires in two days");
+}
+
+#[tokio::test]
+async fn a_user_revokes_only_their_own_keys() {
+    let fx = key_fx().await;
+    fx.user("alice").await;
+    fx.user("mallory").await;
+    let alices = mint_for(&fx, "alice").await;
+    let alices_id = keys(&fx).await[0].id;
+    let mallory = fx.cookie(&fx.session_for("mallory").await);
+    let alice = fx.cookie(&fx.session_for("alice").await);
+
+    let path = format!("/profile/api-keys/{alices_id}/revoke");
+    let res = fx.post(&path, "", Some(&mallory)).await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND, "someone else's key");
+    let res = fx.post_raw(&path, "", Some(&alice)).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "no CSRF token");
+    assert!(fx.auth.identify_key(&alices, key_ip()).await.is_ok(), "the key survived both");
+
+    // Control: the owner revokes it, without re-authenticating, and it stops working.
+    let res = fx.post(&path, "", Some(&alice)).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert!(res.body.contains("revoked"), "{}", res.body);
+    assert!(fx.auth.identify_key(&alices, key_ip()).await.is_err(), "revoked");
+    assert!(keys(&fx).await.is_empty());
+}
+
+#[tokio::test]
+async fn without_api_keys_there_is_no_card_and_no_route() {
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    let page = fx.get("/profile", Some(&cookie)).await;
+    assert!(!page.body.contains("API keys"), "{}", page.body);
+    // The path then falls to the manager route (`/profile/{id}`, no such user): refused either way.
+    let res = fx.post("/profile/api-keys", &form(&[("current_password", PW)]), Some(&cookie)).await;
+    assert!(res.status.is_client_error(), "{}", res.status);
+    assert!(keys(&fx).await.is_empty());
+
+    // Control: switched on, the card is there — and identify_key works either way.
+    let fx = key_fx().await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    assert!(fx.get("/profile", Some(&cookie)).await.body.contains("API keys"));
+}
+
+/// What the audit observer saw: `(op, entity, before, after)`.
+#[derive(Default)]
+struct KeyEvents(std::sync::Mutex<Vec<(Operation, String, String)>>);
+
+#[async_trait::async_trait]
+impl crate::observe::WriteObserver for KeyEvents {
+    async fn on_write(&self, ev: &crate::observe::WriteEvent<'_>) {
+        let body = format!("{:?} {:?} {:?}", ev.before, ev.after, ev.before_rows);
+        self.0.lock().unwrap().push((ev.op, ev.entity.to_string(), body));
+    }
+}
+
+#[tokio::test]
+async fn minting_and_revoking_are_audited_without_the_key() {
+    let events = Arc::new(KeyEvents::default());
+    let fx = Fx::with(|a| a.api_keys(api_key::ApiKeys::new("test_")).on_write(events.clone())).await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    let res = fx
+        .post("/profile/api-keys", &form(&[("name", "router"), ("current_password", PW)]), Some(&cookie))
+        .await;
+    let raw = minted_key(&res.body);
+    let row = keys(&fx).await.remove(0);
+    fx.post(&format!("/profile/api-keys/{}/revoke", row.id), "", Some(&cookie)).await;
+
+    let seen = events.0.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!((seen[0].0, seen[0].1.as_str()), (Operation::Create, "auth_api_key"));
+    assert_eq!((seen[1].0, seen[1].1.as_str()), (Operation::Delete, "auth_api_key"));
+    for (_, _, body) in &seen {
+        assert!(body.contains("router") && body.contains(&row.prefix), "describes the key: {body}");
+        assert!(!body.contains(&raw), "never the key: {body}");
+        assert!(!body.contains(&row.hashed_key), "never its hash: {body}");
+    }
 }

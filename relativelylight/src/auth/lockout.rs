@@ -1,6 +1,7 @@
 //! Lockout — the brute-force brake in front of the **unauthenticated** credential checks: `POST
 //! /login`, the still-pending second factor at `POST /login/totp`, and whatever the app checks itself
-//! (HTTP Basic on a machine endpoint, an API token). See `docs/AUTH.md` §5e.
+//! (HTTP Basic on a machine endpoint). An API key counts against the address inside
+//! [`Auth::identify_key`](crate::auth::Auth::identify_key). See `docs/AUTH.md` §5e.
 //!
 //! Two counters, two tables, two deliberately separate types: [`UsernameLockout`](crate::auth::lockout::UsernameLockout) keyed by account
 //! name and [`IpLockout`](crate::auth::lockout::IpLockout) keyed by source address. They do the same arithmetic today and are expected

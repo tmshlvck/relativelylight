@@ -20,12 +20,15 @@
 //! per-model enforcement in the `crud` HTTP handlers via
 //! `crud::seaorm::Crud::register`, plus **OIDC single sign-on** (feature `sso`, module [`sso`]:
 //! Google / Okta / corporate, with username- and claim-based group mapping and optional
-//! auto-registration). Not yet: the CSRF/CORS/real-ip/logging middleware and PassKeys.
+//! auto-registration), and **API keys** for machine endpoints (module [`api_key`],
+//! [`Auth::identify_key`]). Not yet: PassKeys.
 //!
 //! The session cookie (name configurable, default `rl_session`) carries only an **opaque token** —
 //! the id of a row in the session table; the identity is rebuilt server-side from the DB on each
 //! lookup, and deleting the row revokes it.
 
+/// API keys (§5k): bearer keys for the app's machine endpoints, each acting as its owner.
+pub mod api_key;
 pub mod group;
 /// Lockout (§5e): the two DB-backed failure counters — by account name and by source address —
 /// braking the unauthenticated credential checks, here and in the app.
@@ -70,6 +73,8 @@ use sea_orm::{
     EntityTrait, IntoActiveModel, QueryFilter, Schema, Set,
 };
 
+pub use api_key::bearer_token;
+
 const DEFAULT_COOKIE: &str = "rl_session";
 
 // ===================== Identity + gate presets =====================
@@ -78,7 +83,8 @@ const DEFAULT_COOKIE: &str = "rl_session";
 /// plain return value — nothing injects it into the request.
 ///
 /// **`#[non_exhaustive]` with [`Identity::new`]**, because this is the type most likely to grow: an
-/// assurance level once PassKeys land, an auth-source marker once API tokens do. Reading it is
+/// assurance level once PassKeys land. (An API-key caller is an `Identity` inside an
+/// [`api_key::KeyIdentity`], which says which key; this type stays the same for both.) Reading it is
 /// unaffected; the constructor is there for the cases that legitimately build one — a test double, or a
 /// custom identity source of your own.
 #[derive(Clone, Debug)]
@@ -265,7 +271,7 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
 // ===================== Setup helpers =====================
 
 /// The `CREATE TABLE` statements for the auth tables — `auth_user`, `auth_group`, `auth_user_group`,
-/// `auth_session` (in that order). Use these to fold the auth schema into your own **`sea-orm-migration`**
+/// `auth_session`, the two lockout tables, `auth_totp_recovery` and `auth_api_key` (in that order). Use these to fold the auth schema into your own **`sea-orm-migration`**
 /// migration so it's versioned alongside your app tables — the recommended approach for anything
 /// long-lived (see `docs/AUTH.md`):
 ///
@@ -285,6 +291,7 @@ pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> 
         schema.create_table_from_entity(lockout::username_entity::Entity),
         schema.create_table_from_entity(lockout::ip_entity::Entity),
         schema.create_table_from_entity(recovery::entity::Entity),
+        schema.create_table_from_entity(api_key::entity::Entity),
     ]
 }
 
@@ -621,6 +628,8 @@ struct Inner {
     ips: lockout::IpLockout,
     /// Strength check for a new password; `None` disables it (see [`Auth::password_policy`]).
     password_check: Option<PasswordCheck>,
+    /// Self-service API keys on `/profile`, when switched on (see [`Auth::api_keys`]).
+    api_keys: Option<api_key::ApiKeys>,
 }
 
 impl Inner {
@@ -786,18 +795,39 @@ impl Inner {
         headers: &HeaderMap,
         client_ip: std::net::IpAddr,
     ) {
-        let Some(observer) = &self.observer else { return };
-        let ev = crate::observe::WriteEvent {
+        self.notify_event(Event {
             source,
             op: crate::authz::Operation::Update,
+            actor,
             entity,
             key,
             before: None,
             after: Some(after),
-            before_rows: &[], // auth writes are never deletes
-            actor: Some(actor),
             headers,
             client_ip,
+        })
+        .await;
+    }
+
+    /// Fire the audit observer with any operation — a create, an update or a single-row delete, whose
+    /// `before` also becomes the event's one `before_rows` element.
+    async fn notify_event(&self, ev: Event<'_>) {
+        let Some(observer) = &self.observer else { return };
+        let before_rows: Vec<serde_json::Value> = match ev.op {
+            crate::authz::Operation::Delete => ev.before.iter().cloned().collect(),
+            _ => Vec::new(),
+        };
+        let ev = crate::observe::WriteEvent {
+            source: ev.source,
+            op: ev.op,
+            entity: ev.entity,
+            key: ev.key,
+            before: ev.before,
+            after: ev.after,
+            before_rows: &before_rows,
+            actor: Some(ev.actor),
+            headers: ev.headers,
+            client_ip: ev.client_ip,
         };
         observer.on_write(&ev).await;
     }
@@ -814,6 +844,20 @@ impl Inner {
         let ev = crate::observe::ErrorEvent { source, during, error, client_ip };
         observer.on_error(&ev).await;
     }
+}
+
+/// What [`Inner::notify_event`] reports: the fields of a [`WriteEvent`](crate::observe::WriteEvent)
+/// an `auth` handler knows. Never put a secret in `before` / `after`.
+struct Event<'a> {
+    source: &'static str,
+    op: crate::authz::Operation,
+    actor: &'a str,
+    entity: &'a str,
+    key: Option<String>,
+    before: Option<serde_json::Value>,
+    after: Option<serde_json::Value>,
+    headers: &'a HeaderMap,
+    client_ip: std::net::IpAddr,
 }
 
 /// Stamp a user's `last_login_at` (UTC Unix seconds). Uses a set-based update so it doesn't bump
@@ -881,6 +925,7 @@ impl Auth {
                 usernames,
                 ips,
                 password_check: Some(policy_check(crate::validate::PasswordPolicy::recommended())),
+                api_keys: None,
             }),
         }
     }
@@ -919,15 +964,15 @@ impl Auth {
     }
 
     /// Append an app-rendered section below the password/2FA fragment on the caller's **own** profile
-    /// page (API tokens, preferences). The hook gets a [`ProfileSection`] — the identity and the CSRF
+    /// page (preferences, a webhook secret; API keys are built in, [`api_keys`](Auth::api_keys)). The hook gets a [`ProfileSection`] — the identity and the CSRF
     /// token this request's forms must carry — and returns an HTML fragment.
     ///
     /// ```ignore
     /// let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
-    ///     let tokens = list_api_tokens(&s.who.id).await;
-    ///     format!(r#"<hr><h2 class="h6">API tokens</h2>{tokens}
-    ///                <form method="post" action="/api-token/new">{}
-    ///                <button class="btn btn-sm btn-outline-primary">Issue a token</button></form>"#,
+    ///     let hooks = list_webhooks(&s.who.id).await;
+    ///     format!(r#"<hr><h2 class="h6">Webhooks</h2>{hooks}
+    ///                <form method="post" action="/webhook-secret/rotate">{}
+    ///                <button class="btn btn-sm btn-outline-primary">Rotate the secret</button></form>"#,
     ///             relativelylight::csrf::Csrf::hidden_input(&s.csrf))
     /// });
     /// ```
@@ -1158,7 +1203,7 @@ impl Auth {
     /// account holder is present; `Err(message)` is fit to render back into your form.
     ///
     /// A live session isn't evidence its owner is present. This module asks for a factor again before
-    /// its own sensitive changes; use this for yours (deleting an account, rotating an API token):
+    /// its own sensitive changes; use this for yours (deleting an account, rotating a webhook secret):
     ///
     /// ```ignore
     /// let Some(who) = auth.identify(&headers).await else { return redirect_to_login() };
@@ -1241,6 +1286,8 @@ impl Auth {
     /// - `GET/POST /profile/totp` + `POST /profile/totp/disable` — enrol in / disable your own 2FA.
     /// - `POST /profile/totp/recovery` — replace your recovery codes (§5i).
     /// - `POST /profile/sessions/revoke` — sign out your *other* sessions.
+    /// - `POST /profile/api-keys` + `POST /profile/api-keys/{id}/revoke` — mint and revoke your own API
+    ///   keys, only when [`api_keys`](Auth::api_keys) is on (§5k).
     /// - `GET/POST /profile/{id}` — a manager resets another user's password.
     /// - `POST /profile/{id}/totp/disable` — a manager disables another user's 2FA.
     ///
@@ -1248,7 +1295,13 @@ impl Auth {
     /// merge time. Change where they live with [`login_path`](Auth::login_path)'s and
     /// [`profile_path`](Auth::profile_path)'s configuration, or nest the whole thing under a prefix.
     pub fn routes(&self) -> Router {
-        Router::new()
+        let mut router = Router::new();
+        if self.inner.api_keys.is_some() {
+            router = router
+                .route("/profile/api-keys", post(api_key::mint_submit))
+                .route("/profile/api-keys/{id}/revoke", post(api_key::revoke_submit));
+        }
+        router
             .route("/login", get(login_form).post(login_submit))
             .route("/login/totp", get(login_totp_form).post(login_totp_submit))
             .route("/logout", get(logout))
@@ -1704,12 +1757,7 @@ async fn profile_form(
         return Redirect::to(&inner.login_path).into_response();
     };
     let (token, jar) = csrf_token(&inner, headers, jar);
-    let frag = match user.sso_key() {
-        Some(provider) => {
-            inner.with_profile_extra(sso_profile_html(&who, provider), &who, &token, headers).await
-        }
-        None => profile_fragment(&inner, &who, &user, None, None, &token, headers).await,
-    };
+    let frag = profile_fragment(&inner, &who, &user, None, None, &token, headers).await;
     (jar, inner.page(&who, &frag, &req)).into_response()
 }
 
@@ -2159,7 +2207,8 @@ async fn totp_manage_disable(
 
 /// The whole self-service profile fragment for `user`: the password form, the 2FA section, the recovery
 /// codes section (only when 2FA is on — it needs a count from the DB, which is why this is async), the
-/// sessions section, and the app's `profile_extra` appended.
+/// sessions section, the API-key card when switched on, and the app's `profile_extra` appended. An SSO
+/// account gets the read-only notice in place of the password and 2FA sections.
 async fn profile_fragment(
     inner: &Inner,
     who: &Identity,
@@ -2169,13 +2218,51 @@ async fn profile_fragment(
     csrf: &str,
     headers: &HeaderMap,
 ) -> String {
+    profile_fragment_with(inner, who, user, (error, success), (None, None), csrf, headers).await
+}
+
+/// [`profile_fragment`] with a message for the top of the page and one for the API-key card.
+async fn profile_fragment_with(
+    inner: &Inner,
+    who: &Identity,
+    user: &user::Model,
+    (error, success): (Option<&str>, Option<&str>),
+    (key_error, key_success): (Option<&str>, Option<&str>),
+    csrf: &str,
+    headers: &HeaderMap,
+) -> String {
     let totp_on = user.has_totp();
-    let left = match totp_on {
-        true => Some(recovery::remaining(&inner.db, user.id).await),
-        false => None,
+    let mut frag = match user.sso_key() {
+        Some(provider) => sso_profile_html(who, provider),
+        None => {
+            let left = match totp_on {
+                true => Some(recovery::remaining(&inner.db, user.id).await),
+                false => None,
+            };
+            change_form_html(who, totp_on, left, error, success, csrf)
+        }
     };
-    let frag = change_form_html(who, totp_on, left, error, success, csrf);
+    if inner.api_keys.is_some() {
+        let card = api_key::card(&inner.db, user.id, headers).await;
+        let can_reauth = !user.password_hash.is_empty() || totp_on;
+        frag.push_str(&api_keys_html(&card, can_reauth, totp_on, key_error, key_success, csrf));
+    }
     inner.with_profile_extra(frag, who, csrf, headers).await
+}
+
+/// The caller's own profile page with a message on the API-key card — what the key routes answer.
+async fn profile_page_keys(
+    inner: &Inner,
+    who: &Identity,
+    user: &user::Model,
+    error: Option<&str>,
+    success: Option<&str>,
+    csrf: &str,
+    req: &Parts,
+) -> Html<String> {
+    let frag =
+        profile_fragment_with(inner, who, user, (None, None), (error, success), csrf, &req.headers).await;
+    inner.page(who, &frag, req)
 }
 
 /// The caller's own profile page — [`profile_fragment`] in the app's profile shell.
@@ -2395,8 +2482,8 @@ mod tests {
         let stmts = table_create_statements(DbBackend::Sqlite);
         assert_eq!(
             stmts.len(),
-            7,
-            "user, group, user_group, session, the two lockout tables + totp recovery"
+            8,
+            "user, group, user_group, session, the two lockout tables, totp recovery + api keys"
         );
         for mut stmt in stmts {
             stmt.if_not_exists();

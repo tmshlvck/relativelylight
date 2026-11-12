@@ -17,6 +17,7 @@
 //!   cargo run -p auth-example -- --set-admin-pw s3cret   # break-glass: pw + enable + clear 2FA + group
 //!   curl -u admin:password    127.0.0.1:3000/api/whoami  # the app's own credential check
 //!   curl -u admin:nope -i     127.0.0.1:3000/api/whoami  # 5 of these → 429, and /login locks too
+//!   curl -H "Authorization: Bearer demo_…" 127.0.0.1:3000/api/whoami  # an API key minted on /profile
 //!
 //! It also shows the two housekeeping duties the library leaves to the app: it schedules
 //! `auth::prune` (expired sessions + expired lockout rows), and it registers the two lockout
@@ -29,6 +30,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Form, Router};
 use axum_extra::extract::CookieJar;
+use relativelylight::auth::api_key::{ApiKeys, KeyError};
 use relativelylight::auth::lockout::{IpLockout, Lockout, UsernameLockout};
 use relativelylight::middleware::RealIp;
 use relativelylight::auth::sso::{Sso, SsoButton, SsoProvider};
@@ -124,8 +126,11 @@ from this site. Reload the page and try again.</div>
         })
         .login_shell(move |form, _req| bootstrap_login(form, &sso_buttons))
         .profile_shell(|frag, who, _req| bootstrap_profile(frag, who))
-        // The app's own section on the library's profile page — see `api_token_section`.
-        .profile_extra(|s| async move { api_token_section(&s) });
+        // API keys: a card on /profile to mint (re-authenticated, shown once), list and revoke them.
+        // `/api/whoami` accepts them; the accounts panel shows everyone's (docs/AUTH.md §5k).
+        .api_keys(ApiKeys::new("demo_"))
+        // The app's own section on the library's profile page — see `webhook_section`.
+        .profile_extra(|s| async move { webhook_section(&s) });
 
     // auth is now fully configured — safe to clone it into the Sso.
     let sso = google.map(|(id, secret)| build_sso(&auth, id, secret));
@@ -152,8 +157,8 @@ from this site. Reload the page and try again.</div>
     // of, say, `/api/whoami`.
     let guarded = Router::new()
         // An app-owned **sensitive** action: CSRF-checked by the layer, then identity-checked by
-        // `Auth::reauthenticate` inside the handler (see `rotate_api_token`).
-        .route("/api-token/rotate", post(rotate_api_token))
+        // `Auth::reauthenticate` inside the handler (see `rotate_webhook_secret`).
+        .route("/webhook-secret/rotate", post(rotate_webhook_secret))
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce));
 
@@ -281,7 +286,7 @@ async fn secret(State(app): State<AppState>, headers: HeaderMap, jar: CookieJar)
             r#"<p>Signed in as <b>{}</b> — groups: [{}].</p>
 <p class="small text-muted mb-1">session cookie</p>
 <pre class="bg-body-secondary p-2 rounded"><code>{name}={}</code></pre>
-<a class="btn btn-primary btn-sm" href="/profile">Profile, 2FA &amp; API token</a>
+<a class="btn btn-primary btn-sm" href="/profile">Profile, 2FA &amp; API keys</a>
 <a class="btn btn-outline-secondary btn-sm" href="/admin">Accounts</a>
 <a class="btn btn-outline-secondary btn-sm" href="/logout">Log out</a>
 <p class="small text-muted mt-3 mb-0">The API-token section on <a href="/profile">/profile</a> is this
@@ -297,21 +302,21 @@ app's own, rendered into the library's page by <code>Auth::profile_extra</code>.
 /// **Extending the library's profile page** — `Auth::profile_extra` appends this below the
 /// password/2FA fragment on `/profile` (the caller's own page only; a manager's `/profile/{id}` does
 /// not get it). This is where an app puts the things that belong beside "change my password": API
-/// tokens, notification preferences, a data export.
+/// webhooks, notification preferences, a data export. (API keys are built in: `Auth::api_keys`.)
 ///
 /// The hook is handed the caller's identity *and this request's CSRF token*, which is what lets the
 /// section contain a real `<form>` rather than just text — the app never sees the request, so it
 /// could not mint one itself.
-fn api_token_section(s: &relativelylight::auth::ProfileSection) -> String {
+fn webhook_section(s: &relativelylight::auth::ProfileSection) -> String {
     format!(
         r#"<hr class="my-4">
-<h2 class="h6">API token</h2>
-<p class="small text-muted">Rotating <b>{}</b>'s API token is the kind of thing a live session alone
+<h2 class="h6">Webhook secret</h2>
+<p class="small text-muted">Rotating <b>{}</b>'s webhook signing secret is the kind of thing a live session alone
 shouldn't be enough for — a stolen cookie <em>is</em> a live session. So the app asks the caller to prove
 they are present, with <code>Auth::reauthenticate</code>: the same factors the library's own sensitive
 pages take (your password, or a fresh 2FA code), and the same single-use rule for codes. The CSRF token
 comes from the hook; the re-auth happens in the handler.</p>
-<form method="post" action="/api-token/rotate">
+<form method="post" action="/webhook-secret/rotate">
   {csrf_input}
   <div class="mb-2" style="max-width:22rem">
     <label class="form-label small" for="rot-pw">Your current password</label>
@@ -323,7 +328,7 @@ comes from the hook; the re-auth happens in the handler.</p>
     <input class="form-control form-control-sm" id="rot-code" name="totp_code" inputmode="numeric"
            autocomplete="one-time-code" placeholder="123456">
   </div>
-  <button class="btn btn-outline-danger btn-sm" type="submit">Rotate API token</button>
+  <button class="btn btn-outline-danger btn-sm" type="submit">Rotate webhook secret</button>
 </form>"#,
         s.who.username,
         csrf_input = relativelylight::csrf::Csrf::hidden_input(&s.csrf),
@@ -340,7 +345,7 @@ struct RotateForm {
     totp_code: String,
 }
 
-/// `POST /api-token/rotate` — **the showcase for re-authentication before a sensitive change.**
+/// `POST /webhook-secret/rotate` — **the showcase for re-authentication before a sensitive change.**
 ///
 /// The pattern to copy, in order:
 /// 1. resolve the caller (`identify`); anonymous goes to the login page;
@@ -352,7 +357,7 @@ struct RotateForm {
 /// lives; this bounds what it can *do* while it lives. An account with no local factor (an SSO login)
 /// passes step 2 — there is nothing to ask it for — which `Auth::can_reauthenticate` reports if you want
 /// to say so in your own UI.
-async fn rotate_api_token(
+async fn rotate_webhook_secret(
     State(app): State<AppState>,
     headers: HeaderMap,
     Form(form): Form<RotateForm>,
@@ -362,7 +367,7 @@ async fn rotate_api_token(
         return Redirect::to(auth.login_path()).into_response();
     };
     if let Err(msg) = auth.reauthenticate(&who, &form.current_password, &form.totp_code).await {
-        // 403, and nothing has changed — the old token is still the token.
+        // 403, and nothing has changed — the old secret is still the secret.
         return (
             StatusCode::FORBIDDEN,
             Html(page(
@@ -376,12 +381,12 @@ async fn rotate_api_token(
         )
             .into_response();
     }
-    // Re-authenticated. A real app would mint and store a token here; this one only says it would, since
+    // Re-authenticated. A real app would mint and store a secret here; this one only says it would, since
     // the point of the example is the check above.
     Html(page(
-        "API token rotated",
+        "Webhook secret rotated",
         &format!(
-            r#"<div class="alert alert-success">Confirmed — a new API token would now be issued for
+            r#"<div class="alert alert-success">Confirmed — a new webhook secret would now be issued for
 <b>{}</b>, and the old one revoked.</div>
 <a class="btn btn-outline-secondary btn-sm" href="/secret">Back</a>"#,
             who.username
@@ -490,6 +495,8 @@ fn accounts_engine(db: DatabaseConnection, auth: &Auth) -> Arc<Engine> {
     let mut crud = Crud::new(db);
     crud.register(user, gate.clone());
     crud.register(group, gate.clone());
+    // Everyone's API keys: the hash hidden, the owner pinned, disable/re-date/delete allowed.
+    crud.register(auth::api_key::meta_model(), gate.clone());
     crud.register(locked_names, gate.clone());
     crud.register(locked_ips, gate);
     // These writes are cookie-authenticated, so they must carry the double-submit token — the same
@@ -521,6 +528,9 @@ fn accounts(engine: &Engine) -> Admin<'_> {
                 auth::group::Column::Name.as_str(),
                 "auth_user",
             ]))
+        // Keys are minted on /profile, where the raw value can be shown once; one made here would
+        // have no value anyone could see, so the panel offers no "+ New".
+        .entity_with("auth_api_key", |t| t.title("API keys").create(false))
         .separator()
         .group("Locked out")
         .entity_with("auth_username_lockout", |t| t.title("By account"))
@@ -592,9 +602,12 @@ struct AppState {
     ips: IpLockout,
 }
 
-/// `GET /api/whoami` — an **app-owned** credential check (HTTP Basic against the same user table),
-/// standing in for the API-token endpoint a real app would have. `auth` never sees this request, so
-/// braking it is the app's job — and it must use the library's counters, not its own, so that:
+/// `GET /api/whoami` — a machine endpoint taking either credential:
+///
+/// - an **API key** (`Authorization: Bearer`), minted on /profile. The app reads the header and
+///   `Auth::identify_key` verifies it, braking on the library's address counter itself;
+/// - **HTTP Basic**, an app-owned check against the same user table. `auth` never sees this, so
+///   braking it is the app's job — and it must use the library's counters, not its own, so that:
 ///
 /// - one account has **one** budget: burning it here locks `/login` too, and vice versa;
 /// - `Auth::clear_login_attempts` (the operator unlock) frees every surface at once.
@@ -606,10 +619,32 @@ async fn whoami(
     RealIp(ip): RealIp,
     headers: HeaderMap,
 ) -> Response {
+    // An API key: the owner, with their groups as they are now. A key never opens /profile or the
+    // panel — `identify` ignores it — so this route is where it means something.
+    if let Some(token) = auth::bearer_token(&headers) {
+        return match app.auth.identify_key(token, ip).await {
+            Ok(k) => format!(
+                "ok: {} (API key {} \"{}\"; groups: {})\n",
+                k.identity.username,
+                k.key_prefix,
+                k.key_name,
+                k.identity.groups.join(", ")
+            )
+            .into_response(),
+            Err(KeyError::Invalid) => unauthorized("bad API key"),
+            Err(KeyError::Locked(retry)) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(axum::http::header::RETRY_AFTER, retry.to_string())],
+                format!("too many failed attempts — retry in {retry}s\n"),
+            )
+                .into_response(),
+            Err(KeyError::Internal) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+    }
     // A request with no credential at all is a plain 401 — never counted, or an anonymous scanner
     // could lock out everyone who shares its address.
     let Some((username, password)) = basic_auth(&headers) else {
-        return unauthorized("send HTTP Basic credentials");
+        return unauthorized("send HTTP Basic credentials or an API key");
     };
     // No resolution to do and no proxy flag to remember: `RealIp` is the address the middleware already
     // worked out, which is by construction the one `/login` counted against. That's the point of it.
@@ -630,7 +665,7 @@ async fn whoami(
         .ok()
         .flatten()
         // An SSO account's password isn't ours to check, and a 2FA account's password isn't the whole
-        // credential — a machine endpoint should hand those users an API token instead.
+        // credential — a machine endpoint should hand those users an API key instead.
         .filter(|u| u.is_active && !u.is_sso() && !u.has_totp());
     let ok = user.as_ref().is_some_and(|u| auth::verify_password(&u.password_hash, &password));
     if !ok {

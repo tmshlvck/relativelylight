@@ -1,0 +1,54 @@
+{%- import "auth/_macros.html" as m -%}
+{#- The API-key card (AUTH.md §5k), below the library's own sections on the caller's /profile. #}
+<hr class="my-4">
+<h2 class="h6" id="api-keys">API keys</h2>
+<p class="text-muted small mb-2">Keys for scripts, devices and agents calling this app's API. A key acts
+as <em>you</em>: it can do what your account can, checked on every request, and stops working when your
+access changes. It can't sign in to these pages. Revoke a key here if a device is lost.</p>
+{{ m::alert(error, success) }}
+{%- if card.rows.is_empty() %}
+<p class="text-muted small">No keys yet.</p>
+{%- else %}
+<div class="table-responsive">
+<table class="table table-sm align-middle small">
+  <thead><tr><th>Label</th><th>Key</th><th>Created</th><th>Expires</th><th>Last used</th><th></th></tr></thead>
+  <tbody>
+  {%- for k in card.rows %}
+  <tr>
+    <td>{{ k.name }}
+      {%- if k.disabled %} <span class="badge text-bg-secondary">disabled by an administrator</span>{% endif %}
+      {%- if k.expired %} <span class="badge text-bg-warning">expired</span>{% endif %}</td>
+    <td><code>{{ k.prefix }}…</code></td>
+    <td>{{ k.created }}</td>
+    <td>{{ k.expires }}</td>
+    <td>{{ k.used }}</td>
+    <td class="text-end"><form method="post" action="/profile/api-keys/{{ k.id }}/revoke" class="d-inline">
+      {{ m::csrf(csrf) }}
+      <button class="btn btn-outline-danger btn-sm" type="submit">Revoke</button>
+    </form></td>
+  </tr>
+  {%- endfor %}
+  </tbody>
+  <caption class="small">Times in {{ card.zone }}.</caption>
+</table>
+</div>
+{%- endif %}
+<form method="post" action="/profile/api-keys">
+  {{ m::csrf(csrf) }}
+  <div class="row g-2 mb-2">
+    <div class="col-sm-7">
+      <label class="form-label small" for="rl-key-name">Label</label>
+      <input class="form-control form-control-sm" id="rl-key-name" name="name" maxlength="128"
+             placeholder="router at home">
+    </div>
+    <div class="col-sm-5">
+      <label class="form-label small" for="rl-key-exp">Expires after (days)</label>
+      <input class="form-control form-control-sm" id="rl-key-exp" name="expires_days" type="number"
+             min="1" max="36500" placeholder="never">
+    </div>
+  </div>
+  {%- if can_reauth %}
+  {{- m::reauth("rl-key", totp_on, "Confirm it's you. A key is a new way into this account that doesn't ask for your second factor.") }}
+  {%- endif %}
+  <button class="btn btn-outline-primary btn-sm" type="submit">Create key</button>
+</form>

@@ -8,6 +8,7 @@ Feature `auth`, usable without `crud`. It provides:
 - OIDC single sign-on with group mapping (feature `sso`, §5b);
 - lockout on the unauthenticated credential checks (§5e), session lifetimes and revocation (§5f), a
   password policy (§5g), re-authentication before sensitive changes (§5h);
+- API keys for machine endpoints, each acting as its owner, with self-service on `/profile` (§5k);
 - double-submit CSRF (feature `csrf`, §7);
 - per-model gate presets for `crud` (§6).
 
@@ -31,8 +32,10 @@ client → resolve_real_ip → [your request log] → [CORS] → router
 
 - **authn** is `Auth::identify(&headers) -> Option<Identity>`, called where it is needed — a gate, a
   page handler. Anything you want public (`/metrics`) simply never calls it.
+- **API keys** are `Auth::identify_key(token, ip)`, called by the machine endpoints that accept one
+  (§5k). `identify` never accepts a key.
 - **authz** is one `Authz` gate per model (§6), handed the raw headers, so it can also accept a
-  credential this crate knows nothing about, such as your own API tokens.
+  credential this crate knows nothing about.
 - **CSRF** is built into `auth`'s routes and the `crud` UI, and is a layer for your own routes (§7).
 
 ## 2. Features
@@ -50,7 +53,8 @@ admin, plus `"sso"` for single sign-on.
 
 **A server-side session in an opaque cookie.** A random 256-bit id, backed by a row in
 `auth_session`; deleting the row revokes it at once, which is what logout, "sign out everywhere" and
-disabling an account rely on. A bearer token for your own API is the app's to issue and verify (§6).
+disabling an account rely on. The session is the only credential that opens the UI. A machine
+endpoint can take an **API key** instead (§5k), but only where the app checks for one.
 
 Cookie attributes: `HttpOnly`, `Secure` (`secure_cookies(false)` for local http), `SameSite=Strict`,
 `Path=/`, and a lifetime matching the session's (§5f).
@@ -78,17 +82,18 @@ to `/logout` signs the user out. `SameSite=None` is not offered.
   it keeps from the caller reach you through `Auth::on_error` (§5d).
   [`examples/audit`](../examples/audit/src/main.rs) has the dozen lines in two variants: the handler
   puts the caller in the response extensions for the layer to read (free), or the layer calls
-  `Auth::identify` itself (one lookup per request). Neither can name a bearer-token caller, which is
-  verified inside the handler; log that from the handler, where extracting `RealIp` gives the same
-  address:
+  `Auth::identify` itself (one lookup per request). Neither can name an API-key caller, which is
+  verified inside the handler (§5k); log that from the handler, where extracting `RealIp` gives the
+  same address:
 
   ```rust
-  async fn api_write(RealIp(ip): RealIp, headers: HeaderMap) -> Response {
-      let Some(principal) = verify_api_token(&headers).await else {
-          eprintln!("{ip} api-token rejected");
+  async fn api_write(State(app): State<App>, RealIp(ip): RealIp, headers: HeaderMap) -> Response {
+      let token = auth::bearer_token(&headers).unwrap_or_default();
+      let Ok(caller) = app.auth.identify_key(token, ip).await else {
+          eprintln!("{ip} api key rejected");
           return StatusCode::UNAUTHORIZED.into_response();
       };
-      eprintln!("{ip} {principal} api-write ok");
+      eprintln!("{ip} {} key {} api-write ok", caller.identity.username, caller.key_id);
       // …
   }
   ```
@@ -119,9 +124,11 @@ The tables, all ordinary SeaORM entities an admin panel can register (§5j):
 - **`auth_session`** — the opaque id, `user_id`, `expires_at` (absolute deadline), `last_seen_at`
   (idle clock, §5f) and `awaiting_totp` (password accepted, second factor pending).
 - **`auth_totp_recovery`** — hashed single-use recovery codes (§5i).
+- **`auth_api_key`** — hashed API keys (§5k).
 - **`auth_username_lockout`**, **`auth_ip_lockout`** — the lockout counters (§5e).
 
-Deleting an account **cascades** to its sessions, recovery codes and memberships, whoever deletes it.
+Deleting an account **cascades** to its sessions, recovery codes, API keys and memberships, whoever
+deletes it.
 The lockout tables key on a submitted name and an address, so they have no foreign key.
 
 ### Database schema & migrations
@@ -166,20 +173,20 @@ fragment and your `Auth::profile_shell` wraps it, handed the `Identity` and the 
 write only the password hash and revoke sessions (§5f).
 
 **Extending the profile page — `Auth::profile_extra`.** The password/2FA fragment is rarely the whole
-of "my account": an app wants API tokens, notification preferences, a data export, a list of the
-user's own things. Register a hook and it renders **below** the library's fragment, on the caller's
-own `/profile` only (a manager's `/profile/{id}` doesn't get it — resetting someone's password is no
-licence to touch their tokens):
+of "my account": an app wants notification preferences, a webhook secret, a data export, a list of
+the user's own things. (API keys are built in, §5k.) Register a hook and it renders **below** the
+library's fragment, on the caller's own `/profile` only (a manager's `/profile/{id}` doesn't get it —
+resetting someone's password is no licence to touch their settings):
 
 ```rust
 use relativelylight::auth::ProfileSection;
 use relativelylight::csrf::Csrf;
 
 let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
-    let rows = my_api_tokens(&s.who.id).await;                 // `s.who` is the caller
-    format!(r#"<hr><h2 class="h6">API tokens</h2>{rows}
-               <form method="post" action="/api-token/new">{}
-               <button class="btn btn-sm btn-outline-primary">Issue a token</button></form>"#,
+    let hooks = my_webhooks(&s.who.id).await;                  // `s.who` is the caller
+    format!(r#"<hr><h2 class="h6">Webhooks</h2>{hooks}
+               <form method="post" action="/webhook-secret/rotate">{}
+               <button class="btn btn-sm btn-outline-primary">Rotate the secret</button></form>"#,
             Csrf::hidden_input(&s.csrf))                        // `s.csrf` is *this request's* token
 });
 ```
@@ -190,8 +197,8 @@ section that reads a preference cookie, such as a
 [timezone picker](TIME.md#3-the-picker-and-its-handler) showing the caller's current zone. The
 section's *handler* is an ordinary route of yours — put
 [`reauthenticate`](#5h-re-authentication-before-sensitive-changes) at the top of it if
-the action is sensitive, which for an API token it is. `examples/auth` does exactly this: its
-`POST /api-token/rotate` is reached from a `profile_extra` section and re-authenticates before it
+the action is sensitive, which for a secret it is. `examples/auth` does exactly this: its
+`POST /webhook-secret/rotate` is reached from a `profile_extra` section and re-authenticates before it
 does anything.
 
 Three things it is not: it is **not** a way to replace the password/2FA fragment (that's
@@ -456,6 +463,7 @@ key for `duration` after the last one"** — a decaying window, not a strict sli
 | `POST /profile` (current password) | **not limited** | the caller is *authenticated*: that's session theft, whose mitigations are short TTLs and re-authentication (§5h) — and counting it would let a stolen session lock the real user out of logging in |
 | `POST /profile/totp` (enrolment code) | **not limited** | authenticated, and the code guessed is the caller's *own* pending secret |
 | `POST /profile/{id}` (manager reset) | **not limited** | verifies no secret; gated by group membership instead |
+| `Auth::identify_key` (API key, §5k) | address | a key names no account, so the address is all there is to count |
 
 **Configuration is mandatory** — it is an argument to `Auth::new`, not a builder call, so there is no
 way to end up with an unbraked login by forgetting one:
@@ -497,8 +505,9 @@ Setting `ip_after: 0` turns per-address counting off everywhere, leaving the per
 still covers the common case of one account being guessed at, just not spraying across many.
 
 **The app's own credential checks share these counters.** An app that authenticates callers itself —
-API tokens, HTTP Basic on a machine endpoint, a DDNS update URL — must not keep a second limiter, or an
-account gets two budgets and an unlock frees only half of them:
+HTTP Basic on a machine endpoint, a DDNS update URL — must not keep a second limiter, or an account
+gets two budgets and an unlock frees only half of them. (API keys, §5k, already count against the
+address counter inside `identify_key`.)
 
 ```rust
 let usernames = auth.username_lockout();   // in AppState; cheap to clone
@@ -633,10 +642,11 @@ ask for a factor again, per request:
 | `POST /profile/totp` (enrol) | the caller's | otherwise they enrol *their own* authenticator — which doesn't just persist access, it **locks the real user out**, since login then wants a code only they can produce |
 | `POST /profile/{id}` (reset) | the **manager's** | sets a password without knowing the old one; every account it reaches is one the session can then log in as |
 | `POST /profile/{id}/totp/disable` | the **manager's** | strips a victim's second factor |
+| `POST /profile/api-keys` (mint, §5k) | the caller's | a key outlives the session and skips the second factor — a stolen session must not become a permanent credential |
 
 `POST /profile` (your own password change) asks for the current password anyway.
-`POST /profile/sessions/revoke` is **not** re-authenticated: it only removes access, and a user racing
-to evict an intruder shouldn't be slowed down.
+`POST /profile/sessions/revoke` and `POST /profile/api-keys/{id}/revoke` are **not** re-authenticated:
+each only removes access, and a user racing to evict an intruder shouldn't be slowed down.
 
 **Either factor.** A `current_password` or a `totp_code` satisfies it. A **fresh code is preferred** when
 the account has 2FA — it proves presence, where a password may have been filled in by the browser for
@@ -665,7 +675,7 @@ delete_the_thing(&who).await;
 ```
 
 `Auth::can_reauthenticate(&who)` says whether the account *can* be challenged (false for SSO), for a UI
-hint. `examples/auth` gates a `POST /api-token/rotate` on it — the pattern to copy, including returning
+hint. `examples/auth` gates a `POST /webhook-secret/rotate` on it — the pattern to copy, including returning
 the refusal before anything is written.
 
 **Per request, not a window.** There is no "you confirmed five minutes ago" grace period, which would
@@ -790,6 +800,115 @@ What the panel deliberately cannot do: **enrol or reset someone's 2FA** (a manag
 it, from `/profile/{id}`, under re-auth — §5h), and **reset an SSO account's password** (there is none
 to reset — §5b).
 
+## 5k. API keys
+
+Bearer keys for the app's machine endpoints: a device updating DNS, an agent calling an MCP server, a
+script calling a JSON API. `auth::api_key` holds the table, the resolver and the self-service card on
+`/profile`.
+
+**A key is its owner, and nothing else.** A key stores no scope, level or group. The resolver returns
+the owner's `Identity` with the groups as they are **on this request**, so removing a membership or
+deactivating the account disarms every key that user holds at once. To give a device less than its
+human owner can do, give the device **its own account** in a narrower group and a key of that account.
+The scope then lives in group membership, where it is visible and revocable, and the audit trail names
+the device, not a person.
+
+**A key never opens the UI.** `Auth::identify(&headers)` reads only the session cookie, so a key
+presented as a cookie or in an `Authorization` header is anonymous to every gate, to the `crud` UI
+and to `/profile`. A key is checked only where the app asks for it:
+
+```rust
+use relativelylight::auth::{self, api_key::KeyError};
+use relativelylight::middleware::RealIp;
+
+async fn update(State(app): State<App>, RealIp(ip): RealIp, headers: HeaderMap) -> Response {
+    // The app chooses where the credential comes from: `Authorization: Bearer`, a vendor header…
+    let Some(token) = auth::bearer_token(&headers) else { return StatusCode::UNAUTHORIZED.into_response() };
+    let caller = match app.auth.identify_key(token, ip).await {
+        Ok(k) => k,                                    // k.identity, k.key_id, k.key_name, k.key_prefix
+        Err(KeyError::Invalid) => return StatusCode::UNAUTHORIZED.into_response(),
+        Err(KeyError::Locked(retry)) => return too_many(retry),   // 429 + Retry-After
+        Err(KeyError::Internal) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    // …then the same authorization as a signed-in user: caller.identity.in_group("dns")
+}
+```
+
+The app parses the request and `identify_key` verifies the token. `auth::bearer_token` reads
+`Authorization: Bearer <key>` (the scheme is case-insensitive); an app that also takes the key from a
+header of its own (teleddns's Cloudflare-compatible `X-Auth-Key`) passes that value instead.
+`identify_key` refuses, as `Invalid`:
+
+- an unknown key;
+- an expired key (`expires_at` reached);
+- a key an administrator disabled;
+- a key whose owner is deactivated.
+
+**Lockout.** A key carries no account name, so only the **source address** is braked, on the same
+`IpLockout` counter as `/login` (§5e). While the address is locked, `identify_key` answers
+`Locked(retry)` without looking up the key. A rejected key counts one failure. An empty token
+presents no credential and is refused without counting. A good key clears nothing: one valid
+credential shouldn't refund a spraying address's budget. A database failure is `Internal`, goes to
+the `on_error` observer and is not counted.
+
+**What a request logs is the app's.** `identify_key` writes nothing to stdout. Request logging
+belongs to your middleware or proxy (`examples/audit`). Audit with the `key_id` it returns: a write
+made with a key is the owner's write, made with that key.
+
+**Self-service on `/profile`**, switched on with `Auth::api_keys`:
+
+```rust
+use relativelylight::auth::api_key::ApiKeys;
+
+let auth = Auth::new(db, lockout).api_keys(ApiKeys::new("climb_"));
+```
+
+The card lists the caller's keys (label, prefix, created, expires, last used, and whether disabled)
+and offers:
+
+| route | does | guard |
+|---|---|---|
+| `POST /profile/api-keys` | mint a key with a label and an optional expiry in days, and show the raw key **once** | CSRF + **re-authentication** (§5h) |
+| `POST /profile/api-keys/{id}/revoke` | delete one of the caller's own keys | CSRF |
+
+Minting is re-authenticated because a key is a credential that outlives the session and skips the
+second factor. An intruder holding a session must not be able to turn it into a permanent one.
+Revoking only removes access, so it is not re-authenticated, as with signing out other sessions. A
+request naming someone else's key changes nothing. Both fire a `WriteEvent` (`auth_api_key`,
+`Create` / `Delete`) with the label, the prefix and the expiry, never the key or its hash. A
+manager's `/profile/{id}` doesn't show the card. An administrator manages other users' keys in the
+panel (below). Without `api_keys` the card and its routes are absent, and `identify_key` still
+works, for keys an app mints itself with `api_key::mint`.
+
+**The key.** `{prefix}` followed by 40 random alphanumeric characters (≈ 238 bits). The prefix makes
+a leaked key recognisable (secret scanners, logs). The table stores the first `prefix + 6` characters
+for telling keys apart in a listing, and the **SHA-256** of the whole key. It is SHA-256 and not
+argon2 for §5i's reason, made stronger: a machine-generated 238-bit secret can't be enumerated
+however cheap the hash is, and a deterministic hash makes the lookup one indexed equality match on
+an unauthenticated path. `last_used_at` is refreshed lazily, at most once a minute per key, as the
+session idle clock is (§5f).
+
+**Schema.** `auth_api_key`: `id`, `user_id` (FK `auth_user`, **cascade**: a key is its owner and
+goes with it), `name`, `hashed_key` (unique), `prefix`, `created_at`, `expires_at`, `last_used_at`,
+`disabled`. It is in `table_create_statements`, so `auth::migrate` creates it. An app with its own
+migrations adds a step when it starts using keys (`api_key::table_create_statement`). Expired keys are
+not pruned. They stay listed as expired until their owner or an administrator deletes them.
+
+**In the accounts panel**, register `api_key::meta_model()` (feature `crud`). It applies the rules
+that keep the panel from becoming a way around the above:
+
+- `hashed_key` is hidden;
+- the owner, the prefix, `created_at` and `last_used_at` are read-only, because moving a key to
+  another account would hand that account's rights to whoever holds it;
+- labels and datetimes are set.
+
+An administrator can disable, re-enable, re-label, re-date or delete any key. Turn creation off in
+the panel (`Table::create(false)`): a key minted there would have no raw value anyone could see.
+
+```rust
+crud.register(auth::api_key::meta_model(), Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP])));
+```
+
 ## 6. authz — the gate
 
 The gate trait lives in **`relativelylight::authz`** — always compiled, independent of the `auth`
@@ -837,7 +956,7 @@ lacking the group gets `Denied`.
   groups may read **or** write; anonymous → `NeedsLogin`, any other logged-in user → `Denied`. Use it
   to keep whole models group-only (e.g. the `auth_user` / `auth_group` tables). Its
   `admits(&Identity)` method is a header-free membership check for deciding group-only UI.
-- **Custom** — implement `authz::Authz` (full RBAC over users/groups, an app's own API tokens, IP
+- **Custom** — implement `authz::Authz` (full RBAC over users/groups, an app's own credential, IP
   allow-lists — anything, since you get the headers and can call `auth.identify`).
 
 > The profile page's "manage another user" rule is **not** an `Authz` gate — the header-only trait
@@ -947,7 +1066,7 @@ use axum::middleware::from_fn_with_state;
 
 let guarded = Router::new()
     .route("/account/delete", post(delete_account))
-    .route("/api-token/rotate", post(rotate_token))
+    .route("/webhook-secret/rotate", post(rotate_secret))
     .with_state(state)
     .layer(from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce));
 ```
@@ -962,7 +1081,7 @@ and failing that, for `application/x-www-form-urlencoded` bodies **under 64 KiB*
 body is buffered, checked, and handed to the handler intact, so a plain MPA `<form>` post needs nothing
 from the handler. A **multipart** body is deliberately *not* parsed (an upload shouldn't be buffered to
 find a token): send the header there, or check it in the handler. `examples/auth` guards its
-`POST /api-token/rotate` this way.
+`POST /webhook-secret/rotate` this way.
 
 **Your own rejection page.** The built-in `403` is shell-less and static on purpose: a rejected request
 hasn't proved it came from your site, so nothing about the caller is rendered and no cookies are set.
@@ -1004,8 +1123,9 @@ port-scoped), exactly as with the session cookie.
 
 - **[`examples/auth`](../examples/auth/src/main.rs)** — `auth` up close: the login page, a `/secret`
   page gated by `identify`, the self-service `/profile` with 2FA in the app's chrome, an accounts panel
-  at `/admin` (§5j), lockout tuned down to 5 failures per account so it is easy to trip, and
-  `POST /api-token/rotate` — an app's own sensitive action behind `csrf::enforce` and
+  at `/admin` (§5j) including everyone's API keys, lockout tuned down to 5 failures per account so it
+  is easy to trip, API keys minted on `/profile` and accepted by `/api/whoami` beside HTTP Basic
+  (§5k), and `POST /webhook-secret/rotate` — an app's own sensitive action behind `csrf::enforce` and
   `Auth::reauthenticate` (§5h, §7), reached from a `profile_extra` section. SSO is wired in when
   `SSO_GOOGLE_CLIENT_ID` / `SSO_GOOGLE_CLIENT_SECRET` are set. `--set-admin-pw` is the break-glass path.
 - **[`examples/adminpanel`](../examples/adminpanel/src/main.rs)** — a login-gated `crud::ui::Admin`
@@ -1023,8 +1143,10 @@ in-memory SQLite:
 - **`auth/security_tests.rs`** — sessions (expired, idle, half-authenticated, deactivated, forged and
   bearer-presented tokens all resolve to anonymous), login, TOTP and its replay guard, recovery codes,
   the profile and manager pages, re-authentication, the password policy, lockout (including the proxy
-  flag and the whitelist), session rotation and revocation, CSRF on every unsafe route, and the gate
-  presets as a matrix of caller × operation.
+  flag and the whitelist), session rotation and revocation, CSRF on every unsafe route, the gate
+  presets as a matrix of caller × operation, and API keys (unknown, expired, disabled, inactive owner,
+  locked address, a key never opening the UI, minting without re-authentication, revoking someone
+  else's key).
 - **`auth/sso_tests.rs`** (feature `sso`) — the OIDC callback against a **fake IdP** on a loopback
   port (real discovery, real RSA signatures): missing or forged state, wrong key, audience, issuer,
   nonce, an expired token, missing claims, auto-registration off, disabled, local and

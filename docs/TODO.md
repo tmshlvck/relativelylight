@@ -48,6 +48,10 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
   release.
 - [ ] **PassKeys / WebAuthn**, when an app faces real-time phishing (TOTP doesn't stop a relaying
   proxy). Likely adds an assurance level to the session and a field to `Identity`.
+- **No scopes on API keys.** A key is its owner (AUTH.md §5k); narrower access is an account of its
+  own in a narrower group. Revisit only for a third-party OAuth client, which is a different design.
+- **Expired API keys are not pruned.** They stay listed as expired, as evidence, until someone
+  deletes them.
 - **No username whitelist for lockout.** An account that can't be locked out can be guessed at forever.
 - **No recovery-code backfill.** Codes are issued with enrolment; `recovery::issue` exists for an app.
 - **The SSO transaction cookie stays unsigned.** Anyone can get a validly signed one from

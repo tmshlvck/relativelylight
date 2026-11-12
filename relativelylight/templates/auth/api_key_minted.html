@@ -1,0 +1,7 @@
+{#- Shown once: only the key's hash is stored, so this page cannot be reproduced. -#}
+<h1 class="h5 mb-3">API key created</h1>
+<div class="alert alert-success">Key “{{ name }}” is ready.</div>
+<p class="text-muted small"><strong>Copy it now. It is not shown again:</strong> only a hash is stored,
+so this page cannot be reproduced. Send it as <code>Authorization: Bearer &lt;key&gt;</code>.</p>
+<pre class="bg-body-secondary p-3 rounded user-select-all"><code>{{ raw }}</code></pre>
+<a class="btn btn-primary btn-sm" href="/profile#api-keys">I've copied it</a>

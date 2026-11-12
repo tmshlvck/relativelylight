@@ -292,7 +292,7 @@ const MAX_BUFFERED_UPLOAD: usize = 16 * 1024 * 1024;
 ///
 /// let guarded = Router::new()
 ///     .route("/account/delete", post(delete_account))
-///     .route("/api-token/rotate", post(rotate_token))
+///     .route("/webhook-secret/rotate", post(rotate_secret))
 ///     .layer(from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce));
 /// ```
 ///

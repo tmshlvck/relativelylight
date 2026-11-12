@@ -3,7 +3,7 @@
 //! [`Auth::login_shell`](super::Auth::login_shell) / [`profile_shell`](super::Auth::profile_shell)
 //! wraps and styles it.
 
-use super::{recovery, totp, Identity};
+use super::{api_key, recovery, totp, Identity};
 use axum::http::request::Parts;
 use askama::Template;
 
@@ -150,6 +150,42 @@ pub(super) fn recovery_codes_html(codes: &[String], headline: &str) -> String {
 }
 
 #[derive(Template)]
+#[template(path = "auth/api_keys.html")]
+struct ApiKeys<'a> {
+    card: &'a api_key::Card,
+    can_reauth: bool,
+    totp_on: bool,
+    error: Option<&'a str>,
+    success: Option<&'a str>,
+    csrf: &'a str,
+}
+
+/// The API-key card on the caller's own profile: their keys, a revoke button each, and the mint form,
+/// which re-authenticates when the account has a factor to ask for.
+pub(super) fn api_keys_html(
+    card: &api_key::Card,
+    can_reauth: bool,
+    totp_on: bool,
+    error: Option<&str>,
+    success: Option<&str>,
+    csrf: &str,
+) -> String {
+    render(ApiKeys { card, can_reauth, totp_on, error, success, csrf })
+}
+
+#[derive(Template)]
+#[template(path = "auth/api_key_minted.html")]
+struct ApiKeyMinted<'a> {
+    name: &'a str,
+    raw: &'a str,
+}
+
+/// The one showing of a freshly minted key.
+pub(super) fn api_key_minted_html(name: &str, raw: &str) -> String {
+    render(ApiKeyMinted { name, raw })
+}
+
+#[derive(Template)]
 #[template(path = "auth/sso.html")]
 struct Sso<'a> {
     managed: bool,
@@ -178,6 +214,17 @@ mod tests {
         let bad = r#"<script>x</script>""#;
         let who = Identity { id: bad.into(), username: bad.into(), groups: vec![] };
         let prov = totp::Provisioning { url: bad.into(), qr_data_uri: bad.into() };
+        let row = || api_key::Row {
+            id: 1,
+            name: bad.into(),
+            prefix: bad.into(),
+            created: bad.into(),
+            expires: bad.into(),
+            expired: true,
+            used: bad.into(),
+            disabled: true,
+        };
+        let card = api_key::Card { rows: vec![row()], zone: bad.into() };
         let pages = [
             login_form_html(Some(bad), bad),
             totp_login_html(Some(bad), bad),
@@ -189,6 +236,9 @@ mod tests {
             sso_managed_html(bad, bad),
             sso_profile_html(&who, bad),
             csrf_rejected_html(bad),
+            api_keys_html(&card, true, true, Some(bad), None, bad),
+            api_keys_html(&card, false, false, None, Some(bad), bad),
+            api_key_minted_html(bad, bad),
         ];
         for html in pages {
             assert!(!html.contains("<script>") && !html.contains("\"\""), "unescaped: {html}");

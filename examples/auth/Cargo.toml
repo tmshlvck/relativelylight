@@ -16,5 +16,5 @@ axum = "0.8"
 axum-extra = { version = "0.12", features = ["cookie"] }
 tokio = { workspace = true, features = ["net"] }
 base64 = "0.22"   # decode the HTTP Basic header on the app's own /api/whoami endpoint
-serde = { version = "1", features = ["derive"] } # the app's own form body (POST /api-token/rotate)
+serde = { version = "1", features = ["derive"] } # the app's own form body (POST /webhook-secret/rotate)
 serde_json = "1"  # one column default (is_active) on the accounts panel
