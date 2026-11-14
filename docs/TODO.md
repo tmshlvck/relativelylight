@@ -26,8 +26,8 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
   renders `.edit(id)` and submits with a plain `Form::new`: a minor bump with a migration step.
 - [ ] **Cross-document view transitions** for POST → 303 → GET. Cheap to try, easy to get wrong (a 422
   re-render animated as a navigation).
-- **`Table`'s API is stable for 0.4** — no split into `List`/`Search`/… pieces; the per-action
-  switches cover turning a control off.
+- **`Table` stays one type** — no split into `List`/`Search`/… pieces; the per-action switches
+  cover turning a control off.
 - **No browser tests in CI**; `ui_tests.rs` covers the server half of the picker.
 - **No timezone abbreviations per cell.** The zone is named once per page.
 - **No type-changing codec until needed.** Cents shown as `12.34` is a formatter plus a validated
@@ -40,47 +40,16 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
 - [ ] **Re-authenticate SSO accounts through the IdP** (`prompt=login`), which needs somewhere to park
   the pending action across the redirect. Until then an account with no local factor passes
   re-authentication (AUTH.md §5h).
-- [ ] **Audit logins and 2FA enable/disable.** Password changes, resets, recovery-code reissue and
-  session revocation fire `WriteEvent`s; these don't yet (`last_login_at` records logins).
+- [ ] **Audit logins and 2FA enable/disable.** Password changes, resets, recovery-code reissue,
+  session revocation and API-key mint/revoke fire `WriteEvent`s; these don't yet (`last_login_at`
+  records logins).
 - [ ] **Breached-password screening** (HIBP range API or a local corpus). Possible today through
   `Auth::password_check`; the question is whether a helper earns a feature flag.
 - [ ] **SSO leftovers:** refresh tokens, `userinfo`, RP-initiated logout, a real-IdP smoke test at
   release.
-- [ ] **Passkeys (WebAuthn)**, feature `passkeys`, on branch `passkeys`. The design is in
-  [DESIGN.md → auth](DESIGN.md#auth). Phases:
-  - [x] **0. Spike (done).** Findings with `webauthn-rs` 0.6.2:
-    - **Crates.** `webauthn-rs` with features `conditional-ui` (username-less login),
-      `danger-allow-state-serialisation` (the ceremony state goes in our server-side row) and
-      `danger-credential-internals` (to read the backup flags at registration through
-      `Credential`).
-    - **Login.** A username-less login finishes with `finish_discoverable_authentication_v2`, given
-      the one stored credential. The v1 call is deprecated. Look the credential up by the
-      response's credential ID: `userHandle` is optional, and the software authenticator sends
-      none. Check it against `passkey_handle` when it is present.
-    - **Attested credentials.** An `AttestedPasskey` registers against an app-supplied CA list
-      (`AttestationCaListBuilder::insert_device_pem(pem, aaguid, desc)`). It works in the
-      username-less login, and is refused against a CA list that lacks its CA. A wrong origin is
-      refused too.
-    - **The backup flag.** The library refuses an assertion whose backup-eligible flag went from
-      true to false (`CredentialBackupEligibilityInconsistent`). False to true is allowed by the
-      spec, so a device-bound credential that starts reporting backup-eligible must be reclassified
-      as synced at that login.
-    - **Tests.** `webauthn-authenticator-rs` (`softpasskey`, `softtoken`) works as a dev-dependency.
-      It only answers when the request names a credential, so the tests put the credential into the
-      request options. It always reports device-bound, and `SoftToken` attests with its own CA. A
-      synced credential for the registration tests is made by rewriting the response: set the
-      backup flags in `authData` and change the format to `none`. Logging in with such a credential
-      is impossible, because the assertion is signed, so the login class checks use a row whose
-      class was edited.
-  - [x] **1. Schema (done).**
-    - `auth_passkey` and `auth_webauthn_challenge`, in `auth::passkey`, compiled without the
-      feature;
-    - `auth_user.passkey_handle`, unique;
-    - `auth_session.method` / `passkey_class`, recorded by every login path;
-    - expired challenges pruned;
-    - the upgrade statements (`passkey::table_alter_statements` and friends), tested against a
-      pre-passkey database;
-    - MIGRATION-0.5.md §3.
+- [ ] **Passkeys (WebAuthn)**, feature `passkeys`, on branch `passkeys`. The design and the
+  library findings are in [DESIGN.md → auth](DESIGN.md#auth). The schema has shipped
+  ([AUTH.md §5](AUTH.md#5-authn--users-sessions-login-passwords)). Remaining phases:
   - [ ] **2. Enrolment** on `/profile`, re-authenticated. Enrolling a passkey switches the account
     to passwordless: the password and TOTP are removed and recovery codes are issued. With
     `second_factor(true)` the user can instead keep the password and use the passkey after it.

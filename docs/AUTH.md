@@ -413,13 +413,14 @@ engine:
 | Action | `source` |
 |---|---|
 | your password change (`POST /profile`), new recovery codes, signing out other sessions | `auth-profile` |
+| minting or revoking one of your API keys (§5k): `Create` / `Delete` on `auth_api_key` | `auth-profile` |
 | a manager's reset (`POST /profile/{id}`) | `auth-admin` |
 
 Each event carries the headers, the resolved `client_ip`, **`actor`** (the username who acted — read
 it rather than calling `identify`, since a password change has already rotated the caller's session),
-and an `after` describing what changed with no secret in it (`{"password_changed": true}`). Logins
-and 2FA changes don't fire yet ([TODO.md](TODO.md#auth)); `last_login_at` records logins. Share one
-`Arc` with `Crud::on_write` so a single sink covers both:
+and an `after` (and, for a delete, a `before`) describing what changed with no secret in it
+(`{"password_changed": true}`). Logins and 2FA changes don't fire yet ([TODO.md](TODO.md#auth));
+`last_login_at` records logins. Share one `Arc` with `Crud::on_write` so a single sink covers both:
 
 ```rust
 let audit = Arc::new(MyAuditSink::new(db.clone()));

@@ -93,7 +93,7 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 - **A key never opens the UI.** `identify` reads only the session cookie, and keys have their own
   entry point, `identify_key`, which the app calls on the routes that take one. The crate doesn't
   read the header itself: where the credential arrives is the app's choice.
-- **Passkeys (planned, feature `passkeys`, `webauthn-rs`).** The policy is **app-wide**. It sets
+- **Passkeys (in progress, feature `passkeys`, `webauthn-rs`).** The policy is **app-wide**. It sets
   the lowest class of passkey accepted, `Any < DeviceBound < Attested`, and whether a passkey may be
   a second factor after a password.
   - *Device-bound* means the authenticator reports itself non-backup-eligible. That is cheap, but
@@ -114,6 +114,19 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
   `auth::routes()` as a file, so a strict CSP can allow it. Challenge state is a server-side row,
   single-use and short-lived. It is created when the user asks for a challenge, not on every
   `GET /login`, so anonymous traffic can't write rows.
+- **What the passkey code relies on in `webauthn-rs` 0.6** (checked in a spike):
+  - **Features.** `conditional-ui` for username-less login, `danger-allow-state-serialisation` to
+    keep the ceremony state in our row, and `danger-credential-internals` to read the backup flags
+    at registration.
+  - **Lookup.** A sign-in looks the credential up by its ID and finishes with
+    `finish_discoverable_authentication_v2`. `userHandle` is optional, so it is checked against
+    `passkey_handle` only when present.
+  - **Attestation.** It is checked against an app-supplied CA list (PEM plus AAGUID).
+  - **The backup flag.** The library refuses an assertion whose backup-eligible flag went from true
+    to false. False to true is legal, and reclassifies the credential as synced.
+  - **Tests.** `webauthn-authenticator-rs`'s software authenticators answer only for a named
+    credential and always report device-bound, so a synced registration is made by rewriting the
+    response, and a login class check by editing the row's class.
 - **Not here, on purpose:** a registration page, request logging, scoped keys. Each is product
   policy; the gate receives the headers, so an app's own credential needs no change here.
 
