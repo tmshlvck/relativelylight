@@ -153,19 +153,19 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 
   | Signed in with | Level |
   |---|---|
-  | a password | `Single` (1) |
-  | a password + TOTP (or a recovery code), a password + passkey | `Multi` (2) |
-  | a passkey | `Multi` (2) |
-  | an attested passkey, alone or with anything | `Hardware` (3) |
-  | SSO | `Multi` by default (the IdP is trusted to have asked for its own second factor); `Auth::sso_level(Level::Single)` to distrust it |
-  | SSO + TOTP | at least `Multi` |
+  | a password | `Simple` (1) |
+  | a password + TOTP (or a recovery code), a password + passkey | `Mfa` (2) |
+  | a passkey | `Mfa` (2) |
+  | an attested passkey, alone or with anything | `Attested` (3) |
+  | SSO | `Mfa` by default (the IdP is trusted to have asked for its own second factor); `Auth::sso_level(Level::Simple)` to distrust it |
+  | SSO + TOTP | at least `Mfa` |
 
-  - **TOTP lifts a method to `Multi`, never higher.** `Hardware` means an attested passkey and
+  - **TOTP lifts a method to `Mfa`, never higher.** `Attested` means an attested passkey and
     nothing else, so "attested hardware only" stays expressible. (The first draft had TOTP add one
     level, which made passkey + TOTP equal to attested hardware.)
-  - **The default minimum is `Single`**, which changes nothing for an existing app. "Password +
-    TOTP or SSO" is `Multi`. "SSO must add our TOTP" is `sso_level(Single)` with `Multi`, which is
-    why an SSO account may enrol TOTP. `Hardware` needs passkeys requiring `Class::Attested`,
+  - **The default minimum is `Simple`**, which changes nothing for an existing app. "Password +
+    TOTP or SSO" is `Mfa`. "SSO must add our TOTP" is `sso_level(Simple)` with `Mfa`, which is
+    why an SSO account may enrol TOTP. `Attested` needs passkeys requiring `Class::Attested`,
     checked at startup.
   - **The level comes from the session's recorded method and passkey class**, read on every
     request, so a stricter policy applies to sessions already open. `Identity::level` carries it,

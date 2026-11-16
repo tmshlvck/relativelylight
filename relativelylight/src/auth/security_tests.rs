@@ -4081,26 +4081,26 @@ async fn each_way_of_signing_in_has_its_level() {
     let lv = |m: Option<M>, c: Option<passkey::Class>| fx.auth.inner.level_of(m, c);
     let attested = Some(passkey::Class::Attested);
     let synced = Some(passkey::Class::Synced);
-    assert_eq!(lv(Some(M::Password), None), Level::Single);
-    assert_eq!(lv(None, None), Level::Single, "a row from before the column existed");
-    assert_eq!(lv(Some(M::PasswordTotp), None), Level::Multi);
-    assert_eq!(lv(Some(M::PasswordRecovery), None), Level::Multi);
-    assert_eq!(lv(Some(M::Passkey), synced), Level::Multi);
-    assert_eq!(lv(Some(M::PasswordPasskey), synced), Level::Multi);
-    assert_eq!(lv(Some(M::Passkey), attested), Level::Hardware);
-    assert_eq!(lv(Some(M::PasskeyTotp), synced), Level::Multi, "TOTP lifts to Multi, never higher");
-    assert_eq!(lv(Some(M::PasskeyTotp), attested), Level::Hardware);
-    assert_eq!(lv(Some(M::Sso), None), Level::Multi, "the IdP is trusted by default");
-    assert_eq!(lv(Some(M::SsoTotp), None), Level::Multi);
+    assert_eq!(lv(Some(M::Password), None), Level::Simple);
+    assert_eq!(lv(None, None), Level::Simple, "a row from before the column existed");
+    assert_eq!(lv(Some(M::PasswordTotp), None), Level::Mfa);
+    assert_eq!(lv(Some(M::PasswordRecovery), None), Level::Mfa);
+    assert_eq!(lv(Some(M::Passkey), synced), Level::Mfa);
+    assert_eq!(lv(Some(M::PasswordPasskey), synced), Level::Mfa);
+    assert_eq!(lv(Some(M::Passkey), attested), Level::Attested);
+    assert_eq!(lv(Some(M::PasskeyTotp), synced), Level::Mfa, "TOTP lifts to Mfa, never higher");
+    assert_eq!(lv(Some(M::PasskeyTotp), attested), Level::Attested);
+    assert_eq!(lv(Some(M::Sso), None), Level::Mfa, "the IdP is trusted by default");
+    assert_eq!(lv(Some(M::SsoTotp), None), Level::Mfa);
 
-    let fx = Fx::with(|a| a.sso_level(Level::Single)).await;
-    assert_eq!(fx.auth.inner.level_of(Some(M::Sso), None), Level::Single);
-    assert_eq!(fx.auth.inner.level_of(Some(M::SsoTotp), None), Level::Multi);
+    let fx = Fx::with(|a| a.sso_level(Level::Simple)).await;
+    assert_eq!(fx.auth.inner.level_of(Some(M::Sso), None), Level::Simple);
+    assert_eq!(fx.auth.inner.level_of(Some(M::SsoTotp), None), Level::Mfa);
 }
 
 #[tokio::test]
 async fn below_the_minimum_a_session_is_restricted_to_its_profile() {
-    let fx = Fx::with(|a| a.min_level(Level::Multi).api_keys(api_key::ApiKeys::new("t_"))).await;
+    let fx = Fx::with(|a| a.min_level(Level::Mfa).api_keys(api_key::ApiKeys::new("t_"))).await;
     fx.user_in("alice", "admin").await;
     let bob = fx.user("bob").await;
 
@@ -4122,10 +4122,10 @@ async fn below_the_minimum_a_session_is_restricted_to_its_profile() {
     assert!(api_key::entity::Entity::find().all(&fx.db).await.unwrap().is_empty());
     assert_ne!(fx.get(&format!("/profile/{bob}"), Some(&cookie)).await.status, StatusCode::OK);
 
-    // Adding TOTP steps the very session up: a new id, and now an identity at Multi.
+    // Adding TOTP steps the very session up: a new id, and now an identity at Mfa.
     let (secret, _) = enrol_with_codes(&fx, "alice", &mut cookie).await;
     let token = cookie.split('=').nth(1).unwrap().to_string();
-    assert_eq!(fx.identify_token(&token).await.map(|w| w.level), Some(Level::Multi));
+    assert_eq!(fx.identify_token(&token).await.map(|w| w.level), Some(Level::Mfa));
     let res = fx.post("/profile/api-keys", &form(&[("current_password", PW)]), Some(&cookie)).await;
     assert_eq!(res.status, StatusCode::OK, "control: the stepped-up session mints: {}", res.body);
 
@@ -4141,24 +4141,24 @@ async fn below_the_minimum_a_session_is_restricted_to_its_profile() {
 
 #[tokio::test]
 async fn a_stricter_minimum_applies_to_sessions_already_open() {
-    let fx = Fx::with(|a| a.min_level(Level::Multi)).await;
+    let fx = Fx::with(|a| a.min_level(Level::Mfa)).await;
     fx.user("alice").await;
     let password = session_with(&fx, "alice", session::Method::Password, None).await;
     let with_totp = session_with(&fx, "alice", session::Method::PasswordTotp, None).await;
     assert!(fx.identify_token(&password).await.is_none(), "a password session is below it");
     let who = fx.identify_token(&with_totp).await.expect("control: a two-factor session is not");
-    assert_eq!(who.level, Level::Multi);
+    assert_eq!(who.level, Level::Mfa);
     // The same rows under the default policy: both count.
     let open = Fx::new().await;
     open.user("alice").await;
     let password = session_with(&open, "alice", session::Method::Password, None).await;
-    assert_eq!(open.identify_token(&password).await.map(|w| w.level), Some(Level::Single));
+    assert_eq!(open.identify_token(&password).await.map(|w| w.level), Some(Level::Simple));
 }
 
 #[tokio::test]
 #[should_panic(expected = "needs passkeys requiring Class::Attested")]
-async fn a_hardware_minimum_without_attested_passkeys_is_a_startup_error() {
-    Fx::with(|a| a.min_level(Level::Hardware)).await;
+async fn an_attested_minimum_without_attested_passkeys_is_a_startup_error() {
+    Fx::with(|a| a.min_level(Level::Attested)).await;
 }
 
 #[tokio::test]

@@ -88,7 +88,7 @@ ALTER TABLE auth_session ADD COLUMN passkey_class varchar NULL;
 ```
 
 **After the upgrade:**
-- Sessions from before the step keep working. Their `method` is empty, which counts as `Single`.
+- Sessions from before the step keep working. Their `method` is empty, which counts as `Simple`.
 - A password from before has no `password_changed_at`; a maximum age counts it from `created_at`.
 - **Accounts panel:** hide `passkey_handle` with the TOTP columns (the user's authenticators hold
   it, so an edited one orphans every passkey). Show `must_change_password` read-only (an editable

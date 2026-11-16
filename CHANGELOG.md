@@ -73,11 +73,17 @@ is easy to miss in a diff.
   - adding and removing a passkey are audited, without the credential.
 
   `examples/auth` has passkeys on.
+- **`WriteEvent::new(source, op, entity, headers, client_ip)`** with `.key()`, `.before()`,
+  `.before_rows()`, `.after()` and `.actor()`: an app reports its own writes (an API endpoint taking
+  an API key, a hand-written form) to the same audit sink as `crud` and `auth`
+  ([CRUD.md → Write observer](docs/CRUD.md#write-observer-audit)). Before, `WriteEvent` was
+  `#[non_exhaustive]` with no constructor, so an app couldn't build one. `examples/audit` audits a
+  post retitled through `PUT /api/posts/{id}/title` with an API key.
 - **The sign-in policy: one minimum assurance level** ([AUTH.md §5m](docs/AUTH.md#5m-the-sign-in-policy-and-password-change-required)).
-  - `Auth::min_level(Level::Single | Multi | Hardware)`, default `Single`, changes nothing for an
+  - `Auth::min_level(Level::Simple | Mfa | Attested)`, default `Simple`, changes nothing for an
     existing app.
-  - Each sign-in method has a level: password `Single`; password + TOTP, a passkey, SSO `Multi`; an
-    attested passkey `Hardware`. `Auth::sso_level` sets SSO's (`Single` to distrust the IdP).
+  - Each sign-in method has a level: password `Simple`; password + TOTP, a passkey, SSO `Mfa`; an
+    attested passkey `Attested`. `Auth::sso_level` sets SSO's (`Simple` to distrust the IdP).
   - A session below the minimum is restricted: `identify` returns `None`, and its only page is the
     caller's profile, which says which factor to add. Adding it steps the session up.
   - `Identity::level` carries the level for an app that wants more for one action.

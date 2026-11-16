@@ -112,13 +112,13 @@ pub struct Identity {
 
 impl Identity {
     /// An identity from its parts. `id` is the `auth_user` primary key as a string. Its
-    /// [`level`](Identity::level) is [`Level::Single`] and it has no password change due.
+    /// [`level`](Identity::level) is [`Level::Simple`] and it has no password change due.
     pub fn new(id: impl Into<String>, username: impl Into<String>, groups: Vec<String>) -> Self {
         Self {
             id: id.into(),
             username: username.into(),
             groups,
-            level: Level::Single,
+            level: Level::Simple,
             password_change: None,
         }
     }
@@ -143,17 +143,17 @@ impl Identity {
 // ===================== Assurance level =====================
 
 /// How strongly a session was authenticated — the sign-in policy's one number (§5m, and the table in
-/// `docs/DESIGN.md` → auth). Ordered: `Single < Multi < Hardware`.
+/// `docs/DESIGN.md` → auth). Ordered: `Simple < Mfa < Attested`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Level {
     /// One factor: a password alone, or SSO when the app distrusts the IdP
     /// ([`Auth::sso_level`]).
-    Single = 1,
+    Simple = 1,
     /// Two factors, or one that is both (a passkey verifies the user itself): a password + TOTP, a
     /// passkey, SSO by default.
-    Multi = 2,
+    Mfa = 2,
     /// An attested passkey: hardware of a model the site trusts.
-    Hardware = 3,
+    Attested = 3,
 }
 
 // ===================== Re-authentication input =====================
@@ -902,20 +902,20 @@ impl Inner {
     }
 
     /// The [`Level`] a session authenticated by `method` (with a passkey of `class`) has. See the table
-    /// in `docs/DESIGN.md` → auth: TOTP lifts a method to `Multi`, never higher; `Hardware` is an
-    /// attested passkey. An unknown method (a row from before the column existed) is `Single`.
+    /// in `docs/DESIGN.md` → auth: TOTP lifts a method to `Mfa`, never higher; `Attested` is an
+    /// attested passkey. An unknown method (a row from before the column existed) is `Simple`.
     fn level_of(&self, method: Option<session::Method>, class: Option<passkey::Class>) -> Level {
         use session::Method as M;
         let passkey = match class {
-            Some(passkey::Class::Attested) => Level::Hardware,
-            _ => Level::Multi,
+            Some(passkey::Class::Attested) => Level::Attested,
+            _ => Level::Mfa,
         };
         match method {
-            Some(M::Password) | None => Level::Single,
-            Some(M::PasswordTotp | M::PasswordRecovery) => Level::Multi,
+            Some(M::Password) | None => Level::Simple,
+            Some(M::PasswordTotp | M::PasswordRecovery) => Level::Mfa,
             Some(M::Passkey | M::PasskeyTotp | M::PasskeyRecovery | M::PasswordPasskey) => passkey,
             Some(M::Sso) => self.sso_level,
-            Some(M::SsoTotp | M::SsoRecovery) => self.sso_level.max(Level::Multi),
+            Some(M::SsoTotp | M::SsoRecovery) => self.sso_level.max(Level::Mfa),
         }
     }
 
@@ -936,7 +936,7 @@ impl Inner {
         }
     }
 
-    /// Whether passkeys are on and accept only attested ones — what `Level::Hardware` needs.
+    /// Whether passkeys are on and accept only attested ones — what `Level::Attested` needs.
     fn attested_only(&self) -> bool {
         #[cfg(feature = "passkeys")]
         if let Some(rt) = &self.passkeys {
@@ -949,7 +949,7 @@ impl Inner {
     fn policy_notice(&self, user: &user::Model) -> String {
         let can_passkey = self.passkeys_on() && !user.is_sso();
         match self.min_level {
-            Level::Hardware => "This site needs a security key of a model it trusts. Add one under \
+            Level::Attested => "This site needs a security key of a model it trusts. Add one under \
                 Passkeys below; until then you can use only this page."
                 .into(),
             _ if can_passkey => "This site needs a second way to confirm it's you. Add an authenticator \
@@ -1223,8 +1223,8 @@ impl Auth {
                 api_keys: None,
                 #[cfg(feature = "passkeys")]
                 passkeys: None,
-                min_level: Level::Single,
-                sso_level: Level::Multi,
+                min_level: Level::Simple,
+                sso_level: Level::Mfa,
                 password_max_age_days: 0,
             }),
         }
@@ -1289,25 +1289,25 @@ impl Auth {
         self
     }
 
-    /// The **minimum assurance level** a session must have (§5m), default [`Level::Single`] (any
+    /// The **minimum assurance level** a session must have (§5m), default [`Level::Simple`] (any
     /// sign-in). A session below it is **restricted**: [`identify`](Auth::identify) treats it as
     /// anonymous, and its only page is the caller's own profile, which says which factor to add.
     /// Adding it steps the session up.
     ///
     /// ```ignore
-    /// .min_level(Level::Multi)   // a password alone is not enough: TOTP, a passkey, or SSO
+    /// .min_level(Level::Mfa)   // a password alone is not enough: TOTP, a passkey, or SSO
     /// ```
     ///
-    /// [`Level::Hardware`] needs passkeys requiring
+    /// [`Level::Attested`] needs passkeys requiring
     /// [`Class::Attested`](passkey::Class::Attested); [`routes`](Auth::routes) panics otherwise.
     pub fn min_level(mut self, level: Level) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().min_level = level;
         self
     }
 
-    /// The level an **SSO** sign-in counts as (§5m), default [`Level::Multi`]: the identity provider is
-    /// trusted to have asked for its own second factor. Set [`Level::Single`] to distrust it — with a
-    /// [`min_level`](Auth::min_level) of `Multi`, an SSO account then enrols this site's TOTP, and the
+    /// The level an **SSO** sign-in counts as (§5m), default [`Level::Mfa`]: the identity provider is
+    /// trusted to have asked for its own second factor. Set [`Level::Simple`] to distrust it — with a
+    /// [`min_level`](Auth::min_level) of `Mfa`, an SSO account then enrols this site's TOTP, and the
     /// TOTP step follows the provider's callback.
     pub fn sso_level(mut self, level: Level) -> Self {
         Arc::get_mut(&mut self.inner).unwrap().sso_level = level;
@@ -1674,8 +1674,8 @@ impl Auth {
     /// [`profile_path`](Auth::profile_path)'s configuration, or nest the whole thing under a prefix.
     pub fn routes(&self) -> Router {
         assert!(
-            self.inner.min_level < Level::Hardware || self.inner.attested_only(),
-            "relativelylight: Auth::min_level(Level::Hardware) needs passkeys requiring Class::Attested"
+            self.inner.min_level < Level::Attested || self.inner.attested_only(),
+            "relativelylight: Auth::min_level(Level::Attested) needs passkeys requiring Class::Attested"
         );
         let mut router = Router::new();
         #[cfg(feature = "passkeys")]

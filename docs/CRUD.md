@@ -1562,7 +1562,25 @@ arrives already resolved. Hand the same `Arc` to `Auth::on_write` ([AUTH.md](AUT
 sees both surfaces: `source` tells them apart (`autocrud` here, `auth-profile` and `auth-admin`
 there). Times are UTC `i64` seconds ([TIME.md](TIME.md)).
 
-**Runnable:** [`examples/audit`](../examples/audit/src/main.rs) — one sink on both `on_write`s,
+**Your own writes, into the same sink.** A write your own handler makes (an API endpoint taking an
+API key, a hand-written form) is reported with `WriteEvent::new` and its builders, so one audit trail
+covers every surface. Name the surface in `source` and set the actor yourself when your handler
+authenticated the caller some other way than the session:
+
+```rust
+let ev = WriteEvent::new("api", Operation::Update, "post", &headers, ip)
+    .key(id.to_string())
+    .before(old_row)
+    .after(new_row)
+    .actor(&caller.identity.username);     // the API key's owner (AUTH.md §5k)
+audit.on_write(&ev).await;
+```
+
+For a delete, pass the removed rows to `.before_rows(&rows)` too, so the sink reads every delete the
+same way.
+
+**Runnable:** [`examples/audit`](../examples/audit/src/main.rs) — one sink on both `on_write`s and on
+the app's own API write (`PUT /api/posts/{id}/title`, authenticated by an API key),
 printing `source op entity#key actor@address` and a per-field diff. The sink runs **inside the
 request** (after the commit, before the response), so real work belongs on a channel.
 

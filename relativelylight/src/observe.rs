@@ -34,8 +34,8 @@ use std::sync::Arc;
 /// A committed state-changing write, handed to the registered [`WriteObserver`]. Borrows the request
 /// pieces (the observer reads what it needs synchronously and must not retain the references).
 ///
-/// **`#[non_exhaustive]`**: an observer *reads* these, and this crate constructs them, so marking it
-/// costs you nothing and means a field added later (a request id, a trace context) isn't a break.
+/// **`#[non_exhaustive]`**: a field added later (a request id, a trace context) isn't a break. An app
+/// that reports its own writes builds one with [`WriteEvent::new`] and the builders.
 #[non_exhaustive]
 pub struct WriteEvent<'a> {
     /// Which surface produced it — `"autocrud"` (the auto-CRUD API/admin) or an `auth` handler
@@ -93,6 +93,75 @@ pub struct WriteEvent<'a> {
     pub client_ip: IpAddr,
 }
 
+impl<'a> WriteEvent<'a> {
+    /// An event of the **app's own** — a write its own handler made (an API endpoint taking an API
+    /// key, a hand-written form) — for the same sink `crud` and `auth` report to. Name the surface in
+    /// `source` (`"api"`, `"import-job"`), then add what is known:
+    ///
+    /// ```ignore
+    /// let ev = WriteEvent::new("api", Operation::Update, "post", &headers, ip)
+    ///     .key(id.to_string())
+    ///     .before(old_row)
+    ///     .after(new_row)
+    ///     .actor(&caller.identity.username);
+    /// audit.on_write(&ev).await;
+    /// ```
+    ///
+    /// For a delete, hand the removed rows to [`before_rows`](WriteEvent::before_rows) as well — one
+    /// element for a single row — so a sink reads every delete the same way.
+    pub fn new(
+        source: &'static str,
+        op: Operation,
+        entity: &'a str,
+        headers: &'a HeaderMap,
+        client_ip: IpAddr,
+    ) -> Self {
+        Self {
+            source,
+            op,
+            entity,
+            key: None,
+            before: None,
+            before_rows: &[],
+            after: None,
+            actor: None,
+            headers,
+            client_ip,
+        }
+    }
+
+    /// The affected row's primary key.
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+
+    /// The row as it was (an update or a delete). No secrets: the emitter redacts.
+    pub fn before(mut self, row: Value) -> Self {
+        self.before = Some(row);
+        self
+    }
+
+    /// Every row a delete removed (see [`WriteEvent::before_rows`](WriteEvent#structfield.before_rows)).
+    pub fn before_rows(mut self, rows: &'a [Value]) -> Self {
+        self.before_rows = rows;
+        self
+    }
+
+    /// The row as it is now (a create or an update). No secrets.
+    pub fn after(mut self, row: Value) -> Self {
+        self.after = Some(row);
+        self
+    }
+
+    /// Who did it, when the emitter authenticated them itself — e.g. the owner of the API key the
+    /// request carried, whom `auth.identify(headers)` would not find.
+    pub fn actor(mut self, actor: &'a str) -> Self {
+        self.actor = Some(actor);
+        self
+    }
+}
+
 /// A sink for [`WriteEvent`]s. Register one with `Crud::on_write` and/or `Auth::on_write`; the same
 /// `Arc` can be shared by both (the blanket impl below forwards through `Arc`).
 #[async_trait]
@@ -137,5 +206,33 @@ pub trait ErrorObserver: Send + Sync {
 impl<T: ErrorObserver + ?Sized> ErrorObserver for Arc<T> {
     async fn on_error(&self, event: &ErrorEvent<'_>) {
         (**self).on_error(event).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_apps_own_event_is_built_with_what_it_knows() {
+        let headers = HeaderMap::new();
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        let ev = WriteEvent::new("api", Operation::Update, "post", &headers, ip)
+            .key("7")
+            .before(serde_json::json!({ "title": "a" }))
+            .after(serde_json::json!({ "title": "b" }))
+            .actor("alice");
+        assert_eq!(
+            (ev.source, ev.entity, ev.key.as_deref(), ev.actor),
+            ("api", "post", Some("7"), Some("alice"))
+        );
+        assert_eq!(ev.after.unwrap()["title"], "b");
+        assert!(ev.before_rows.is_empty(), "not a delete");
+
+        let removed = [serde_json::json!({ "id": 7 })];
+        let ev =
+            WriteEvent::new("api", Operation::Delete, "post", &headers, ip).before_rows(&removed);
+        assert_eq!(ev.before_rows.len(), 1);
+        assert!(ev.after.is_none() && ev.actor.is_none());
     }
 }

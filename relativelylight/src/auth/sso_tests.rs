@@ -712,18 +712,18 @@ fn session_cookie_of(fx: &Fx, res: &Resp) -> String {
 #[tokio::test]
 async fn sso_counts_as_two_factors_unless_the_site_says_otherwise() {
     use crate::auth::Level;
-    // Default: the IdP is trusted, so SSO meets a `Multi` minimum and lands in the app.
-    let fx = Fx::with_auth(true, |p| p, |a| a.min_level(Level::Multi)).await;
+    // Default: the IdP is trusted, so SSO meets a `Mfa` minimum and lands in the app.
+    let fx = Fx::with_auth(true, |p| p, |a| a.min_level(Level::Mfa)).await;
     let res = fx.login_with(Recipe::valid("staff-alice")).await;
     assert_eq!(res.headers.get(header::LOCATION).unwrap(), "/", "{}", res.body);
     let cookie = session_cookie_of(&fx, &res);
     let mut h = HeaderMap::new();
     h.insert(header::COOKIE, cookie.parse().unwrap());
-    assert_eq!(fx.auth.identify(&h).await.map(|w| w.level), Some(Level::Multi));
+    assert_eq!(fx.auth.identify(&h).await.map(|w| w.level), Some(Level::Mfa));
 
     // Distrusted: SSO alone is one factor, so the session is restricted to the profile.
     let fx =
-        Fx::with_auth(true, |p| p, |a| a.min_level(Level::Multi).sso_level(Level::Single)).await;
+        Fx::with_auth(true, |p| p, |a| a.min_level(Level::Mfa).sso_level(Level::Simple)).await;
     let res = fx.login_with(Recipe::valid("staff-alice")).await;
     assert_eq!(res.headers.get(header::LOCATION).unwrap(), "/profile");
     let cookie = session_cookie_of(&fx, &res);
@@ -754,5 +754,5 @@ async fn sso_counts_as_two_factors_unless_the_site_says_otherwise() {
     let cookie = session_cookie_of(&fx, &res);
     let mut h = HeaderMap::new();
     h.insert(header::COOKIE, cookie.parse().unwrap());
-    assert_eq!(fx.auth.identify(&h).await.map(|w| w.level), Some(Level::Multi));
+    assert_eq!(fx.auth.identify(&h).await.map(|w| w.level), Some(Level::Mfa));
 }

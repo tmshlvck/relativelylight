@@ -1052,36 +1052,36 @@ accepts:
 use relativelylight::auth::Level;
 
 let auth = Auth::new(db, lockout)
-    .min_level(Level::Multi)          // default Level::Single: any sign-in
-    .sso_level(Level::Single);        // default Level::Multi: trust the IdP's own second factor
+    .min_level(Level::Mfa)          // default Level::Simple: any sign-in
+    .sso_level(Level::Simple);        // default Level::Mfa: trust the IdP's own second factor
 ```
 
 | Signed in with | Level |
 |---|---|
-| a password | `Single` |
-| a password + TOTP (or a recovery code), a password + passkey | `Multi` |
-| a passkey (§5l) | `Multi` |
-| an attested passkey, alone or with anything | `Hardware` |
-| SSO | `sso_level`, `Multi` by default |
-| SSO + TOTP | at least `Multi` |
+| a password | `Simple` |
+| a password + TOTP (or a recovery code), a password + passkey | `Mfa` |
+| a passkey (§5l) | `Mfa` |
+| an attested passkey, alone or with anything | `Attested` |
+| SSO | `sso_level`, `Mfa` by default |
+| SSO + TOTP | at least `Mfa` |
 
-TOTP lifts a method to `Multi`, never higher: `Hardware` means an attested passkey, so "security keys
-of trusted models only" stays expressible. `min_level(Level::Hardware)` needs passkeys requiring
+TOTP lifts a method to `Mfa`, never higher: `Attested` means an attested passkey, so "security keys
+of trusted models only" stays expressible. `min_level(Level::Attested)` needs passkeys requiring
 `Class::Attested`; `routes()` panics otherwise. Typical settings:
 
 | The site wants | Set |
 |---|---|
 | any sign-in (the default) | nothing |
-| a password + TOTP, a passkey, or SSO | `min_level(Level::Multi)` |
-| the same, and our own TOTP after SSO | `min_level(Level::Multi).sso_level(Level::Single)` |
-| attested security keys only | `min_level(Level::Hardware)` and passkeys `require(Class::Attested)` |
+| a password + TOTP, a passkey, or SSO | `min_level(Level::Mfa)` |
+| the same, and our own TOTP after SSO | `min_level(Level::Mfa).sso_level(Level::Simple)` |
+| attested security keys only | `min_level(Level::Attested)` and passkeys `require(Class::Attested)` |
 
 **The level is read from the session** (its recorded method and passkey class) on every request, so a
 stricter policy applies to sessions already open. `Identity::level` carries it, for an app that wants
 more for one action than the site's minimum, such as a signature:
 
 ```rust
-if who.level < Level::Hardware { return refuse("sign with your security key"); }
+if who.level < Level::Attested { return refuse("sign with your security key"); }
 ```
 
 **A session below the minimum is restricted.** `identify` returns `None`, so the app and every gate
@@ -1092,9 +1092,9 @@ callers to the login page doesn't loop. A restricted session can't mint an API k
 **Adding the factor steps the session up**: TOTP or a passkey enrolled on `/profile` rotates the
 session to the stronger method (a new id, the same as completing a second factor at login), and the
 user goes on without signing in again. API keys (§5k) are outside the policy: a key's identity is
-`Single`, and only a session that meets the minimum can mint one.
+`Simple`, and only a session that meets the minimum can mint one.
 
-**SSO accounts may enrol TOTP** for this. With `sso_level(Level::Single)` and a `Multi` minimum, an SSO
+**SSO accounts may enrol TOTP** for this. With `sso_level(Level::Simple)` and a `Mfa` minimum, an SSO
 user's first sign-in is restricted and asks for TOTP; after that, the TOTP step follows the provider's
 callback.
 
@@ -1348,8 +1348,9 @@ port-scoped), exactly as with the session cookie.
   account tables behind `GroupReadWrite` and shown only to managers, and the password policy wired into
   both `Auth` and the account form. Logins: `admin` and `editor` (read-only).
 - **[`examples/audit`](../examples/audit/src/main.rs)** — one observer on both `Auth` and `Crud` (API
-  key mint and revoke included), and a request log built on `RealIp` that names an API-key caller
-  from its handler (`/api/whoami`).
+  key mint and revoke included) and on the app's own API write (`WriteEvent::new`), and a request log
+  built on `RealIp` that names an API-key caller from its handler (`/api/whoami`,
+  `PUT /api/posts/{id}/title`).
 
 ## 9. Tests — the negative paths
 
@@ -1373,10 +1374,10 @@ in-memory SQLite:
   script is checked in Chromium's virtual authenticator (Playwright).
 - The sign-in policy and password change, also in `auth/security_tests.rs`: each method's level; a
   restricted session sees only its profile, can't mint a key or manage anyone, and steps up when it
-  adds TOTP; a stricter minimum ends open sessions; a `Hardware` minimum without attested passkeys is a
+  adds TOTP; a stricter minimum ends open sessions; a `Attested` minimum without attested passkeys is a
   startup error; who flags a password and who doesn't (through the CRUD engine too); the maximum age.
   `sso_tests.rs` covers `sso_level` and the TOTP step after a callback, `passkey_tests.rs` the
-  `Hardware` level.
+  `Attested` level.
 - **`auth/sso_tests.rs`** (feature `sso`) — the OIDC callback against a **fake IdP** on a loopback
   port (real discovery, real RSA signatures): missing or forged state, wrong key, audience, issuer,
   nonce, an expired token, missing claims, auto-registration off, disabled, local and

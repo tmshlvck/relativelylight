@@ -145,8 +145,8 @@ from this site. Reload the page and try again.</div>
         // The sign-in policy, from the environment so it can be tried: 1 (default) any sign-in,
         // 2 two factors (TOTP, a passkey, or SSO).
         .min_level(match std::env::var("MIN_LEVEL").as_deref() {
-            Ok("2") => Level::Multi,
-            _ => Level::Single,
+            Ok("2") => Level::Mfa,
+            _ => Level::Simple,
         })
         .password_max_age_days(std::env::var("PASSWORD_MAX_AGE_DAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
         // The app's own section on the library's profile page — see `webhook_section`.

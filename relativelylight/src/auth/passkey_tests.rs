@@ -1220,7 +1220,7 @@ async fn without_passkeys_there_is_no_button_section_or_route() {
 }
 
 #[tokio::test]
-async fn an_attested_passkey_is_hardware_and_a_hardware_minimum_wants_one() {
+async fn an_attested_passkey_meets_an_attested_minimum_and_a_password_does_not() {
     let (mut token, ca) = SoftToken::new(true).unwrap();
     let pem = ca_pem(&ca);
     let cfg = Passkeys::new("localhost", ORIGIN).require(Class::Attested).attestation_ca(
@@ -1228,7 +1228,7 @@ async fn an_attested_passkey_is_hardware_and_a_hardware_minimum_wants_one() {
         &AAGUID.to_string(),
         "soft token",
     );
-    let fx = Fx::build_with(Lockout::default(), Some(cfg), |a| a.min_level(Level::Hardware)).await;
+    let fx = Fx::build_with(Lockout::default(), Some(cfg), |a| a.min_level(Level::Attested)).await;
     fx.user("alice").await;
 
     // A password alone is restricted to the profile, which asks for a security key…
@@ -1239,16 +1239,16 @@ async fn an_attested_passkey_is_hardware_and_a_hardware_minimum_wants_one() {
     let cookie = format!("{}={restricted}", fx.auth.session_cookie_name());
     assert!(fx.get("/profile", Some(&cookie)).await.body.contains("security key"));
 
-    // …and adding the attested passkey steps that session up to Hardware.
+    // …and adding the attested passkey steps that session up to Attested.
     let res = fx.enrol(&cookie, &mut token, "yubikey").await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.body);
     let stepped = res.session(fx.auth.session_cookie_name()).expect("a new session");
-    assert_eq!(fx.identify(&stepped).await.map(|w| w.level), Some(Level::Hardware));
+    assert_eq!(fx.identify(&stepped).await.map(|w| w.level), Some(Level::Attested));
 
-    // Control: signing in with it lands in the app at Hardware.
+    // Control: signing in with it lands in the app at Attested.
     let row = fx.keys().await.remove(0);
     let res = fx.sign_in(&mut token, &row.credential_id).await;
     assert_eq!(res.location(), Some("/"));
     let s = res.session(fx.auth.session_cookie_name()).unwrap();
-    assert_eq!(fx.identify(&s).await.map(|w| w.level), Some(Level::Hardware));
+    assert_eq!(fx.identify(&s).await.map(|w| w.level), Some(Level::Attested));
 }

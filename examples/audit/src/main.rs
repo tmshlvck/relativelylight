@@ -24,9 +24,15 @@
 //! audit  auth-profile create auth_api_key#1 admin@127.0.0.1  created {"expires_at":null,"name":"laptop",…}
 //! ```
 //!
-//! Then call the machine endpoint with the key (`curl -H "Authorization: Bearer audit_…"
-//! 127.0.0.1:3000/api/whoami`): its handler verifies the key, so it is the handler that names the
-//! caller, key and all, in the request log.
+//! Then call the machine endpoints with the key: its handler verifies the key, so it is the handler
+//! that names the caller, key and all, in the request log — and a write it makes reaches the same
+//! audit trail, reported with `WriteEvent::new`:
+//!
+//! ```text
+//! curl -H "Authorization: Bearer audit_…" 127.0.0.1:3000/api/whoami
+//! curl -X PUT -H "Authorization: Bearer audit_…" --data 'Retitled by a script' 127.0.0.1:3000/api/posts/1/title
+//! audit  api          update post#1       admin@127.0.0.1  title: "Hello" → "Retitled by a script"
+//! ```
 //!
 //! The audit line fires **after the commit**, for the CRUD panel's writes and `auth`'s own (one
 //! observer, registered on both).
@@ -122,13 +128,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.on_write(audit.clone());
     let engine = Arc::new(crud.into_engine());
 
-    let state = AppState { auth: auth.clone(), engine };
+    let state = AppState { auth: auth.clone(), engine, audit: audit.clone() };
     let app = Router::new()
         .route("/", get(public))
         .route("/private", get(private))
         .route("/data", get(|| async { Redirect::to("/data/post") }))
         .route("/data/{entity}", get(panel_show).post(panel_save))
         .route("/api/whoami", get(whoami))
+        .route("/api/posts/{id}/title", axum::routing::put(set_title))
         .with_state(state.clone())
         .merge(auth.routes()); // /login, /logout, /profile
 
@@ -449,6 +456,8 @@ async fn access_log_identify(
 struct AppState {
     auth: Auth,
     engine: Arc<Engine>,
+    /// The audit sink, for the app's own writes (`set_title`) — the same one `Auth` and `Crud` report to.
+    audit: Arc<AuditLog>,
 }
 
 /// The app's own landing page, and the first thing you see after logging in — so this is where the
@@ -519,6 +528,44 @@ async fn whoami(State(app): State<AppState>, RealIp(ip): RealIp, headers: Header
             .into_response(),
         Err(KeyError::Internal) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
+}
+
+/// `PUT /api/posts/{id}/title` — the app's **own write**, authenticated by an API key, and reported to
+/// the same audit sink as the panel's and `auth`'s writes. `Engine::update` is ungated (the gate guards
+/// the UI's write path), so this handler authorizes the caller itself: here any valid key, as the
+/// panel's gate admits any signed-in user. And since `Engine::update` fires no event, the handler
+/// builds one: `source` names this surface, and `actor` is the key's owner, whom `auth.identify`
+/// would not find in these headers.
+async fn set_title(
+    State(app): State<AppState>,
+    RealIp(ip): RealIp,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    title: String,
+) -> Response {
+    let token = auth::bearer_token(&headers).unwrap_or_default();
+    let caller = match app.auth.identify_key(token, ip).await {
+        Ok(k) => k,
+        Err(KeyError::Locked(_)) => return StatusCode::TOO_MANY_REQUESTS.into_response(),
+        Err(_) => return (StatusCode::UNAUTHORIZED, "send a valid API key\n").into_response(),
+    };
+    let Ok(before) = app.engine.get("post", &id).await else {
+        return (StatusCode::NOT_FOUND, "no such post\n").into_response();
+    };
+    let body = serde_json::json!({ model::post::Column::Title.as_str(): title.trim() });
+    let after = match app.engine.update("post", &id, &body).await {
+        Ok(row) => row,
+        Err(e) => return e.into_response(),
+    };
+    let ev = WriteEvent::new("api", Operation::Update, "post", &headers, ip)
+        .key(id)
+        .before(before)
+        .after(after)
+        .actor(&caller.identity.username);
+    app.audit.on_write(&ev).await;
+    let mut res = "ok\n".into_response();
+    res.extensions_mut().insert(Actor(format!("{}/key#{}", caller.identity.username, caller.key_id)));
+    res
 }
 
 /// Login-gated, and the worked example of variant 1: it already resolved an identity to decide whether
