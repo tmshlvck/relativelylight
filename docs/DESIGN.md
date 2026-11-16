@@ -110,7 +110,9 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
     second step after the passkey. With no password, the last passkey can't be removed until a
     password is set again, so the account always keeps a way in.
   - **TOTP is a second factor after any primary method.** Recovery codes belong to TOTP alone.
-  - **SSO accounts get no local password or passkeys;** their primary factor is the IdP's.
+  - **SSO accounts get no local password or passkeys;** their primary factor is the IdP's. They may
+    enrol TOTP, which a policy can require (`sso_level(1)`, above), and then the TOTP step follows
+    the IdP's callback.
   - **A manager can always** reset a password, disable TOTP and remove passkeys, each
     re-authenticated, each independent of the others.
   - **There is no self-service recovery** for a lost password or passkey; that is the
@@ -136,6 +138,24 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
   - **Tests.** `webauthn-authenticator-rs`'s software authenticators answer only for a named
     credential and always report device-bound, so a synced registration is made by rewriting the
     response, and a login class check by editing the row's class.
+- **The sign-in policy is one minimum assurance level** (planned). Each way of signing in has a level:
+
+  | Signed in with | Level |
+  |---|---|
+  | a password | 1 |
+  | a password + TOTP | 2 |
+  | a passkey | 2 |
+  | an attested passkey | 3 |
+  | SSO | 2 by default (the IdP is trusted to have asked for its own second factor); 1 with `Auth::sso_level(1)` |
+
+  - TOTP adds one to any primary method, capped at 3.
+  - The app sets one minimum. A session below it is restricted to `/profile`, with a message naming
+    the factor to add.
+  - One number covers the setups apps choose, without a matrix of flags. "Password + TOTP or SSO"
+    is minimum 2. "Attested hardware only" is minimum 3. "SSO must add our TOTP" is
+    `sso_level(1)` with minimum 2, which is also why an SSO account may enrol TOTP.
+  - The level comes from the session's recorded method and passkey class, so a stricter policy
+    applies to existing sessions at once.
 - **Re-authentication is per request, not a window.** The proof travels with the sensitive form
   itself: a password, a TOTP code, or a passkey assertion over a challenge rendered into that form.
   Nothing records "re-authenticated at", so there is no grace period for a stolen session to ride

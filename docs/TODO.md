@@ -74,25 +74,16 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
     - the browser script tested in Chromium's virtual authenticator (Playwright), and a check with
       real devices before release;
     - `examples/auth`, AUTH.md §5l, the changelog, and the MSRV bump to 1.89.
-  - [ ] **Open:** may an SSO account enrol TOTP, on top of what the IdP asked for?
   - [ ] **Later:**
     - browser autofill of passkeys on the login page;
     - device names from FIDO metadata;
     - an AAGUID allowlist.
-- [ ] **Sign-in policy as an assurance level** (design; it replaces "mandatory passkeys").
-  - **Levels per method:**
-    - password: 1;
-    - password + TOTP: 2;
-    - passkey: 2;
-    - an attested passkey: 3;
-    - SSO: 1 or 2, as the app trusts its IdP;
-    - TOTP raises any primary method by one.
-  - **The policy is one minimum level.** A session below it is restricted to `/profile`, with a
-    message saying which factor to add.
-  - **Why one number:** it expresses the setups apps actually choose (password + TOTP, SSO alone,
-    passkey alone, attested only) without a matrix of flags.
-  - **Needs** `Identity` to carry the level, and the session's recorded method, which is already
-    stored.
+- [ ] **Sign-in policy as a minimum assurance level**, as designed in
+  [DESIGN.md → auth](DESIGN.md#auth); it replaces "mandatory passkeys". Needs:
+  - `Auth::min_level(n)` and `Auth::sso_level(n)`, defaulting to 1 and 2;
+  - the level on `Identity`, from the session's recorded method;
+  - the restricted `/profile` session for a level below the minimum;
+  - TOTP enrolment for SSO accounts (refused today), with the TOTP step after the IdP's callback.
 - [ ] **Password change required** (design).
   - **New columns:** `auth_user.password_changed_at`, and `must_change_password`, set by a
     manager's reset and by the admin panel's password field.
