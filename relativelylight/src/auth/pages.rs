@@ -13,6 +13,35 @@ fn render(t: impl Template) -> String {
     t.render().unwrap_or_default()
 }
 
+/// The confirm-it's-you block's inputs (`_macros.html` → `reauth`): which factors the account has to
+/// offer. Built per render by `Inner::reauth_view`, which also creates the passkey challenge.
+pub(super) struct ReauthView {
+    pub has_password: bool,
+    pub totp_on: bool,
+    pub passkey: Option<PasskeyAsk>,
+}
+
+impl ReauthView {
+    /// No factor at all — the SSO case, and the safe stand-in when a page has no account to ask about.
+    pub fn none() -> Self {
+        Self { has_password: false, totp_on: false, passkey: None }
+    }
+}
+
+/// A passkey ceremony a page asks for: the challenge row's id and the options for the browser, as JSON
+/// already made safe to sit inside a `<script>` element ([`script_json`]).
+pub(super) struct PasskeyAsk {
+    pub challenge: String,
+    pub options: String,
+}
+
+/// JSON made safe for a `<script type="application/json">` element: `<`, `>` and `&` become `\u` escapes,
+/// so no value can close the element or open a comment. `JSON.parse` reads them back unchanged.
+#[cfg_attr(not(feature = "passkeys"), allow(dead_code))]
+pub(super) fn script_json(json: &str) -> String {
+    json.replace('<', "\\u003c").replace('>', "\\u003e").replace('&', "\\u0026")
+}
+
 #[derive(Template)]
 #[template(path = "auth/shell.html")]
 struct Shell<'a> {
@@ -47,10 +76,12 @@ struct Login<'a> {
     error: Option<&'a str>,
     success: Option<&'a str>,
     csrf: &'a str,
+    passkeys: bool,
 }
 
-pub(super) fn login_form_html(error: Option<&str>, csrf: &str) -> String {
-    render(Login { error, success: None, csrf })
+/// The login form; `passkeys` adds the "Sign in with a passkey" button.
+pub(super) fn login_form_html(error: Option<&str>, csrf: &str, passkeys: bool) -> String {
+    render(Login { error, success: None, csrf, passkeys })
 }
 
 #[derive(Template)]
@@ -59,11 +90,19 @@ struct TotpLogin<'a> {
     error: Option<&'a str>,
     success: Option<&'a str>,
     csrf: &'a str,
+    totp_on: bool,
+    passkey: Option<&'a PasskeyAsk>,
 }
 
-/// The second step of a login, at `/login/totp`, after a correct password.
-pub(super) fn totp_login_html(error: Option<&str>, csrf: &str) -> String {
-    render(TotpLogin { error, success: None, csrf })
+/// The second step of a login, at `/login/totp`: the TOTP code when the account has TOTP, and its
+/// passkey when one is asked for.
+pub(super) fn totp_login_html(
+    error: Option<&str>,
+    csrf: &str,
+    totp_on: bool,
+    passkey: Option<&PasskeyAsk>,
+) -> String {
+    render(TotpLogin { error, success: None, csrf, totp_on, passkey })
 }
 
 #[derive(Template)]
@@ -71,7 +110,7 @@ pub(super) fn totp_login_html(error: Option<&str>, csrf: &str) -> String {
 struct TotpSetup<'a> {
     qr: &'a str,
     url: &'a str,
-    totp_on: bool,
+    reauth: &'a ReauthView,
     error: Option<&'a str>,
     success: Option<&'a str>,
     csrf: &'a str,
@@ -80,17 +119,19 @@ struct TotpSetup<'a> {
 /// 2FA enrolment: the QR image, the `otpauth://` URL as text, and a code to confirm it.
 pub(super) fn totp_setup_html(
     prov: &totp::Provisioning,
-    totp_on: bool,
+    reauth: &ReauthView,
     error: Option<&str>,
     csrf: &str,
 ) -> String {
-    render(TotpSetup { qr: &prov.qr_data_uri, url: &prov.url, totp_on, error, success: None, csrf })
+    render(TotpSetup { qr: &prov.qr_data_uri, url: &prov.url, reauth, error, success: None, csrf })
 }
 
 #[derive(Template)]
 #[template(path = "auth/profile.html")]
 struct Profile<'a> {
     username: &'a str,
+    has_password: bool,
+    reauth: &'a ReauthView,
     totp_on: bool,
     recovery_left: Option<u64>,
     error: Option<&'a str>,
@@ -100,15 +141,19 @@ struct Profile<'a> {
 
 /// The self-service profile: change password, the 2FA state, recovery codes (with 2FA on) and
 /// signing out other sessions.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn change_form_html(
     who: &Identity,
+    has_password: bool,
+    reauth: &ReauthView,
     totp_on: bool,
     recovery_left: Option<u64>,
     error: Option<&str>,
     success: Option<&str>,
     csrf: &str,
 ) -> String {
-    render(Profile { username: &who.username, totp_on, recovery_left, error, success, csrf })
+    let username = &who.username;
+    render(Profile { username, has_password, reauth, totp_on, recovery_left, error, success, csrf })
 }
 
 #[derive(Template)]
@@ -117,7 +162,10 @@ struct Reset<'a> {
     id: &'a str,
     username: &'a str,
     totp_on: bool,
-    manager_totp_on: bool,
+    has_password: bool,
+    passkeys: u64,
+    /// The **manager's** factors — they confirm with their own, never the target's.
+    reauth: &'a ReauthView,
     error: Option<&'a str>,
     success: Option<&'a str>,
     csrf: &'a str,
@@ -125,16 +173,101 @@ struct Reset<'a> {
 
 /// A manager's view of another account: set its password without the current one, and disable its
 /// 2FA (a manager can't set one up for someone else).
+/// What a manager's page shows about the account being managed.
+pub(super) struct Target<'a> {
+    pub id: &'a str,
+    pub username: &'a str,
+    pub totp_on: bool,
+    pub has_password: bool,
+    pub passkeys: u64,
+}
+
 pub(super) fn reset_form_html(
-    id: &str,
-    username: &str,
-    totp_on: bool,
-    manager_totp_on: bool,
+    t: &Target<'_>,
+    reauth: &ReauthView,
     error: Option<&str>,
     success: Option<&str>,
     csrf: &str,
 ) -> String {
-    render(Reset { id, username, totp_on, manager_totp_on, error, success, csrf })
+    render(Reset {
+        id: t.id,
+        username: t.username,
+        totp_on: t.totp_on,
+        has_password: t.has_password,
+        passkeys: t.passkeys,
+        reauth,
+        error,
+        success,
+        csrf,
+    })
+}
+
+#[derive(Template)]
+#[template(path = "auth/reauth_fields.html")]
+struct ReauthFields<'a> {
+    reauth: &'a ReauthView,
+    hint: &'a str,
+}
+
+/// The confirm-it's-you block alone, for an app's own form (`Auth::reauth_fields`).
+pub(super) fn reauth_fields_html(reauth: &ReauthView, hint: &str) -> String {
+    render(ReauthFields { reauth, hint })
+}
+
+/// One passkey in the profile's passkeys section, formatted.
+#[cfg(feature = "passkeys")]
+pub(super) struct PasskeyRow {
+    pub id: i32,
+    pub name: String,
+    pub class: &'static str,
+    /// Whether the policy accepts it now; one it doesn't is listed so the user can remove it.
+    pub accepted: bool,
+    pub created: String,
+    pub used: String,
+}
+
+/// The passkeys section of the caller's own profile.
+#[cfg(feature = "passkeys")]
+#[derive(Template)]
+#[template(path = "auth/passkeys.html")]
+pub(super) struct PasskeysCard<'a> {
+    pub rows: &'a [PasskeyRow],
+    pub zone: &'a str,
+    pub has_password: bool,
+    pub requirement: Option<&'a str>,
+    pub reauth: &'a ReauthView,
+    pub error: Option<&'a str>,
+    pub success: Option<&'a str>,
+    pub csrf: &'a str,
+}
+
+#[cfg(feature = "passkeys")]
+pub(super) fn passkeys_card_html(card: &PasskeysCard<'_>) -> String {
+    card.render().unwrap_or_default()
+}
+
+/// A page whose one job is a passkey ceremony: the options, the button that starts it, and the form
+/// the script submits.
+#[cfg(feature = "passkeys")]
+#[derive(Template)]
+#[template(path = "auth/passkey_ceremony.html")]
+pub(super) struct Ceremony<'a> {
+    pub title: &'a str,
+    pub lead: &'a str,
+    pub action: &'a str,
+    /// `get` (sign in, confirm) or `create` (add a passkey).
+    pub mode: &'a str,
+    pub button: &'a str,
+    pub cancel: &'a str,
+    /// Extra fields the post carries (the new passkey's label).
+    pub hidden: &'a [(&'a str, &'a str)],
+    pub ask: &'a PasskeyAsk,
+    pub csrf: &'a str,
+}
+
+#[cfg(feature = "passkeys")]
+pub(super) fn passkey_ceremony_html(c: &Ceremony<'_>) -> String {
+    c.render().unwrap_or_default()
 }
 
 #[derive(Template)]
@@ -153,8 +286,7 @@ pub(super) fn recovery_codes_html(codes: &[String], headline: &str) -> String {
 #[template(path = "auth/api_keys.html")]
 struct ApiKeys<'a> {
     card: &'a api_key::Card,
-    can_reauth: bool,
-    totp_on: bool,
+    reauth: &'a ReauthView,
     error: Option<&'a str>,
     success: Option<&'a str>,
     csrf: &'a str,
@@ -164,13 +296,12 @@ struct ApiKeys<'a> {
 /// which re-authenticates when the account has a factor to ask for.
 pub(super) fn api_keys_html(
     card: &api_key::Card,
-    can_reauth: bool,
-    totp_on: bool,
+    reauth: &ReauthView,
     error: Option<&str>,
     success: Option<&str>,
     csrf: &str,
 ) -> String {
-    render(ApiKeys { card, can_reauth, totp_on, error, success, csrf })
+    render(ApiKeys { card, reauth, error, success, csrf })
 }
 
 #[derive(Template)]
@@ -225,19 +356,21 @@ mod tests {
             disabled: true,
         };
         let card = api_key::Card { rows: vec![row()], zone: bad.into() };
+        let none = ReauthView::none();
+        let target = Target { id: bad, username: bad, totp_on: true, has_password: false, passkeys: 2 };
         let pages = [
-            login_form_html(Some(bad), bad),
-            totp_login_html(Some(bad), bad),
-            totp_setup_html(&prov, true, Some(bad), bad),
-            change_form_html(&who, true, Some(2), Some(bad), None, bad),
-            change_form_html(&who, false, None, None, Some(bad), bad),
-            reset_form_html(bad, bad, true, true, Some(bad), None, bad),
+            login_form_html(Some(bad), bad, true),
+            totp_login_html(Some(bad), bad, true, None),
+            totp_setup_html(&prov, &none, Some(bad), bad),
+            change_form_html(&who, true, &none, true, Some(2), Some(bad), None, bad),
+            change_form_html(&who, false, &none, false, None, None, Some(bad), bad),
+            reset_form_html(&target, &none, Some(bad), None, bad),
             recovery_codes_html(&[], bad),
             sso_managed_html(bad, bad),
             sso_profile_html(&who, bad),
             csrf_rejected_html(bad),
-            api_keys_html(&card, true, true, Some(bad), None, bad),
-            api_keys_html(&card, false, false, None, Some(bad), bad),
+            api_keys_html(&card, &none, Some(bad), None, bad),
+            api_keys_html(&card, &none, None, Some(bad), bad),
             api_key_minted_html(bad, bad),
         ];
         for html in pages {

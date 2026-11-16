@@ -10,6 +10,8 @@
 //! - `auth_user.passkey_handle` — the WebAuthn user handle, set at the account's first enrolment.
 //! - `auth_session.method` / `passkey_class` — how a session was authenticated.
 
+#[cfg(feature = "passkeys")]
+pub use super::webauthn::Passkeys;
 use sea_orm::sea_query::{
     Alias, ColumnDef, Index, IndexCreateStatement, Table, TableAlterStatement, TableCreateStatement,
 };
@@ -214,6 +216,82 @@ pub fn index_create_statements() -> Vec<IndexCreateStatement> {
         .to_owned()]
 }
 
+// ===================== An account's passkeys (no WebAuthn needed) =====================
+
+/// How many passkeys `user_id` has. `0` on a database error: callers use it to *offer* a factor, and
+/// re-authentication treats an account with passkeys it can't count as one it can't confirm.
+pub async fn count(db: &DatabaseConnection, user_id: i32) -> u64 {
+    use sea_orm::PaginatorTrait;
+    entity::Entity::find()
+        .filter(entity::Column::UserId.eq(user_id))
+        .count(db)
+        .await
+        .unwrap_or(0)
+}
+
+/// `user_id`'s passkeys, oldest first.
+pub async fn list(db: &DatabaseConnection, user_id: i32) -> Result<Vec<entity::Model>, DbErr> {
+    use sea_orm::QueryOrder;
+    entity::Entity::find()
+        .filter(entity::Column::UserId.eq(user_id))
+        .order_by_asc(entity::Column::Id)
+        .all(db)
+        .await
+}
+
+/// Delete every passkey `user_id` has; returns how many went. What a manager's "remove passkeys" does.
+pub async fn remove_all(db: &DatabaseConnection, user_id: i32) -> Result<u64, DbErr> {
+    Ok(entity::Entity::delete_many()
+        .filter(entity::Column::UserId.eq(user_id))
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+/// The passkey table for an accounts panel: the credential hidden, everything the ceremonies maintain
+/// read-only, and the owner pinned (a passkey moved to another account would sign that account in).
+/// The label is editable; deleting a row removes the passkey. Turn creation off in the panel
+/// (`Table::create(false)`): a passkey is made only by its authenticator, on `/profile`.
+///
+/// Deleting the last passkey of an account with no password leaves it no way in until a manager sets
+/// a password; the profile pages refuse that, the panel leaves it to the administrator.
+///
+/// ```ignore
+/// crud.register(auth::passkey::meta_model(), Arc::new(GroupReadWrite::new(&auth, ["admin"])));
+/// ```
+#[cfg(feature = "crud")]
+pub fn meta_model() -> crate::crud::seaorm::MetaModel<entity::Entity> {
+    use entity::Column as C;
+    use sea_orm::IdenStatic;
+    let mut m = crate::crud::seaorm::MetaModel::new(entity::Entity);
+    m.label_column(C::Name.as_str());
+    m.field(C::Credential.as_str()).hidden = true;
+    m.field(C::Name.as_str()).label = Some("Label".into());
+    for (col, label) in [
+        (C::UserId, "Owner"),
+        (C::CredentialId, "Credential ID"),
+        (C::Class, "Kind"),
+        (C::Aaguid, "Model (AAGUID)"),
+        (C::BackupEligible, "Can sync"),
+        (C::BackupState, "Synced"),
+        (C::CreatedAt, "Added"),
+        (C::LastUsedAt, "Last used"),
+    ] {
+        let f = m.field(col.as_str());
+        f.read_only = true;
+        f.label = Some(label.into());
+    }
+    m.field(C::CreatedAt.as_str()).datetime();
+    m.field(C::LastUsedAt.as_str()).datetime();
+    m.field(C::Class.as_str()).description = Some(
+        "synced, device-bound (self-reported) or attested (proved by the authenticator).".into(),
+    );
+    let r = m.relation("user");
+    r.label = Some("Owner".into());
+    r.read_only = true;
+    m
+}
+
 /// Delete expired challenges; returns how many went. Part of [`Auth::prune`](super::Auth::prune).
 pub(super) async fn prune_challenges(db: &DatabaseConnection) -> Result<u64, DbErr> {
     Ok(challenge::Entity::delete_many()
@@ -226,6 +304,28 @@ pub(super) async fn prune_challenges(db: &DatabaseConnection) -> Result<u64, DbE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "crud")]
+    #[test]
+    fn the_panel_model_hides_the_credential_and_pins_the_owner() {
+        let mut m = meta_model();
+        assert!(m.field("credential").hidden);
+        assert!(m.field("user_id").read_only && m.relation("user").read_only);
+        for f in [
+            "credential_id",
+            "class",
+            "aaguid",
+            "backup_eligible",
+            "created_at",
+            "last_used_at",
+        ] {
+            assert!(m.field(f).read_only, "{f}");
+        }
+        assert!(
+            !m.field("name").read_only && !m.field("name").hidden,
+            "the label stays editable"
+        );
+    }
 
     #[test]
     fn classes_order_weakest_first_and_round_trip() {

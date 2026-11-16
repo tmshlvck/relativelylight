@@ -456,13 +456,13 @@ pub(super) async fn card(db: &DatabaseConnection, user_id: i32, headers: &Header
 /// The caller's display zone and a formatter for it: their timezone cookie with feature `tz`, UTC
 /// without it.
 #[cfg(feature = "tz")]
-fn clock(headers: &HeaderMap) -> (String, impl Fn(i64) -> String) {
+pub(super) fn clock(headers: &HeaderMap) -> (String, impl Fn(i64) -> String) {
     let tz = crate::time::Tz::from_headers(headers);
     (tz.name().to_string(), move |t| tz.format(t))
 }
 
 #[cfg(not(feature = "tz"))]
-fn clock(_headers: &HeaderMap) -> (String, impl Fn(i64) -> String) {
+pub(super) fn clock(_headers: &HeaderMap) -> (String, impl Fn(i64) -> String) {
     let fmt = |t: i64| match time::OffsetDateTime::from_unix_timestamp(t) {
         Ok(d) => format!(
             "{:04}-{:02}-{:02} {:02}:{:02}",
@@ -485,16 +485,15 @@ pub(super) struct MintForm {
     /// `<input type=number>` posts `expires_days=`.
     #[serde(default)]
     expires_days: String,
-    #[serde(default)]
-    current_password: String,
-    #[serde(default)]
-    totp_code: String,
+    /// The caller's re-authentication (§5h).
+    #[serde(flatten)]
+    reauth: super::ReauthInput,
     #[serde(default, rename = "_csrf")]
     csrf: Option<String>,
 }
 
 /// The label to store, or the message to show. Blank becomes `"key"`.
-fn clean_name(raw: &str) -> Result<String, &'static str> {
+pub(super) fn clean_name(raw: &str) -> Result<String, &'static str> {
     let name = raw.trim();
     if name.chars().count() > NAME_MAX {
         return Err("The label is too long (at most 128 characters).");
@@ -537,7 +536,7 @@ pub(super) async fn mint_submit(
         Err(res) => return res,
     };
     if let Err(msg) = inner
-        .reauth(&user, &form.current_password, &form.totp_code)
+        .reauth(&user, &form.reauth)
         .await
     {
         return refuse(

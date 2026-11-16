@@ -47,37 +47,14 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
   `Auth::password_check`; the question is whether a helper earns a feature flag.
 - [ ] **SSO leftovers:** refresh tokens, `userinfo`, RP-initiated logout, a real-IdP smoke test at
   release.
-- [ ] **Passkeys (WebAuthn)**, feature `passkeys`, on branch `passkeys`. The design and the
-  library findings are in [DESIGN.md → auth](DESIGN.md#auth). The schema has shipped
-  ([AUTH.md §5](AUTH.md#5-authn--users-sessions-login-passwords)). Remaining phases:
-  - [ ] **2. Enrolment and the account's credentials** on `/profile`:
-    - add a passkey, re-authenticated, at or above the policy's class;
-    - remove the password once a passkey exists, and set one again;
-    - refuse removing the last passkey of an account with no password;
-    - TOTP stays allowed beside a passkey;
-    - nothing for SSO accounts.
-  - [ ] **3. Sign-in:**
-    - with a passkey, from a button on `/login`, then the TOTP step if the account has TOTP;
-    - a passkey as the second factor after a password, when `second_factor(true)`;
-    - the class checked on every use, and the backup-eligible flag re-checked;
-    - lockout on the address for a passkey sign-in, on the account for a second factor.
-  - [ ] **4. Re-authentication.** `reauthenticate` keeps its password/code form. A new pair renders
-    a confirm block (with the passkey challenge) into an app's form and checks the posted form. The
-    library's own re-auth forms accept a passkey. An account without a password must use its
-    passkey.
-  - [ ] **5. The rest:**
-    - a manager removes a user's passkeys;
-    - attestation CAs from the app (PEM plus AAGUID), and an `Attested` policy with no CA is a
-      startup error;
-    - `passkey::meta_model()` for the admin panel;
-    - rejection tests with positive controls;
-    - the browser script tested in Chromium's virtual authenticator (Playwright), and a check with
-      real devices before release;
-    - `examples/auth`, AUTH.md §5l, the changelog, and the MSRV bump to 1.89.
-  - [ ] **Later:**
-    - browser autofill of passkeys on the login page;
-    - device names from FIDO metadata;
-    - an AAGUID allowlist.
+- [ ] **Passkeys: before release.** A check with real devices: a security key, a phone (hybrid / QR
+  sign-in), a platform authenticator (Touch ID, Windows Hello), Safari and Firefox. The tests cover
+  the server with a software authenticator and the script in Chromium's virtual one.
+- [ ] **Passkeys: later.**
+  - browser autofill of passkeys on the login page;
+  - a username-first sign-in, for security keys with no free slot for a discoverable credential;
+  - device names from FIDO metadata;
+  - an AAGUID allowlist.
 - [ ] **Sign-in policy as a minimum assurance level**, as designed in
   [DESIGN.md → auth](DESIGN.md#auth); it replaces "mandatory passkeys". Needs:
   - `Auth::min_level(n)` and `Auth::sso_level(n)`, defaulting to 1 and 2;

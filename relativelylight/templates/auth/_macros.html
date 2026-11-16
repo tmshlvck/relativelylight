@@ -10,20 +10,41 @@
 {%- endif -%}
 {%- endmacro -%}
 
-{#- The confirm-it's-you inputs for a sensitive action (AUTH.md §5h): the account's password, or a
-    fresh code when it has 2FA. `prefix` keeps the input ids unique when two render on one page. -#}
-{%- macro reauth(prefix, totp_on, hint) %}
+{#- The confirm-it's-you inputs for a sensitive action (AUTH.md §5h), from a `ReauthView`: the
+    account's password, a fresh code when it has 2FA, and its passkey when it has one. Only the factors
+    the account has are offered; an account with none (SSO) gets nothing to fill in. `prefix` keeps the
+    input ids unique when two render on one page. -#}
+{%- macro reauth(prefix, r, hint) %}
+  {%- if r.has_password || r.totp_on || r.passkey.is_some() %}
   <p class="text-muted small mb-2">{{ hint }}</p>
+  {%- if r.has_password %}
   <div class="mb-2">
     <label class="form-label small" for="{{ prefix }}-reauth">Your current password</label>
     <input class="form-control form-control-sm" id="{{ prefix }}-reauth" name="current_password"
            type="password" autocomplete="current-password">
   </div>
-  {%- if totp_on %}
+  {%- endif %}
+  {%- if r.totp_on %}
   <div class="mb-2">
-    <label class="form-label small" for="{{ prefix }}-code">…or a code from your authenticator app</label>
+    <label class="form-label small" for="{{ prefix }}-code">{% if r.has_password %}…or a code from your authenticator app{% else %}A code from your authenticator app{% endif %}</label>
     <input class="form-control form-control-sm" id="{{ prefix }}-code" name="totp_code"
            inputmode="numeric" autocomplete="one-time-code" placeholder="123456">
   </div>
   {%- endif %}
+  {%- if let Some(p) = r.passkey %}
+  {%- call passkey_get(p, "Confirm with your passkey") %}{% endcall %}
+  {%- endif %}
+  {%- endif %}
+{%- endmacro -%}
+
+{#- A passkey ceremony inside the enclosing form: the challenge, an empty field for the browser's
+    answer, the options for the script, and the button that starts it. The script fills the answer and
+    submits the form; without JavaScript the button does nothing and the form's other fields still
+    work. `p.options` is JSON made safe for a script element on the server. -#}
+{%- macro passkey_get(p, label) %}
+  <input type="hidden" name="passkey_challenge" value="{{ p.challenge }}">
+  <input type="hidden" name="passkey_response" value="">
+  <script type="application/json" data-rl-passkey-options>{{ p.options|safe }}</script>
+  <button class="btn btn-outline-primary btn-sm mb-2" type="button" data-rl-passkey="get">{{ label }}</button>
+  <script src="/auth/passkey.js" defer></script>
 {%- endmacro -%}

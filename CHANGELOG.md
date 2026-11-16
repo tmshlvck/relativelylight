@@ -13,6 +13,9 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
+- **MSRV 1.89** (was 1.88), for `webauthn-rs` 0.6, the passkeys dependency. **Upgrade:** a 1.89 or
+  newer toolchain ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#4-msrv-189)).
+
 - **Schema: three new columns and two new tables, needed before the upgraded crate runs**, whether
   or not the app uses passkeys. The new columns are `auth_user.passkey_handle` (the WebAuthn user
   handle), `auth_session.method` and `auth_session.passkey_class` (how a session was authenticated).
@@ -23,7 +26,7 @@ is easy to miss in a diff.
   ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#3-new-auth-columns-for-passkeys)). Hide
   `passkey_handle` in an accounts panel, as the TOTP columns are hidden. Each session now records
   its method (`password`, `password+totp`, `password+recovery`, `sso`), and `auth.prune()` deletes
-  expired challenges. The passkeys themselves are in progress ([TODO.md](docs/TODO.md#auth)).
+  expired challenges.
 
 - **`Auth`'s page callbacks get the request.** `login_shell`, `profile_shell` and `csrf_rejection`
   now receive the request's `http::request::Parts` (URI, method, headers, extensions), so the pages
@@ -39,6 +42,35 @@ is easy to miss in a diff.
 
 ### Added
 
+- **Passkeys** (feature `passkeys`, [AUTH.md §5l](docs/AUTH.md#5l-passkeys-feature-passkeys)), with
+  `Auth::passkeys(Passkeys::new(rp_id, origin))`. It adds:
+  - "Sign in with a passkey" on `/login`, without a username, followed by the TOTP step when the
+    account has TOTP;
+  - a passkeys section on `/profile` to add (re-authenticated) and remove passkeys, and to remove
+    the password once a passkey exists;
+  - with `second_factor(true)`, a passkey after a password, beside TOTP.
+
+  **An app-wide class policy** (`require(Class::Synced | DeviceBound | Attested)`) is checked at
+  enrolment, at every use and against open sessions. `Attested` takes the app's CAs
+  (`attestation_ca(pem, aaguid, desc)`).
+
+  **Mechanics:**
+  - the ceremonies are posted forms driven by one script (`GET /auth/passkey.js`);
+  - challenges are single-use database rows;
+  - a failed passkey sign-in counts against the address, a failed second factor against the
+    account;
+  - a manager removes someone's passkeys at `POST /profile/{id}/passkeys/remove`;
+  - `passkey::meta_model()` adds the passkeys table to an accounts panel;
+  - adding and removing a passkey are audited, without the credential.
+
+  `examples/auth` has passkeys on.
+- **Re-authentication takes a passkey, and an app's own form can too.**
+  - `Auth::reauth_fields(&who, hint)` renders the confirm-it's-you inputs for whichever factors the
+    account has. `Auth::reauthenticate_with(&who, &ReauthInput)` checks the post.
+  - `ProfileSection::reauth_fields` hands a `profile_extra` section the same block.
+  - An account with a passkey and no password must now confirm with a factor. It no longer passes
+    re-authentication with nothing, and `Auth::reauthenticate(&who, password, code)` refuses it.
+  - SSO accounts still pass.
 - **API keys** (`auth::api_key`, [AUTH.md §5k](docs/AUTH.md#5k-api-keys)): bearer keys for an app's
   machine endpoints. A key is its owner: `Auth::identify_key(token, ip)` returns the owner's
   `Identity` with the groups read on that request, plus the key's id, name and prefix, so removing a

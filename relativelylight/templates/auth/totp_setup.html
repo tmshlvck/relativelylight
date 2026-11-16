@@ -14,7 +14,7 @@
     <input class="form-control" id="rl-totp" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus>
   </div>
   <hr class="my-3">
-  {{- m::reauth("rl-2fa-on", totp_on, "Confirm it's you: the code above proves you hold that device, not that the account is yours.") }}
+  {{- m::reauth("rl-2fa-on", reauth, "Confirm it's you: the code above proves you hold that device, not that the account is yours.") }}
   <button class="btn btn-primary" type="submit">Verify &amp; enable</button>
   <a class="btn btn-link" href="/profile">Cancel</a>
 </form>

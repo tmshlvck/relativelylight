@@ -47,8 +47,6 @@ access changes. It can't sign in to these pages. Revoke a key here if a device i
              min="1" max="36500" placeholder="never">
     </div>
   </div>
-  {%- if can_reauth %}
-  {{- m::reauth("rl-key", totp_on, "Confirm it's you. A key is a new way into this account that doesn't ask for your second factor.") }}
-  {%- endif %}
+  {{- m::reauth("rl-key", reauth, "Confirm it's you. A key is a new way into this account that doesn't ask for your second factor.") }}
   <button class="btn btn-outline-primary btn-sm" type="submit">Create key</button>
 </form>

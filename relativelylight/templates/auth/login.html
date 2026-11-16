@@ -12,3 +12,11 @@
   </div>
   <button class="btn btn-primary" type="submit">Log in</button>
 </form>
+{%- if passkeys %}
+{#- A separate post: the challenge is created when the user asks for one, never on a page view, so
+    anonymous traffic can't write rows. #}
+<form method="post" action="/login/passkey" class="mt-3">
+  {{ m::csrf(csrf) }}
+  <button class="btn btn-outline-primary w-100" type="submit">Sign in with a passkey</button>
+</form>
+{%- endif %}

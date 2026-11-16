@@ -50,7 +50,8 @@ the design is [docs/DESIGN.md](docs/DESIGN.md) and open work [docs/TODO.md](docs
 A Cargo workspace: the crate is `relativelylight/` (`crud/` with `ui/` as the renderer, `auth/`,
 `files/`, `authz.rs`, `observe.rs`, `time.rs`, `validate.rs`; Askama templates in `templates/`; CSS and
 the picker's script in `assets/`), with runnable examples in `examples/` sharing `examples/model`.
-Deps: SeaORM 2.0, axum 0.8, askama 0.16, jiff 0.2, totp-rs 6, argon2 0.6. MSRV 1.88 (askama, totp-rs).
+Deps: SeaORM 2.0, axum 0.8, askama 0.16, jiff 0.2, totp-rs 6, argon2 0.6, webauthn-rs 0.6. MSRV 1.89
+(webauthn-rs).
 
 ```bash
 cargo build --all-features && cargo test --all-features && cargo clippy --all-features --all-targets
@@ -61,7 +62,7 @@ a helper that is dead code in a narrower build. Before a release, check the matr
 as well as errors:
 
 ```bash
-for f in "" crud axum csrf tz csv auth auth,sso crud,ui crud,ui,csv files files,csrf; do
+for f in "" crud axum csrf tz csv auth auth,sso passkeys crud,ui crud,ui,csv files files,csrf; do
   cargo build -p relativelylight --no-default-features ${f:+--features $f} 2>&1 \
     | grep -E "^(error|warning: )" | grep -v "the following packages"
 done
@@ -71,12 +72,12 @@ cargo build --workspace      # the examples pin their own narrow feature sets
 Don't run `rustfmt` over the whole repo; format only what you touch.
 
 **Security behaviour is tested by rejection.** `auth/security_tests.rs`, `auth/sso_tests.rs` (a fake
-IdP) and `crud/gate_tests.rs` assert the negative cases over in-memory SQLite: bad credentials,
-unusable sessions and API keys, replayed codes, non-manager profile writes, each gate's decision, refused reads,
-CSRF on every write. `crud/ui_tests.rs` covers escaping and form decoding; `crud/transform_tests.rs`
+IdP), `auth/passkey_tests.rs` (a software authenticator) and `crud/gate_tests.rs` assert the negative
+cases over in-memory SQLite: bad credentials, unusable sessions, API keys and passkeys, replayed
+codes, non-manager profile writes, each gate's decision, refused reads, CSRF on every write. `crud/ui_tests.rs` covers escaping and form decoding; `crud/transform_tests.rs`
 covers a value's way through form, CSV and the codec against a real database. `files/tests.rs` covers
 the CSRF token required before the first file, limits holding while streaming, and escaping in the
-components. Touching login, sessions, 2FA, API keys, the profile pages, a gate or the upload
+components. Touching login, sessions, 2FA, API keys, passkeys, the profile pages, a gate or the upload
 path means extending them, with a positive control so the negatives can't
 pass vacuously ([AUTH.md §9](docs/AUTH.md#9-tests--the-negative-paths)).
 

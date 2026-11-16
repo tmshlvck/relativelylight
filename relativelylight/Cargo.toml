@@ -2,7 +2,7 @@
 name = "relativelylight"
 version = "0.4.3"
 edition = "2021"
-rust-version = "1.88"           # askama 0.16, totp-rs 6
+rust-version = "1.89"           # webauthn-rs 0.6 (askama 0.16 and totp-rs 6 need 1.88)
 license = "MIT"
 description = "Web-app building blocks: an auto-generated, server-rendered CRUD admin UI over your ORM entities (no JavaScript framework, no per-model code), plus sessions, user authentication (password, TOTP 2FA, OIDC SSO), and user management."
 repository = "https://github.com/tmshlvck/relativelylight"
@@ -30,6 +30,8 @@ sha2 = { version = "0.11", optional = true }       # hash TOTP recovery codes (h
 openidconnect = { version = "4", optional = true } # OIDC relying-party (SSO); default async reqwest + rustls
 regex = { version = "1", optional = true }         # SSO username → group mapping rules
 base64 = { version = "0.23", optional = true }     # decode the verified ID-token payload; txn cookie
+webauthn-rs = { version = "0.6.2", optional = true, features = ["conditional-ui", "danger-allow-state-serialisation", "danger-credential-internals"] } # passkeys
+webauthn-rs-proto = { version = "0.6.2", optional = true } # its wire types: asking for a discoverable credential
 ipnet = "2"                      # CIDR allow-lists (net::parse_nets / in_nets, the lockout's ip_allow)
 # --- files --------------------------------------------------------------------------------------
 tokio = { workspace = true, optional = true }                                # io::AsyncRead — what a Download is read from
@@ -37,6 +39,13 @@ tokio-util = { version = "0.7", features = ["io"], optional = true }         # i
 multer = { version = "3", optional = true }                                  # streaming multipart — uploads never land in memory
 
 [dev-dependencies]
+# Software authenticators for the passkey tests (auth/passkey_tests.rs): `SoftPasskey`, and `SoftToken`,
+# which attests with a CA of its own. Plus the CBOR codec to make a registration look synced, and the
+# proto type that names a credential in a request (the soft authenticators can't discover one).
+webauthn-authenticator-rs = { version = "0.6.2", features = ["softpasskey", "softtoken"] }
+webauthn-rs-proto = "0.6.2"
+serde_cbor_2 = "0.13"
+crypto-glue = "0.2.2"                 # the soft token's attestation CA as PEM, for `Passkeys::attestation_ca`
 tokio = { workspace = true }
 sea-orm = { workspace = true, features = ["sqlx-sqlite", "runtime-tokio-rustls"] } # in-memory SQLite for the auth/engine tests
 tower = { version = "0.5", features = ["util"] }  # ServiceExt::oneshot — drive the routers without a socket
@@ -69,5 +78,9 @@ sso = ["auth", "dep:openidconnect", "dep:regex", "dep:base64"] # OIDC single sig
 # components (docs/FILES.md). Storage, naming and listing are the app's, so this needs neither `crud`
 # nor a database.
 files = ["axum", "dep:tokio", "dep:sha2", "dep:tokio-util", "dep:multer"]
+# Passkeys (WebAuthn): enrolment on /profile, sign-in, a second factor, re-authentication (docs/AUTH.md
+# §5l). The tables are `auth`'s and exist without it. `webauthn-rs` is pure Rust; the features keep a
+# ceremony's state in our database row and read a credential's backup flags.
+passkeys = ["auth", "dep:webauthn-rs", "dep:webauthn-rs-proto", "dep:base64"]
 validate-regex = ["dep:regex"]   # validate::regex_match (reuses the regex dep)
 validate-base64 = ["dep:base64"] # validate::base64 / base64_url (reuses the base64 dep)

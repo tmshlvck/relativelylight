@@ -19,6 +19,10 @@
 //!   curl -u admin:nope -i     127.0.0.1:3000/api/whoami  # 5 of these → 429, and /login locks too
 //!   curl -H "Authorization: Bearer demo_…" 127.0.0.1:3000/api/whoami  # an API key minted on /profile
 //!
+//! **Passkeys** are on: add one on `/profile`, remove your password there if you like, and sign in with
+//! "Sign in with a passkey". Browse to **http://localhost:3000**, not 127.0.0.1: a passkey belongs to a
+//! domain name, and browsers refuse one for a bare IP address.
+//!
 //! It also shows the two housekeeping duties the library leaves to the app: it schedules
 //! `auth::prune` (expired sessions + expired lockout rows), and it registers the two lockout
 //! entities in the panel, so an operator sees who is locked out and clears a row by deleting it.
@@ -32,6 +36,7 @@ use axum::{Form, Router};
 use axum_extra::extract::CookieJar;
 use relativelylight::auth::api_key::{ApiKeys, KeyError};
 use relativelylight::auth::lockout::{IpLockout, Lockout, UsernameLockout};
+use relativelylight::auth::passkey::Passkeys;
 use relativelylight::middleware::RealIp;
 use relativelylight::auth::sso::{Sso, SsoButton, SsoProvider};
 use relativelylight::auth::{self, Auth, GroupReadWrite, Identity};
@@ -129,6 +134,9 @@ from this site. Reload the page and try again.</div>
         // API keys: a card on /profile to mint (re-authenticated, shown once), list and revoke them.
         // `/api/whoami` accepts them; the accounts panel shows everyone's (docs/AUTH.md §5k).
         .api_keys(ApiKeys::new("demo_"))
+        // Passkeys: a section on /profile, "Sign in with a passkey" on /login, and a passkey on every
+        // confirm-it's-you form. The site is `localhost` on port 3000 — what the browser must show.
+        .passkeys(Passkeys::new("localhost", "http://localhost:3000").rp_name("relativelylight auth demo"))
         // The app's own section on the library's profile page — see `webhook_section`.
         .profile_extra(|s| async move { webhook_section(&s) });
 
@@ -157,7 +165,7 @@ from this site. Reload the page and try again.</div>
     // of, say, `/api/whoami`.
     let guarded = Router::new()
         // An app-owned **sensitive** action: CSRF-checked by the layer, then identity-checked by
-        // `Auth::reauthenticate` inside the handler (see `rotate_webhook_secret`).
+        // `Auth::reauthenticate_with` inside the handler (see `rotate_webhook_secret`).
         .route("/webhook-secret/rotate", post(rotate_webhook_secret))
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce));
@@ -203,7 +211,7 @@ from this site. Reload the page and try again.</div>
     });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
-    println!("auth playground on http://127.0.0.1:3000/   (log in as admin / password)");
+    println!("auth playground on http://localhost:3000/   (log in as admin / password; use localhost for passkeys)");
     println!("accounts panel   http://127.0.0.1:3000/admin  (admin group only — the library has no sign-up page)");
     if sso.is_some() {
         println!("SSO enabled: 'Sign in with Google' button on the login page");
@@ -313,43 +321,33 @@ fn webhook_section(s: &relativelylight::auth::ProfileSection) -> String {
 <h2 class="h6">Webhook secret</h2>
 <p class="small text-muted">Rotating <b>{}</b>'s webhook signing secret is the kind of thing a live session alone
 shouldn't be enough for — a stolen cookie <em>is</em> a live session. So the app asks the caller to prove
-they are present, with <code>Auth::reauthenticate</code>: the same factors the library's own sensitive
-pages take (your password, or a fresh 2FA code), and the same single-use rule for codes. The CSRF token
-comes from the hook; the re-auth happens in the handler.</p>
-<form method="post" action="/webhook-secret/rotate">
+they are present, with <code>Auth::reauthenticate_with</code>: the same factors the library's own
+sensitive pages take (your password, a fresh 2FA code, or your passkey), and the same single-use rule.
+The CSRF token and the confirm-it's-you inputs come from the hook; the check happens in the handler.</p>
+<form method="post" action="/webhook-secret/rotate" style="max-width:22rem">
   {csrf_input}
-  <div class="mb-2" style="max-width:22rem">
-    <label class="form-label small" for="rot-pw">Your current password</label>
-    <input class="form-control form-control-sm" id="rot-pw" name="current_password" type="password"
-           autocomplete="current-password">
-  </div>
-  <div class="mb-2" style="max-width:22rem">
-    <label class="form-label small" for="rot-code">…or a code from your authenticator app</label>
-    <input class="form-control form-control-sm" id="rot-code" name="totp_code" inputmode="numeric"
-           autocomplete="one-time-code" placeholder="123456">
-  </div>
+  {reauth}
   <button class="btn btn-outline-danger btn-sm" type="submit">Rotate webhook secret</button>
 </form>"#,
         s.who.username,
         csrf_input = relativelylight::csrf::Csrf::hidden_input(&s.csrf),
+        reauth = s.reauth_fields,
     )
 }
 
-/// What an app's own sensitive route submits: the caller's re-authentication. (A real one would carry a
-/// CSRF token too — `auth.csrf()` — which the library's own forms demonstrate.)
+/// What an app's own sensitive route submits: the caller's re-authentication — any of their factors,
+/// as `ProfileSection::reauth_fields` rendered them. (The CSRF token is checked by the layer.)
 #[derive(serde::Deserialize)]
 struct RotateForm {
-    #[serde(default)]
-    current_password: String,
-    #[serde(default)]
-    totp_code: String,
+    #[serde(flatten)]
+    reauth: auth::ReauthInput,
 }
 
 /// `POST /webhook-secret/rotate` — **the showcase for re-authentication before a sensitive change.**
 ///
 /// The pattern to copy, in order:
 /// 1. resolve the caller (`identify`); anonymous goes to the login page;
-/// 2. **`reauthenticate`**, and return its error *before anything happens*, so a refusal is a no-op;
+/// 2. **`reauthenticate_with`**, and return its error *before anything happens*, so a refusal is a no-op;
 /// 3. only then do the destructive thing.
 ///
 /// Why bother when the caller already has a session? Because a session proves someone logged in once,
@@ -366,7 +364,7 @@ async fn rotate_webhook_secret(
     let Some(who) = auth.identify(&headers).await else {
         return Redirect::to(auth.login_path()).into_response();
     };
-    if let Err(msg) = auth.reauthenticate(&who, &form.current_password, &form.totp_code).await {
+    if let Err(msg) = auth.reauthenticate_with(&who, &form.reauth).await {
         // 403, and nothing has changed — the old secret is still the secret.
         return (
             StatusCode::FORBIDDEN,
@@ -500,6 +498,8 @@ fn accounts_engine(db: DatabaseConnection, auth: &Auth) -> Arc<Engine> {
     crud.register(group, gate.clone());
     // Everyone's API keys: the hash hidden, the owner pinned, disable/re-date/delete allowed.
     crud.register(auth::api_key::meta_model(), gate.clone());
+    // Everyone's passkeys: the credential hidden, the owner pinned; relabel or delete.
+    crud.register(auth::passkey::meta_model(), gate.clone());
     crud.register(locked_names, gate.clone());
     crud.register(locked_ips, gate);
     // These writes are cookie-authenticated, so they must carry the double-submit token — the same
@@ -534,6 +534,8 @@ fn accounts(engine: &Engine) -> Admin<'_> {
         // Keys are minted on /profile, where the raw value can be shown once; one made here would
         // have no value anyone could see, so the panel offers no "+ New".
         .entity_with("auth_api_key", |t| t.title("API keys").create(false))
+        // A passkey is made by its authenticator, on /profile; there is nothing to create here.
+        .entity_with("auth_passkey", |t| t.title("Passkeys").create(false))
         .separator()
         .group("Locked out")
         .entity_with("auth_username_lockout", |t| t.title("By account"))

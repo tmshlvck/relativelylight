@@ -93,7 +93,7 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 - **A key never opens the UI.** `identify` reads only the session cookie, and keys have their own
   entry point, `identify_key`, which the app calls on the routes that take one. The crate doesn't
   read the header itself: where the credential arrives is the app's choice.
-- **Passkeys (in progress, feature `passkeys`, `webauthn-rs`).** The policy is **app-wide**. It sets
+- **Passkeys (feature `passkeys`, `webauthn-rs`).** The policy is **app-wide**. It sets
   the lowest class of passkey accepted, `Synced < DeviceBound < Attested`, and whether a passkey may
   be a second factor after a password.
   - *Device-bound* means the authenticator reports itself non-backup-eligible. That is cheap, but
@@ -134,10 +134,20 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
     `passkey_handle` only when present.
   - **Attestation.** It is checked against an app-supplied CA list (PEM plus AAGUID).
   - **The backup flag.** The library refuses an assertion whose backup-eligible flag went from true
-    to false. False to true is legal, and reclassifies the credential as synced.
+    to false. False to true is legal in a user's own ceremony (re-auth, the second factor), where we
+    reclassify the credential as synced. The username-less sign-in refuses it, before checking the
+    signature, so it fails like an unknown passkey: the user signs in another way and re-adds it.
+  - **Discoverable credentials.** The library's registration discourages a discoverable credential.
+    A passkey here signs in without a username, so the options the browser receives require one; the
+    server's verification doesn't depend on that hint. A security key with no free slot can't be
+    added.
   - **Tests.** `webauthn-authenticator-rs`'s software authenticators answer only for a named
-    credential and always report device-bound, so a synced registration is made by rewriting the
-    response, and a login class check by editing the row's class.
+    credential, can't store a discoverable one, and always report device-bound. So the tests name the
+    credential, relax the discoverable hint, make a synced registration by rewriting the response,
+    and check a sign-in's class by editing the row. The browser script is checked in Chromium's
+    virtual authenticator, which also covers what the software ones can't.
+- **A ceremony starts on a click.** Browsers want a user gesture before a passkey prompt (Safari
+  insists), so every ceremony page has a button, never an automatic start.
 - **The sign-in policy is one minimum assurance level** (planned). Each way of signing in has a level:
 
   | Signed in with | Level |

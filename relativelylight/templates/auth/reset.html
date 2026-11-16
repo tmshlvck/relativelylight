@@ -1,7 +1,8 @@
 {%- import "auth/_macros.html" as m -%}
 <h1 class="h5 mb-3">Reset password</h1>
 <p class="text-muted">Set a new password for <strong>{{ username }}</strong> — you don't need their current one,
-which is why you have to confirm your own identity below.</p>
+which is why you have to confirm your own identity below.
+{%- if !has_password %} The account has no password now: it signs in with a passkey.{% endif %}</p>
 <form method="post" action="/profile/{{ id }}">
   {{ m::csrf(csrf) }}
   {{ m::alert(error, success) }}
@@ -14,7 +15,7 @@ which is why you have to confirm your own identity below.</p>
     <input class="form-control" id="rl-confirm" name="confirm_password" type="password" autocomplete="new-password">
   </div>
   <hr class="my-3">
-  {{- m::reauth("rl-mgr-pw", manager_totp_on, "Confirm it's you — this sets a password without knowing the old one, so it's the most valuable thing a stolen session of yours could reach.") }}
+  {{- m::reauth("rl-mgr-pw", reauth, "Confirm it's you — this sets a password without knowing the old one, so it's the most valuable thing a stolen session of yours could reach.") }}
   <button class="btn btn-primary" type="submit">Reset password</button>
 </form>
 <hr class="my-4">
@@ -23,9 +24,20 @@ which is why you have to confirm your own identity below.</p>
 <p class="text-muted small mb-2">This user has 2FA enabled. Disabling it lets them log in with just a password until they set it up again.</p>
 <form method="post" action="/profile/{{ id }}/totp/disable">
   {{ m::csrf(csrf) }}
-  {{- m::reauth("rl-mgr-2fa", manager_totp_on, "Confirm it's you before removing someone else's second factor.") }}
+  {{- m::reauth("rl-mgr-2fa", reauth, "Confirm it's you before removing someone else's second factor.") }}
   <button class="btn btn-outline-danger btn-sm" type="submit">Disable 2FA for {{ username }}</button>
 </form>
 {%- else %}
 <p class="text-muted small mb-0">This user has no two-factor authentication set up.</p>
+{%- endif %}
+{%- if passkeys > 0 %}
+<hr class="my-4">
+<h2 class="h6">Passkeys</h2>
+<p class="text-muted small mb-2">{{ username }} has {{ passkeys }} passkey{% if passkeys != 1 %}s{% endif %}.
+{%- if !has_password %} Without a password, removing them leaves the account no way in until you set one above.{% endif %}</p>
+<form method="post" action="/profile/{{ id }}/passkeys/remove">
+  {{ m::csrf(csrf) }}
+  {{- m::reauth("rl-mgr-pk", reauth, "Confirm it's you before removing someone else's passkeys.") }}
+  <button class="btn btn-outline-danger btn-sm" type="submit">Remove all passkeys of {{ username }}</button>
+</form>
 {%- endif %}

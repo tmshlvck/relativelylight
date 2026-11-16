@@ -9,6 +9,7 @@ Feature `auth`, usable without `crud`. It provides:
 - lockout on the unauthenticated credential checks (§5e), session lifetimes and revocation (§5f), a
   password policy (§5g), re-authentication before sensitive changes (§5h);
 - API keys for machine endpoints, each acting as its owner, with self-service on `/profile` (§5k);
+- passkeys: sign-in without a password, a second factor, re-authentication (feature `passkeys`, §5l);
 - double-submit CSRF (feature `csrf`, §7);
 - per-model gate presets for `crud` (§6).
 
@@ -45,6 +46,7 @@ client → resolve_real_ip → [your request log] → [CORS] → router
 | (always) | `authz`: the `Authz` trait, `Operation`, `Decision`, `Open` | `http`, `async-trait` |
 | `auth` | users, groups, sessions, login, profile pages, 2FA, lockout, gate presets | `sea-orm`, `argon2`, `totp-rs`, `askama`, cookies; implies `csrf` |
 | `sso` | `auth::sso`: OIDC sign-in and group mapping (§5b) | `openidconnect`, `regex`, `base64` |
+| `passkeys` | passkeys: sign-in, a second factor, re-authentication, the profile section (§5l) | `webauthn-rs`, `base64`; implies `auth` |
 
 `auth` works without `crud`: `features = ["auth"]` for login alone, `["crud", "auth"]` for a gated
 admin, plus `"sso"` for single sign-on.
@@ -130,7 +132,8 @@ The tables, all ordinary SeaORM entities an admin panel can register (§5j):
 - **`auth_totp_recovery`** — hashed single-use recovery codes (§5i).
 - **`auth_api_key`** — hashed API keys (§5k).
 - **`auth_passkey`**, **`auth_webauthn_challenge`** — passkeys and the WebAuthn ceremonies in flight
-  (in progress: [TODO.md](TODO.md#auth)). Expired challenges are pruned by `auth.prune()`.
+  (§5l). Both exist with or without the `passkeys` feature. Expired challenges are pruned by
+  `auth.prune()`.
 - **`auth_username_lockout`**, **`auth_ip_lockout`** — the lockout counters (§5e).
 
 Deleting an account **cascades** to its sessions, recovery codes, API keys, passkeys, challenges and
@@ -202,8 +205,9 @@ a form without one is refused like any other POST (§7). `s.headers` are the req
 section that reads a preference cookie, such as a
 [timezone picker](TIME.md#3-the-picker-and-its-handler) showing the caller's current zone. The
 section's *handler* is an ordinary route of yours — put
-[`reauthenticate`](#5h-re-authentication-before-sensitive-changes) at the top of it if
-the action is sensitive, which for a secret it is. `examples/auth` does exactly this: its
+[`reauthenticate_with`](#5h-re-authentication-before-sensitive-changes) at the top of it if
+the action is sensitive, which for a secret it is, and put `s.reauth_fields` in the form: the caller's
+confirm-it's-you inputs (password, code, passkey), sharing the page's passkey challenge. `examples/auth` does exactly this: its
 `POST /webhook-secret/rotate` is reached from a `profile_extra` section and re-authenticates before it
 does anything.
 
@@ -414,7 +418,8 @@ engine:
 |---|---|
 | your password change (`POST /profile`), new recovery codes, signing out other sessions | `auth-profile` |
 | minting or revoking one of your API keys (§5k): `Create` / `Delete` on `auth_api_key` | `auth-profile` |
-| a manager's reset (`POST /profile/{id}`) | `auth-admin` |
+| adding or removing one of your passkeys (§5l): `Create` / `Delete` on `auth_passkey`; removing your password | `auth-profile` |
+| a manager's reset (`POST /profile/{id}`), a manager removing someone's passkeys | `auth-admin` |
 
 Each event carries the headers, the resolved `client_ip`, **`actor`** (the username who acted — read
 it rather than calling `identify`, since a password change has already rotated the caller's session),
@@ -470,6 +475,8 @@ key for `duration` after the last one"** — a decaying window, not a strict sli
 | `POST /profile` (current password) | **not limited** | the caller is *authenticated*: that's session theft, whose mitigations are short TTLs and re-authentication (§5h) — and counting it would let a stolen session lock the real user out of logging in |
 | `POST /profile/totp` (enrolment code) | **not limited** | authenticated, and the code guessed is the caller's *own* pending secret |
 | `POST /profile/{id}` (manager reset) | **not limited** | verifies no secret; gated by group membership instead |
+| `POST /login/passkey/finish` (passkey sign-in, §5l) | address | the passkey names no account until it is verified |
+| `POST /login/totp/passkey` (passkey second factor, §5l) | account + address | the same step as a TOTP code |
 | `Auth::identify_key` (API key, §5k) | address | a key names no account, so the address is all there is to count |
 
 **Configuration is mandatory** — it is an argument to `Auth::new`, not a builder call, so there is no
@@ -650,22 +657,28 @@ ask for a factor again, per request:
 | `POST /profile/{id}` (reset) | the **manager's** | sets a password without knowing the old one; every account it reaches is one the session can then log in as |
 | `POST /profile/{id}/totp/disable` | the **manager's** | strips a victim's second factor |
 | `POST /profile/api-keys` (mint, §5k) | the caller's | a key outlives the session and skips the second factor — a stolen session must not become a permanent credential |
+| `POST /profile/passkeys` (add, §5l) | the caller's | a passkey is a new way into the account |
+| `POST /profile/password/remove` (§5l) | the caller's | it changes how the account signs in |
+| `POST /profile` without a password (setting one) | the caller's | a password is a new way into the account |
+| `POST /profile/{id}/passkeys/remove` | the **manager's** | strips a victim's passkeys |
 
 `POST /profile` (your own password change) asks for the current password anyway.
-`POST /profile/sessions/revoke` and `POST /profile/api-keys/{id}/revoke` are **not** re-authenticated:
-each only removes access, and a user racing to evict an intruder shouldn't be slowed down.
+`POST /profile/sessions/revoke`, `POST /profile/api-keys/{id}/revoke` and
+`POST /profile/passkeys/{id}/remove` are **not** re-authenticated: each only removes access, and a user racing to evict an intruder shouldn't be slowed down.
 
-**Either factor.** A `current_password` or a `totp_code` satisfies it. A **fresh code is preferred** when
+**Any factor the account has.** A `current_password`, a `totp_code`, or a passkey (§5l) satisfies it;
+the confirm block offers only the factors the account has. A **fresh code is preferred** when
 the account has 2FA — it proves presence, where a password may have been filled in by the browser for
 whoever is sitting there — and a code accepted here is **spent** (§5a), so one captured code can't wave
 through both a sensitive action and a login. Enrolment is the one asymmetric case: a *first* enrolment has
 no active secret to check a code against, so the password is the factor; a re-enrolment can use either.
 
-**An account with no local factor passes.** An SSO account has neither password nor local 2FA, so there is
-nothing to ask it for, and refusing would lock every SSO administrator out of the manager pages
-permanently. Their assurance is whatever the IdP gave them; re-authenticating through the provider is
-[open work](TODO.md#auth). The same holds for a local account whose password is blank, which already
-can't log in.
+**An account with no local factor passes.** An SSO account has neither password nor local 2FA nor a
+passkey, so there is nothing to ask it for, and refusing would lock every SSO administrator out of the
+manager pages permanently. Their assurance is whatever the IdP gave them; re-authenticating through the
+provider is [open work](TODO.md#auth). The same holds for a local account with no password, no TOTP
+and no passkey, which can't log in at all. An account with a passkey and no password **does** have a
+factor, and must present it.
 
 **Not lockout-limited**, for §5e's reason: the caller is authenticated, so counting failures here would let
 a stolen session lock the real user out of logging in. Nor is it needed — guessing a password is no easier
@@ -674,13 +687,22 @@ here than at `/login`, and a 6-digit code would take ~10⁶ requests inside its 
 **For your own routes**, which is where most sensitive actions live:
 
 ```rust
+#[derive(Deserialize)]
+struct DeleteForm { #[serde(flatten)] reauth: auth::ReauthInput /* , your fields */ }
+
+// rendering: the inputs for whichever factors the caller has, inside your <form>
+let fields = auth.reauth_fields(&who, "Confirm it's you before deleting.").await;
+
+// handling the post
 let Some(who) = auth.identify(&headers).await else { return redirect_to_login() };
-if let Err(msg) = auth.reauthenticate(&who, &form.current_password, &form.totp_code).await {
+if let Err(msg) = auth.reauthenticate_with(&who, &form.reauth).await {
     return (StatusCode::FORBIDDEN, render_form_with_error(&msg));  // nothing has happened yet
 }
 delete_the_thing(&who).await;
 ```
 
+`Auth::reauthenticate(&who, password, code)` is the same check for a form with only a password and a
+code field; it can't confirm an account that has a passkey and no password, which it refuses.
 `Auth::can_reauthenticate(&who)` says whether the account *can* be challenged (false for SSO), for a UI
 hint. `examples/auth` gates a `POST /webhook-secret/rotate` on it — the pattern to copy, including returning
 the refusal before anything is written.
@@ -917,6 +939,103 @@ the panel (`Table::create(false)`): a key minted there would have no raw value a
 crud.register(auth::api_key::meta_model(), Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP])));
 ```
 
+## 5l. Passkeys (feature `passkeys`)
+
+Passkeys (WebAuthn) sign a user in with a fingerprint, face, device PIN or security key, with nothing
+to type and nothing a fake site can capture. They are phishing-resistant where TOTP is not: a relaying
+proxy can pass a code on, but a passkey is bound to the site's domain. The crate uses `webauthn-rs`
+(pure Rust).
+
+```rust
+use relativelylight::auth::passkey::{Class, Passkeys};
+
+let auth = Auth::new(db, lockout).passkeys(
+    Passkeys::new("example.com", "https://example.com")   // the domain, and the origin the site is served at
+        .rp_name("Example")                                // what authenticators show
+        .require(Class::DeviceBound)                       // optional: the lowest class accepted (below)
+        .second_factor(true),                              // optional: a passkey after a password, beside TOTP
+);
+```
+
+A passkey is bound to the domain (`rp_id`) for good, so choose the one the site will keep. Browsers
+refuse passkeys on a bare IP address; locally, use `localhost`.
+
+**What it adds:**
+
+- "Sign in with a passkey" on `/login`. The passkey names the account, so no username is typed. When
+  the account also has TOTP, the TOTP step follows.
+- A passkeys section on `/profile`: list, add (re-authenticated), remove, and "Remove my password".
+- A passkey on every confirm-it's-you form (§5h): the library's own, and the app's
+  (`Auth::reauth_fields` / `reauthenticate_with`, or `ProfileSection::reauth_fields` in a
+  `profile_extra` section).
+- With `second_factor(true)`, a password sign-in by an account that has a passkey continues to a
+  passkey step at `/login/totp`, beside TOTP.
+- `passkey::meta_model()` for the accounts panel (below).
+
+**An account's life.** An administrator creates an account with a password (§5j). The user can add
+TOTP and passkeys. With a passkey they can remove their password, and keep TOTP as a second step
+after the passkey or not. An account with no password can't remove its last passkey until it sets a
+password again ("Set a password" on `/profile`, confirmed with the passkey). SSO accounts get no
+passkeys. A manager can always reset a password, disable TOTP and remove passkeys
+(`POST /profile/{id}/passkeys/remove`), each confirmed with the manager's own factor. There is no
+self-service recovery: an account that loses its only passkey is the administrator's to reopen.
+
+**Classes.** Each passkey is recorded with how strongly it is bound to hardware:
+
+| Class | Means | Proof |
+|---|---|---|
+| `synced` | can be copied between devices (iCloud Keychain, Google Password Manager, a password manager) | the authenticator says so |
+| `device-bound` | stays on one authenticator | **self-reported**: the authenticator says so |
+| `attested` | a hardware authenticator of a model the site trusts | an attestation chain to a CA the app configured |
+
+`require(class)` sets the lowest class accepted. It is checked when a passkey is added, at every use,
+and against open sessions: a session a passkey opened stops counting once its class is below the
+policy. `Class::Attested` needs `attestation_ca(pem, aaguid, description)` entries, the vendor's root
+CA and the model's AAGUID, and fails at startup without one. Synced passkeys can never be attested.
+
+**How a ceremony runs.** WebAuthn needs the browser's API, so passkeys need JavaScript, but no JSON
+API: the page embeds the challenge, the script (`GET /auth/passkey.js`, cacheable, allowed by a strict
+`script-src 'self'`) runs the browser's prompt on a click, puts the answer in a hidden field and
+submits the form. The server answers with the usual 303 or a page. A challenge is a database row
+(`auth_webauthn_challenge`), single-use and valid for five minutes, pruned by `auth.prune()`. A sign-in
+challenge is created only when the user clicks "Sign in with a passkey", so anonymous page views write
+nothing; a signed-in page with a confirm-it's-you form creates one per render. Without JavaScript the
+passkey buttons do nothing and everything else works.
+
+**Registration asks for a discoverable credential** (one the authenticator can offer without a
+username). Phones and laptops always make one; a security key needs a free slot, and one that can't
+make a discoverable credential can't be added.
+
+**Lockout** (§5e). A failed passkey sign-in counts against the **address**: the credential names no
+account until it is verified. A failed passkey second factor counts against the account and the
+address, like a TOTP code. An expired or unknown challenge checks nothing and counts nothing.
+
+**Re-authentication** (§5h) accepts the passkey, and an account with a passkey and no password
+**must** use one of its factors: it no longer passes with nothing. Only an account with no local
+factor at all (SSO) still passes.
+
+**What a session records.** `auth_session.method` is `passkey`, `passkey+totp`, `passkey+recovery`
+or `password+passkey`, and `passkey_class` the class of the passkey used.
+
+**A passkey whose device starts syncing it.** The spec lets an authenticator turn a credential
+backup-eligible later. `webauthn-rs` allows that when a user's own challenge is answered (re-auth, the
+second factor), and the passkey is reclassified `synced`. It refuses it in the username-less sign-in,
+before checking the signature, so that sign-in fails like an unknown passkey. The user signs in
+another way, removes the passkey and adds it again.
+
+**In the accounts panel**, register `auth::passkey::meta_model()`: the credential hidden, the owner
+and everything the ceremonies maintain read-only, the label editable, deleting allowed. Turn creation
+off (`Table::create(false)`): only an authenticator can make a passkey. Hide `auth_user.passkey_handle`
+with the TOTP columns.
+
+```rust
+crud.register(auth::passkey::meta_model(), Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP])));
+```
+
+**Audit** (§5d). Adding and removing a passkey fire `Create` / `Delete` on `auth_passkey` with its
+label, class and AAGUID, never the credential. Removing a password and a manager's removal fire
+`Update` on `auth_user`.
+
 ## 6. authz — the gate
 
 The gate trait lives in **`relativelylight::authz`** — always compiled, independent of the `auth`
@@ -1131,10 +1250,12 @@ port-scoped), exactly as with the session cookie.
 
 - **[`examples/auth`](../examples/auth/src/main.rs)** — `auth` up close: the login page, a `/secret`
   page gated by `identify`, the self-service `/profile` with 2FA in the app's chrome, an accounts panel
-  at `/admin` (§5j) including everyone's API keys, lockout tuned down to 5 failures per account so it
-  is easy to trip, API keys minted on `/profile` and accepted by `/api/whoami` beside HTTP Basic
-  (§5k), and `POST /webhook-secret/rotate` — an app's own sensitive action behind `csrf::enforce` and
-  `Auth::reauthenticate` (§5h, §7), reached from a `profile_extra` section. SSO is wired in when
+  at `/admin` (§5j) including everyone's API keys and passkeys, lockout tuned down to 5 failures per
+  account so it is easy to trip, API keys minted on `/profile` and accepted by `/api/whoami` beside
+  HTTP Basic (§5k), passkeys (§5l; browse to `http://localhost:3000`), and
+  `POST /webhook-secret/rotate` — an app's own sensitive action behind `csrf::enforce` and
+  `Auth::reauthenticate_with` (§5h, §7), reached from a `profile_extra` section and confirmable with
+  a passkey. SSO is wired in when
   `SSO_GOOGLE_CLIENT_ID` / `SSO_GOOGLE_CLIENT_SECRET` are set. `--set-admin-pw` is the break-glass path.
 - **[`examples/adminpanel`](../examples/adminpanel/src/main.rs)** — a login-gated `crud::ui::Admin`
   with CSRF on, content models behind `UserReadGroupWrite` (everyone reads, `admin` writes), the
@@ -1156,6 +1277,14 @@ in-memory SQLite:
   presets as a matrix of caller × operation, and API keys (unknown, expired, disabled, inactive owner,
   locked address, a key never opening the UI, minting without re-authentication, revoking someone
   else's key).
+- **`auth/passkey_tests.rs`** (feature `passkeys`) — every ceremony through the shipped routes with a
+  software authenticator: adding needs a session, CSRF and re-authentication; an answer works once
+  and only for its account; a synced passkey under a device-bound policy and an untrusted model under
+  an attested one are refused; an unknown, garbled or deactivated owner's passkey signs nobody in and
+  counts against the address; a locked address gets no challenge; a stricter policy ends open
+  sessions; the second factor only when enabled; a passwordless account keeps a way in and must
+  confirm with its passkey; managers, audit, and nothing at all with the feature off. The browser
+  script is checked in Chromium's virtual authenticator (Playwright).
 - **`auth/sso_tests.rs`** (feature `sso`) — the OIDC callback against a **fake IdP** on a loopback
   port (real discovery, real RSA signatures): missing or forged state, wrong key, audience, issuer,
   nonce, an expired token, missing claims, auto-registration off, disabled, local and

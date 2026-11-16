@@ -37,6 +37,11 @@ pub mod lockout;
 mod pages;
 /// Passkeys (WebAuthn): the credential and challenge tables, and the hardware-binding [`passkey::Class`].
 pub mod passkey;
+/// The passkey ceremonies, routes and configuration (feature `passkeys`, §5l).
+#[cfg(feature = "passkeys")]
+mod webauthn;
+#[cfg(all(test, feature = "passkeys"))]
+mod passkey_tests;
 /// TOTP **recovery codes** (§5i): single-use codes that get a user back in when the authenticator is
 /// gone, issued at enrolment and regenerable from the profile page.
 pub mod recovery;
@@ -111,6 +116,41 @@ impl Identity {
     /// Whether this identity belongs to any of the given groups.
     pub fn in_any_group(&self, groups: &[String]) -> bool {
         self.groups.iter().any(|g| groups.contains(g))
+    }
+}
+
+// ===================== Re-authentication input =====================
+
+/// What a re-authenticating form submits (§5h): any one of the account's factors. Flatten it into your
+/// own form's struct (`#[serde(flatten)] reauth: ReauthInput`) and hand it to
+/// [`Auth::reauthenticate_with`]; [`Auth::reauth_fields`] renders the inputs it reads.
+///
+/// `#[non_exhaustive]` so a factor added later isn't a break; build one with `Default` and the fields.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[non_exhaustive]
+pub struct ReauthInput {
+    /// The account's password.
+    #[serde(default)]
+    pub current_password: String,
+    /// A fresh code from the account's authenticator app.
+    #[serde(default)]
+    pub totp_code: String,
+    /// The passkey challenge the page was rendered with.
+    #[serde(default)]
+    pub passkey_challenge: String,
+    /// The browser's answer to it (JSON), filled in by the passkey script.
+    #[serde(default)]
+    pub passkey_response: String,
+}
+
+impl ReauthInput {
+    /// A password and/or a TOTP code — what [`Auth::reauthenticate`] takes.
+    pub fn password_or_code(password: &str, totp_code: &str) -> Self {
+        Self {
+            current_password: password.to_string(),
+            totp_code: totp_code.to_string(),
+            ..Self::default()
+        }
     }
 }
 
@@ -581,6 +621,11 @@ pub struct ProfileSection {
     /// display-preference cookie: `time::Tz::from_headers(&s.headers)` preselects a
     /// [`TzPicker`](crate::time::TzPicker) in the caller's current zone.
     pub headers: HeaderMap,
+    /// The confirm-it's-you inputs for a sensitive form in your section, as an HTML fragment: the
+    /// caller's password, code and passkey, whichever they have — the same block (and passkey
+    /// challenge) as the library's own forms on this page. Put it inside your `<form>` and check the
+    /// post with [`Auth::reauthenticate_with`].
+    pub reauth_fields: String,
 }
 
 type ProfileShell = Arc<dyn Fn(&str, &Identity, &Parts) -> String + Send + Sync>;
@@ -636,6 +681,9 @@ struct Inner {
     password_check: Option<PasswordCheck>,
     /// Self-service API keys on `/profile`, when switched on (see [`Auth::api_keys`]).
     api_keys: Option<api_key::ApiKeys>,
+    /// Passkeys, when switched on (see `Auth::passkeys`).
+    #[cfg(feature = "passkeys")]
+    passkeys: Option<Arc<webauthn::Runtime>>,
 }
 
 impl Inner {
@@ -665,22 +713,33 @@ impl Inner {
         self.password_check.as_ref().and_then(|c| c(password, username).err())
     }
 
-    /// Re-authenticate the holder of `user`: their current password, or a fresh TOTP code when 2FA is
-    /// on. `Ok(())` on success **or** when the account has no local factor to ask for. See
-    /// [`Auth::reauthenticate`] for what this is protecting against and why the no-factor case passes.
+    /// Re-authenticate the holder of `user` with any factor the account has: its password, a fresh TOTP
+    /// code, or its passkey. `Ok(())` on success **or** when the account has no local factor at all (an
+    /// SSO account). See [`Auth::reauthenticate`] for what this is protecting against and why the
+    /// no-factor case passes.
     ///
-    /// A code accepted here is **spent** (the §5a replay guard), so it can't then be used to log in or
-    /// to confirm a second sensitive action inside its window.
-    async fn reauth(&self, user: &user::Model, password: &str, code: &str) -> Result<(), String> {
+    /// A passkey counts as a factor, so an account without a password but with a passkey **must**
+    /// present one of its factors. A code accepted here is **spent** (the §5a replay guard), and so is a
+    /// passkey challenge.
+    async fn reauth(&self, user: &user::Model, proof: &ReauthInput) -> Result<(), String> {
         let has_password = !user.password_hash.is_empty();
-        if !has_password && !user.has_totp() {
+        let has_passkey = passkey::count(&self.db, user.id).await > 0;
+        if !has_password && !user.has_totp() && !has_passkey {
             return Ok(()); // nothing to prove with — see the doc comment on `Auth::reauthenticate`
         }
-        // The code path first: a fresh code is better evidence of presence than a password, which a
-        // browser may have filled in for whoever is sitting there.
-        if !code.trim().is_empty() {
+        // A passkey first: it proves presence and possession in one step, and the script only fills
+        // the answer in when the user chose it.
+        if !proof.passkey_response.trim().is_empty() {
+            if !has_passkey {
+                return Err("This account has no passkey. Use another way to confirm.".into());
+            }
+            return self.reauth_passkey(user, proof).await;
+        }
+        // The code next: a fresh code is better evidence of presence than a password, which a browser
+        // may have filled in for whoever is sitting there.
+        if !proof.totp_code.trim().is_empty() {
             if let Some(secret) = user.totp_key() {
-                return match totp::verify_step(secret, code) {
+                return match totp::verify_step(secret, &proof.totp_code) {
                     Some(step) if user.totp_step_ok(step) => {
                         stamp_login(&self.db, user.id, Some(step)).await; // spend it
                         Ok(())
@@ -690,17 +749,105 @@ impl Inner {
             }
             return Err("This account has no authenticator app — enter your password instead.".into());
         }
-        if !password.is_empty() {
-            return if has_password && verify_password(&user.password_hash, password) {
+        if !proof.current_password.is_empty() {
+            return if has_password && verify_password(&user.password_hash, &proof.current_password) {
                 Ok(())
+            } else if !has_password {
+                Err("This account has no password. Confirm another way.".into())
             } else {
                 Err("That password is incorrect.".into())
             };
         }
-        Err(match user.has_totp() {
-            true => "Confirm with your password or a code from your authenticator app.".into(),
-            false => "Confirm with your current password.".into(),
+        Err(match (has_password, user.has_totp(), has_passkey) {
+            (true, false, false) => "Confirm with your current password.".into(),
+            (true, true, false) => {
+                "Confirm with your password or a code from your authenticator app.".into()
+            }
+            (true, false, true) => "Confirm with your password or your passkey.".into(),
+            (true, true, true) => {
+                "Confirm with your password, a code from your authenticator app, or your passkey.".into()
+            }
+            (false, true, true) => {
+                "Confirm with your passkey or a code from your authenticator app.".into()
+            }
+            (false, true, false) => "Confirm with a code from your authenticator app.".into(),
+            (false, false, _) => "Confirm with your passkey.".into(),
         })
+    }
+
+    /// The passkey half of [`reauth`](Inner::reauth).
+    #[cfg(feature = "passkeys")]
+    async fn reauth_passkey(&self, user: &user::Model, proof: &ReauthInput) -> Result<(), String> {
+        let Some(rt) = self.passkeys.clone() else {
+            return Err("Passkeys are not enabled on this site.".into());
+        };
+        let (challenge, response) = (&proof.passkey_challenge, &proof.passkey_response);
+        let purpose = webauthn::Purpose::Reauth;
+        let checked = rt.verify_user(self, user, purpose, challenge, response).await;
+        checked.map(|_| ()).map_err(|r| r.message)
+    }
+
+    #[cfg(not(feature = "passkeys"))]
+    async fn reauth_passkey(&self, _user: &user::Model, _proof: &ReauthInput) -> Result<(), String> {
+        Err("Passkeys are not enabled on this site.".into())
+    }
+
+    /// What `user`'s confirm-it's-you blocks can offer, on a page about to be rendered: their factors,
+    /// and a fresh passkey challenge when they have a passkey and passkeys are on.
+    async fn reauth_view(&self, user: &user::Model) -> ReauthView {
+        ReauthView {
+            has_password: !user.password_hash.is_empty(),
+            totp_on: user.has_totp(),
+            passkey: self.passkey_ask(user).await,
+        }
+    }
+
+    #[cfg(feature = "passkeys")]
+    async fn passkey_ask(&self, user: &user::Model) -> Option<PasskeyAsk> {
+        let rt = self.passkeys.clone()?;
+        rt.ask_user(self, user, webauthn::Purpose::Reauth).await
+    }
+
+    #[cfg(not(feature = "passkeys"))]
+    async fn passkey_ask(&self, _user: &user::Model) -> Option<PasskeyAsk> {
+        None
+    }
+
+    /// Whether `user`'s password sign-in continues to a passkey step: passkeys are a second factor here
+    /// and the account has one.
+    async fn second_factor_ask_possible(&self, user: &user::Model) -> bool {
+        #[cfg(feature = "passkeys")]
+        if let Some(rt) = &self.passkeys {
+            return rt.second_factor() && passkey::count(&self.db, user.id).await > 0;
+        }
+        let _ = user;
+        false
+    }
+
+    /// The passkey challenge for `user`'s second step, when [`second_factor_ask_possible`].
+    ///
+    /// [`second_factor_ask_possible`]: Inner::second_factor_ask_possible
+    async fn second_factor_ask(&self, user: &user::Model) -> Option<PasskeyAsk> {
+        #[cfg(feature = "passkeys")]
+        if let Some(rt) = self.passkeys.clone() {
+            if rt.second_factor() {
+                return rt.ask_user(self, user, webauthn::Purpose::SecondFactor).await;
+            }
+        }
+        let _ = user;
+        None
+    }
+
+    /// Whether passkeys are switched on (the feature, and `Auth::passkeys`).
+    fn passkeys_on(&self) -> bool {
+        #[cfg(feature = "passkeys")]
+        {
+            self.passkeys.is_some()
+        }
+        #[cfg(not(feature = "passkeys"))]
+        {
+            false
+        }
     }
 
     /// Whether this session is still alive on **both** clocks: inside its absolute deadline, and used
@@ -775,13 +922,18 @@ impl Inner {
         &self,
         frag: String,
         who: &Identity,
+        reauth: &ReauthView,
         csrf: &str,
         headers: &HeaderMap,
     ) -> String {
         match &self.profile_extra {
             Some(hook) => {
-                let ctx =
-                    ProfileSection { who: who.clone(), csrf: csrf.to_string(), headers: headers.clone() };
+                let ctx = ProfileSection {
+                    who: who.clone(),
+                    csrf: csrf.to_string(),
+                    headers: headers.clone(),
+                    reauth_fields: reauth_fields_html(reauth, "Confirm it's you."),
+                };
                 format!("{frag}{}", hook(ctx).await)
             }
             None => frag,
@@ -932,6 +1084,8 @@ impl Auth {
                 ips,
                 password_check: Some(policy_check(crate::validate::PasswordPolicy::recommended())),
                 api_keys: None,
+                #[cfg(feature = "passkeys")]
+                passkeys: None,
             }),
         }
     }
@@ -1219,8 +1373,12 @@ impl Auth {
     /// delete_everything(&who).await;
     /// ```
     ///
+    /// This takes a password or a code only. An account that has a passkey and no password can't confirm
+    /// with either, and is refused; use [`reauthenticate_with`](Auth::reauthenticate_with) and
+    /// [`reauth_fields`](Auth::reauth_fields), which take a passkey too.
+    ///
     /// A TOTP code accepted here is **spent** (§5a). An account with no local factor (SSO, or a blank
-    /// password) passes: there is nothing to ask it for, and re-auth through the IdP isn't built
+    /// password and no passkey) passes: there is nothing to ask it for, and re-auth through the IdP isn't built
     /// (AUTH.md §5h). Not lockout-limited — the caller is authenticated, and counting would let a stolen
     /// session lock the real user out (§5e).
     pub async fn reauthenticate(
@@ -1232,17 +1390,56 @@ impl Auth {
         let Some(user) = target_user(&self.inner, &who.id).await else {
             return Err("Your session is no longer valid — sign in again.".into());
         };
-        self.inner.reauth(&user, password, totp_code).await
+        self.inner.reauth(&user, &ReauthInput::password_or_code(password, totp_code)).await
     }
 
     /// Whether [`reauthenticate`](Auth::reauthenticate) can actually challenge this account — i.e. it has
-    /// a local password or 2FA. `false` for an SSO account (nothing to ask for, so re-auth passes), which
-    /// is what to key a "you'll be asked to confirm" hint off in your own UI.
+    /// a local password, 2FA or a passkey. `false` for an SSO account (nothing to ask for, so re-auth
+    /// passes), which is what to key a "you'll be asked to confirm" hint off in your own UI.
     pub async fn can_reauthenticate(&self, who: &Identity) -> bool {
         match target_user(&self.inner, &who.id).await {
-            Some(u) => !u.password_hash.is_empty() || u.has_totp(),
+            Some(u) => {
+                !u.password_hash.is_empty()
+                    || u.has_totp()
+                    || passkey::count(&self.inner.db, u.id).await > 0
+            }
             None => false,
         }
+    }
+
+    /// **Re-authenticate** with whatever factor the caller's form submitted — the password, a TOTP
+    /// code, or a passkey — read as a [`ReauthInput`] flattened into your form. Render the inputs with
+    /// [`reauth_fields`](Auth::reauth_fields) inside that form. This is [`reauthenticate`]'s full form:
+    /// an account that signs in with a passkey and has no password can only confirm this way.
+    ///
+    /// ```ignore
+    /// #[derive(Deserialize)]
+    /// struct DeleteForm { #[serde(flatten)] reauth: ReauthInput, #[serde(rename = "_csrf")] csrf: String }
+    ///
+    /// if let Err(msg) = auth.reauthenticate_with(&who, &form.reauth).await {
+    ///     return (StatusCode::FORBIDDEN, render_form_with_error(&msg));
+    /// }
+    /// ```
+    ///
+    /// [`reauthenticate`]: Auth::reauthenticate
+    pub async fn reauthenticate_with(&self, who: &Identity, proof: &ReauthInput) -> Result<(), String> {
+        let Some(user) = target_user(&self.inner, &who.id).await else {
+            return Err("Your session is no longer valid — sign in again.".into());
+        };
+        self.inner.reauth(&user, proof).await
+    }
+
+    /// The confirm-it's-you inputs for one of **your** forms, as an HTML fragment: a password field, a
+    /// code field when the account has 2FA, and a "Confirm with your passkey" button when it has a
+    /// passkey (with a fresh challenge, and the script that runs it). Only the factors the account has
+    /// are offered; `hint` is the sentence above them. Put it inside the `<form>` whose handler calls
+    /// [`reauthenticate_with`](Auth::reauthenticate_with). Empty for an account with no factor (SSO).
+    pub async fn reauth_fields(&self, who: &Identity, hint: &str) -> String {
+        let reauth = match target_user(&self.inner, &who.id).await {
+            Some(user) => self.inner.reauth_view(&user).await,
+            None => ReauthView::none(),
+        };
+        reauth_fields_html(&reauth, hint)
     }
 
     /// Sign a user out **everywhere**: delete every session row they hold. Returns how many were
@@ -1297,12 +1494,17 @@ impl Auth {
     ///   keys, only when [`api_keys`](Auth::api_keys) is on (§5k).
     /// - `GET/POST /profile/{id}` — a manager resets another user's password.
     /// - `POST /profile/{id}/totp/disable` — a manager disables another user's 2FA.
+    /// - `POST /profile/{id}/passkeys/remove` — a manager removes another user's passkeys.
     ///
     /// These paths are the module's, so don't also route them yourself — axum panics on an overlap at
     /// merge time. Change where they live with [`login_path`](Auth::login_path)'s and
     /// [`profile_path`](Auth::profile_path)'s configuration, or nest the whole thing under a prefix.
     pub fn routes(&self) -> Router {
         let mut router = Router::new();
+        #[cfg(feature = "passkeys")]
+        if self.inner.passkeys.is_some() {
+            router = webauthn::routes(router);
+        }
         if self.inner.api_keys.is_some() {
             router = router
                 .route("/profile/api-keys", post(api_key::mint_submit))
@@ -1319,6 +1521,7 @@ impl Auth {
             .route("/profile/sessions/revoke", post(sessions_revoke))
             .route("/profile/{id}", get(manage_form).post(manage_submit))
             .route("/profile/{id}/totp/disable", post(totp_manage_disable))
+            .route("/profile/{id}/passkeys/remove", post(passkeys_manage_remove))
             .with_state(self.inner.clone())
     }
 
@@ -1347,6 +1550,14 @@ async fn identity_from(inner: &Inner, token: &str) -> Option<Identity> {
     let session = session::Entity::find_by_id(token.to_string()).one(&inner.db).await.ok()??;
     if !inner.session_live(&session) || session.awaiting_totp {
         return None; // expired (either clock), or the TOTP second factor is still pending
+    }
+    // A session a passkey opened counts only while the policy still accepts that passkey's class, so a
+    // stricter policy applies to sessions already open, not just to the next sign-in.
+    #[cfg(feature = "passkeys")]
+    if let (Some(rt), Some(class)) = (&inner.passkeys, session.passkey_class()) {
+        if class < rt.require() {
+            return None;
+        }
     }
     let user = user::Entity::find_by_id(session.user_id).one(&inner.db).await.ok()??;
     if !user.is_active {
@@ -1385,6 +1596,17 @@ async fn create_session(
     awaiting_totp: bool,
     method: session::Method,
 ) -> Result<String, DbErr> {
+    create_session_class(inner, user_id, awaiting_totp, method, None).await
+}
+
+/// [`create_session`], recording the class of the passkey that authenticated it.
+async fn create_session_class(
+    inner: &Inner,
+    user_id: i32,
+    awaiting_totp: bool,
+    method: session::Method,
+    class: Option<passkey::Class>,
+) -> Result<String, DbErr> {
     let token = new_token();
     let now = now_secs();
     session::ActiveModel {
@@ -1394,7 +1616,7 @@ async fn create_session(
         last_seen_at: Set(now),
         awaiting_totp: Set(awaiting_totp),
         method: Set(method.as_str().to_string()),
-        passkey_class: Set(None),
+        passkey_class: Set(class.map(|c| c.as_str().to_string())),
     }
     .insert(&inner.db)
     .await?;
@@ -1428,9 +1650,15 @@ async fn resession(inner: &Inner, user_id: i32, method: session::Method) -> Opti
 /// authenticated session the moment the victim typed their own code. A new id leaves the attacker
 /// holding a token that was deleted.
 ///
-/// `method` is how the session is authenticated now that the second factor is in.
-async fn rotate_session(inner: &Inner, old: session::Model, method: session::Method) -> Option<String> {
-    let token = create_session(inner, old.user_id, false, method).await.ok()?;
+/// `method` is how the session is authenticated now that the second factor is in, and `class` the
+/// class of the passkey involved, if any.
+async fn rotate_session(
+    inner: &Inner,
+    old: session::Model,
+    method: session::Method,
+    class: Option<passkey::Class>,
+) -> Option<String> {
+    let token = create_session_class(inner, old.user_id, false, method, class).await.ok()?;
     // Best-effort: a surviving old row is half-authenticated, so it grants nothing either way.
     let _ = session::Entity::delete_by_id(old.id).exec(&inner.db).await;
     Some(token)
@@ -1447,7 +1675,7 @@ struct LoginForm {
 async fn login_form(State(inner): State<Arc<Inner>>, req: Parts, jar: CookieJar) -> Response {
     let headers = &req.headers;
     let (token, jar) = csrf_token(&inner, headers, jar);
-    (jar, Html((inner.login_shell)(&login_form_html(None, &token), &req))).into_response()
+    (jar, Html((inner.login_shell)(&login_form_html(None, &token, inner.passkeys_on()), &req))).into_response()
 }
 
 async fn login_submit(
@@ -1470,7 +1698,7 @@ async fn login_submit(
         return too_many_attempts(
             retry,
             jar,
-            Html((inner.login_shell)(&login_form_html(Some(&lockout_message(retry)), &token), &req)),
+            Html((inner.login_shell)(&login_form_html(Some(&lockout_message(retry)), &token, inner.passkeys_on()), &req)),
         );
     }
     let user = match verify_credentials(&inner, &form.username, &form.password).await {
@@ -1489,7 +1717,8 @@ async fn login_submit(
     let Some(user) = user else {
         return login_rejected(&inner, &req, jar);
     };
-    let needs_totp = user.has_totp();
+    // A second step when the account has TOTP, or a passkey and passkeys are a second factor here.
+    let needs_totp = user.has_totp() || inner.second_factor_ask_possible(&user).await;
     let token = match create_session(&inner, user.id, needs_totp, session::Method::Password).await {
         Ok(token) => token,
         Err(e) => {
@@ -1521,7 +1750,7 @@ fn login_rejected(inner: &Inner, req: &Parts, jar: CookieJar) -> Response {
     (
         StatusCode::UNAUTHORIZED,
         jar,
-        Html((inner.login_shell)(&login_form_html(Some("Invalid username or password."), &token), req)),
+        Html((inner.login_shell)(&login_form_html(Some("Invalid username or password."), &token, inner.passkeys_on()), req)),
     )
         .into_response()
 }
@@ -1535,12 +1764,31 @@ async fn login_totp_form(
 ) -> Response {
     let headers = &req.headers;
     match pending_totp_user(&inner, headers).await {
-        Some(_) => {
+        Some((session, user)) => {
             let (token, jar) = csrf_token(&inner, headers, jar);
-            (jar, Html((inner.login_shell)(&totp_login_html(None, &token), &req))).into_response()
+            (jar, second_step_page(&inner, &session, &user, None, &token, &req).await).into_response()
         }
         None => Redirect::to(&inner.login_path).into_response(),
     }
+}
+
+/// The second-step page (`/login/totp`) for a pending session: the TOTP code (with recovery codes) when
+/// the account has TOTP, and its passkey when passkeys are a second factor here and the first step was
+/// the password. After a passkey sign-in only TOTP is offered: a passkey can't be its own second factor.
+async fn second_step_page(
+    inner: &Inner,
+    session: &session::Model,
+    user: &user::Model,
+    error: Option<&str>,
+    csrf: &str,
+    req: &Parts,
+) -> Html<String> {
+    let after_password = session.method() == Some(session::Method::Password);
+    let passkey = match after_password {
+        true => inner.second_factor_ask(user).await,
+        false => None,
+    };
+    Html((inner.login_shell)(&totp_login_html(error, csrf, user.has_totp(), passkey.as_ref()), req))
 }
 
 #[derive(serde::Deserialize)]
@@ -1553,14 +1801,12 @@ struct TotpForm {
     /// had no reason to include.
     #[serde(default)]
     code: String,
-    /// Re-authentication for `/profile/totp` (§5h); unused at `/login/totp`, where the password was just
-    /// checked a moment ago.
-    #[serde(default)]
-    current_password: String,
-    /// A code from the account's *currently active* secret — only meaningful when re-enrolling over an
-    /// existing 2FA setup. A first enrolment has no active secret, so the password is the factor.
-    #[serde(default)]
-    totp_code: String,
+    /// Re-authentication for `/profile/totp` (§5h); unused at `/login/totp`, where the first factor was
+    /// just checked. Its `totp_code` is a code from the account's *currently active* secret — only
+    /// meaningful when re-enrolling over an existing 2FA setup; a first enrolment has no active
+    /// secret, so another factor confirms it.
+    #[serde(flatten)]
+    reauth: ReauthInput,
     /// A single-use **recovery code** (§5i), accepted at `/login/totp` in place of `code` when the
     /// authenticator is gone. Unused at `/profile/totp`.
     #[serde(default)]
@@ -1599,7 +1845,7 @@ async fn login_totp_submit(
         return too_many_attempts(
             retry,
             jar,
-            Html((inner.login_shell)(&totp_login_html(Some(&lockout_message(retry)), &token), &req)),
+            second_step_page(&inner, &session, &user, Some(&lockout_message(retry)), &token, &req).await,
         );
     }
     // An empty submission presents **no credential**, so it is not a failed check and must not spend the
@@ -1610,10 +1856,15 @@ async fn login_totp_submit(
         return (
             StatusCode::UNAUTHORIZED,
             jar,
-            Html((inner.login_shell)(&totp_login_html(
+            second_step_page(
+                &inner,
+                &session,
+                &user,
                 Some("Enter the code from your authenticator app, or a recovery code."),
                 &token,
-            ), &req)),
+                &req,
+            )
+            .await,
         )
             .into_response();
     }
@@ -1636,18 +1887,23 @@ async fn login_totp_submit(
         return (
             StatusCode::UNAUTHORIZED,
             jar,
-            Html((inner.login_shell)(&totp_login_html(Some("Invalid code. Try again."), &token), &req)),
+            second_step_page(&inner, &session, &user, Some("Invalid code. Try again."), &token, &req).await,
         )
             .into_response();
     }
     // The second factor is confirmed, so the session gains full privilege — which means a **new id**
     // (see `rotate_session`), a new CSRF token, and the spent step recorded so this code can't be used
     // again inside its ±1-step window.
-    let method = match used_recovery {
-        true => session::Method::PasswordRecovery,
-        false => session::Method::PasswordTotp,
+    // The first step decides the name: a password, or a passkey (whose class carries over).
+    let after_passkey = session.method() == Some(session::Method::Passkey);
+    let method = match (after_passkey, used_recovery) {
+        (false, true) => session::Method::PasswordRecovery,
+        (false, false) => session::Method::PasswordTotp,
+        (true, true) => session::Method::PasskeyRecovery,
+        (true, false) => session::Method::PasskeyTotp,
     };
-    let Some(token) = rotate_session(&inner, session, method).await else {
+    let class = session.passkey_class();
+    let Some(token) = rotate_session(&inner, session, method, class).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
     };
     stamp_login(&inner.db, user.id, step).await;
@@ -1688,7 +1944,10 @@ async fn logout(State(inner): State<Arc<Inner>>, jar: CookieJar) -> Response {
 
 #[derive(serde::Deserialize)]
 struct ChangeForm {
-    current_password: String,
+    /// `current_password` for an account that has one; any other factor for one that doesn't, which
+    /// is setting a password rather than changing it.
+    #[serde(flatten)]
+    reauth: ReauthInput,
     new_password: String,
     confirm_password: String,
     #[serde(default, rename = "_csrf")]
@@ -1700,10 +1959,8 @@ struct ResetForm {
     new_password: String,
     confirm_password: String,
     /// The **manager's own** re-authentication (§5h) — not the target's, which they don't know.
-    #[serde(default)]
-    current_password: String,
-    #[serde(default)]
-    totp_code: String,
+    #[serde(flatten)]
+    reauth: ReauthInput,
     #[serde(default, rename = "_csrf")]
     csrf: Option<String>,
 }
@@ -1711,10 +1968,8 @@ struct ResetForm {
 /// A post whose only payload is the caller's re-authentication (§5h): the "disable 2FA" buttons.
 #[derive(serde::Deserialize)]
 struct ReauthForm {
-    #[serde(default)]
-    current_password: String,
-    #[serde(default)]
-    totp_code: String,
+    #[serde(flatten)]
+    reauth: ReauthInput,
     #[serde(default, rename = "_csrf")]
     csrf: Option<String>,
 }
@@ -1811,8 +2066,19 @@ async fn profile_submit(
     // it's someone with a live session, which is a session-theft problem (short TTLs, re-auth before
     // sensitive changes — docs/TODO.md), not a guessing one. Counting it here would also let a stolen
     // session lock the real user out of logging in.
-    let error: Option<String> = if !verify_password(&user.password_hash, &form.current_password) {
-        Some("Current password is incorrect.".into())
+    //
+    // An account with a password proves it with that password. One without (it signs in with a
+    // passkey) is *setting* a password, which is a new way in, so it confirms with another factor.
+    let has_password = !user.password_hash.is_empty();
+    let proved = match has_password {
+        true => match verify_password(&user.password_hash, &form.reauth.current_password) {
+            true => Ok(()),
+            false => Err("Current password is incorrect.".to_string()),
+        },
+        false => inner.reauth(&user, &form.reauth).await,
+    };
+    let error: Option<String> = if let Err(msg) = proved {
+        Some(msg)
     } else if let Some(msg) = password_pair_error(&form.new_password, &form.confirm_password) {
         Some(msg.into())
     } else {
@@ -1879,24 +2145,41 @@ async fn manage_form(
         Err(res) => return res,
     };
     let (token, jar) = csrf_token(&inner, headers, jar);
-    // The manager's own 2FA state decides whether the confirm-it's-you block offers a code field.
-    let manager_totp_on =
-        target_user(&inner, &who.id).await.map(|m| m.has_totp()).unwrap_or(false);
     // Don't offer a reset form for an account whose password lives at the identity provider — the POST
     // refuses it, so a form here would only ever produce an error.
-    let frag = match target.sso_key() {
-        Some(provider) => sso_managed_html(&target.username, provider),
-        None => reset_form_html(
-            &id,
-            &target.username,
-            target.has_totp(),
-            manager_totp_on,
-            None,
-            None,
-            &token,
-        ),
+    if let Some(provider) = target.sso_key() {
+        let frag = sso_managed_html(&target.username, provider);
+        return (jar, inner.page(&who, &frag, &req)).into_response();
+    }
+    let Some(manager) = target_user(&inner, &who.id).await else {
+        return Redirect::to(&inner.login_path).into_response();
     };
-    (jar, inner.page(&who, &frag, &req)).into_response()
+    (jar, manager_page(&inner, &who, &manager, &target, None, None, &token, &req).await).into_response()
+}
+
+/// The manager's page about `target`, with an optional message. The confirm-it's-you blocks offer the
+/// **manager's** factors — their own password, code or passkey, never the target's.
+#[allow(clippy::too_many_arguments)]
+async fn manager_page(
+    inner: &Inner,
+    who: &Identity,
+    manager: &user::Model,
+    target: &user::Model,
+    error: Option<&str>,
+    success: Option<&str>,
+    csrf: &str,
+    req: &Parts,
+) -> Html<String> {
+    let id = target.id.to_string();
+    let t = Target {
+        id: &id,
+        username: &target.username,
+        totp_on: target.has_totp(),
+        has_password: !target.password_hash.is_empty(),
+        passkeys: passkey::count(&inner.db, target.id).await,
+    };
+    let reauth = inner.reauth_view(manager).await;
+    inner.page(who, &reset_form_html(&t, &reauth, error, success, csrf), req)
 }
 
 /// `POST /profile/{id}` — a manager sets another user's password (no current password required).
@@ -1916,23 +2199,26 @@ async fn manage_submit(
         Ok(v) => v,
         Err(res) => return res,
     };
-    let totp_on = target.has_totp();
-
     // Re-authenticate the **manager** (§5h) with their own factor. This route sets a password without
     // knowing the old one — which is the point of it, and also what makes it the most valuable thing a
     // stolen manager session can reach: every account it can reset is an account it can then log in as.
     let Some(manager) = target_user(&inner, &who.id).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
-    let manager_totp_on = manager.has_totp(); // whether to offer *them* the code field
-    // The reset form again, with a message.
-    let page = |error: Option<&str>, success: Option<&str>| {
-        let frag =
-            reset_form_html(&id, &target.username, totp_on, manager_totp_on, error, success, &csrf);
-        inner.page(&who, &frag, &req)
+    // The reset form again, with a message, re-read so it shows the account as it now stands.
+    let page = |error: Option<String>, success: Option<String>| {
+        let (inner, who, manager, csrf, req) = (&inner, &who, &manager, &csrf, &req);
+        let target_id = target.id;
+        async move {
+            let Ok(Some(target)) = user::Entity::find_by_id(target_id).one(&inner.db).await else {
+                return Html(String::new());
+            };
+            manager_page(inner, who, manager, &target, error.as_deref(), success.as_deref(), csrf, req)
+                .await
+        }
     };
-    if let Err(msg) = inner.reauth(&manager, &form.current_password, &form.totp_code).await {
-        return (StatusCode::FORBIDDEN, page(Some(&msg), None)).into_response();
+    if let Err(msg) = inner.reauth(&manager, &form.reauth).await {
+        return (StatusCode::FORBIDDEN, page(Some(msg), None).await).into_response();
     }
 
     // An SSO account has no local password to set, so refuse rather than store a hash that can never
@@ -1944,7 +2230,7 @@ async fn manage_submit(
             "{} signs in through {provider} (single sign-on) — its password is managed there, not here.",
             target.username
         );
-        return (StatusCode::BAD_REQUEST, page(Some(&msg), None)).into_response();
+        return (StatusCode::BAD_REQUEST, page(Some(msg), None).await).into_response();
     }
 
     // The same policy as the self-service page, against the *target's* username — a manager's reset
@@ -1957,11 +2243,11 @@ async fn manage_submit(
                 .map(|e| format!("The new password {e}."))
         });
     if let Some(msg) = error {
-        return (StatusCode::BAD_REQUEST, page(Some(&msg), None)).into_response();
+        return (StatusCode::BAD_REQUEST, page(Some(msg), None).await).into_response();
     }
     if set_password(&inner.db, &target.username, &form.new_password).await.is_err() {
-        let msg = "Could not set the password.";
-        return (StatusCode::INTERNAL_SERVER_ERROR, page(Some(msg), None)).into_response();
+        let msg = "Could not set the password.".to_string();
+        return (StatusCode::INTERNAL_SERVER_ERROR, page(Some(msg), None).await).into_response();
     }
     // A manager resets a password for one of two reasons — the user is locked out, or the account is
     // suspected compromised. The second reason makes signing the target out everywhere mandatory: none
@@ -1988,7 +2274,7 @@ async fn manage_submit(
         1 => format!("Password reset for {} and 1 session signed out.", target.username),
         n => format!("Password reset for {} and {n} sessions signed out.", target.username),
     };
-    page(None, Some(&msg)).into_response()
+    page(None, Some(msg)).await.into_response()
 }
 
 // ---- TOTP 2FA (setup / verify / disable) ----
@@ -2008,16 +2294,15 @@ async fn totp_setup_form(
         return Redirect::to(&inner.profile_path).into_response(); // SSO: 2FA managed by the IdP
     }
     let secret = totp::generate_secret();
-    // Whether they *already* have 2FA decides which factors the confirm block can offer: a re-enrolment
-    // can be confirmed with a code from the outgoing authenticator, a first enrolment can't.
-    let totp_on = user.has_totp();
     let mut am: user::ActiveModel = user.into();
     am.totp_pending = Set(Some(secret.clone()));
-    if am.update(&inner.db).await.is_err() {
+    // The updated row decides which factors the confirm block can offer: a re-enrolment can be confirmed
+    // with a code from the outgoing authenticator, a first enrolment can't.
+    let Ok(user) = am.update(&inner.db).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not start 2FA setup").into_response();
-    }
+    };
     let (token, jar) = csrf_token(&inner, headers, jar);
-    (jar, render_totp_setup(&inner, &who, &secret, totp_on, None, &token, &req)).into_response()
+    (jar, render_totp_setup(&inner, &who, &user, &secret, None, &token, &req).await).into_response()
 }
 
 /// `POST /profile/totp` — confirm enrolment: verify the code against the pending secret, then promote
@@ -2042,25 +2327,17 @@ async fn totp_setup_submit(
     // own authenticator — which doesn't just persist their access, it locks the real user out, since
     // login would then demand a code only the intruder can produce.
     //
-    // The password is the factor here: the account's *active* secret is what a code would be checked
-    // against, and for a first enrolment there isn't one. An already-enrolled user re-enrolling can use
-    // either.
-    let totp_on = user.has_totp();
-    if let Err(msg) = inner.reauth(&user, &form.current_password, &form.totp_code).await {
-        return render_totp_setup(&inner, &who, &pending, totp_on, Some(&msg), &csrf, &req);
+    // The password or a passkey is the factor here: the account's *active* secret is what a code would
+    // be checked against, and for a first enrolment there isn't one. An already-enrolled user
+    // re-enrolling can use a code too.
+    if let Err(msg) = inner.reauth(&user, &form.reauth).await {
+        return render_totp_setup(&inner, &who, &user, &pending, Some(&msg), &csrf, &req).await;
     }
     // Not lockout-limited: enrolling is authenticated, and the code being guessed is the caller's own
     // pending secret — there is nobody else's account to reach by guessing it.
     let Some(step) = totp::verify_step(&pending, &form.code) else {
-        return render_totp_setup(
-            &inner,
-            &who,
-            &pending,
-            totp_on,
-            Some("That code didn't match. Try again."),
-            &csrf,
-            &req,
-        );
+        let msg = Some("That code didn't match. Try again.");
+        return render_totp_setup(&inner, &who, &user, &pending, msg, &csrf, &req).await;
     };
     let mut am: user::ActiveModel = user.into();
     am.totp_secret = Set(Some(pending));
@@ -2108,7 +2385,7 @@ async fn recovery_regenerate(
         // Codes exist to recover a second factor; without one there is nothing to recover.
         return Redirect::to(&inner.profile_path).into_response();
     }
-    if let Err(msg) = inner.reauth(&user, &form.current_password, &form.totp_code).await {
+    if let Err(msg) = inner.reauth(&user, &form.reauth).await {
         let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf, &req).await;
         return (StatusCode::FORBIDDEN, page).into_response();
     }
@@ -2188,7 +2465,7 @@ async fn totp_self_disable(
         Ok(v) => v,
         Err(res) => return res,
     };
-    if let Err(msg) = inner.reauth(&user, &form.current_password, &form.totp_code).await {
+    if let Err(msg) = inner.reauth(&user, &form.reauth).await {
         let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf, &req).await;
         return (StatusCode::FORBIDDEN, page).into_response();
     }
@@ -2219,30 +2496,84 @@ async fn totp_manage_disable(
     let Some(manager) = target_user(&inner, &who.id).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
-    let manager_totp_on = manager.has_totp();
-    if let Err(msg) = inner.reauth(&manager, &form.current_password, &form.totp_code).await {
-        let frag = reset_form_html(
-            &id,
-            &target.username,
-            target.has_totp(),
-            manager_totp_on,
-            Some(&msg),
-            None,
-            &csrf,
-        );
-        return (StatusCode::FORBIDDEN, inner.page(&who, &frag, &req)).into_response();
+    if let Err(msg) = inner.reauth(&manager, &form.reauth).await {
+        let page = manager_page(&inner, &who, &manager, &target, Some(&msg), None, &csrf, &req).await;
+        return (StatusCode::FORBIDDEN, page).into_response();
     }
     let target = clear_totp(&inner, target).await;
     let msg = format!("Two-factor authentication disabled for {}.", target.username);
-    let frag =
-        reset_form_html(&id, &target.username, target.has_totp(), manager_totp_on, None, Some(&msg), &csrf);
-    inner.page(&who, &frag, &req).into_response()
+    manager_page(&inner, &who, &manager, &target, None, Some(&msg), &csrf, &req).await.into_response()
+}
+
+/// `POST /profile/{id}/passkeys/remove` — a manager removes **all** of another user's passkeys,
+/// re-authenticated with the manager's own factor. Independent of the password: an account left with
+/// neither has no way in until the manager sets a password, which the page says.
+async fn passkeys_manage_remove(
+    State(inner): State<Arc<Inner>>,
+    req: Parts,
+    RealIp(client_ip): RealIp,
+    Path(id): Path<String>,
+    Form(form): Form<ReauthForm>,
+) -> Response {
+    let headers = &req.headers;
+    if !inner.csrf().verify(headers, form.csrf.as_deref()) {
+        return csrf_rejected(&inner, &req);
+    }
+    let csrf = inner.csrf().token(headers).unwrap_or_default();
+    let (who, target) = match managed_target(&inner, headers, &id).await {
+        Ok(v) => v,
+        Err(res) => return res,
+    };
+    let Some(manager) = target_user(&inner, &who.id).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    if let Err(msg) = inner.reauth(&manager, &form.reauth).await {
+        let page = manager_page(&inner, &who, &manager, &target, Some(&msg), None, &csrf, &req).await;
+        return (StatusCode::FORBIDDEN, page).into_response();
+    }
+    let removed = match passkey::remove_all(&inner.db, target.id).await {
+        Ok(n) => n,
+        Err(e) => {
+            inner.report("auth-admin", "passkey removal", &e, client_ip).await;
+            let msg = "Could not remove the passkeys.";
+            let page = manager_page(&inner, &who, &manager, &target, Some(msg), None, &csrf, &req).await;
+            return (StatusCode::INTERNAL_SERVER_ERROR, page).into_response();
+        }
+    };
+    // Sessions a passkey opened are no longer backed by anything the account holds.
+    let revoked = inner.revoke_sessions(target.id, None).await;
+    inner
+        .notify(
+            "auth-admin",
+            &who.username,
+            "auth_user",
+            Some(id.clone()),
+            serde_json::json!({ "passkeys_removed_by_manager": removed, "by": who.username, "sessions_revoked": revoked }),
+            headers,
+            client_ip,
+        )
+        .await;
+    let msg = match target.password_hash.is_empty() {
+        true => format!("{removed} passkey(s) removed. {} has no password either: set one above.", target.username),
+        false => format!("{removed} passkey(s) removed from {}.", target.username),
+    };
+    manager_page(&inner, &who, &manager, &target, None, Some(&msg), &csrf, &req).await.into_response()
+}
+
+/// Which part of the profile page a message belongs to: the top (password and 2FA), the API-key
+/// section or the passkeys section. Each shows its own, next to the form it is about.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Card {
+    Top,
+    ApiKeys,
+    #[cfg_attr(not(feature = "passkeys"), allow(dead_code))]
+    Passkeys,
 }
 
 /// The whole self-service profile fragment for `user`: the password form, the 2FA section, the recovery
 /// codes section (only when 2FA is on — it needs a count from the DB, which is why this is async), the
-/// sessions section, the API-key card when switched on, and the app's `profile_extra` appended. An SSO
-/// account gets the read-only notice in place of the password and 2FA sections.
+/// sessions section, the passkeys and API-key sections when switched on, and the app's `profile_extra`
+/// appended. An SSO account gets the read-only notice in place of the password and 2FA sections.
 async fn profile_fragment(
     inner: &Inner,
     who: &Identity,
@@ -2252,20 +2583,26 @@ async fn profile_fragment(
     csrf: &str,
     headers: &HeaderMap,
 ) -> String {
-    profile_fragment_with(inner, who, user, (error, success), (None, None), csrf, headers).await
+    profile_fragment_with(inner, who, user, Card::Top, (error, success), csrf, headers).await
 }
 
-/// [`profile_fragment`] with a message for the top of the page and one for the API-key card.
+/// [`profile_fragment`] with the message on `card`.
 async fn profile_fragment_with(
     inner: &Inner,
     who: &Identity,
     user: &user::Model,
+    card: Card,
     (error, success): (Option<&str>, Option<&str>),
-    (key_error, key_success): (Option<&str>, Option<&str>),
     csrf: &str,
     headers: &HeaderMap,
 ) -> String {
+    let on = |c: Card| match c == card {
+        true => (error, success),
+        false => (None, None),
+    };
     let totp_on = user.has_totp();
+    // One view per render: every confirm-it's-you block on the page shares its passkey challenge.
+    let reauth = inner.reauth_view(user).await;
     let mut frag = match user.sso_key() {
         Some(provider) => sso_profile_html(who, provider),
         None => {
@@ -2273,15 +2610,22 @@ async fn profile_fragment_with(
                 true => Some(recovery::remaining(&inner.db, user.id).await),
                 false => None,
             };
-            change_form_html(who, totp_on, left, error, success, csrf)
+            let (e, s) = on(Card::Top);
+            let has_password = !user.password_hash.is_empty();
+            change_form_html(who, has_password, &reauth, totp_on, left, e, s, csrf)
         }
     };
-    if inner.api_keys.is_some() {
-        let card = api_key::card(&inner.db, user.id, headers).await;
-        let can_reauth = !user.password_hash.is_empty() || totp_on;
-        frag.push_str(&api_keys_html(&card, can_reauth, totp_on, key_error, key_success, csrf));
+    #[cfg(feature = "passkeys")]
+    if let (Some(rt), false) = (&inner.passkeys, user.is_sso()) {
+        let (e, s) = on(Card::Passkeys);
+        frag.push_str(&rt.card_html(inner, user, &reauth, e, s, csrf, headers).await);
     }
-    inner.with_profile_extra(frag, who, csrf, headers).await
+    if inner.api_keys.is_some() {
+        let keys = api_key::card(&inner.db, user.id, headers).await;
+        let (e, s) = on(Card::ApiKeys);
+        frag.push_str(&api_keys_html(&keys, &reauth, e, s, csrf));
+    }
+    inner.with_profile_extra(frag, who, &reauth, csrf, headers).await
 }
 
 /// The caller's own profile page with a message on the API-key card — what the key routes answer.
@@ -2294,8 +2638,23 @@ async fn profile_page_keys(
     csrf: &str,
     req: &Parts,
 ) -> Html<String> {
+    profile_page_card(inner, who, user, Card::ApiKeys, error, success, csrf, req).await
+}
+
+/// The caller's own profile page with a message on `card`.
+#[allow(clippy::too_many_arguments)]
+async fn profile_page_card(
+    inner: &Inner,
+    who: &Identity,
+    user: &user::Model,
+    card: Card,
+    error: Option<&str>,
+    success: Option<&str>,
+    csrf: &str,
+    req: &Parts,
+) -> Html<String> {
     let frag =
-        profile_fragment_with(inner, who, user, (None, None), (error, success), csrf, &req.headers).await;
+        profile_fragment_with(inner, who, user, card, (error, success), csrf, &req.headers).await;
     inner.page(who, &frag, req)
 }
 
@@ -2338,12 +2697,13 @@ async fn clear_totp(inner: &Inner, user: user::Model) -> user::Model {
     user
 }
 
-/// Render the 2FA enrolment page (QR + otpauth URL + verify form) for a pending secret.
-fn render_totp_setup(
+/// Render the 2FA enrolment page (QR + otpauth URL + verify form) for a pending secret. `user` is the
+/// caller's row, for the confirm-it's-you block.
+async fn render_totp_setup(
     inner: &Inner,
     who: &Identity,
+    user: &user::Model,
     secret: &str,
-    totp_on: bool,
     error: Option<&str>,
     csrf: &str,
     req: &Parts,
@@ -2351,7 +2711,8 @@ fn render_totp_setup(
     let Some(prov) = totp::provisioning(&inner.totp_issuer, &who.username, secret) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not build QR code").into_response();
     };
-    let frag = totp_setup_html(&prov, totp_on, error, csrf);
+    let reauth = inner.reauth_view(user).await;
+    let frag = totp_setup_html(&prov, &reauth, error, csrf);
     inner.page(who, &frag, req).into_response()
 }
 

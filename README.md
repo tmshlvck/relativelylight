@@ -48,7 +48,9 @@ URL, verified (and re-authenticated) before it's on.</sub></td>
 - **A typed `Engine`** per entity — list/get/create/update/delete, relations by name, validation.
   Publish your own JSON API over it if you need one.
 - **Auth** (`auth`): sessions, login, TOTP 2FA with recovery codes, lockout, CSRF, OIDC SSO, API
-  keys for machine endpoints (each acting as its owner, minted on `/profile`), and a per-model gate.
+  keys for machine endpoints (each acting as its owner, minted on `/profile`), passkeys (feature
+  `passkeys`: sign-in without a password, a second factor, an app-wide hardware-binding policy), and a
+  per-model gate.
 - **Files** (`files`): a streaming upload reader (several files, or a phone's camera), safe download
   responses, and upload-form, preview and thumbnail components. Storage, naming and listing stay yours.
 - **Timezones** (`tz`): integer-UTC storage, rendered server-side in the operator's zone, and
@@ -130,6 +132,7 @@ async fn save(headers: HeaderMap, uri: Uri, RealIp(ip): RealIp,
 | `auth` | | sessions, login, TOTP 2FA, lockout, profile pages, API keys, gate presets |
 | `csrf` | | the double-submit CSRF token; implied by `auth` |
 | `sso` | | OIDC single sign-on + group mapping; implies `auth` |
+| `passkeys` | | passkeys (WebAuthn): sign-in, a second factor, re-authentication; implies `auth` |
 | `files` | | streaming upload reader, download responses, upload form/preview/thumbnail components; implies `axum` |
 | `validate-regex`, `validate-base64` | | the regex and base64 validators in `validate` ([docs/DATAINPUT.md](docs/DATAINPUT.md)) |
 
@@ -144,7 +147,7 @@ All run on port 3000, so run one at a time; the database ones use a seeded in-me
 cargo run -p crud-example            # Table/Form on your own pages, CSV, timezones, the relation picker
 cargo run -p relationfield-example   # the admin's relation input in a hand-written form
 cargo run -p adminpanel-example      # Admin behind login + 2FA (admin / password)
-cargo run -p auth-example            # login, SSO wiring, 2FA, re-auth, API keys, the accounts panel (admin / password)
+cargo run -p auth-example            # login, SSO wiring, 2FA, passkeys, re-auth, API keys, the accounts panel (admin / password)
 cargo run -p audit-example           # a request log and a write observer over one resolved address
 cargo run -p files-example           # files in a directory: upload, preview, download, delete, thumbnails
 ```
@@ -153,7 +156,7 @@ cargo run -p files-example           # files in a directory: upload, preview, do
 
 - **[docs/APP.md](docs/APP.md)** — start here: a whole app (shell, login, admin, your own pages).
 - **[docs/CRUD.md](docs/CRUD.md)** — the `crud` engine and the web UI.
-- **[docs/AUTH.md](docs/AUTH.md)** — sessions, login, 2FA, SSO, API keys, gates, CSRF.
+- **[docs/AUTH.md](docs/AUTH.md)** — sessions, login, 2FA, passkeys, SSO, API keys, gates, CSRF.
 - **[docs/TIME.md](docs/TIME.md)** — timestamps and timezones, and the `TzPicker` zone selector.
 - **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module.
 - **[docs/FILES.md](docs/FILES.md)** — uploads, downloads and the file components.

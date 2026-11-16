@@ -40,7 +40,7 @@ pub struct Model {
     pub passkey_class: Option<String>,
 }
 
-/// How a session was authenticated. `#[non_exhaustive]`: the passkey methods arrive with sign-in.
+/// How a session was authenticated. `#[non_exhaustive]`: a method added later isn't a break.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Method {
@@ -52,6 +52,15 @@ pub enum Method {
     PasswordRecovery,
     /// An OIDC identity provider.
     Sso,
+    /// A passkey alone (it verified the user itself: a PIN or a biometric), or a passkey with the TOTP
+    /// step still pending.
+    Passkey,
+    /// A passkey and a TOTP code.
+    PasskeyTotp,
+    /// A passkey and a recovery code in place of the TOTP step.
+    PasskeyRecovery,
+    /// A password and a passkey as the second factor.
+    PasswordPasskey,
 }
 
 impl Method {
@@ -62,6 +71,10 @@ impl Method {
             Method::PasswordTotp => "password+totp",
             Method::PasswordRecovery => "password+recovery",
             Method::Sso => "sso",
+            Method::Passkey => "passkey",
+            Method::PasskeyTotp => "passkey+totp",
+            Method::PasskeyRecovery => "passkey+recovery",
+            Method::PasswordPasskey => "password+passkey",
         }
     }
 
@@ -72,6 +85,10 @@ impl Method {
             "password+totp" => Some(Method::PasswordTotp),
             "password+recovery" => Some(Method::PasswordRecovery),
             "sso" => Some(Method::Sso),
+            "passkey" => Some(Method::Passkey),
+            "passkey+totp" => Some(Method::PasskeyTotp),
+            "passkey+recovery" => Some(Method::PasskeyRecovery),
+            "password+passkey" => Some(Method::PasswordPasskey),
             _ => None,
         }
     }
@@ -81,6 +98,11 @@ impl Model {
     /// How this session was authenticated; `None` for a row from before the column existed.
     pub fn method(&self) -> Option<Method> {
         Method::parse(&self.method)
+    }
+
+    /// The class of the passkey that opened the session, when one did.
+    pub fn passkey_class(&self) -> Option<super::passkey::Class> {
+        self.passkey_class.as_deref().and_then(super::passkey::Class::parse)
     }
 }
 

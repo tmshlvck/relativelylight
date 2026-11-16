@@ -436,8 +436,10 @@ Two things to carry over from the library's own forms, because they are easy to 
   .layer(from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce))
   ```
 - **Re-authentication before anything sensitive.** A live session is not evidence its owner is
-  present: `auth.reauthenticate(&who, password, code).await` before rotating a credential, changing a
-  payout account, or deleting an installation. See [AUTH.md §5h](AUTH.md).
+  present: put `auth.reauth_fields(&who, hint).await` in the form and check the post with
+  `auth.reauthenticate_with(&who, &form.reauth).await` before rotating a credential, changing a
+  payout account, or deleting an installation. It accepts the password, a TOTP code or a passkey,
+  whichever the account has. See [AUTH.md §5h](AUTH.md#5h-re-authentication-before-sensitive-changes).
 
 A relation in such a form needn't be a hand-rolled `<select>` of every row:
 [`crud::ui::RelationField`](CRUD.md#relationfield--the-relation-input-in-a-form-of-your-own) renders

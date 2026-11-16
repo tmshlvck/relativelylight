@@ -1,0 +1,53 @@
+{%- import "auth/_macros.html" as m -%}
+{#- The passkeys section (AUTH.md §5l), on the caller's own /profile. #}
+<hr class="my-4">
+<h2 class="h6" id="passkeys">Passkeys</h2>
+<p class="text-muted small mb-2">Sign in with your fingerprint, face, device PIN or a security key, with
+nothing to type and nothing a fake site can capture.
+{%- if let Some(r) = requirement %} {{ r }}{% endif %}</p>
+{{ m::alert(error, success) }}
+{%- if rows.is_empty() %}
+<p class="text-muted small">No passkeys yet.</p>
+{%- else %}
+<div class="table-responsive">
+<table class="table table-sm align-middle small">
+  <thead><tr><th>Label</th><th>Kind</th><th>Added</th><th>Last used</th><th></th></tr></thead>
+  <tbody>
+  {%- for k in rows %}
+  <tr>
+    <td>{{ k.name }}
+      {%- if !k.accepted %} <span class="badge text-bg-warning">no longer accepted here</span>{% endif %}</td>
+    <td>{{ k.class }}</td>
+    <td>{{ k.created }}</td>
+    <td>{{ k.used }}</td>
+    <td class="text-end"><form method="post" action="/profile/passkeys/{{ k.id }}/remove" class="d-inline">
+      {{ m::csrf(csrf) }}
+      <button class="btn btn-outline-danger btn-sm" type="submit">Remove</button>
+    </form></td>
+  </tr>
+  {%- endfor %}
+  </tbody>
+  <caption class="small">Times in {{ zone }}.</caption>
+</table>
+</div>
+{%- endif %}
+<form method="post" action="/profile/passkeys">
+  {{ m::csrf(csrf) }}
+  <div class="mb-2">
+    <label class="form-label small" for="rl-pk-name">Label</label>
+    <input class="form-control form-control-sm" id="rl-pk-name" name="name" maxlength="128"
+           placeholder="laptop, phone, YubiKey">
+  </div>
+  {{- m::reauth("rl-pk-add", reauth, "Confirm it's you: a passkey is a new way into this account.") }}
+  <button class="btn btn-outline-primary btn-sm" type="submit">Add a passkey</button>
+</form>
+{%- if has_password && !rows.is_empty() %}
+<h3 class="h6 mt-4">Sign in without a password</h3>
+<p class="text-muted small mb-2">With a passkey you don't need a password. Removing it signs out your
+other sessions; you can set one again later.</p>
+<form method="post" action="/profile/password/remove">
+  {{ m::csrf(csrf) }}
+  {{- m::reauth("rl-pw-rm", reauth, "Confirm it's you before removing your password.") }}
+  <button class="btn btn-outline-danger btn-sm" type="submit">Remove my password</button>
+</form>
+{%- endif %}

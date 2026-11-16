@@ -1,13 +1,20 @@
 {%- import "auth/_macros.html" as m -%}
+{%- if has_password %}
 <h1 class="h5 mb-3">Change your password</h1>
-<p class="text-muted small">Signed in as <strong>{{ username }}</strong>.</p>
+{%- else %}
+<h1 class="h5 mb-3">Set a password</h1>
+{%- endif %}
+<p class="text-muted small">Signed in as <strong>{{ username }}</strong>.
+{%- if !has_password %} This account signs in with a passkey and has no password.{% endif %}</p>
 <form method="post" action="/profile">
   {{ m::csrf(csrf) }}
   {{ m::alert(error, success) }}
+  {%- if has_password %}
   <div class="mb-3">
     <label class="form-label" for="rl-current">Current password</label>
     <input class="form-control" id="rl-current" name="current_password" type="password" autocomplete="current-password" autofocus>
   </div>
+  {%- endif %}
   <div class="mb-3">
     <label class="form-label" for="rl-new">New password</label>
     <input class="form-control" id="rl-new" name="new_password" type="password" autocomplete="new-password">
@@ -16,7 +23,12 @@
     <label class="form-label" for="rl-confirm">Confirm new password</label>
     <input class="form-control" id="rl-confirm" name="confirm_password" type="password" autocomplete="new-password">
   </div>
+  {%- if has_password %}
   <button class="btn btn-primary" type="submit">Change password</button>
+  {%- else %}
+  {{- m::reauth("rl-setpw", reauth, "Confirm it's you: a password is a new way into this account.") }}
+  <button class="btn btn-primary" type="submit">Set password</button>
+  {%- endif %}
 </form>
 <hr class="my-4">
 <h2 class="h6">Two-factor authentication</h2>
@@ -24,7 +36,7 @@
 <p class="text-muted small mb-2">Enabled — a code from your authenticator app is required at login.</p>
 <form method="post" action="/profile/totp/disable">
   {{ m::csrf(csrf) }}
-  {{- m::reauth("rl-2fa-off", true, "Turning off your second factor needs confirming — this is what stops someone who has taken over your session from removing it.") }}
+  {{- m::reauth("rl-2fa-off", reauth, "Turning off your second factor needs confirming — this is what stops someone who has taken over your session from removing it.") }}
   <button class="btn btn-outline-danger btn-sm" type="submit">Disable 2FA</button>
 </form>
 {%- else %}
@@ -44,7 +56,7 @@ available.
 {%- endif %}</p>
 <form method="post" action="/profile/totp/recovery">
   {{ m::csrf(csrf) }}
-  {{- m::reauth("rl-rec", true, "Confirm it's you — a new set is a new way into this account.") }}
+  {{- m::reauth("rl-rec", reauth, "Confirm it's you — a new set is a new way into this account.") }}
   <button class="btn btn-outline-secondary btn-sm" type="submit">Generate new codes</button>
 </form>
 <p class="text-muted small mt-2 mb-0">Generating a set invalidates the previous one.</p>

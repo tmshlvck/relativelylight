@@ -1,0 +1,3 @@
+{%- import "auth/_macros.html" as m -%}
+{#- `Auth::reauth_fields`: the confirm-it's-you inputs for an app's own form. #}
+{{- m::reauth("rl-app", reauth, hint) }}

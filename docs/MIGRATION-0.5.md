@@ -84,3 +84,9 @@ ALTER TABLE auth_session ADD COLUMN passkey_class varchar NULL;
 Sessions from before the step keep working; their `method` is empty. In an accounts panel, hide
 `passkey_handle` with the TOTP columns: the user's authenticators hold it, so an edited one orphans
 every passkey on the account.
+
+## 4. MSRV 1.89
+
+The minimum Rust version is **1.89** (was 1.88), for `webauthn-rs` 0.6, the passkeys dependency. It
+applies with or without the `passkeys` feature: `rustup update`, and raise `rust-version` in your
+own `Cargo.toml` if you pin one.
