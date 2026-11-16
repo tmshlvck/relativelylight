@@ -50,29 +50,65 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
 - [ ] **Passkeys (WebAuthn)**, feature `passkeys`, on branch `passkeys`. The design and the
   library findings are in [DESIGN.md → auth](DESIGN.md#auth). The schema has shipped
   ([AUTH.md §5](AUTH.md#5-authn--users-sessions-login-passwords)). Remaining phases:
-  - [ ] **2. Enrolment** on `/profile`, re-authenticated. Enrolling a passkey switches the account
-    to passwordless: the password and TOTP are removed and recovery codes are issued. With
-    `second_factor(true)` the user can instead keep the password and use the passkey after it.
-    Enrolment is refused for SSO accounts and for a class below the policy.
+  - [ ] **2. Enrolment and the account's credentials** on `/profile`:
+    - add a passkey, re-authenticated, at or above the policy's class;
+    - remove the password once a passkey exists, and set one again;
+    - refuse removing the last passkey of an account with no password;
+    - TOTP stays allowed beside a passkey;
+    - nothing for SSO accounts.
   - [ ] **3. Sign-in:**
-    - passwordless, from a button on `/login`;
-    - the second-factor step beside TOTP, when enabled;
+    - with a passkey, from a button on `/login`, then the TOTP step if the account has TOTP;
+    - a passkey as the second factor after a password, when `second_factor(true)`;
     - the class checked on every use, and the backup-eligible flag re-checked;
-    - lockout on the address for passwordless, on the account for the second factor.
-  - [ ] **4. Re-authentication.** `reauthenticate` and every re-auth form accept a passkey, and a
-    passkey counts as a local factor, so a passwordless account no longer passes re-auth with
-    nothing.
+    - lockout on the address for a passkey sign-in, on the account for a second factor.
+  - [ ] **4. Re-authentication.** `reauthenticate` keeps its password/code form. A new pair renders
+    a confirm block (with the passkey challenge) into an app's form and checks the posted form. The
+    library's own re-auth forms accept a passkey. An account without a password must use its
+    passkey.
   - [ ] **5. The rest:**
     - a manager removes a user's passkeys;
-    - a manager's password reset of a passwordless user removes their passkeys;
+    - attestation CAs from the app (PEM plus AAGUID), and an `Attested` policy with no CA is a
+      startup error;
     - `passkey::meta_model()` for the admin panel;
     - rejection tests with positive controls;
+    - the browser script tested in Chromium's virtual authenticator (Playwright), and a check with
+      real devices before release;
     - `examples/auth`, AUTH.md §5l, the changelog, and the MSRV bump to 1.89.
+  - [ ] **Open:** may an SSO account enrol TOTP, on top of what the IdP asked for?
   - [ ] **Later:**
-    - mandatory passkeys, with a restricted "enrol now" session;
     - browser autofill of passkeys on the login page;
     - device names from FIDO metadata;
     - an AAGUID allowlist.
+- [ ] **Sign-in policy as an assurance level** (design; it replaces "mandatory passkeys").
+  - **Levels per method:**
+    - password: 1;
+    - password + TOTP: 2;
+    - passkey: 2;
+    - an attested passkey: 3;
+    - SSO: 1 or 2, as the app trusts its IdP;
+    - TOTP raises any primary method by one.
+  - **The policy is one minimum level.** A session below it is restricted to `/profile`, with a
+    message saying which factor to add.
+  - **Why one number:** it expresses the setups apps actually choose (password + TOTP, SSO alone,
+    passkey alone, attested only) without a matrix of flags.
+  - **Needs** `Identity` to carry the level, and the session's recorded method, which is already
+    stored.
+- [ ] **Password change required** (design).
+  - **New columns:** `auth_user.password_changed_at`, and `must_change_password`, set by a
+    manager's reset and by the admin panel's password field.
+  - **Optional maximum age:** `Auth::password_max_age_days(n)`, `0` = never, the default. NIST SP
+    800-63B advises against periodic rotation, so it is off unless an app is required to rotate.
+  - **Not `updated_at`:** any edit to the account moves it, so it can't say when the password
+    changed.
+  - **When a change is due:** the login lands on `/profile`, which explains why, and the user can
+    still go on to the app.
+  - **Known-breached passwords** feed the same flag (see breached-password screening).
+- [ ] **Notifications** (discuss and design first, no implementation yet). Should `auth`, and the
+  crate in general, have a way to hand the app pending messages for a user? The app would render
+  them, e.g. a bell in the navbar. The first use is the password-change notice above. Open: per
+  request or stored, who clears one, and whether it is an `auth` thing or a crate-wide one.
+- [ ] **Self-service password recovery** (later). It resets passkeys too, but not TOTP: the user
+  needs recovery codes or an administrator for that.
 - **No scopes on API keys.** A key is its owner (AUTH.md §5k); narrower access is an account of its
   own in a narrower group. Revisit only for a third-party OAuth client, which is a different design.
 - **Expired API keys are not pruned.** They stay listed as expired, as evidence, until someone

@@ -94,8 +94,8 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
   entry point, `identify_key`, which the app calls on the routes that take one. The crate doesn't
   read the header itself: where the credential arrives is the app's choice.
 - **Passkeys (in progress, feature `passkeys`, `webauthn-rs`).** The policy is **app-wide**. It sets
-  the lowest class of passkey accepted, `Any < DeviceBound < Attested`, and whether a passkey may be
-  a second factor after a password.
+  the lowest class of passkey accepted, `Synced < DeviceBound < Attested`, and whether a passkey may
+  be a second factor after a password.
   - *Device-bound* means the authenticator reports itself non-backup-eligible. That is cheap, but
     self-reported.
   - *Attested* means the authenticator proves its make and model with a manufacturer certificate
@@ -103,11 +103,20 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 
   Each credential's class is recorded when it is registered and checked on every use, so a policy
   made stricter takes effect at the next sign-in.
-- **A passkey replaces the password.** An account is either passwordless (passkeys, recovery codes,
-  no password, no TOTP) or password-based, with TOTP or, when the app allows it, a passkey as the
-  second factor. The mode follows from whether the account has a password, so no flag records it.
-  A password beside a passwordless passkey would be a weaker way into the same account. A passkey is
-  a local factor for re-authentication, so a passwordless account must present it there.
+- **An account's life, and who may change what.**
+  - **Accounts come from an administrator, with a password** (no self-registration, §5j). The user
+    can change the password and add TOTP or passkeys.
+  - **With a passkey, the user can remove their password.** They choose whether to keep TOTP as a
+    second step after the passkey. With no password, the last passkey can't be removed until a
+    password is set again, so the account always keeps a way in.
+  - **TOTP is a second factor after any primary method.** Recovery codes belong to TOTP alone.
+  - **SSO accounts get no local password or passkeys;** their primary factor is the IdP's.
+  - **A manager can always** reset a password, disable TOTP and remove passkeys, each
+    re-authenticated, each independent of the others.
+  - **There is no self-service recovery** for a lost password or passkey; that is the
+    administrator's job. A later password-recovery flow would also reset passkeys, but not TOTP.
+  - **A passkey is a local factor for re-authentication,** so an account without a password must
+    present it there.
 - **WebAuthn needs a script, and it posts a form.** The page embeds the challenge options. The
   script runs the browser ceremony, puts the result in a hidden field and submits; the server
   answers with the usual 303. There is no JSON API and no `fetch`. The script is served by
@@ -127,6 +136,10 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
   - **Tests.** `webauthn-authenticator-rs`'s software authenticators answer only for a named
     credential and always report device-bound, so a synced registration is made by rewriting the
     response, and a login class check by editing the row's class.
+- **Re-authentication is per request, not a window.** The proof travels with the sensitive form
+  itself: a password, a TOTP code, or a passkey assertion over a challenge rendered into that form.
+  Nothing records "re-authenticated at", so there is no grace period for a stolen session to ride
+  on (AUTH.md §5h).
 - **Not here, on purpose:** a registration page, request logging, scoped keys. Each is product
   policy; the gate receives the headers, so an app's own credential needs no change here.
 
