@@ -83,8 +83,8 @@ to `/logout` signs the user out. `SameSite=None` is not offered.
   [`examples/audit`](../examples/audit/src/main.rs) has the dozen lines in two variants: the handler
   puts the caller in the response extensions for the layer to read (free), or the layer calls
   `Auth::identify` itself (one lookup per request). Neither can name an API-key caller, which is
-  verified inside the handler (§5k); log that from the handler, where extracting `RealIp` gives the
-  same address:
+  verified inside the handler (§5k); the handler names it, as the example's `/api/whoami` does, or
+  logs a line itself, where extracting `RealIp` gives the same address:
 
   ```rust
   async fn api_write(State(app): State<App>, RealIp(ip): RealIp, headers: HeaderMap) -> Response {
@@ -1140,8 +1140,9 @@ port-scoped), exactly as with the session cookie.
   with CSRF on, content models behind `UserReadGroupWrite` (everyone reads, `admin` writes), the
   account tables behind `GroupReadWrite` and shown only to managers, and the password policy wired into
   both `Auth` and the account form. Logins: `admin` and `editor` (read-only).
-- **[`examples/audit`](../examples/audit/src/main.rs)** — one observer on both `Auth` and `Crud`, and a
-  request log built on `RealIp`.
+- **[`examples/audit`](../examples/audit/src/main.rs)** — one observer on both `Auth` and `Crud` (API
+  key mint and revoke included), and a request log built on `RealIp` that names an API-key caller
+  from its handler (`/api/whoami`).
 
 ## 9. Tests — the negative paths
 

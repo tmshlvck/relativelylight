@@ -15,13 +15,18 @@
 //! TRUST_PROXY=1 cargo run -p audit-example              # behind a proxy: believe X-Forwarded-For
 //! ```
 //!
-//! Edit a post at `/data/post`, change your password at `/profile`, and watch:
+//! Edit a post at `/data/post`, change your password or create an API key at `/profile`, and watch:
 //!
 //! ```text
 //! 127.0.0.1       admin  GET  /data/post   200 3ms
 //! audit  autocrud    update post#1       admin@127.0.0.1  title: "Hello" → "Hello, world"
 //! 127.0.0.1       admin  POST /data/post   303 12ms
+//! audit  auth-profile create auth_api_key#1 admin@127.0.0.1  created {"expires_at":null,"name":"laptop",…}
 //! ```
+//!
+//! Then call the machine endpoint with the key (`curl -H "Authorization: Bearer audit_…"
+//! 127.0.0.1:3000/api/whoami`): its handler verifies the key, so it is the handler that names the
+//! caller, key and all, in the request log.
 //!
 //! The audit line fires **after the commit**, for the CRUD panel's writes and `auth`'s own (one
 //! observer, registered on both).
@@ -34,7 +39,8 @@
 //! | [`access_log_identify`] (`NAME_EVERY_REQUEST=1`) | every request with a session cookie | one `Auth::identify` per request |
 //!
 //! Under the default, the library's routes (`/login`, `/profile`) print `-`. Neither variant can name
-//! a bearer-token caller, which isn't verified until inside the handler — log a line from there.
+//! an API-key caller, which isn't verified until inside the handler: `/api/whoami` hands the name to
+//! the log the same way our own pages do.
 
 use axum::body::Bytes;
 use axum::extract::{Path, Request, State};
@@ -43,6 +49,7 @@ use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
+use relativelylight::auth::api_key::{ApiKeys, KeyError};
 use relativelylight::auth::lockout::Lockout;
 use relativelylight::auth::{self, Auth, UserReadWrite};
 use relativelylight::authz::Operation;
@@ -60,7 +67,7 @@ use std::sync::{Arc, OnceLock};
 /// *after* `next.run(req)`, so anything the handler learned on the way through is available by then.
 ///
 /// It is a *response* extension rather than a request one because the handler is where identity
-/// becomes known — a bearer token isn't verified until the handler checks it, which is precisely why
+/// becomes known — an API key isn't verified until the handler checks it, which is precisely why
 /// a library-level layer could never do this for you.
 #[derive(Clone)]
 struct Actor(String);
@@ -90,6 +97,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .login_shell(|form, _req| page("Log in", form))
         .profile_shell(|frag, _who, _req| page("Profile", frag))
         .on_write(audit.clone())
+        // API keys on /profile: minting and revoking one are `auth` writes, so they reach the same
+        // audit sink; `/api/whoami` below accepts them.
+        .api_keys(ApiKeys::new("audit_"))
         // A login whose database lookup failed still answers "Invalid username or password"; this is
         // where the real cause goes.
         .on_error(Arc::new(ErrorLog));
@@ -118,6 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/private", get(private))
         .route("/data", get(|| async { Redirect::to("/data/post") }))
         .route("/data/{entity}", get(panel_show).post(panel_save))
+        .route("/api/whoami", get(whoami))
         .with_state(state.clone())
         .merge(auth.routes()); // /login, /logout, /profile
 
@@ -138,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     println!("audit demo on http://127.0.0.1:3000/   (log in as admin / password)");
-    println!("edit something at /data/post, or change your password at /profile, and watch the audit lines");
+    println!("edit something at /data/post, or change your password or create an API key at /profile, and watch the audit lines");
     println!(
         "naming: {}",
         if name_everyone {
@@ -169,7 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///   emitter. `before` is `None` on a create, `after` is `None` on a delete.
 /// - **`actor`** — the username, on `auth`'s own events (it authenticated the caller itself).
 /// - **`headers`** — otherwise resolve the actor from these. `crud` deliberately does *not* name
-///   one for you: an app may authenticate by session, by bearer token, or by a service account, and
+///   one for you: an app may authenticate by session, by API key, or by a service account, and
 ///   only it knows which.
 /// - **`client_ip`** — already resolved by `resolve_real_ip`, so this line's address is the same one
 ///   the request log printed and the lockout counted.
@@ -404,7 +415,7 @@ async fn access_log(RealIp(ip): RealIp, req: Request, next: Next) -> Response {
 /// per second that is nothing; for a public API at thousands it is a real bill, which is why the
 /// library refuses to make the choice for you.
 ///
-/// Note what it still cannot name: a caller authenticating with a **bearer token**. That credential
+/// Note what it still cannot name: a caller authenticating with an **API key**. That credential
 /// isn't checked until the handler checks it, so identity doesn't exist yet out here — and a request
 /// that *fails* authentication, the one most worth naming, never produces a name at all. For those,
 /// variant 1 plus a line from the handler is not a workaround, it is the better answer.
@@ -452,8 +463,10 @@ async fn public(State(app): State<AppState>, req: Request) -> Response {
 <p>Watch the terminal — two records, one address:</p>
 <ul>
   <li>a <b>request log</b> line per request, and an <b>audit</b> line per committed write. Edit
-      something at <a href="/data/post">/data/post</a> or change your password at
-      <a href="/profile">/profile</a> to produce one.</li>
+      something at <a href="/data/post">/data/post</a>, or change your password or create an API key
+      at <a href="/profile">/profile</a>, to produce one.</li>
+  <li><code>/api/whoami</code> takes that key (<code>curl -H "Authorization: Bearer audit_…"</code>):
+      its handler verifies it, so its log line names you and the key.</li>
   <li><b>this page</b> and <a href="/private">/private</a> are <i>ours</i> — their log lines name you
       once you are logged in, at no extra cost: the handler already knew.</li>
   <li><a href="/profile">/profile</a>, <a href="/login">/login</a> and <a href="/logout">/logout</a>
@@ -479,6 +492,33 @@ async fn public(State(app): State<AppState>, req: Request) -> Response {
         res.extensions_mut().insert(Actor(id.username));
     }
     res
+}
+
+/// `GET /api/whoami` — a machine endpoint taking an **API key** (mint one on `/profile`). The key is
+/// verified here, not in a layer, so this is where the caller becomes known — and where it is handed to
+/// the request log, exactly as [`private`] does for a session. The name says which key: a request made
+/// with a key is its owner's request, and the key is what an operator revokes if it was not them.
+///
+/// A rejected key names nobody (`-`) and counts against the caller's address on the same lockout
+/// counter as `/login`.
+async fn whoami(State(app): State<AppState>, RealIp(ip): RealIp, headers: HeaderMap) -> Response {
+    let token = auth::bearer_token(&headers).unwrap_or_default();
+    match app.auth.identify_key(token, ip).await {
+        Ok(k) => {
+            let mut res = format!("ok: {} (key {} \"{}\")\n", k.identity.username, k.key_prefix, k.key_name)
+                .into_response();
+            res.extensions_mut().insert(Actor(format!("{}/key#{}", k.identity.username, k.key_id)));
+            res
+        }
+        Err(KeyError::Invalid) => (StatusCode::UNAUTHORIZED, "send a valid API key\n").into_response(),
+        Err(KeyError::Locked(retry)) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(axum::http::header::RETRY_AFTER, retry.to_string())],
+            "too many failed attempts\n",
+        )
+            .into_response(),
+        Err(KeyError::Internal) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
 
 /// Login-gated, and the worked example of variant 1: it already resolved an identity to decide whether
