@@ -8,16 +8,13 @@
 //! - [`challenge`] — `auth_webauthn_challenge`, one row per ceremony in flight: single-use, short-lived,
 //!   pruned by [`Auth::prune`](super::Auth::prune).
 //! - `auth_user.passkey_handle` — the WebAuthn user handle, set at the account's first enrolment.
+//!
+//! Upgrading a database from before these: [`upgrade`](super::upgrade).
 //! - `auth_session.method` / `passkey_class` — how a session was authenticated.
 
 #[cfg(feature = "passkeys")]
 pub use super::webauthn::Passkeys;
-use sea_orm::sea_query::{
-    Alias, ColumnDef, Index, IndexCreateStatement, Table, TableAlterStatement, TableCreateStatement,
-};
-use sea_orm::{
-    ColumnTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait, QueryFilter, Schema,
-};
+use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
 
 /// How strongly a passkey is bound to hardware, weakest first. A credential's class is recorded when it
 /// is registered; the app's policy names the lowest class it accepts, and `Synced` accepts any.
@@ -160,60 +157,6 @@ pub mod challenge {
     }
 
     impl ActiveModelBehavior for ActiveModel {}
-}
-
-// ===================== Upgrading an existing database =====================
-//
-// A database created before passkeys lacks two tables and three columns. `auth::migrate` creates
-// missing tables but never alters one, so the columns need a migration step of the app's own — and
-// they are needed **before** the upgraded crate runs, passkeys or not: every login writes
-// `auth_session.method`, and every read of an account selects `auth_user.passkey_handle`.
-
-/// The `CREATE TABLE` statements for the two passkey tables, `auth_passkey` and
-/// `auth_webauthn_challenge` — the new tables of the upgrade (see `docs/MIGRATION-0.5.md`).
-pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> {
-    let schema = Schema::new(backend);
-    vec![
-        schema.create_table_from_entity(entity::Entity),
-        schema.create_table_from_entity(challenge::Entity),
-    ]
-}
-
-/// The `ALTER TABLE` statements adding the upgrade's three columns: `auth_user.passkey_handle`,
-/// `auth_session.method` and `auth_session.passkey_class`. Pair them with
-/// [`index_create_statements`] — SQLite can't add a `UNIQUE` column, so the handle's uniqueness is
-/// an index of its own.
-pub fn table_alter_statements() -> Vec<TableAlterStatement> {
-    vec![
-        Table::alter()
-            .table(Alias::new("auth_user"))
-            .add_column(ColumnDef::new(Alias::new("passkey_handle")).string().null())
-            .to_owned(),
-        Table::alter()
-            .table(Alias::new("auth_session"))
-            .add_column(
-                ColumnDef::new(Alias::new("method"))
-                    .string()
-                    .not_null()
-                    .default(""),
-            )
-            .to_owned(),
-        Table::alter()
-            .table(Alias::new("auth_session"))
-            .add_column(ColumnDef::new(Alias::new("passkey_class")).string().null())
-            .to_owned(),
-    ]
-}
-
-/// The unique index on `auth_user.passkey_handle`, for a database upgraded with
-/// [`table_alter_statements`]. (A fresh install has the constraint inline.)
-pub fn index_create_statements() -> Vec<IndexCreateStatement> {
-    vec![Index::create()
-        .name("idx-auth_user-passkey_handle")
-        .table(Alias::new("auth_user"))
-        .col(Alias::new("passkey_handle"))
-        .unique()
-        .to_owned()]
 }
 
 // ===================== An account's passkeys (no WebAuthn needed) =====================

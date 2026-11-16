@@ -1,4 +1,11 @@
 {%- import "auth/_macros.html" as m -%}
+{%- if let Some(provider) = sso %}
+<h1 class="h5 mb-3">Manage {{ username }}</h1>
+<div class="alert alert-info">This account signs in through <strong>{{ provider }}</strong> (single
+sign-on). Its password is managed by the identity provider, and its group memberships come from the
+SSO mapping, reconciled at each login.</div>
+{{ m::alert(error, success) }}
+{%- else %}
 <h1 class="h5 mb-3">Reset password</h1>
 <p class="text-muted">Set a new password for <strong>{{ username }}</strong> — you don't need their current one,
 which is why you have to confirm your own identity below.
@@ -18,6 +25,7 @@ which is why you have to confirm your own identity below.
   {{- m::reauth("rl-mgr-pw", reauth, "Confirm it's you — this sets a password without knowing the old one, so it's the most valuable thing a stolen session of yours could reach.") }}
   <button class="btn btn-primary" type="submit">Reset password</button>
 </form>
+{%- endif %}
 <hr class="my-4">
 <h2 class="h6">Two-factor authentication</h2>
 {%- if totp_on %}

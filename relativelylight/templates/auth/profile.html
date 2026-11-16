@@ -1,4 +1,15 @@
 {%- import "auth/_macros.html" as m -%}
+{#- What the page must say first (AUTH.md §5m): the factor a restricted session must add, and a password
+    change that is due. #}
+{%- if let Some(n) = notices.policy %}<div class="alert alert-warning" role="alert">{{ n }}</div>{% endif %}
+{%- if let Some(n) = notices.password %}<div class="alert alert-warning" role="alert">{{ n }}</div>{% endif %}
+{%- if let Some(provider) = sso %}
+<h1 class="h5 mb-3">Profile</h1>
+<p class="text-muted small">Signed in as <strong>{{ username }}</strong>.</p>
+<div class="alert alert-info">This account signs in through <strong>{{ provider }}</strong> (single
+sign-on). Its password and group memberships are managed by the identity provider.</div>
+{{ m::alert(error, success) }}
+{%- else %}
 {%- if has_password %}
 <h1 class="h5 mb-3">Change your password</h1>
 {%- else %}
@@ -30,6 +41,7 @@
   <button class="btn btn-primary" type="submit">Set password</button>
   {%- endif %}
 </form>
+{%- endif %}
 <hr class="my-4">
 <h2 class="h6">Two-factor authentication</h2>
 {%- if totp_on %}

@@ -41,6 +41,12 @@ the design is [docs/DESIGN.md](docs/DESIGN.md) and open work [docs/TODO.md](docs
   `auth.ip_lockout()`, not a second limiter. `identify_key` already counts a bad key on the address
   counter; an app must not count it again. Pruning (`auth.prune()`) is scheduled by the app; the
   crate spawns no tasks and writes nothing to stdout or stderr.
+- **A session below `Auth::min_level` is restricted**: `identify` returns `None` and only the caller's
+  own `/profile` serves it. Keep it that way for anything new: an API key minted, a manager action or
+  an app section reached from a restricted session would carry the account past the policy.
+- **`must_change_password` is set by the `auth_user` row hook** whenever a write sets `password_hash`
+  without setting it. Keep it read-only in an accounts panel (an editable checkbox posts `false` and
+  wins); a helper that writes the owner's own password sets it to `false` explicitly.
 - **Configure `Auth` fully before `Sso::new(&auth)`** clones it.
 - Entities need a single-column primary key and single-column to-one FKs; N:M junction tables are
   never registered (`post.relate(&tag)` declares N:M).

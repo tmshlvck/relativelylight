@@ -1161,13 +1161,17 @@ async fn password_change_rejects_an_empty_or_mismatched_new_password() {
 
 /// Enrol `username` in 2FA through the real pages and return `(active secret, recovery codes)` — the
 /// only way to obtain the codes, since they're shown once and hashed on the way in.
-async fn enrol_with_codes(fx: &Fx, username: &str, cookie: &str) -> (String, Vec<String>) {
+/// Enrol `username` in 2FA through the profile and return its secret and recovery codes. Enrolling
+/// steps the session up (§5m), which rotates it: `cookie` is updated to the new session's.
+async fn enrol_with_codes(fx: &Fx, username: &str, cookie: &mut String) -> (String, Vec<String>) {
     assert_eq!(fx.get("/profile/totp", Some(cookie)).await.status, StatusCode::OK);
     let pending = fx.row(username).await.totp_pending.expect("pending secret");
     let res = fx
         .post("/profile/totp", &reauth_form(&[("code", &totp::current_code(&pending))]), Some(cookie))
         .await;
     assert_eq!(res.status, StatusCode::OK, "enrolment: {}", res.body);
+    let token = res.session_token(fx.auth.session_cookie_name()).expect("the session steps up");
+    *cookie = fx.cookie(&token);
     // Scrape the displayed codes out of the one page that ever shows them.
     let codes: Vec<String> = res
         .body
@@ -1401,8 +1405,8 @@ async fn the_rejection_hook_covers_the_modules_own_forms() {
 async fn enrolment_issues_recovery_codes_shown_once_and_stored_hashed() {
     let fx = Fx::new().await;
     let id = fx.user("alice").await;
-    let cookie = fx.cookie(&fx.session_for("alice").await);
-    let (_secret, codes) = enrol_with_codes(&fx, "alice", &cookie).await;
+    let mut cookie = fx.cookie(&fx.session_for("alice").await);
+    let (_secret, codes) = enrol_with_codes(&fx, "alice", &mut cookie).await;
 
     assert_eq!(recovery::remaining(&fx.db, id).await, recovery::SET_SIZE as u64);
     // Stored hashed: no row contains a code, so a database read is not a way in.
@@ -1427,8 +1431,8 @@ async fn a_recovery_code_completes_a_login_once() {
     // The whole point: the authenticator is gone, and this is the way back in.
     let fx = Fx::new().await;
     fx.user("alice").await;
-    let cookie = fx.cookie(&fx.session_for("alice").await);
-    let (_secret, codes) = enrol_with_codes(&fx, "alice", &cookie).await;
+    let mut cookie = fx.cookie(&fx.session_for("alice").await);
+    let (_secret, codes) = enrol_with_codes(&fx, "alice", &mut cookie).await;
 
     // Password gets you to the second-factor step, as usual.
     let res = fx.post("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
@@ -1467,8 +1471,8 @@ async fn a_wrong_recovery_code_is_refused_and_costs_an_attempt() {
     // A recovery code is a credential, so guessing at one has to be braked like guessing a password.
     let fx = Fx::with_lockout(Lockout { username_after: 3, ..Lockout::default() }).await;
     fx.user("alice").await;
-    let cookie = fx.cookie(&fx.session_for("alice").await);
-    let (_secret, codes) = enrol_with_codes(&fx, "alice", &cookie).await;
+    let mut cookie = fx.cookie(&fx.session_for("alice").await);
+    let (_secret, codes) = enrol_with_codes(&fx, "alice", &mut cookie).await;
 
     let res = fx.post("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
     let pending = res.session_token(fx.auth.session_cookie_name()).unwrap();
@@ -1510,10 +1514,10 @@ async fn recovery_codes_are_bound_to_one_account() {
     let fx = Fx::new().await;
     fx.user("alice").await;
     fx.user("bob").await;
-    let alice_cookie = fx.cookie(&fx.session_for("alice").await);
-    let bob_cookie = fx.cookie(&fx.session_for("bob").await);
-    let (_, alice_codes) = enrol_with_codes(&fx, "alice", &alice_cookie).await;
-    let (_, bob_codes) = enrol_with_codes(&fx, "bob", &bob_cookie).await;
+    let mut alice_cookie = fx.cookie(&fx.session_for("alice").await);
+    let mut bob_cookie = fx.cookie(&fx.session_for("bob").await);
+    let (_, alice_codes) = enrol_with_codes(&fx, "alice", &mut alice_cookie).await;
+    let (_, bob_codes) = enrol_with_codes(&fx, "bob", &mut bob_cookie).await;
     assert!(alice_codes.iter().all(|c| !bob_codes.contains(c)), "different sets");
 
     // Bob's second-factor step, with one of Alice's codes.
@@ -1531,8 +1535,8 @@ async fn recovery_codes_are_bound_to_one_account() {
 async fn regenerating_replaces_the_set_and_needs_re_authentication() {
     let fx = Fx::new().await;
     let id = fx.user("alice").await;
-    let cookie = fx.cookie(&fx.session_for("alice").await);
-    let (_secret, old) = enrol_with_codes(&fx, "alice", &cookie).await;
+    let mut cookie = fx.cookie(&fx.session_for("alice").await);
+    let (_secret, old) = enrol_with_codes(&fx, "alice", &mut cookie).await;
 
     // A new set is a new way in, so an intruder holding the session must not be able to mint one.
     for (body, what) in [(form(&[]), "no confirmation"), (form(&[("current_password", "nope")]), "a wrong one")] {
@@ -1576,8 +1580,8 @@ async fn turning_2fa_off_destroys_the_recovery_codes() {
     // later re-enrolment must not inherit a set the user threw away with their old phone.
     let fx = Fx::new().await;
     let id = fx.user("alice").await;
-    let cookie = fx.cookie(&fx.session_for("alice").await);
-    let (_secret, codes) = enrol_with_codes(&fx, "alice", &cookie).await;
+    let mut cookie = fx.cookie(&fx.session_for("alice").await);
+    let (_secret, codes) = enrol_with_codes(&fx, "alice", &mut cookie).await;
 
     let res = fx.post("/profile/totp/disable", &reauth_form(&[]), Some(&cookie)).await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.body);
@@ -1590,8 +1594,8 @@ async fn turning_2fa_off_destroys_the_recovery_codes() {
     let fx2 = Fx::with(|a| a.admin_group("admin")).await;
     fx2.user_in("boss", "admin").await;
     let victim = fx2.user("victim").await;
-    let vcookie = fx2.cookie(&fx2.session_for("victim").await);
-    enrol_with_codes(&fx2, "victim", &vcookie).await;
+    let mut vcookie = fx2.cookie(&fx2.session_for("victim").await);
+    enrol_with_codes(&fx2, "victim", &mut vcookie).await;
     let bcookie = fx2.cookie(&fx2.session_for("boss").await);
     let res = fx2
         .post(&format!("/profile/{victim}/totp/disable"), &reauth_form(&[]), Some(&bcookie))
@@ -1608,8 +1612,8 @@ async fn a_recovery_code_does_not_satisfy_re_authentication() {
     // password already covers the lost-authenticator case for re-auth.
     let fx = Fx::new().await;
     fx.user("alice").await;
-    let cookie = fx.cookie(&fx.session_for("alice").await);
-    let (_secret, codes) = enrol_with_codes(&fx, "alice", &cookie).await;
+    let mut cookie = fx.cookie(&fx.session_for("alice").await);
+    let (_secret, codes) = enrol_with_codes(&fx, "alice", &mut cookie).await;
 
     for field in ["totp_code", "recovery_code", "current_password"] {
         let res = fx
@@ -1675,6 +1679,8 @@ async fn a_fresh_totp_code_re_authenticates_and_is_spent_doing_so() {
         .await;
     assert_eq!(res.status, StatusCode::OK, "a code re-authenticates: {}", res.body);
     assert_eq!(fx.row("alice").await.totp_key(), Some(pending.as_str()), "the new secret is active");
+    // Enrolling stepped the session up, so the next request carries its new cookie.
+    let cookie = fx.cookie(&res.session_token(fx.auth.session_cookie_name()).expect("stepped up"));
 
     // That code is now spent: it can't re-authenticate a second action…
     let res = fx.post("/profile/totp/disable", &form(&[("totp_code", &code)]), Some(&cookie)).await;
@@ -2316,13 +2322,13 @@ async fn break_glass_creates_the_admin_when_there_is_none() {
 }
 
 #[tokio::test]
-async fn an_sso_account_cannot_set_a_local_password_or_enrol_2fa() {
+async fn an_sso_account_cannot_set_a_local_password_but_may_enrol_totp() {
     let fx = Fx::new().await;
     fx.user("federated").await;
     fx.make_sso("federated", "okta").await;
     let cookie = fx.cookie(&fx.session_for("federated").await);
 
-    // The profile page is a read-only notice…
+    // The profile page has no password form…
     let res = fx.get("/profile", Some(&cookie)).await;
     assert_eq!(res.status, StatusCode::OK);
     assert!(res.body.contains("single"), "expected the SSO notice: {}", res.body);
@@ -2344,12 +2350,17 @@ async fn an_sso_account_cannot_set_a_local_password_or_enrol_2fa() {
     assert!(fx.password_works("federated", PW).await, "the local hash must not be rewritten");
     assert!(!fx.password_works("federated", OTHER_PW).await);
 
-    fx.get("/profile/totp", Some(&cookie)).await.assert_redirect("/profile");
-    fx.post("/profile/totp", &form(&[("code", "000000")]), Some(&cookie))
-        .await
-        .assert_redirect("/profile");
-    let row = fx.row("federated").await;
-    assert!(row.totp_secret.is_none() && row.totp_pending.is_none(), "no local 2FA for SSO accounts");
+    // …but this site's TOTP may be added (§5m: a site that distrusts its IdP asks for its own). An SSO
+    // account has no local factor to confirm with, so it passes re-authentication, as before.
+    assert_eq!(fx.get("/profile/totp", Some(&cookie)).await.status, StatusCode::OK);
+    let pending = fx.row("federated").await.totp_pending.expect("enrolment started");
+    let res = fx.post("/profile/totp", &form(&[("code", "000000")]), Some(&cookie)).await;
+    assert!(res.body.contains("didn&#39;t match"), "a wrong code is refused: {}", res.body);
+    assert!(fx.row("federated").await.totp_secret.is_none());
+    let code = totp::current_code(&pending);
+    let res = fx.post("/profile/totp", &form(&[("code", &code)]), Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert!(fx.row("federated").await.has_totp(), "control: the right code enrols it");
 }
 
 #[tokio::test]
@@ -3889,8 +3900,8 @@ async fn every_session_records_how_it_was_authenticated() {
 
     // With 2FA: the pending session says password, the rotated one password+totp…
     fx.user("bob").await;
-    let bob = fx.cookie(&fx.session_for("bob").await);
-    let (secret, codes) = enrol_with_codes(&fx, "bob", &bob).await;
+    let mut bob = fx.cookie(&fx.session_for("bob").await);
+    let (secret, codes) = enrol_with_codes(&fx, "bob", &mut bob).await;
     // Enrolment spent the current step; forget it so the same step's code can log in here.
     fx.update_user("bob", |am| am.totp_last_step = Set(None)).await;
     let res = fx.try_login("bob").await;
@@ -3978,13 +3989,20 @@ async fn a_credential_id_and_a_user_handle_belong_to_one_row_each() {
     assert!(am.update(&fx.db).await.is_err(), "nor can a user handle");
 }
 
-/// The schema as it stood before passkeys: `auth_user` without `passkey_handle`, `auth_session`
-/// without `method` / `passkey_class`, and neither passkey table.
+/// The schema as it stood before 0.5: `auth_user` without `passkey_handle`, `password_changed_at` and
+/// `must_change_password`, `auth_session` without `method` / `passkey_class`, and neither passkey
+/// table.
 async fn downgrade_schema_to_pre_passkey(db: &DatabaseConnection) {
     let backend = db.get_database_backend();
     let user_sql = backend.build(&Schema::new(backend).create_table_from_entity(user::Entity)).sql;
-    let old_user = user_sql.replace(r#", "passkey_handle" varchar UNIQUE"#, "");
-    assert_ne!(old_user, user_sql, "the fixture must actually remove the column: {user_sql}");
+    // The three 0.5 columns out of the CREATE TABLE, each asserted to have been there.
+    let mut old_user = user_sql.clone();
+    for col in ["passkey_handle", "password_changed_at", "must_change_password"] {
+        let start = old_user.find(&format!(r#", "{col}""#)).unwrap_or_else(|| panic!("{col}: {user_sql}"));
+        let end = old_user[start + 2..].find(", \"").map(|e| start + 2 + e).expect("a column follows");
+        old_user.replace_range(start..end, "");
+    }
+    assert!(!old_user.contains("passkey_handle") && !old_user.contains("password_changed_at"), "{old_user}");
     for sql in [
         "PRAGMA foreign_keys = OFF".to_string(),
         "DROP TABLE auth_passkey".into(),
@@ -4008,21 +4026,22 @@ async fn the_upgrade_statements_bring_a_pre_passkey_database_up_to_date() {
     downgrade_schema_to_pre_passkey(&fx.db).await;
 
     // What an app meets if it upgrades the crate and skips the migration: every read of an account
-    // names the new column, so nobody can sign in. That is the break the migration step fixes.
-    create_user(&fx.db, "carol", PW).await.expect("an insert leaves the column out and still works");
-    assert!(user::Entity::find().all(&fx.db).await.is_err(), "but reading an account fails");
+    // names the new columns, and so does every write of a password, so nobody can be created or sign
+    // in. That is the break the migration step fixes.
+    assert!(create_user(&fx.db, "carol", PW).await.is_err(), "a new account can't be written");
+    assert!(user::Entity::find().all(&fx.db).await.is_err(), "nor an existing one read");
     let res = fx.post("/login", &form(&[("username", "carol"), ("password", PW)]), None).await;
     assert_eq!(res.status, StatusCode::UNAUTHORIZED, "so login fails");
     assert!(res.session_token(fx.auth.session_cookie_name()).is_none());
 
     let backend = fx.db.get_database_backend();
-    for stmt in passkey::table_create_statements(backend) {
+    for stmt in upgrade::table_create_statements(backend) {
         fx.db.execute(&stmt).await.expect("create");
     }
-    for stmt in passkey::table_alter_statements() {
+    for stmt in upgrade::table_alter_statements() {
         fx.db.execute(&stmt).await.expect("alter");
     }
-    for stmt in passkey::index_create_statements() {
+    for stmt in upgrade::index_create_statements() {
         fx.db.execute(&stmt).await.expect("index");
     }
 
@@ -4040,4 +4059,235 @@ async fn the_upgrade_statements_bring_a_pre_passkey_database_up_to_date() {
     let mut am: user::ActiveModel = fx.row("bob").await.into();
     am.passkey_handle = Set(Some("h".into()));
     assert!(am.update(&fx.db).await.is_err(), "the index holds");
+}
+
+// ===================== The sign-in policy and password change (§5m) =====================
+
+/// A session row for `username` authenticated by `method` (with a passkey of `class`).
+async fn session_with(fx: &Fx, username: &str, method: session::Method, class: Option<&str>) -> String {
+    let token = fx.session_for(username).await;
+    let mut am: session::ActiveModel =
+        session::Entity::find_by_id(token.clone()).one(&fx.db).await.unwrap().unwrap().into();
+    am.method = Set(method.as_str().into());
+    am.passkey_class = Set(class.map(Into::into));
+    am.update(&fx.db).await.unwrap();
+    token
+}
+
+#[tokio::test]
+async fn each_way_of_signing_in_has_its_level() {
+    use session::Method as M;
+    let fx = Fx::new().await;
+    let lv = |m: Option<M>, c: Option<passkey::Class>| fx.auth.inner.level_of(m, c);
+    let attested = Some(passkey::Class::Attested);
+    let synced = Some(passkey::Class::Synced);
+    assert_eq!(lv(Some(M::Password), None), Level::Single);
+    assert_eq!(lv(None, None), Level::Single, "a row from before the column existed");
+    assert_eq!(lv(Some(M::PasswordTotp), None), Level::Multi);
+    assert_eq!(lv(Some(M::PasswordRecovery), None), Level::Multi);
+    assert_eq!(lv(Some(M::Passkey), synced), Level::Multi);
+    assert_eq!(lv(Some(M::PasswordPasskey), synced), Level::Multi);
+    assert_eq!(lv(Some(M::Passkey), attested), Level::Hardware);
+    assert_eq!(lv(Some(M::PasskeyTotp), synced), Level::Multi, "TOTP lifts to Multi, never higher");
+    assert_eq!(lv(Some(M::PasskeyTotp), attested), Level::Hardware);
+    assert_eq!(lv(Some(M::Sso), None), Level::Multi, "the IdP is trusted by default");
+    assert_eq!(lv(Some(M::SsoTotp), None), Level::Multi);
+
+    let fx = Fx::with(|a| a.sso_level(Level::Single)).await;
+    assert_eq!(fx.auth.inner.level_of(Some(M::Sso), None), Level::Single);
+    assert_eq!(fx.auth.inner.level_of(Some(M::SsoTotp), None), Level::Multi);
+}
+
+#[tokio::test]
+async fn below_the_minimum_a_session_is_restricted_to_its_profile() {
+    let fx = Fx::with(|a| a.min_level(Level::Multi).api_keys(api_key::ApiKeys::new("t_"))).await;
+    fx.user_in("alice", "admin").await;
+    let bob = fx.user("bob").await;
+
+    // A password alone lands on the profile, which says what to add…
+    let res = fx.try_login("alice").await;
+    res.assert_redirect("/profile");
+    let token = res.session_token(fx.auth.session_cookie_name()).unwrap();
+    let mut cookie = fx.cookie(&token);
+    assert!(fx.identify_token(&token).await.is_none(), "…and is no identity for the app or its gates");
+    let page = fx.get("/profile", Some(&cookie)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("second way to confirm"), "{}", page.body);
+    assert!(!page.body.contains("API keys"), "no key section for a restricted session");
+    fx.get("/login", Some(&cookie)).await.assert_redirect("/profile");
+
+    // It can't mint a key, or manage anyone, even as an admin.
+    let res = fx.post("/profile/api-keys", &form(&[("current_password", PW)]), Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    assert!(api_key::entity::Entity::find().all(&fx.db).await.unwrap().is_empty());
+    assert_ne!(fx.get(&format!("/profile/{bob}"), Some(&cookie)).await.status, StatusCode::OK);
+
+    // Adding TOTP steps the very session up: a new id, and now an identity at Multi.
+    let (secret, _) = enrol_with_codes(&fx, "alice", &mut cookie).await;
+    let token = cookie.split('=').nth(1).unwrap().to_string();
+    assert_eq!(fx.identify_token(&token).await.map(|w| w.level), Some(Level::Multi));
+    let res = fx.post("/profile/api-keys", &form(&[("current_password", PW)]), Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK, "control: the stepped-up session mints: {}", res.body);
+
+    // Control: a password + TOTP sign-in lands in the app.
+    fx.update_user("alice", |am| am.totp_last_step = Set(None)).await;
+    let res = fx.try_login("alice").await;
+    let pending = res.session_token(fx.auth.session_cookie_name()).unwrap();
+    let res = fx
+        .post("/login/totp", &form(&[("code", &totp::current_code(&secret))]), Some(&fx.cookie(&pending)))
+        .await;
+    res.assert_redirect("/");
+}
+
+#[tokio::test]
+async fn a_stricter_minimum_applies_to_sessions_already_open() {
+    let fx = Fx::with(|a| a.min_level(Level::Multi)).await;
+    fx.user("alice").await;
+    let password = session_with(&fx, "alice", session::Method::Password, None).await;
+    let with_totp = session_with(&fx, "alice", session::Method::PasswordTotp, None).await;
+    assert!(fx.identify_token(&password).await.is_none(), "a password session is below it");
+    let who = fx.identify_token(&with_totp).await.expect("control: a two-factor session is not");
+    assert_eq!(who.level, Level::Multi);
+    // The same rows under the default policy: both count.
+    let open = Fx::new().await;
+    open.user("alice").await;
+    let password = session_with(&open, "alice", session::Method::Password, None).await;
+    assert_eq!(open.identify_token(&password).await.map(|w| w.level), Some(Level::Single));
+}
+
+#[tokio::test]
+#[should_panic(expected = "needs passkeys requiring Class::Attested")]
+async fn a_hardware_minimum_without_attested_passkeys_is_a_startup_error() {
+    Fx::with(|a| a.min_level(Level::Hardware)).await;
+}
+
+#[tokio::test]
+async fn a_password_set_by_someone_else_must_be_changed() {
+    let fx = Fx::new().await;
+    fx.user_in("admin", "admin").await;
+    let bob = fx.user("bob").await;
+    assert!(!fx.row("bob").await.must_change_password, "control: create_user doesn't flag");
+
+    // A manager's reset flags it, and stamps when.
+    let admin = fx.cookie(&fx.session_for("admin").await);
+    let reset = form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW), ("current_password", PW)]);
+    assert_eq!(fx.post(&format!("/profile/{bob}"), &reset, Some(&admin)).await.status, StatusCode::OK);
+    let row = fx.row("bob").await;
+    assert!(row.must_change_password && row.password_changed_at.is_some());
+
+    // Bob signs in, lands on his profile with the reason, and can still use the app.
+    let res = fx.post("/login", &form(&[("username", "bob"), ("password", OTHER_PW)]), None).await;
+    res.assert_redirect("/profile");
+    let token = res.session_token(fx.auth.session_cookie_name()).unwrap();
+    let who = fx.identify_token(&token).await.expect("a notice, not a lock");
+    assert_eq!(who.password_change, Some(user::PasswordChange::SetByAnother));
+    let page = fx.get("/profile", Some(&fx.cookie(&token))).await;
+    assert!(page.body.contains("set by an administrator"), "{}", page.body);
+
+    // His own change clears it.
+    let change = form(&[("current_password", OTHER_PW), ("new_password", PW), ("confirm_password", PW)]);
+    let res = fx.post("/profile", &change, Some(&fx.cookie(&token))).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert!(!fx.row("bob").await.must_change_password);
+    fx.try_login("bob").await.assert_redirect("/");
+}
+
+#[tokio::test]
+async fn only_a_password_written_for_someone_flags_the_account() {
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    // The programmatic helpers are the owner's or a seeder's: no flag.
+    set_password(&fx.db, "alice", OTHER_PW).await.unwrap();
+    assert!(!fx.row("alice").await.must_change_password);
+    reset_admin_access(&fx.db, "admin", "alice", PW).await.unwrap();
+    assert!(!fx.row("alice").await.must_change_password);
+
+    // Any other write of a password — an admin panel's, an app's own — flags it and stamps it.
+    let before = fx.row("alice").await.password_changed_at;
+    fx.update_user("alice", |am| am.password_hash = Set(hash_password(OTHER_PW))).await;
+    let row = fx.row("alice").await;
+    assert!(row.must_change_password, "a password someone else chose");
+    assert!(row.password_changed_at >= before && row.password_changed_at.is_some());
+    // …unless the writer says otherwise.
+    fx.update_user("alice", |am| {
+        am.password_hash = Set(hash_password(PW));
+        am.must_change_password = Set(false);
+    })
+    .await;
+    assert!(!fx.row("alice").await.must_change_password);
+
+    // An edit that doesn't touch the password changes neither.
+    fx.update_user("alice", |am| am.is_active = Set(true)).await;
+    assert!(!fx.row("alice").await.must_change_password);
+
+    // An account with no password is never due, whatever the flag says.
+    fx.make_sso("alice", "okta").await;
+    fx.update_user("alice", |am| am.must_change_password = Set(true)).await;
+    assert_eq!(fx.row("alice").await.password_change(0, now_secs()), None);
+}
+
+#[tokio::test]
+async fn a_maximum_age_makes_an_old_password_due() {
+    let day = 86_400;
+    let fx = Fx::with(|a| a.password_max_age_days(30)).await;
+    fx.user("alice").await;
+    fx.update_user("alice", |am| am.password_changed_at = Set(Some(now_secs() - 29 * day))).await;
+    let token = fx.session_for("alice").await;
+    assert_eq!(fx.identify_token(&token).await.unwrap().password_change, None, "control: in time");
+    fx.try_login("alice").await.assert_redirect("/");
+
+    fx.update_user("alice", |am| am.password_changed_at = Set(Some(now_secs() - 31 * day))).await;
+    assert_eq!(fx.identify_token(&token).await.unwrap().password_change, Some(user::PasswordChange::Expired));
+    fx.try_login("alice").await.assert_redirect("/profile");
+    // A row from before the column existed counts from its creation.
+    fx.update_user("alice", |am| {
+        am.password_changed_at = Set(None);
+        am.created_at = Set(now_secs() - 40 * day);
+    })
+    .await;
+    assert!(fx.identify_token(&token).await.unwrap().password_change.is_some());
+
+    // No limit (the default): never due, however old.
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    fx.update_user("alice", |am| am.password_changed_at = Set(Some(0))).await;
+    let token = fx.session_for("alice").await;
+    assert_eq!(fx.identify_token(&token).await.unwrap().password_change, None);
+}
+
+/// The accounts panel's password field flags the account through the row hook — when the flag is
+/// read-only in the panel. An editable flag is posted with every save, and an explicit `false` is the
+/// writer's choice: the guide says so, and this pins both halves.
+#[cfg(feature = "crud")]
+#[tokio::test]
+async fn a_password_set_in_the_accounts_panel_flags_the_account_when_the_flag_is_read_only() {
+    use crate::crud::seaorm::{Crud, MetaModel};
+    let fx = Fx::new().await;
+    let alice = fx.user("alice").await;
+    let engine = |read_only: bool| {
+        let mut m = MetaModel::new(user::Entity);
+        m.field("password_hash").password();
+        m.field("must_change_password").read_only = read_only;
+        let mut crud = Crud::new(fx.db.clone());
+        crud.register(m, crate::authz::Open);
+        crud.into_engine()
+    };
+
+    let e = engine(true);
+    e.update("auth_user", &alice.to_string(), &serde_json::json!({ "password_hash": OTHER_PW }))
+        .await
+        .expect("update");
+    let row = fx.row("alice").await;
+    assert!(row.must_change_password, "a password an administrator typed is theirs, not alice's");
+    assert!(verify_password(&row.password_hash, OTHER_PW));
+    // An edit that leaves the password alone flags nothing.
+    fx.update_user("alice", |am| am.must_change_password = Set(false)).await;
+    e.update("auth_user", &alice.to_string(), &serde_json::json!({ "is_active": true })).await.unwrap();
+    assert!(!fx.row("alice").await.must_change_password);
+
+    // Editable, the posted value wins — which is why the panel keeps it read-only.
+    let e = engine(false);
+    let body = serde_json::json!({ "password_hash": PW, "must_change_password": false });
+    e.update("auth_user", &alice.to_string(), &body).await.unwrap();
+    assert!(!fx.row("alice").await.must_change_password);
 }

@@ -46,6 +46,9 @@ const ADMIN_GROUP: &str = "admin";
 struct Shell {
     title: String,
     user: String, // signed-in username (empty when anonymous) → navbar link to /profile
+    /// The account should choose a new password (`Identity::password_change`): a badge by the name.
+    /// The general "notifications" design (a bell) is open work; this is the one notice there is.
+    password_due: bool,
     body: String,
     css: &'static str, // the library's few CSS rules (crud::ui::CSS)
     js: &'static str,  // crud::ui::JS: modal dialogs with Esc, and the relation dialogs
@@ -76,6 +79,7 @@ impl Shell {
         Self {
             title: title.into(),
             user: user.into(),
+            password_due: false,
             body,
             css: CSS,
             js: JS,
@@ -91,6 +95,14 @@ impl Shell {
 /// `RL_TIMEZONES=all` offers every zone the host knows; `RL_TIMEZONES=UTC,Europe/Prague,Asia/Tokyo`
 /// offers exactly those three. Names the host's database doesn't know are dropped and reported by
 /// `check_timezones()` at boot, rather than appearing as options that quietly mean UTC.
+impl Shell {
+    /// The shell for `who`: their name in the navbar, and the badge if a password change is due.
+    fn for_user(mut self, who: &Identity) -> Self {
+        self.password_due = who.password_change.is_some();
+        self
+    }
+}
+
 fn timezones() -> TzPicker {
     match std::env::var("RL_TIMEZONES").ok().as_deref() {
         None | Some("") => TzPicker::new(),
@@ -311,6 +323,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // tables below, which *are* registered, because deleting one of those rows is the whole unlock.
     // New accounts are active by default (so a freshly created user with a password can log in).
     auth_user_mm.field(UserCol::IsActive.as_str()).default = Some(serde_json::json!(true));
+    // "Password change required": the row hook sets the flag whenever a password is written for
+    // someone (this panel's password field included), so a password an administrator chose asks its
+    // owner for their own. **Read-only here**: an editable checkbox would post `false` with every save,
+    // which the hook takes as the writer's explicit choice, and the flag would never be set. The owner
+    // clears it by choosing a password. When it was last set is the library's to stamp.
+    auth_user_mm.field(UserCol::MustChangePassword.as_str()).label = Some("Must change password".into());
+    auth_user_mm.field(UserCol::MustChangePassword.as_str()).read_only = true;
+    auth_user_mm.field(UserCol::PasswordChangedAt.as_str()).label = Some("Password set".into());
+    auth_user_mm.field(UserCol::PasswordChangedAt.as_str()).read_only = true;
+    auth_user_mm.field(UserCol::PasswordChangedAt.as_str()).datetime();
     // Lifecycle timestamps are maintained by the library (hooks / login flow) — show, don't edit.
     // Lifecycle stamps: read-only + rendered as timezone-aware datetimes (see .datetime() + the
     // $store.tz picker wired into the shell). They follow the picker's zone; storage stays UTC.
@@ -553,6 +575,7 @@ fn panel<'a>(app: &'a App, who: &Identity) -> Admin<'a> {
 fn page(body: String, who: &Identity, headers: &HeaderMap, uri: &Uri) -> Response {
     let back = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     let html = Shell::page("relativelylight", who.username.clone(), body, headers, back)
+        .for_user(who)
         .render()
         .unwrap_or_default();
     Html(html).into_response()
@@ -589,6 +612,7 @@ fn profile_shell(fragment: &str, who: &Identity, req: &Parts) -> String {
 <a class="d-inline-block mt-3" href="/">&larr; Back to admin</a></div></div>"#
     );
     Shell::page("Profile", who.username.clone(), body, &req.headers, back_to(req, "/profile"))
+        .for_user(who)
         .render()
         .unwrap_or_default()
 }

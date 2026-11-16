@@ -83,9 +83,18 @@ impl Fx {
     }
 
     async fn build(lockout: Lockout, passkeys: Option<Passkeys>) -> Fx {
+        Fx::build_with(lockout, passkeys, |a| a).await
+    }
+
+    /// As [`Fx::build`], with a chance to configure `Auth` itself (the sign-in policy).
+    async fn build_with(
+        lockout: Lockout,
+        passkeys: Option<Passkeys>,
+        configure: impl FnOnce(Auth) -> Auth,
+    ) -> Fx {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         migrate(&db).await.unwrap();
-        let mut auth = Auth::new(db.clone(), lockout).secure_cookies(false);
+        let mut auth = configure(Auth::new(db.clone(), lockout).secure_cookies(false));
         if let Some(p) = passkeys {
             auth = auth.passkeys(p);
         }
@@ -1144,9 +1153,12 @@ async fn adding_and_removing_a_passkey_are_audited_without_the_credential() {
     let cookie = fx.cookie_for("alice").await;
     let mut key = SoftPasskey::new(true);
     fx.enrol(&cookie, &mut key, "laptop").await;
+    // Adding the first passkey stepped that session up (a new cookie); the second uses a fresh one.
+    let cookie = fx.cookie_for("alice").await;
     fx.enrol(&cookie, &mut SoftPasskey::new(true), "phone")
         .await;
     let row = fx.keys().await.remove(0);
+    let cookie = fx.cookie_for("alice").await;
     fx.post(
         &format!("/profile/passkeys/{}/remove", row.id),
         &[],
@@ -1205,4 +1217,38 @@ async fn without_passkeys_there_is_no_button_section_or_route() {
         fx.get("/auth/passkey.js", None).await.status,
         StatusCode::OK
     );
+}
+
+#[tokio::test]
+async fn an_attested_passkey_is_hardware_and_a_hardware_minimum_wants_one() {
+    let (mut token, ca) = SoftToken::new(true).unwrap();
+    let pem = ca_pem(&ca);
+    let cfg = Passkeys::new("localhost", ORIGIN).require(Class::Attested).attestation_ca(
+        &pem,
+        &AAGUID.to_string(),
+        "soft token",
+    );
+    let fx = Fx::build_with(Lockout::default(), Some(cfg), |a| a.min_level(Level::Hardware)).await;
+    fx.user("alice").await;
+
+    // A password alone is restricted to the profile, which asks for a security key…
+    let res = fx.post("/login", &[("username", "alice"), ("password", PW)], None).await;
+    assert_eq!(res.location(), Some("/profile"));
+    let restricted = res.session(fx.auth.session_cookie_name()).unwrap();
+    assert!(fx.identify(&restricted).await.is_none());
+    let cookie = format!("{}={restricted}", fx.auth.session_cookie_name());
+    assert!(fx.get("/profile", Some(&cookie)).await.body.contains("security key"));
+
+    // …and adding the attested passkey steps that session up to Hardware.
+    let res = fx.enrol(&cookie, &mut token, "yubikey").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    let stepped = res.session(fx.auth.session_cookie_name()).expect("a new session");
+    assert_eq!(fx.identify(&stepped).await.map(|w| w.level), Some(Level::Hardware));
+
+    // Control: signing in with it lands in the app at Hardware.
+    let row = fx.keys().await.remove(0);
+    let res = fx.sign_in(&mut token, &row.credential_id).await;
+    assert_eq!(res.location(), Some("/"));
+    let s = res.session(fx.auth.session_cookie_name()).unwrap();
+    assert_eq!(fx.identify(&s).await.map(|w| w.level), Some(Level::Hardware));
 }

@@ -37,6 +37,8 @@ pub mod lockout;
 mod pages;
 /// Passkeys (WebAuthn): the credential and challenge tables, and the hardware-binding [`passkey::Class`].
 pub mod passkey;
+/// Upgrading an existing database to 0.5's schema: the new tables, columns and index.
+pub mod upgrade;
 /// The passkey ceremonies, routes and configuration (feature `passkeys`, §5l).
 #[cfg(feature = "passkeys")]
 mod webauthn;
@@ -100,12 +102,31 @@ pub struct Identity {
     pub id: String,
     pub username: String,
     pub groups: Vec<String>,
+    /// How strongly this session was authenticated (§5m). Always at least the site's
+    /// [`min_level`](Auth::min_level): a session below it isn't an identity at all.
+    pub level: Level,
+    /// Whether, and why, the account should choose a new password (§5m) — for a notice in the app's
+    /// shell. `None` for an account with no password.
+    pub password_change: Option<user::PasswordChange>,
 }
 
 impl Identity {
-    /// An identity from its parts. `id` is the `auth_user` primary key as a string.
+    /// An identity from its parts. `id` is the `auth_user` primary key as a string. Its
+    /// [`level`](Identity::level) is [`Level::Single`] and it has no password change due.
     pub fn new(id: impl Into<String>, username: impl Into<String>, groups: Vec<String>) -> Self {
-        Self { id: id.into(), username: username.into(), groups }
+        Self {
+            id: id.into(),
+            username: username.into(),
+            groups,
+            level: Level::Single,
+            password_change: None,
+        }
+    }
+
+    /// The same identity at `level` — for a test double, or an identity source of your own.
+    pub fn with_level(mut self, level: Level) -> Self {
+        self.level = level;
+        self
     }
 
     /// Whether this identity belongs to the named group.
@@ -117,6 +138,22 @@ impl Identity {
     pub fn in_any_group(&self, groups: &[String]) -> bool {
         self.groups.iter().any(|g| groups.contains(g))
     }
+}
+
+// ===================== Assurance level =====================
+
+/// How strongly a session was authenticated — the sign-in policy's one number (§5m, and the table in
+/// `docs/DESIGN.md` → auth). Ordered: `Single < Multi < Hardware`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Level {
+    /// One factor: a password alone, or SSO when the app distrusts the IdP
+    /// ([`Auth::sso_level`]).
+    Single = 1,
+    /// Two factors, or one that is both (a passkey verifies the user itself): a password + TOTP, a
+    /// passkey, SSO by default.
+    Multi = 2,
+    /// An attested passkey: hardware of a model the site trusts.
+    Hardware = 3,
 }
 
 // ===================== Re-authentication input =====================
@@ -419,6 +456,7 @@ pub async fn create_user(db: &DatabaseConnection, username: &str, password: &str
     user::ActiveModel {
         username: Set(username.to_string()),
         password_hash: Set(hash_password(password)),
+        must_change_password: Set(false),
         is_active: Set(true),
         ..Default::default()
     }
@@ -435,14 +473,31 @@ pub async fn create_user(db: &DatabaseConnection, username: &str, password: &str
 /// disabled, 2FA stays on, and an SSO account still refuses password login. A password reset is
 /// therefore never a way to re-open a closed account — re-opening one is
 /// [`reset_admin_access`] (break-glass) or an explicit `is_active` edit in the admin UI.
+///
+/// It does **not** ask the owner to change it (`must_change_password` is cleared): this is the owner's
+/// own change, or a seeder's. To set someone's password *for* them, write the row (the hook flags it)
+/// or set `must_change_password` yourself.
 pub async fn set_password(db: &DatabaseConnection, username: &str, password: &str) -> Result<(), DbErr> {
     let existing = user::Entity::find()
         .filter(user::Column::Username.eq(username))
         .one(db)
         .await?
         .ok_or_else(|| DbErr::Custom(format!("no such user: {username}")))?;
-    let mut am = existing.into_active_model();
+    set_password_hash(db, existing, password, false).await
+}
+
+/// Set `user`'s password, and whether its owner must then choose their own (`must_change`): `true`
+/// when someone else chose it (a manager's reset), `false` for the owner's own change and for the
+/// programmatic helpers. The row hook stamps `password_changed_at`.
+async fn set_password_hash(
+    db: &DatabaseConnection,
+    user: user::Model,
+    password: &str,
+    must_change: bool,
+) -> Result<(), DbErr> {
+    let mut am = user.into_active_model();
     am.password_hash = Set(hash_password(password));
+    am.must_change_password = Set(must_change);
     am.update(db).await?;
     Ok(())
 }
@@ -549,6 +604,7 @@ pub async fn reset_admin_access(
             }
             let mut am = existing.into_active_model();
             am.password_hash = Set(hash_password(password));
+            am.must_change_password = Set(false);
             am.is_active = Set(true);
             am.totp_secret = Set(None);
             am.totp_pending = Set(None);
@@ -684,6 +740,12 @@ struct Inner {
     /// Passkeys, when switched on (see `Auth::passkeys`).
     #[cfg(feature = "passkeys")]
     passkeys: Option<Arc<webauthn::Runtime>>,
+    /// The lowest [`Level`] a session must have (see [`Auth::min_level`]).
+    min_level: Level,
+    /// The level an SSO sign-in counts as (see [`Auth::sso_level`]).
+    sso_level: Level,
+    /// The password's maximum age in days, `0` = none (see [`Auth::password_max_age_days`]).
+    password_max_age_days: u32,
 }
 
 impl Inner {
@@ -722,7 +784,8 @@ impl Inner {
     /// present one of its factors. A code accepted here is **spent** (the §5a replay guard), and so is a
     /// passkey challenge.
     async fn reauth(&self, user: &user::Model, proof: &ReauthInput) -> Result<(), String> {
-        let has_password = !user.password_hash.is_empty();
+        // An SSO account's password, if a row has one left over, signs nobody in: it isn't a factor.
+        let has_password = !user.password_hash.is_empty() && !user.is_sso();
         let has_passkey = passkey::count(&self.db, user.id).await > 0;
         if !has_password && !user.has_totp() && !has_passkey {
             return Ok(()); // nothing to prove with — see the doc comment on `Auth::reauthenticate`
@@ -796,7 +859,7 @@ impl Inner {
     /// and a fresh passkey challenge when they have a passkey and passkeys are on.
     async fn reauth_view(&self, user: &user::Model) -> ReauthView {
         ReauthView {
-            has_password: !user.password_hash.is_empty(),
+            has_password: !user.password_hash.is_empty() && !user.is_sso(),
             totp_on: user.has_totp(),
             passkey: self.passkey_ask(user).await,
         }
@@ -836,6 +899,80 @@ impl Inner {
         }
         let _ = user;
         None
+    }
+
+    /// The [`Level`] a session authenticated by `method` (with a passkey of `class`) has. See the table
+    /// in `docs/DESIGN.md` → auth: TOTP lifts a method to `Multi`, never higher; `Hardware` is an
+    /// attested passkey. An unknown method (a row from before the column existed) is `Single`.
+    fn level_of(&self, method: Option<session::Method>, class: Option<passkey::Class>) -> Level {
+        use session::Method as M;
+        let passkey = match class {
+            Some(passkey::Class::Attested) => Level::Hardware,
+            _ => Level::Multi,
+        };
+        match method {
+            Some(M::Password) | None => Level::Single,
+            Some(M::PasswordTotp | M::PasswordRecovery) => Level::Multi,
+            Some(M::Passkey | M::PasskeyTotp | M::PasskeyRecovery | M::PasswordPasskey) => passkey,
+            Some(M::Sso) => self.sso_level,
+            Some(M::SsoTotp | M::SsoRecovery) => self.sso_level.max(Level::Multi),
+        }
+    }
+
+    /// Whether `who`'s session is below the site's minimum: a restricted session, good only for adding
+    /// the factor it lacks on the caller's own profile.
+    fn restricted(&self, who: &Identity) -> bool {
+        who.level < self.min_level
+    }
+
+    /// Where a sign-in that just finished lands: the profile when the session is restricted or the
+    /// password should be changed (both explained there), otherwise the app's root.
+    fn landing(&self, user: &user::Model, method: session::Method, class: Option<passkey::Class>) -> &str {
+        let below = self.level_of(Some(method), class) < self.min_level;
+        let change = user.password_change(self.password_max_age_days, now_secs()).is_some();
+        match below || change {
+            true => &self.profile_path,
+            false => "/",
+        }
+    }
+
+    /// Whether passkeys are on and accept only attested ones — what `Level::Hardware` needs.
+    fn attested_only(&self) -> bool {
+        #[cfg(feature = "passkeys")]
+        if let Some(rt) = &self.passkeys {
+            return rt.require() == passkey::Class::Attested;
+        }
+        false
+    }
+
+    /// What a restricted session's profile says it needs.
+    fn policy_notice(&self, user: &user::Model) -> String {
+        let can_passkey = self.passkeys_on() && !user.is_sso();
+        match self.min_level {
+            Level::Hardware => "This site needs a security key of a model it trusts. Add one under \
+                Passkeys below; until then you can use only this page."
+                .into(),
+            _ if can_passkey => "This site needs a second way to confirm it's you. Add an authenticator \
+                app or a passkey below; until then you can use only this page."
+                .into(),
+            _ => "This site needs a second way to confirm it's you. Add an authenticator app below; \
+                until then you can use only this page."
+                .into(),
+        }
+    }
+
+    /// What the profile says about a password change that is due.
+    fn password_notice(&self, why: user::PasswordChange) -> String {
+        match why {
+            user::PasswordChange::Expired => format!(
+                "Your password is older than {} days, this site's limit. Choose a new one below; you \
+                 can keep using the site meanwhile.",
+                self.password_max_age_days
+            ),
+            _ => "Your password was set by an administrator. Choose your own below; you can keep \
+                using the site meanwhile."
+                .into(),
+        }
     }
 
     /// Whether passkeys are switched on (the feature, and `Auth::passkeys`).
@@ -1086,6 +1223,9 @@ impl Auth {
                 api_keys: None,
                 #[cfg(feature = "passkeys")]
                 passkeys: None,
+                min_level: Level::Single,
+                sso_level: Level::Multi,
+                password_max_age_days: 0,
             }),
         }
     }
@@ -1146,6 +1286,39 @@ impl Auth {
     {
         let h: ProfileExtra = Arc::new(move |s: ProfileSection| Box::pin(hook(s)));
         Arc::get_mut(&mut self.inner).unwrap().profile_extra = Some(h);
+        self
+    }
+
+    /// The **minimum assurance level** a session must have (§5m), default [`Level::Single`] (any
+    /// sign-in). A session below it is **restricted**: [`identify`](Auth::identify) treats it as
+    /// anonymous, and its only page is the caller's own profile, which says which factor to add.
+    /// Adding it steps the session up.
+    ///
+    /// ```ignore
+    /// .min_level(Level::Multi)   // a password alone is not enough: TOTP, a passkey, or SSO
+    /// ```
+    ///
+    /// [`Level::Hardware`] needs passkeys requiring
+    /// [`Class::Attested`](passkey::Class::Attested); [`routes`](Auth::routes) panics otherwise.
+    pub fn min_level(mut self, level: Level) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().min_level = level;
+        self
+    }
+
+    /// The level an **SSO** sign-in counts as (§5m), default [`Level::Multi`]: the identity provider is
+    /// trusted to have asked for its own second factor. Set [`Level::Single`] to distrust it — with a
+    /// [`min_level`](Auth::min_level) of `Multi`, an SSO account then enrols this site's TOTP, and the
+    /// TOTP step follows the provider's callback.
+    pub fn sso_level(mut self, level: Level) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().sso_level = level;
+        self
+    }
+
+    /// The password's maximum age in days (§5m), default `0`: none. NIST SP 800-63B advises against
+    /// periodic rotation; set it only where you are required to rotate. A password older than this
+    /// is a change due: the login lands on the profile, which says so, and the user can go on.
+    pub fn password_max_age_days(mut self, days: u32) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().password_max_age_days = days;
         self
     }
 
@@ -1500,6 +1673,10 @@ impl Auth {
     /// merge time. Change where they live with [`login_path`](Auth::login_path)'s and
     /// [`profile_path`](Auth::profile_path)'s configuration, or nest the whole thing under a prefix.
     pub fn routes(&self) -> Router {
+        assert!(
+            self.inner.min_level < Level::Hardware || self.inner.attested_only(),
+            "relativelylight: Auth::min_level(Level::Hardware) needs passkeys requiring Class::Attested"
+        );
         let mut router = Router::new();
         #[cfg(feature = "passkeys")]
         if self.inner.passkeys.is_some() {
@@ -1547,6 +1724,13 @@ impl Auth {
 const IDLE_REFRESH_GRACE: i64 = 60;
 
 async fn identity_from(inner: &Inner, token: &str) -> Option<Identity> {
+    let (who, _, restricted) = resolve(inner, token).await?;
+    (!restricted).then_some(who)
+}
+
+/// A live session's caller: their identity, their row, and whether the session is **restricted**
+/// (below [`Auth::min_level`]) — usable only on the caller's own profile, to add the factor it lacks.
+async fn resolve(inner: &Inner, token: &str) -> Option<(Identity, user::Model, bool)> {
     let session = session::Entity::find_by_id(token.to_string()).one(&inner.db).await.ok()??;
     if !inner.session_live(&session) || session.awaiting_totp {
         return None; // expired (either clock), or the TOTP second factor is still pending
@@ -1566,7 +1750,15 @@ async fn identity_from(inner: &Inner, token: &str) -> Option<Identity> {
     let groups = groups_of(&inner.db, user.id).await;
     // The session was used: push the idle clock forward, but only once the last stamp has gone stale.
     inner.touch_session(&session).await;
-    Some(Identity { id: user.id.to_string(), username: user.username, groups })
+    let level = inner.level_of(session.method(), session.passkey_class());
+    let who = Identity {
+        id: user.id.to_string(),
+        username: user.username.clone(),
+        groups,
+        level,
+        password_change: user.password_change(inner.password_max_age_days, now_secs()),
+    };
+    Some((who, user, level < inner.min_level))
 }
 
 /// Verify username + password. Returns the user on success (regardless of 2FA) — the caller decides
@@ -1674,6 +1866,13 @@ struct LoginForm {
 
 async fn login_form(State(inner): State<Arc<Inner>>, req: Parts, jar: CookieJar) -> Response {
     let headers = &req.headers;
+    // A restricted session is signed in, just not enough for the app: the app sends it here, and here
+    // sends it to the one page it can use, which says what to add. Without this it would loop.
+    if let Some(token) = jar.get(&inner.cookie_name).map(|c| c.value().to_string()) {
+        if let Some((_, _, true)) = resolve(&inner, &token).await {
+            return Redirect::to(&inner.profile_path).into_response();
+        }
+    }
     let (token, jar) = csrf_token(&inner, headers, jar);
     (jar, Html((inner.login_shell)(&login_form_html(None, &token, inner.passkeys_on()), &req))).into_response()
 }
@@ -1739,7 +1938,7 @@ async fn login_submit(
         // Login is complete (no 2FA) — stamp last_login now (the TOTP path stamps on confirm, with the
         // step it spent).
         stamp_login(&inner.db, user.id, None).await;
-        "/"
+        inner.landing(&user, session::Method::Password, None)
     };
     (jar, Redirect::to(dest)).into_response()
 }
@@ -1894,16 +2093,18 @@ async fn login_totp_submit(
     // The second factor is confirmed, so the session gains full privilege — which means a **new id**
     // (see `rotate_session`), a new CSRF token, and the spent step recorded so this code can't be used
     // again inside its ±1-step window.
-    // The first step decides the name: a password, or a passkey (whose class carries over).
-    let after_passkey = session.method() == Some(session::Method::Passkey);
-    let method = match (after_passkey, used_recovery) {
-        (false, true) => session::Method::PasswordRecovery,
-        (false, false) => session::Method::PasswordTotp,
-        (true, true) => session::Method::PasskeyRecovery,
-        (true, false) => session::Method::PasskeyTotp,
+    // The first step decides the name: a password, a passkey (whose class carries over) or SSO.
+    use session::Method as M;
+    let method = match (session.method(), used_recovery) {
+        (Some(M::Passkey), true) => M::PasskeyRecovery,
+        (Some(M::Passkey), false) => M::PasskeyTotp,
+        (Some(M::Sso), true) => M::SsoRecovery,
+        (Some(M::Sso), false) => M::SsoTotp,
+        (_, true) => M::PasswordRecovery,
+        (_, false) => M::PasswordTotp,
     };
     let class = session.passkey_class();
-    let Some(token) = rotate_session(&inner, session, method, class).await else {
+    let Some(token) = rotate_session(&inner, session.clone(), method, class).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
     };
     stamp_login(&inner.db, user.id, step).await;
@@ -1915,7 +2116,7 @@ async fn login_totp_submit(
         // thing they need is either a re-enrolment or a fresh set of codes, and both live there.
         return (jar, Redirect::to(&inner.profile_path)).into_response();
     }
-    (jar, Redirect::to("/")).into_response()
+    (jar, Redirect::to(inner.landing(&user, method, class))).into_response()
 }
 
 /// Resolve the half-authenticated session (password ok, TOTP pending) and its user from the cookie.
@@ -2145,12 +2346,8 @@ async fn manage_form(
         Err(res) => return res,
     };
     let (token, jar) = csrf_token(&inner, headers, jar);
-    // Don't offer a reset form for an account whose password lives at the identity provider — the POST
-    // refuses it, so a form here would only ever produce an error.
-    if let Some(provider) = target.sso_key() {
-        let frag = sso_managed_html(&target.username, provider);
-        return (jar, inner.page(&who, &frag, &req)).into_response();
-    }
+    // An SSO account gets the page too, without the reset form (its password lives at the identity
+    // provider, and the POST refuses it) but with its 2FA, which a manager can disable.
     let Some(manager) = target_user(&inner, &who.id).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
@@ -2173,6 +2370,7 @@ async fn manager_page(
     let id = target.id.to_string();
     let t = Target {
         id: &id,
+        sso: target.sso_key(),
         username: &target.username,
         totp_on: target.has_totp(),
         has_password: !target.password_hash.is_empty(),
@@ -2245,7 +2443,8 @@ async fn manage_submit(
     if let Some(msg) = error {
         return (StatusCode::BAD_REQUEST, page(Some(msg), None).await).into_response();
     }
-    if set_password(&inner.db, &target.username, &form.new_password).await.is_err() {
+    // A password the manager chose is one the manager knows: the owner is asked to choose their own.
+    if set_password_hash(&inner.db, target.clone(), &form.new_password, true).await.is_err() {
         let msg = "Could not set the password.".to_string();
         return (StatusCode::INTERNAL_SERVER_ERROR, page(Some(msg), None).await).into_response();
     }
@@ -2290,9 +2489,8 @@ async fn totp_setup_form(
     let Some((who, user)) = signed_in(&inner, headers).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
-    if user.is_sso() {
-        return Redirect::to(&inner.profile_path).into_response(); // SSO: 2FA managed by the IdP
-    }
+    // An SSO account may enrol TOTP too: a site that distrusts its IdP's second factor
+    // (`Auth::sso_level`) asks for its own.
     let secret = totp::generate_secret();
     let mut am: user::ActiveModel = user.into();
     am.totp_pending = Set(Some(secret.clone()));
@@ -2310,15 +2508,13 @@ async fn totp_setup_form(
 async fn totp_setup_submit(
     State(inner): State<Arc<Inner>>,
     req: Parts,
+    jar: CookieJar,
     Form(form): Form<TotpForm>,
 ) -> Response {
     let (who, user, csrf) = match self_post(&inner, &req, form.csrf.as_deref()).await {
         Ok(v) => v,
         Err(res) => return res,
     };
-    if user.is_sso() {
-        return Redirect::to(&inner.profile_path).into_response();
-    }
     let Some(pending) = user.pending_totp_key().map(str::to_string) else {
         return Redirect::to(&inner.profile_path).into_response(); // nothing in progress
     };
@@ -2351,19 +2547,85 @@ async fn totp_setup_submit(
     // Issue recovery codes **with** the enrolment and show them once (§5i). Issuing them here rather
     // than leaving it to the user is the difference between a lost phone being an inconvenience and
     // being an account only an administrator can reopen.
+    // This session has just proved the second factor too: it steps up (§5m), so a restricted session
+    // becomes a usable one without signing in again.
+    let (jar, csrf) = step_up(&inner, &req.headers, jar, csrf, Factor::Totp).await;
+    let who = refreshed(&inner, &req, &jar, who).await;
     match recovery::issue(&inner.db, user.id).await {
         Ok(codes) => {
             let frag = recovery_codes_html(
                 &codes,
                 "Two-factor authentication is now enabled. Save these recovery codes.",
             );
-            inner.page(&who, &frag, &req).into_response()
+            (jar, inner.page(&who, &frag, &req)).into_response()
         }
         // 2FA *is* on, so don't imply otherwise; they can generate codes from the profile page.
         Err(_) => {
             let msg = "Two-factor authentication is on, but recovery codes could not be created — generate them below.";
-            profile_page(&inner, &who, &user, Some(msg), None, &csrf, &req).await.into_response()
+            (jar, profile_page(&inner, &who, &user, Some(msg), None, &csrf, &req).await).into_response()
         }
+    }
+}
+
+/// The factor a session just enrolled, for [`step_up`].
+#[cfg_attr(not(feature = "passkeys"), allow(dead_code))]
+enum Factor {
+    Totp,
+    Passkey(passkey::Class),
+}
+
+/// After the caller enrolled `factor` in this very session (and proved it doing so), rotate the session
+/// to the stronger method it now stands for: a password session that added TOTP is a password + TOTP
+/// session. Returns the jar carrying the new cookies and the CSRF token the response's forms must
+/// carry. A session already as strong, or with no row, is left as it is.
+async fn step_up(
+    inner: &Inner,
+    headers: &HeaderMap,
+    jar: CookieJar,
+    csrf: String,
+    factor: Factor,
+) -> (CookieJar, String) {
+    use session::Method as M;
+    let Some(current) = current_session(inner, headers).await else { return (jar, csrf) };
+    let (method, class) = match (current.method(), &factor) {
+        (Some(M::Password), Factor::Totp) => (M::PasswordTotp, None),
+        (Some(M::Password), Factor::Passkey(c)) => (M::PasswordPasskey, Some(*c)),
+        (Some(M::Sso), Factor::Totp) => (M::SsoTotp, None),
+        (Some(M::Passkey), Factor::Totp) => (M::PasskeyTotp, current.passkey_class()),
+        _ => return (jar, csrf),
+    };
+    match rotate_session(inner, current, method, class).await {
+        Some(token) => {
+            let (csrf, csrf_cookie) = inner.csrf().issue();
+            (jar.add(session_cookie(inner, token)).add(csrf_cookie), csrf)
+        }
+        None => (jar, csrf),
+    }
+}
+
+/// The caller as the session `jar` now holds sees them — after a [`step_up`], the stronger session.
+async fn refreshed(inner: &Inner, req: &Parts, jar: &CookieJar, who: Identity) -> Identity {
+    match signed_in(inner, &req.headers_with_session(jar, &inner.cookie_name)).await {
+        Some((w, _)) => w,
+        None => who,
+    }
+}
+
+/// Headers as the next request will send them: these, with the session cookie `jar` now holds — so a
+/// handler that just rotated the session can render for the new one.
+trait WithSession {
+    fn headers_with_session(&self, jar: &CookieJar, name: &str) -> HeaderMap;
+}
+
+impl WithSession for Parts {
+    fn headers_with_session(&self, jar: &CookieJar, name: &str) -> HeaderMap {
+        let mut h = self.headers.clone();
+        if let Some(c) = jar.get(name) {
+            if let Ok(v) = format!("{name}={}", c.value()).parse() {
+                h.insert(axum::http::header::COOKIE, v);
+            }
+        }
+        h
     }
 }
 
@@ -2603,22 +2865,37 @@ async fn profile_fragment_with(
     let totp_on = user.has_totp();
     // One view per render: every confirm-it's-you block on the page shares its passkey challenge.
     let reauth = inner.reauth_view(user).await;
-    let mut frag = match user.sso_key() {
-        Some(provider) => sso_profile_html(who, provider),
-        None => {
-            let left = match totp_on {
-                true => Some(recovery::remaining(&inner.db, user.id).await),
-                false => None,
-            };
-            let (e, s) = on(Card::Top);
-            let has_password = !user.password_hash.is_empty();
-            change_form_html(who, has_password, &reauth, totp_on, left, e, s, csrf)
-        }
+    let left = match totp_on {
+        true => Some(recovery::remaining(&inner.db, user.id).await),
+        false => None,
     };
+    let (e, s) = on(Card::Top);
+    let restricted = inner.restricted(who);
+    let notices = Notices {
+        policy: restricted.then(|| inner.policy_notice(user)),
+        password: user
+            .password_change(inner.password_max_age_days, now_secs())
+            .map(|r| inner.password_notice(r)),
+    };
+    let view = ProfileView {
+        who,
+        sso: user.sso_key(),
+        has_password: !user.password_hash.is_empty(),
+        reauth: &reauth,
+        totp_on,
+        recovery_left: left,
+        notices: &notices,
+    };
+    let mut frag = change_form_html(&view, e, s, csrf);
     #[cfg(feature = "passkeys")]
     if let (Some(rt), false) = (&inner.passkeys, user.is_sso()) {
         let (e, s) = on(Card::Passkeys);
         frag.push_str(&rt.card_html(inner, user, &reauth, e, s, csrf, headers).await);
+    }
+    // A restricted session sees only what adds the factor it lacks: no API keys (a key would carry the
+    // account past the policy) and none of the app's own sections.
+    if restricted {
+        return frag;
     }
     if inner.api_keys.is_some() {
         let keys = api_key::card(&inner.db, user.id, headers).await;
@@ -2673,9 +2950,12 @@ async fn profile_page(
 }
 
 /// The signed-in caller and their account row; `None` sends them to the login page.
+///
+/// A **restricted** session (below [`Auth::min_level`]) is accepted here: these are the pages it exists
+/// for. Check [`Inner::restricted`] before anything it must not do.
 async fn signed_in(inner: &Inner, headers: &HeaderMap) -> Option<(Identity, user::Model)> {
-    let who = identity_of(inner, headers).await?;
-    let user = target_user(inner, &who.id).await?;
+    let token = CookieJar::from_headers(headers).get(&inner.cookie_name)?.value().to_string();
+    let (who, user, _) = resolve(inner, &token).await?;
     Some((who, user))
 }
 
@@ -2813,7 +3093,7 @@ mod tests {
 
     #[test]
     fn identity_group_membership() {
-        let who = Identity { id: "1".into(), username: "u".into(), groups: vec!["admin".into()] };
+        let who = Identity::new("1", "u", vec!["admin".into()]);
         assert!(who.in_group("admin"));
         assert!(!who.in_group("editors"));
     }
@@ -2836,8 +3116,8 @@ mod tests {
 
     #[test]
     fn identity_in_any_group() {
-        let admin = Identity { id: "1".into(), username: "a".into(), groups: vec!["admin".into()] };
-        let editor = Identity { id: "2".into(), username: "e".into(), groups: vec!["editors".into()] };
+        let admin = Identity::new("1", "a", vec!["admin".into()]);
+        let editor = Identity::new("2", "e", vec!["editors".into()]);
         let managers = vec!["admin".into(), "superadmin".into()];
         assert!(admin.in_any_group(&managers));
         assert!(!editor.in_any_group(&managers));

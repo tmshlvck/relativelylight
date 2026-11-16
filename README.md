@@ -49,8 +49,8 @@ URL, verified (and re-authenticated) before it's on.</sub></td>
   Publish your own JSON API over it if you need one.
 - **Auth** (`auth`): sessions, login, TOTP 2FA with recovery codes, lockout, CSRF, OIDC SSO, API
   keys for machine endpoints (each acting as its owner, minted on `/profile`), passkeys (feature
-  `passkeys`: sign-in without a password, a second factor, an app-wide hardware-binding policy), and a
-  per-model gate.
+  `passkeys`: sign-in without a password, a second factor, an app-wide hardware-binding policy), a
+  sign-in policy as one minimum assurance level, "password change required", and a per-model gate.
 - **Files** (`files`): a streaming upload reader (several files, or a phone's camera), safe download
   responses, and upload-form, preview and thumbnail components. Storage, naming and listing stay yours.
 - **Timezones** (`tz`): integer-UTC storage, rendered server-side in the operator's zone, and

@@ -19,6 +19,11 @@
 //!   curl -u admin:nope -i     127.0.0.1:3000/api/whoami  # 5 of these → 429, and /login locks too
 //!   curl -H "Authorization: Bearer demo_…" 127.0.0.1:3000/api/whoami  # an API key minted on /profile
 //!
+//! **The sign-in policy** (docs/AUTH.md §5m): `MIN_LEVEL=2` makes a password alone too little — the
+//! login lands on /profile, which asks for TOTP or a passkey, and adding one lets you in.
+//! `PASSWORD_MAX_AGE_DAYS=30` makes an older password a change due. A password set for someone in the
+//! accounts panel asks them to choose their own.
+//!
 //! **Passkeys** are on: add one on `/profile`, remove your password there if you like, and sign in with
 //! "Sign in with a passkey". Browse to **http://localhost:3000**, not 127.0.0.1: a passkey belongs to a
 //! domain name, and browsers refuse one for a bare IP address.
@@ -39,7 +44,7 @@ use relativelylight::auth::lockout::{IpLockout, Lockout, UsernameLockout};
 use relativelylight::auth::passkey::Passkeys;
 use relativelylight::middleware::RealIp;
 use relativelylight::auth::sso::{Sso, SsoButton, SsoProvider};
-use relativelylight::auth::{self, Auth, GroupReadWrite, Identity};
+use relativelylight::auth::{self, Auth, GroupReadWrite, Identity, Level};
 use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::crud::ui::{Admin, Outcome, ViewState, CSS};
@@ -137,6 +142,13 @@ from this site. Reload the page and try again.</div>
         // Passkeys: a section on /profile, "Sign in with a passkey" on /login, and a passkey on every
         // confirm-it's-you form. The site is `localhost` on port 3000 — what the browser must show.
         .passkeys(Passkeys::new("localhost", "http://localhost:3000").rp_name("relativelylight auth demo"))
+        // The sign-in policy, from the environment so it can be tried: 1 (default) any sign-in,
+        // 2 two factors (TOTP, a passkey, or SSO).
+        .min_level(match std::env::var("MIN_LEVEL").as_deref() {
+            Ok("2") => Level::Multi,
+            _ => Level::Single,
+        })
+        .password_max_age_days(std::env::var("PASSWORD_MAX_AGE_DAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
         // The app's own section on the library's profile page — see `webhook_section`.
         .profile_extra(|s| async move { webhook_section(&s) });
 
@@ -441,11 +453,18 @@ fn accounts_engine(db: DatabaseConnection, auth: &Auth) -> Arc<Engine> {
     ] {
         user.field(f).hidden = true;
     }
+    // "Password change required" (docs/AUTH.md §5m): the row hook flags an account whenever a password
+    // is written for it — this panel's password field included — so the owner is asked for their own.
+    // Read-only here, or the form's unticked checkbox would post an explicit `false` with every save.
+    user.field(UserCol::MustChangePassword.as_str()).label = Some("Must change password".into());
+    user.field(UserCol::MustChangePassword.as_str()).read_only = true;
+    user.field(UserCol::PasswordChangedAt.as_str()).label = Some("Password set".into());
     // Lifecycle stamps are the library's to write: show them, formatted in the caller's zone.
     for f in [
         UserCol::CreatedAt.as_str(),
         UserCol::UpdatedAt.as_str(),
         UserCol::LastLoginAt.as_str(),
+        UserCol::PasswordChangedAt.as_str(),
     ] {
         user.field(f).read_only = true;
         user.field(f).datetime();

@@ -130,36 +130,64 @@ pub(super) fn totp_setup_html(
 #[template(path = "auth/profile.html")]
 struct Profile<'a> {
     username: &'a str,
+    sso: Option<&'a str>,
     has_password: bool,
     reauth: &'a ReauthView,
     totp_on: bool,
     recovery_left: Option<u64>,
+    notices: &'a Notices,
     error: Option<&'a str>,
     success: Option<&'a str>,
     csrf: &'a str,
 }
 
+/// What the top of the profile says before anything else (§5m): the factor a restricted session must
+/// add, and a password change that is due.
+#[derive(Default)]
+pub(super) struct Notices {
+    pub policy: Option<String>,
+    pub password: Option<String>,
+}
+
+/// The caller's own profile, as the page shows it.
+pub(super) struct ProfileView<'a> {
+    pub who: &'a Identity,
+    /// The provider of an SSO account, which has no password here.
+    pub sso: Option<&'a str>,
+    pub has_password: bool,
+    pub reauth: &'a ReauthView,
+    pub totp_on: bool,
+    pub recovery_left: Option<u64>,
+    pub notices: &'a Notices,
+}
+
 /// The self-service profile: change password, the 2FA state, recovery codes (with 2FA on) and
 /// signing out other sessions.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn change_form_html(
-    who: &Identity,
-    has_password: bool,
-    reauth: &ReauthView,
-    totp_on: bool,
-    recovery_left: Option<u64>,
+    v: &ProfileView<'_>,
     error: Option<&str>,
     success: Option<&str>,
     csrf: &str,
 ) -> String {
-    let username = &who.username;
-    render(Profile { username, has_password, reauth, totp_on, recovery_left, error, success, csrf })
+    render(Profile {
+        username: &v.who.username,
+        sso: v.sso,
+        has_password: v.has_password,
+        reauth: v.reauth,
+        totp_on: v.totp_on,
+        recovery_left: v.recovery_left,
+        notices: v.notices,
+        error,
+        success,
+        csrf,
+    })
 }
 
 #[derive(Template)]
 #[template(path = "auth/reset.html")]
 struct Reset<'a> {
     id: &'a str,
+    sso: Option<&'a str>,
     username: &'a str,
     totp_on: bool,
     has_password: bool,
@@ -176,6 +204,8 @@ struct Reset<'a> {
 /// What a manager's page shows about the account being managed.
 pub(super) struct Target<'a> {
     pub id: &'a str,
+    /// The provider of an SSO account: no password to reset.
+    pub sso: Option<&'a str>,
     pub username: &'a str,
     pub totp_on: bool,
     pub has_password: bool,
@@ -191,6 +221,7 @@ pub(super) fn reset_form_html(
 ) -> String {
     render(Reset {
         id: t.id,
+        sso: t.sso,
         username: t.username,
         totp_on: t.totp_on,
         has_password: t.has_password,
@@ -316,24 +347,6 @@ pub(super) fn api_key_minted_html(name: &str, raw: &str) -> String {
     render(ApiKeyMinted { name, raw })
 }
 
-#[derive(Template)]
-#[template(path = "auth/sso.html")]
-struct Sso<'a> {
-    managed: bool,
-    username: &'a str,
-    provider: &'a str,
-}
-
-/// A manager's view of an SSO account: a notice in place of the reset form.
-pub(super) fn sso_managed_html(username: &str, provider: &str) -> String {
-    render(Sso { managed: true, username, provider })
-}
-
-/// The owner's profile of an SSO account: a read-only notice.
-pub(super) fn sso_profile_html(who: &Identity, provider: &str) -> String {
-    render(Sso { managed: false, username: &who.username, provider })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,7 +356,7 @@ mod tests {
     #[test]
     fn every_value_a_page_shows_is_escaped() {
         let bad = r#"<script>x</script>""#;
-        let who = Identity { id: bad.into(), username: bad.into(), groups: vec![] };
+        let who = Identity::new(bad, bad, vec![]);
         let prov = totp::Provisioning { url: bad.into(), qr_data_uri: bad.into() };
         let row = || api_key::Row {
             id: 1,
@@ -357,17 +370,27 @@ mod tests {
         };
         let card = api_key::Card { rows: vec![row()], zone: bad.into() };
         let none = ReauthView::none();
-        let target = Target { id: bad, username: bad, totp_on: true, has_password: false, passkeys: 2 };
+        let target =
+            Target { id: bad, sso: None, username: bad, totp_on: true, has_password: false, passkeys: 2 };
+        let notices = Notices { policy: Some(bad.into()), password: Some(bad.into()) };
+        let view = |has_password: bool, sso: Option<&'static str>| ProfileView {
+            who: &who,
+            sso,
+            has_password,
+            reauth: &none,
+            totp_on: has_password,
+            recovery_left: Some(2),
+            notices: &notices,
+        };
         let pages = [
             login_form_html(Some(bad), bad, true),
             totp_login_html(Some(bad), bad, true, None),
             totp_setup_html(&prov, &none, Some(bad), bad),
-            change_form_html(&who, true, &none, true, Some(2), Some(bad), None, bad),
-            change_form_html(&who, false, &none, false, None, None, Some(bad), bad),
+            change_form_html(&view(true, None), Some(bad), None, bad),
+            change_form_html(&view(false, Some(bad)), None, Some(bad), bad),
             reset_form_html(&target, &none, Some(bad), None, bad),
+            reset_form_html(&Target { sso: Some(bad), ..target }, &none, None, Some(bad), bad),
             recovery_codes_html(&[], bad),
-            sso_managed_html(bad, bad),
-            sso_profile_html(&who, bad),
             csrf_rejected_html(bad),
             api_keys_html(&card, &none, Some(bad), None, bad),
             api_keys_html(&card, &none, None, Some(bad), bad),

@@ -42,6 +42,14 @@ pub struct Model {
     /// purpose — the spec forbids anything identifying here. `None` until the first enrolment.
     #[sea_orm(unique)]
     pub passkey_handle: Option<String>,
+    /// Unix seconds the password was last set, stamped by the row hook whenever a write sets one.
+    /// `None` for a row from before the column existed; the age then counts from `created_at`.
+    pub password_changed_at: Option<i64>,
+    /// The owner must choose a new password: someone else set this one (an administrator's panel
+    /// edit, a manager's reset). Set by the row hook below unless the writer set it explicitly; the
+    /// owner's own change clears it.
+    #[sea_orm(default_value = false)]
+    pub must_change_password: bool,
     /// Row lifecycle timestamps — Unix seconds, **UTC**. `created_at`/`updated_at` are maintained by
     /// the `before_save` hook; `last_login_at` is stamped by the login flow (`None` until first login).
     pub created_at: i64,
@@ -49,7 +57,31 @@ pub struct Model {
     pub last_login_at: Option<i64>,
 }
 
+/// Why an account should choose a new password (`Identity::password_change`, docs/AUTH.md §5m).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PasswordChange {
+    /// Someone other than the owner set it, so it is known to them.
+    SetByAnother,
+    /// Older than the site's `Auth::password_max_age_days`.
+    Expired,
+}
+
 impl Model {
+    /// Whether this account should choose a new password, and why: `None` for an account with no
+    /// password (SSO, passkey-only). `max_age_days` is `Auth::password_max_age_days` (`0` = no limit).
+    pub fn password_change(&self, max_age_days: u32, now: i64) -> Option<PasswordChange> {
+        if self.password_hash.is_empty() || self.is_sso() {
+            return None;
+        }
+        if self.must_change_password {
+            return Some(PasswordChange::SetByAnother);
+        }
+        let since = self.password_changed_at.unwrap_or(self.created_at);
+        (max_age_days > 0 && now - since > i64::from(max_age_days) * 86_400)
+            .then_some(PasswordChange::Expired)
+    }
+
     /// The provider key this account signs in through, or `None` for a local (password) account.
     /// Normalizes a **blank** `sso_provider` to `None`: an admin form that leaves the column empty
     /// stores `""`, which must not turn the account into an SSO one that can never log in.
@@ -103,16 +135,33 @@ impl Related<super::group::Entity> for Entity {
 
 // Maintain the UTC lifecycle timestamps: stamp created_at on insert, updated_at on every save.
 #[async_trait::async_trait]
+/// The row hook: lifecycle stamps, and the password's.
+///
+/// **Any write that sets `password_hash` stamps `password_changed_at`, and flags the account
+/// (`must_change_password`) unless the writer set that column itself.** So a password written by
+/// anyone but its owner — an administrator's panel edit, an app's own form, a manager's reset —
+/// asks the owner to choose their own, without each of those paths having to remember. The owner's
+/// own change and the programmatic helpers (`create_user`, `set_password`, …) clear it explicitly.
 impl ActiveModelBehavior for ActiveModel {
     async fn before_save<C>(mut self, _db: &C, insert: bool) -> Result<Self, DbErr>
     where
         C: ConnectionTrait,
     {
+        use sea_orm::ActiveValue::Set;
         let now = super::now_secs();
         if insert {
-            self.created_at = sea_orm::ActiveValue::Set(now);
+            self.created_at = Set(now);
         }
-        self.updated_at = sea_orm::ActiveValue::Set(now);
+        self.updated_at = Set(now);
+        if self.password_hash.is_set() {
+            self.password_changed_at = Set(Some(now));
+            if !self.must_change_password.is_set() {
+                self.must_change_password = Set(true);
+            }
+        }
+        if insert && !self.must_change_password.is_set() {
+            self.must_change_password = Set(false);
+        }
         Ok(self)
     }
 }

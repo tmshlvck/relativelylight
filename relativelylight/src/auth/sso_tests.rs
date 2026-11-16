@@ -40,7 +40,8 @@ use openidconnect::{
     SubjectIdentifier, TokenUrl,
 };
 use rsa::pkcs1::EncodeRsaPrivateKey;
-use sea_orm::{Database, DatabaseConnection, EntityTrait, Set};
+use axum::http::HeaderMap;
+use sea_orm::{ActiveModelTrait, Database, DatabaseConnection, EntityTrait, Set};
 use serde_json::{json, Map, Value};
 use tower::ServiceExt;
 
@@ -239,10 +240,19 @@ impl Fx {
     }
 
     async fn with(auto_register: bool, tweak: impl FnOnce(SsoProvider) -> SsoProvider) -> Fx {
+        Fx::with_auth(auto_register, tweak, |a| a).await
+    }
+
+    /// As [`Fx::with`], with a chance to configure `Auth` too (the sign-in policy).
+    async fn with_auth(
+        auto_register: bool,
+        tweak: impl FnOnce(SsoProvider) -> SsoProvider,
+        configure: impl FnOnce(Auth) -> Auth,
+    ) -> Fx {
         let idp = start_idp().await;
         let db = Database::connect("sqlite::memory:").await.expect("sqlite in-memory");
         migrate(&db).await.expect("migrate");
-        let auth = Auth::new(db.clone(), Lockout::default()).secure_cookies(false);
+        let auth = configure(Auth::new(db.clone(), Lockout::default()).secure_cookies(false));
         let provider = tweak(
             SsoProvider::new(
                 PROVIDER,
@@ -257,11 +267,17 @@ impl Fx {
         let sso = Sso::new(&auth)
             .username_group_rule(r"^staff-", ["staff"])
             .provider(provider);
-        let app = auth.routes().merge(sso.routes());
+        // The address layer, as an app must apply it: the TOTP step after a callback reads `RealIp`.
+        let app = auth.routes().merge(sso.routes()).layer(axum::middleware::from_fn_with_state(
+            crate::middleware::TrustProxy(false),
+            crate::middleware::resolve_real_ip,
+        ));
         Fx { db, auth, app, idp }
     }
 
-    async fn send(&self, req: Request<Body>) -> Resp {
+    async fn send(&self, mut req: Request<Body>) -> Resp {
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(addr));
         let res = self.app.clone().oneshot(req).await.expect("router response");
         let status = res.status();
         let headers = res.headers().clone();
@@ -683,4 +699,60 @@ async fn provider_discovery_is_fetched_once_and_then_reused() {
         after_first,
         "the cached document is reused across sign-ins"
     );
+}
+
+// ===================== The sign-in policy (§5m) =====================
+
+/// The session cookie a response set, as a `Cookie:` value.
+fn session_cookie_of(fx: &Fx, res: &Resp) -> String {
+    let name = fx.auth.session_cookie_name();
+    format!("{name}={}", res.session_token(name).expect("a session cookie"))
+}
+
+#[tokio::test]
+async fn sso_counts_as_two_factors_unless_the_site_says_otherwise() {
+    use crate::auth::Level;
+    // Default: the IdP is trusted, so SSO meets a `Multi` minimum and lands in the app.
+    let fx = Fx::with_auth(true, |p| p, |a| a.min_level(Level::Multi)).await;
+    let res = fx.login_with(Recipe::valid("staff-alice")).await;
+    assert_eq!(res.headers.get(header::LOCATION).unwrap(), "/", "{}", res.body);
+    let cookie = session_cookie_of(&fx, &res);
+    let mut h = HeaderMap::new();
+    h.insert(header::COOKIE, cookie.parse().unwrap());
+    assert_eq!(fx.auth.identify(&h).await.map(|w| w.level), Some(Level::Multi));
+
+    // Distrusted: SSO alone is one factor, so the session is restricted to the profile.
+    let fx =
+        Fx::with_auth(true, |p| p, |a| a.min_level(Level::Multi).sso_level(Level::Single)).await;
+    let res = fx.login_with(Recipe::valid("staff-alice")).await;
+    assert_eq!(res.headers.get(header::LOCATION).unwrap(), "/profile");
+    let cookie = session_cookie_of(&fx, &res);
+    let mut h = HeaderMap::new();
+    h.insert(header::COOKIE, cookie.parse().unwrap());
+    assert!(fx.auth.identify(&h).await.is_none(), "restricted: not an identity for the app");
+    let page = fx.get("/profile", Some(&cookie)).await;
+    assert!(page.body.contains("authenticator app"), "says what to add: {}", page.body);
+
+    // With this site's TOTP, the code follows the provider's callback, and the session counts.
+    let secret = crate::auth::totp::generate_secret();
+    let row = fx.row("staff-alice").await.unwrap();
+    let mut am: user::ActiveModel = row.into();
+    am.totp_secret = Set(Some(secret.clone()));
+    am.update(&fx.db).await.unwrap();
+    let res = fx.login_with(Recipe::valid("staff-alice")).await;
+    assert_eq!(res.headers.get(header::LOCATION).unwrap(), "/login/totp");
+    let pending = session_cookie_of(&fx, &res);
+    let csrf = "c".repeat(64);
+    let body = format!("code={}&_csrf={csrf}", crate::auth::totp::current_code(&secret));
+    let req = Request::post("/login/totp")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(header::COOKIE, format!("{pending}; {}={csrf}", fx.auth.csrf().cookie()))
+        .body(Body::from(body))
+        .unwrap();
+    let res = fx.send(req).await;
+    assert_eq!(res.headers.get(header::LOCATION).map(|v| v.to_str().unwrap()), Some("/"), "{}", res.body);
+    let cookie = session_cookie_of(&fx, &res);
+    let mut h = HeaderMap::new();
+    h.insert(header::COOKIE, cookie.parse().unwrap());
+    assert_eq!(fx.auth.identify(&h).await.map(|w| w.level), Some(Level::Multi));
 }

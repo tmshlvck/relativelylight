@@ -55,28 +55,16 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
   - a username-first sign-in, for security keys with no free slot for a discoverable credential;
   - device names from FIDO metadata;
   - an AAGUID allowlist.
-- [ ] **Sign-in policy as a minimum assurance level**, as designed in
-  [DESIGN.md → auth](DESIGN.md#auth); it replaces "mandatory passkeys". Needs:
-  - `Auth::min_level(n)` and `Auth::sso_level(n)`, defaulting to 1 and 2;
-  - the level on `Identity`, from the session's recorded method;
-  - the restricted `/profile` session for a level below the minimum;
-  - TOTP enrolment for SSO accounts (refused today), with the TOTP step after the IdP's callback.
-- [ ] **Password change required** (design).
-  - **New columns:** `auth_user.password_changed_at`, and `must_change_password`, set by a
-    manager's reset and by the admin panel's password field.
-  - **Optional maximum age:** `Auth::password_max_age_days(n)`, `0` = never, the default. NIST SP
-    800-63B advises against periodic rotation, so it is off unless an app is required to rotate.
-  - **Not `updated_at`:** any edit to the account moves it, so it can't say when the password
-    changed.
-  - **When a change is due:** the login lands on `/profile`, which explains why, and the user can
-    still go on to the app.
-  - **Known-breached passwords** feed the same flag (see breached-password screening).
 - [ ] **Notifications** (discuss and design first, no implementation yet). Should `auth`, and the
   crate in general, have a way to hand the app pending messages for a user? The app would render
-  them, e.g. a bell in the navbar. The first use is the password-change notice above. Open: per
-  request or stored, who clears one, and whether it is an `auth` thing or a crate-wide one.
-- [ ] **Self-service password recovery** (later). It resets passkeys too, but not TOTP: the user
-  needs recovery codes or an administrator for that.
+  them, e.g. a bell in the navbar. The first uses: the password-change notice
+  (`Identity::password_change`) and the restricted session's "add a factor" notice, which today
+  only `/profile` shows. Open: per request or stored, who clears one, and whether it is an `auth`
+  thing or a crate-wide one.
+- [ ] **Self-service password recovery** (later), probably together with an optional
+  self-registration (today's decision is no sign-up page, §5j: both need a verified e-mail or
+  similar). It resets passkeys too, but not TOTP: the user needs recovery codes or an administrator
+  for that.
 - **No scopes on API keys.** A key is its owner (AUTH.md §5k); narrower access is an account of its
   own in a narrower group. Revisit only for a third-party OAuth client, which is a different design.
 - **Expired API keys are not pruned.** They stay listed as expired, as evidence, until someone

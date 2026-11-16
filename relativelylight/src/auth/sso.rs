@@ -472,16 +472,21 @@ async fn callback(
     };
     let desired = sso.resolve_groups(p, username, &claim_values);
     reconcile_groups(db, &user.username, user.id, &desired).await;
-    super::stamp_login(db, user.id, None).await; // no local 2FA on an SSO account, so no step to spend
-
-    // SSO accounts have no local 2FA, so this is a full session immediately.
-    let Ok(token) =
-        super::create_session(&sso.auth.inner, user.id, false, super::session::Method::Sso).await
-    else {
+    // An SSO account may have this site's TOTP too (§5m, `Auth::sso_level`): then the provider's
+    // callback is the first step, and the session is half-authenticated until the code.
+    let inner = &sso.auth.inner;
+    let needs_totp = user.has_totp();
+    let method = super::session::Method::Sso;
+    let Ok(token) = super::create_session(inner, user.id, needs_totp, method).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, clear, "session error").into_response();
     };
-    let jar = clear.add(session_cookie(&sso.auth.inner, token));
-    (jar, Redirect::to("/")).into_response()
+    let jar = clear.add(session_cookie(inner, token));
+    if needs_totp {
+        return (jar, Redirect::to("/login/totp")).into_response();
+    }
+    super::stamp_login(db, user.id, None).await;
+    let to = inner.landing(&user, method, None).to_string();
+    (jar, Redirect::to(&to)).into_response()
 }
 
 /// Find the SSO user for `username`, honoring the provider binding and auto-registration policy.
@@ -517,6 +522,7 @@ async fn resolve_user(
     let created = user::ActiveModel {
         username: Set(username.to_string()),
         password_hash: Set(String::new()), // no password → no local login
+        must_change_password: Set(false),  // …and so nothing to change
         is_active: Set(true),
         sso_provider: Set(Some(p.key.clone())),
         ..Default::default()

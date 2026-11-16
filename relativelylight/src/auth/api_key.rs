@@ -396,11 +396,9 @@ async fn lookup(inner: &Inner, token: &str) -> Result<Option<KeyIdentity>, DbErr
     }
     let groups = super::groups_of(&inner.db, user.id).await;
     Ok(Some(KeyIdentity {
-        identity: Identity {
-            id: user.id.to_string(),
-            username: user.username,
-            groups,
-        },
+        // A key is a bearer credential outside the sign-in policy (§5m): one factor, whatever the
+        // session that minted it had.
+        identity: Identity::new(user.id.to_string(), user.username, groups),
         key_id: key.id,
         key_name: key.name,
         key_prefix: key.prefix,
@@ -535,6 +533,12 @@ pub(super) async fn mint_submit(
         Ok(v) => v,
         Err(res) => return res,
     };
+    // A restricted session (below the sign-in policy, §5m) can't mint: a key would carry the account
+    // past the policy for good.
+    if inner.restricted(&who) {
+        let msg = "Add the second factor this site needs before creating an API key.";
+        return refuse(&inner, (&who, &user, &csrf, &req), StatusCode::FORBIDDEN, msg).await;
+    }
     if let Err(msg) = inner
         .reauth(&user, &form.reauth)
         .await

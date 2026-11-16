@@ -46,27 +46,31 @@ keep working: the stored hash is the SHA-256 hex of the raw key, as before.
    twice. Build your principal from the returned `identity` (groups by name) and `key_id`.
 4. In the accounts panel, register `auth::api_key::meta_model()` in place of your own `MetaModel`.
 
-## 3. New `auth` columns for passkeys
+## 3. New `auth` columns and tables
 
-**Required, passkeys or not, before the upgraded crate runs.** `auth_user` gains `passkey_handle`,
-`auth_session` gains `method` and `passkey_class`, and there are two new tables, `auth_passkey` and
-`auth_webauthn_challenge`. Every read of an account selects the new column, so an unmigrated
-database refuses every login. `auth::migrate` creates the two tables but never alters one: an app
-that relies on it alone still needs the columns added.
+**Required, whatever features you use, before the upgraded crate runs.**
 
-The crate ships the statements:
+- `auth_user` gains `passkey_handle` (§5l), `password_changed_at` and `must_change_password` (§5m).
+- `auth_session` gains `method` and `passkey_class`.
+- Two new tables: `auth_passkey` and `auth_webauthn_challenge`.
+
+Every read of an account selects the new columns, and every write of a password sets two of them,
+so an unmigrated database can neither sign anyone in nor create an account. `auth::migrate` creates
+the two tables but never alters one: an app that relies on it alone still needs the columns added.
+
+The crate ships the statements, in `auth::upgrade`:
 
 ```rust
-use relativelylight::auth::passkey;
+use relativelylight::auth::upgrade;
 
 // inside a MigrationTrait::up(&self, m: &SchemaManager)
-for stmt in passkey::table_create_statements(m.get_database_backend()) {
+for stmt in upgrade::table_create_statements(m.get_database_backend()) {
     m.create_table(stmt).await?;
 }
-for stmt in passkey::table_alter_statements() {
+for stmt in upgrade::table_alter_statements() {
     m.alter_table(stmt).await?;
 }
-for stmt in passkey::index_create_statements() {
+for stmt in upgrade::index_create_statements() {
     m.create_index(stmt).await?;   // the handle's uniqueness: SQLite can't add a UNIQUE column
 }
 ```
@@ -76,14 +80,19 @@ As SQL:
 ```sql
 ALTER TABLE auth_user ADD COLUMN passkey_handle varchar NULL;
 CREATE UNIQUE INDEX "idx-auth_user-passkey_handle" ON auth_user (passkey_handle);
+ALTER TABLE auth_user ADD COLUMN password_changed_at bigint NULL;
+ALTER TABLE auth_user ADD COLUMN must_change_password boolean NOT NULL DEFAULT FALSE;
 ALTER TABLE auth_session ADD COLUMN method varchar NOT NULL DEFAULT '';
 ALTER TABLE auth_session ADD COLUMN passkey_class varchar NULL;
--- and the two tables, from passkey::table_create_statements
+-- and the two tables, from upgrade::table_create_statements
 ```
 
-Sessions from before the step keep working; their `method` is empty. In an accounts panel, hide
-`passkey_handle` with the TOTP columns: the user's authenticators hold it, so an edited one orphans
-every passkey on the account.
+**After the upgrade:**
+- Sessions from before the step keep working. Their `method` is empty, which counts as `Single`.
+- A password from before has no `password_changed_at`; a maximum age counts it from `created_at`.
+- **Accounts panel:** hide `passkey_handle` with the TOTP columns (the user's authenticators hold
+  it, so an edited one orphans every passkey). Show `must_change_password` read-only (an editable
+  one would never be set, §5m).
 
 ## 4. MSRV 1.89
 

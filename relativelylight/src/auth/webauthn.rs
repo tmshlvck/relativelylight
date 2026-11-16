@@ -927,7 +927,8 @@ pub(super) async fn login_finish(
         return (jar, Redirect::to("/login/totp")).into_response();
     }
     super::stamp_login(&inner.db, account.id, None).await;
-    (jar, Redirect::to("/")).into_response()
+    let to = inner.landing(&account, session::Method::Passkey, Some(row.class())).to_string();
+    (jar, Redirect::to(&to)).into_response()
 }
 
 /// `POST /login/totp/passkey` — the passkey as the **second factor** after a password: the same brakes
@@ -983,6 +984,7 @@ pub(super) async fn second_factor_finish(
         }
     };
     let method = session::Method::PasswordPasskey;
+    let to = inner.landing(&account, method, Some(row.class())).to_string();
     let Some(token) = super::rotate_session(&inner, pending, method, Some(row.class())).await
     else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
@@ -993,7 +995,7 @@ pub(super) async fn second_factor_finish(
     let jar = jar
         .add(super::session_cookie(&inner, token))
         .add(csrf_cookie);
-    (jar, Redirect::to("/")).into_response()
+    (jar, Redirect::to(&to)).into_response()
 }
 
 /// The profile page with a message on the passkeys section.
@@ -1086,6 +1088,7 @@ pub(super) async fn add_finish(
     State(inner): State<Arc<Inner>>,
     req: Parts,
     RealIp(client_ip): RealIp,
+    jar: CookieJar,
     Form(form): Form<CeremonyForm>,
 ) -> Response {
     let Some(rt) = runtime(&inner) else {
@@ -1134,18 +1137,13 @@ pub(super) async fn add_finish(
             client_ip,
         })
         .await;
+    // The session just proved the passkey: it steps up (§5m), so a restricted session becomes usable.
+    let factor = super::Factor::Passkey(row.class());
+    let (jar, csrf) = super::step_up(&inner, &req.headers, jar, csrf, factor).await;
+    let who = super::refreshed(&inner, &req, &jar, who).await;
     let msg = format!("Passkey “{}” added.", row.name);
-    card_page(
-        &inner,
-        &who,
-        &user,
-        StatusCode::OK,
-        None,
-        Some(&msg),
-        &csrf,
-        &req,
-    )
-    .await
+    let page = card_page(&inner, &who, &user, StatusCode::OK, None, Some(&msg), &csrf, &req).await;
+    (jar, page).into_response()
 }
 
 /// `POST /profile/passkeys/{id}/remove` — the caller removes one of their own passkeys. Not
@@ -1282,6 +1280,7 @@ pub(super) async fn password_remove(
     }
     let mut am: user::ActiveModel = user.clone().into();
     am.password_hash = Set(String::new());
+    am.must_change_password = Set(false);
     let user = match am.update(&inner.db).await {
         Ok(u) => u,
         Err(e) => {

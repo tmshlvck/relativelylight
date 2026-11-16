@@ -16,17 +16,26 @@ is easy to miss in a diff.
 - **MSRV 1.89** (was 1.88), for `webauthn-rs` 0.6, the passkeys dependency. **Upgrade:** a 1.89 or
   newer toolchain ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#4-msrv-189)).
 
-- **Schema: three new columns and two new tables, needed before the upgraded crate runs**, whether
-  or not the app uses passkeys. The new columns are `auth_user.passkey_handle` (the WebAuthn user
-  handle), `auth_session.method` and `auth_session.passkey_class` (how a session was authenticated).
-  The new tables are `auth_passkey` and `auth_webauthn_challenge`. Every read of an account selects
-  the new column, so an unmigrated database refuses every login. `auth::migrate` creates the tables
-  but never alters one. **Upgrade:** a migration step applying
-  `auth::passkey::table_create_statements`, `table_alter_statements` and `index_create_statements`
-  ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#3-new-auth-columns-for-passkeys)). Hide
-  `passkey_handle` in an accounts panel, as the TOTP columns are hidden. Each session now records
-  its method (`password`, `password+totp`, `password+recovery`, `sso`), and `auth.prune()` deletes
-  expired challenges.
+- **Schema: five new columns and two new tables, needed before the upgraded crate runs**, whatever
+  features the app uses.
+  - `auth_user` gains `passkey_handle` (the WebAuthn user handle), `password_changed_at` and
+    `must_change_password` ("password change required").
+  - `auth_session` gains `method` and `passkey_class` (how a session was authenticated).
+  - The new tables are `auth_passkey` and `auth_webauthn_challenge`.
+
+  Every read of an account selects the new columns and every write of a password sets two of them,
+  so an unmigrated database can neither sign anyone in nor create an account. `auth::migrate`
+  creates the tables but never alters one. **Upgrade:** a migration step applying
+  `auth::upgrade::{table_create_statements, table_alter_statements, index_create_statements}`
+  ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#3-new-auth-columns-and-tables)). In an accounts panel,
+  hide `passkey_handle` and show `must_change_password` read-only. Each session now records its
+  method, and `auth.prune()` deletes expired challenges.
+- **A password written for someone asks them to choose their own.** Any write that sets
+  `password_hash` without setting `must_change_password` flags the account: an accounts-panel edit,
+  an app's own form, a manager's reset. The owner then lands on `/profile` after signing in, with a
+  notice. `create_user`, `set_password`, `make_admin` and `reset_admin_access` don't flag. **Upgrade:**
+  if an app sets passwords for users itself and doesn't want this, set `must_change_password` to
+  `false` in the same write.
 
 - **`Auth`'s page callbacks get the request.** `login_shell`, `profile_shell` and `csrf_rejection`
   now receive the request's `http::request::Parts` (URI, method, headers, extensions), so the pages
@@ -64,6 +73,19 @@ is easy to miss in a diff.
   - adding and removing a passkey are audited, without the credential.
 
   `examples/auth` has passkeys on.
+- **The sign-in policy: one minimum assurance level** ([AUTH.md §5m](docs/AUTH.md#5m-the-sign-in-policy-and-password-change-required)).
+  - `Auth::min_level(Level::Single | Multi | Hardware)`, default `Single`, changes nothing for an
+    existing app.
+  - Each sign-in method has a level: password `Single`; password + TOTP, a passkey, SSO `Multi`; an
+    attested passkey `Hardware`. `Auth::sso_level` sets SSO's (`Single` to distrust the IdP).
+  - A session below the minimum is restricted: `identify` returns `None`, and its only page is the
+    caller's profile, which says which factor to add. Adding it steps the session up.
+  - `Identity::level` carries the level for an app that wants more for one action.
+  - SSO accounts may now enrol TOTP, and the TOTP step follows the provider's callback when they have.
+- **"Password change required"** ([AUTH.md §5m](docs/AUTH.md#5m-the-sign-in-policy-and-password-change-required)).
+  - `Identity::password_change` (`SetByAnother` / `Expired`) for a notice in the app's shell.
+  - `Auth::password_max_age_days(n)` is an optional maximum age, off by default.
+  - `examples/adminpanel` shows a navbar badge, and both example panels show the flag read-only.
 - **Re-authentication takes a passkey, and an app's own form can too.**
   - `Auth::reauth_fields(&who, hint)` renders the confirm-it's-you inputs for whichever factors the
     account has. `Auth::reauthenticate_with(&who, &ReauthInput)` checks the post.

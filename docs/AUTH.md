@@ -10,6 +10,7 @@ Feature `auth`, usable without `crud`. It provides:
   password policy (§5g), re-authentication before sensitive changes (§5h);
 - API keys for machine endpoints, each acting as its owner, with self-service on `/profile` (§5k);
 - passkeys: sign-in without a password, a second factor, re-authentication (feature `passkeys`, §5l);
+- a sign-in policy as one minimum assurance level, and "password change required" (§5m);
 - double-submit CSRF (feature `csrf`, §7);
 - per-model gate presets for `crud` (§6).
 
@@ -119,15 +120,17 @@ The tables, all ordinary SeaORM entities an admin panel can register (§5j):
 
 - **`auth_user`** — `id`, `username` (unique), `password_hash` (argon2id), `is_active`,
   `sso_provider` (§5b), the 2FA columns `totp_secret` / `totp_pending` / `totp_last_step` (§5a),
-  `passkey_handle` (the WebAuthn user handle, set at the first passkey enrolment), and timestamps
-  (§5c). Every creation path validates the username with `auth::valid_username`
+  `passkey_handle` (the WebAuthn user handle, set at the first passkey enrolment),
+  `password_changed_at` / `must_change_password` (§5m), and timestamps (§5c). Every creation path validates the username with `auth::valid_username`
   (non-empty, ≤ 254 bytes, no spaces or control characters); wire the same check into an admin form
   with `user_mm.field("username").validate_str(auth::valid_username)`.
 - **`auth_group`** + **`auth_user_group`** (N:M) — group membership drives the gates.
 - **`auth_session`** — the opaque id, `user_id`, `expires_at` (absolute deadline), `last_seen_at`
   (idle clock, §5f), `awaiting_totp` (password accepted, second factor pending), and `method` /
   `passkey_class`: how the session was authenticated (`password`, `password+totp`,
-  `password+recovery`, `sso`) and the class of the passkey when one was used. Empty for a row from
+  `password+recovery`, `password+passkey`, `passkey`, `passkey+totp`, `passkey+recovery`, `sso`,
+  `sso+totp`, `sso+recovery`) and the class of the passkey when one was used. The session's level
+  (§5m) is read from these. Empty for a row from
   before the column existed.
 - **`auth_totp_recovery`** — hashed single-use recovery codes (§5i).
 - **`auth_api_key`** — hashed API keys (§5k).
@@ -306,8 +309,10 @@ nonce, ID-token signature/aud/iss/exp verification); the QR-free, cookie-carried
 the round-trip to the provider. Configured at app start; usable alongside password login + 2FA.
 
 **Accounts.** An SSO login resolves to an `auth_user` whose **`sso_provider`** column marks it external.
-Such accounts have **no local password and no 2FA** — `verify_credentials` refuses a password login,
-and the profile page shows a read-only notice instead of the password / 2FA controls. With a
+Such accounts have **no local password and no passkeys** — `verify_credentials` refuses a password
+login, and the profile page shows the provider in place of the password controls. They **may** enrol
+this site's TOTP, which a site that distrusts its IdP requires (`Auth::sso_level`, §5m); the TOTP step
+then follows the provider's callback. With a
 provider's **auto-registration** on, an unknown user is created on first login; with it off, an admin
 must pre-create the user and set its `sso_provider` to the provider key first, else the login is
 refused. A local (password) account can't be signed into via SSO, and an account bound to one provider
@@ -806,7 +811,7 @@ crud.register(user,  Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP])));
 crud.register(group, Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP])));
 ```
 
-Four things are load-bearing:
+Five things are load-bearing:
 
 1. **`user.relate(&group)`** — `auth_user_group` is an N:M junction and is never registered as a model
    of its own, so without this declaration the panel can create an account and cannot put it in a
@@ -822,6 +827,8 @@ Four things are load-bearing:
    the user out of their own authenticator. `passkey_handle` is held by the user's authenticators,
    so an edited one orphans every passkey. 2FA is managed from `/profile`, never from a CRUD form. **Never register
    `auth::recovery::entity`** at all — every row of it is a credential hash.
+5. **Keep `must_change_password` read-only** (§5m). The hook sets it when the panel writes someone's
+   password; an editable checkbox would post `false` with every save and the flag would never be set.
 
 Register `lockout::username_entity` / `lockout::ip_entity` in the same panel (§5e) and the unlock
 becomes an ordinary gated, CSRF-checked, audited `DELETE` rather than a bespoke endpoint.
@@ -1035,6 +1042,85 @@ crud.register(auth::passkey::meta_model(), Arc::new(GroupReadWrite::new(&auth, [
 **Audit** (§5d). Adding and removing a passkey fire `Create` / `Delete` on `auth_passkey` with its
 label, class and AAGUID, never the credential. Removing a password and a manager's removal fire
 `Update` on `auth_user`.
+
+## 5m. The sign-in policy, and "password change required"
+
+**One minimum assurance level.** Each way of signing in has a level, and the app sets the lowest it
+accepts:
+
+```rust
+use relativelylight::auth::Level;
+
+let auth = Auth::new(db, lockout)
+    .min_level(Level::Multi)          // default Level::Single: any sign-in
+    .sso_level(Level::Single);        // default Level::Multi: trust the IdP's own second factor
+```
+
+| Signed in with | Level |
+|---|---|
+| a password | `Single` |
+| a password + TOTP (or a recovery code), a password + passkey | `Multi` |
+| a passkey (§5l) | `Multi` |
+| an attested passkey, alone or with anything | `Hardware` |
+| SSO | `sso_level`, `Multi` by default |
+| SSO + TOTP | at least `Multi` |
+
+TOTP lifts a method to `Multi`, never higher: `Hardware` means an attested passkey, so "security keys
+of trusted models only" stays expressible. `min_level(Level::Hardware)` needs passkeys requiring
+`Class::Attested`; `routes()` panics otherwise. Typical settings:
+
+| The site wants | Set |
+|---|---|
+| any sign-in (the default) | nothing |
+| a password + TOTP, a passkey, or SSO | `min_level(Level::Multi)` |
+| the same, and our own TOTP after SSO | `min_level(Level::Multi).sso_level(Level::Single)` |
+| attested security keys only | `min_level(Level::Hardware)` and passkeys `require(Class::Attested)` |
+
+**The level is read from the session** (its recorded method and passkey class) on every request, so a
+stricter policy applies to sessions already open. `Identity::level` carries it, for an app that wants
+more for one action than the site's minimum, such as a signature:
+
+```rust
+if who.level < Level::Hardware { return refuse("sign with your security key"); }
+```
+
+**A session below the minimum is restricted.** `identify` returns `None`, so the app and every gate
+treat it as anonymous. The caller's own `/profile` still works: the login lands there, a notice says
+which factor to add, and only the sections that add one are shown (no API keys, no `profile_extra`).
+`GET /login` with a restricted session goes to `/profile` too, so an app that redirects anonymous
+callers to the login page doesn't loop. A restricted session can't mint an API key or manage others.
+**Adding the factor steps the session up**: TOTP or a passkey enrolled on `/profile` rotates the
+session to the stronger method (a new id, the same as completing a second factor at login), and the
+user goes on without signing in again. API keys (§5k) are outside the policy: a key's identity is
+`Single`, and only a session that meets the minimum can mint one.
+
+**SSO accounts may enrol TOTP** for this. With `sso_level(Level::Single)` and a `Multi` minimum, an SSO
+user's first sign-in is restricted and asks for TOTP; after that, the TOTP step follows the provider's
+callback.
+
+**"Password change required."** Two columns on `auth_user`: `password_changed_at` (when the password
+was last set) and `must_change_password` (someone other than the owner set it).
+
+- **The row hook flags it.** Any write that sets `password_hash` stamps `password_changed_at` and sets
+  `must_change_password`, unless the writer set that column itself. So a password an administrator
+  types in the accounts panel, an app's own form, or a manager's reset at `/profile/{id}` asks its
+  owner to choose their own. The owner's change on `/profile` clears it, and so do the programmatic
+  helpers (`create_user`, `set_password`, `make_admin`, `reset_admin_access`): those are the
+  owner's or a seeder's.
+- **In an accounts panel, keep `must_change_password` read-only** (shown, not edited). The form posts
+  every editable field, and an unticked checkbox is an explicit `false`, which the hook respects: the
+  flag would never be set. `password_changed_at` is the library's to stamp; show it read-only too.
+- **`Auth::password_max_age_days(n)`**, default `0` (no limit), makes a password older than `n` days
+  due. NIST SP 800-63B advises against periodic rotation; set it only where a rotation is required. A
+  row from before the column existed counts from `created_at`.
+- **Due is a notice, not a lock.** The login lands on `/profile`, which says why, and the user can go
+  on into the app. `Identity::password_change` (`SetByAnother` or `Expired`) is there for the app's
+  shell, as `examples/adminpanel`'s navbar badge shows. Accounts with no password (SSO, passkey-only)
+  are never due.
+
+**Schema.** `password_changed_at`, `must_change_password` and the session's method are among 0.5's
+upgrade statements (`auth::upgrade`,
+[MIGRATION-0.5.md](MIGRATION-0.5.md#3-new-auth-columns-and-tables)).
 
 ## 6. authz — the gate
 
@@ -1285,6 +1371,12 @@ in-memory SQLite:
   sessions; the second factor only when enabled; a passwordless account keeps a way in and must
   confirm with its passkey; managers, audit, and nothing at all with the feature off. The browser
   script is checked in Chromium's virtual authenticator (Playwright).
+- The sign-in policy and password change, also in `auth/security_tests.rs`: each method's level; a
+  restricted session sees only its profile, can't mint a key or manage anyone, and steps up when it
+  adds TOTP; a stricter minimum ends open sessions; a `Hardware` minimum without attested passkeys is a
+  startup error; who flags a password and who doesn't (through the CRUD engine too); the maximum age.
+  `sso_tests.rs` covers `sso_level` and the TOTP step after a callback, `passkey_tests.rs` the
+  `Hardware` level.
 - **`auth/sso_tests.rs`** (feature `sso`) — the OIDC callback against a **fake IdP** on a loopback
   port (real discovery, real RSA signatures): missing or forged state, wrong key, audience, issuer,
   nonce, an expired token, missing claims, auto-registration off, disabled, local and

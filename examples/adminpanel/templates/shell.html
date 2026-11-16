@@ -24,6 +24,10 @@
         <a class="navbar-text text-light text-decoration-none" href="/profile" title="Profile &amp; password">
           <span aria-hidden="true">&#128100;</span> {{ user }}
         </a>
+        {% if password_due %}
+        <!-- Identity::password_change: the account should choose a new password (AUTH.md §5m). -->
+        <a class="badge text-bg-warning text-decoration-none" href="/profile">change your password</a>
+        {% endif %}
         <a class="btn btn-outline-light btn-sm" href="/logout">Log out</a>
         {% endif %}
         <!-- Timezone picker: a plain form posting to our own /tz, which sets the cookie the server

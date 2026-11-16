@@ -148,24 +148,48 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
     virtual authenticator, which also covers what the software ones can't.
 - **A ceremony starts on a click.** Browsers want a user gesture before a passkey prompt (Safari
   insists), so every ceremony page has a button, never an automatic start.
-- **The sign-in policy is one minimum assurance level** (planned). Each way of signing in has a level:
+- **The sign-in policy is one minimum assurance level**, `Auth::min_level`. Each way of signing in
+  has a level:
 
   | Signed in with | Level |
   |---|---|
-  | a password | 1 |
-  | a password + TOTP | 2 |
-  | a passkey | 2 |
-  | an attested passkey | 3 |
-  | SSO | 2 by default (the IdP is trusted to have asked for its own second factor); 1 with `Auth::sso_level(1)` |
+  | a password | `Single` (1) |
+  | a password + TOTP (or a recovery code), a password + passkey | `Multi` (2) |
+  | a passkey | `Multi` (2) |
+  | an attested passkey, alone or with anything | `Hardware` (3) |
+  | SSO | `Multi` by default (the IdP is trusted to have asked for its own second factor); `Auth::sso_level(Level::Single)` to distrust it |
+  | SSO + TOTP | at least `Multi` |
 
-  - TOTP adds one to any primary method, capped at 3.
-  - The app sets one minimum. A session below it is restricted to `/profile`, with a message naming
-    the factor to add.
-  - One number covers the setups apps choose, without a matrix of flags. "Password + TOTP or SSO"
-    is minimum 2. "Attested hardware only" is minimum 3. "SSO must add our TOTP" is
-    `sso_level(1)` with minimum 2, which is also why an SSO account may enrol TOTP.
-  - The level comes from the session's recorded method and passkey class, so a stricter policy
-    applies to existing sessions at once.
+  - **TOTP lifts a method to `Multi`, never higher.** `Hardware` means an attested passkey and
+    nothing else, so "attested hardware only" stays expressible. (The first draft had TOTP add one
+    level, which made passkey + TOTP equal to attested hardware.)
+  - **The default minimum is `Single`**, which changes nothing for an existing app. "Password +
+    TOTP or SSO" is `Multi`. "SSO must add our TOTP" is `sso_level(Single)` with `Multi`, which is
+    why an SSO account may enrol TOTP. `Hardware` needs passkeys requiring `Class::Attested`,
+    checked at startup.
+  - **The level comes from the session's recorded method and passkey class**, read on every
+    request, so a stricter policy applies to sessions already open. `Identity::level` carries it,
+    for an app that wants more for one page (a signature) than for the rest.
+  - **A session below the minimum is restricted.** `identify` returns `None`, so the app and every
+    gate treat it as anonymous. Its own `/profile` still works so the user can add the factor; the
+    login lands there, with a notice saying what to add. A restricted session can't mint API keys,
+    manage others, or show `profile_extra`. Enrolling a factor **steps the session up** (a new id,
+    the stronger method), so the user goes on without signing in again.
+  - **API keys are outside the policy.** A key is a machine credential, minted only from a session
+    that meets the minimum.
+- **"Password change required" is a flag and a timestamp,** not `updated_at`, which any edit to the
+  account moves. `auth_user.must_change_password` and `password_changed_at`.
+  - **The row hook decides the default.** Any write that sets a password stamps
+    `password_changed_at`, and flags the account unless the writer said otherwise. So an
+    administrator's panel edit, a manager's reset, or an app's own form flag it, because someone
+    other than the owner knows the password. The self-service change and the programmatic helpers
+    (`create_user`, `set_password`, `make_admin`, `reset_admin_access`) clear it.
+  - **`Auth::password_max_age_days(n)` is optional, `0` (off) by default.** NIST SP 800-63B advises
+    against periodic rotation. A row from before the column existed counts from `created_at`.
+  - **A change due is a notice, not a lock.** The login lands on `/profile`, which says why, and the
+    user can go on into the app. `Identity::password_change` carries the reason, so the app's shell
+    can show it (the "bell" belongs to the notifications design, [TODO.md](TODO.md#auth)). Accounts
+    without a password (SSO, passkey-only) are never due.
 - **Re-authentication is per request, not a window.** The proof travels with the sensitive form
   itself: a password, a TOTP code, or a passkey assertion over a challenge rendered into that form.
   Nothing records "re-authenticated at", so there is no grace period for a stolen session to ride

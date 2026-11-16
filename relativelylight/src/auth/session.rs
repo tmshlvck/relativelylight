@@ -61,6 +61,10 @@ pub enum Method {
     PasskeyRecovery,
     /// A password and a passkey as the second factor.
     PasswordPasskey,
+    /// An OIDC identity provider and a TOTP code.
+    SsoTotp,
+    /// An OIDC identity provider and a recovery code in place of the TOTP step.
+    SsoRecovery,
 }
 
 impl Method {
@@ -75,6 +79,8 @@ impl Method {
             Method::PasskeyTotp => "passkey+totp",
             Method::PasskeyRecovery => "passkey+recovery",
             Method::PasswordPasskey => "password+passkey",
+            Method::SsoTotp => "sso+totp",
+            Method::SsoRecovery => "sso+recovery",
         }
     }
 
@@ -89,6 +95,8 @@ impl Method {
             "passkey+totp" => Some(Method::PasskeyTotp),
             "passkey+recovery" => Some(Method::PasskeyRecovery),
             "password+passkey" => Some(Method::PasswordPasskey),
+            "sso+totp" => Some(Method::SsoTotp),
+            "sso+recovery" => Some(Method::SsoRecovery),
             _ => None,
         }
     }
