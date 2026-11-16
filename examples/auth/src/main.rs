@@ -1,9 +1,21 @@
-//! examples/auth — the `auth` module on its own terms. See `docs/AUTH.md`. A public page, a
-//! `/secret` page gated by login, `/login` + `/logout`, a configurable admin group, and the
-//! **accounts panel** (`/admin`) an operator provisions users from. Also demonstrates the
-//! `--set-admin-pw <pw>` break-glass startup path and an **app-owned credential check**
-//! (`/api/whoami`, HTTP Basic) braked with the *same* attempt counters as the login form via
-//! `Auth::username_lockout` / `Auth::ip_lockout` — see below.
+//! examples/auth — the skeleton of an intranet app, with `auth` doing its part. See `docs/AUTH.md`.
+//!
+//! The shape is the one CLIMB and teleddns have: **one shell** (a navbar with the links this user may
+//! follow, their name leading to their profile, and "log out"), and behind it:
+//!
+//! | Path | Who | What |
+//! |---|---|---|
+//! | `/login`, `/logout` | anyone | the library's sign-in: password, then TOTP; or a passkey; or SSO |
+//! | `/` | signed in | the dashboard: a card per thing this user may open |
+//! | `/secret` | signed in | an ordinary protected page; anonymous callers are sent to `/login` |
+//! | `/admin` | the admin group | the accounts panel: users, groups, API keys, passkeys, lockouts; anyone else gets 403 |
+//! | `/profile` | signed in | the library's profile: password, 2FA, passkeys, API keys, and an app section |
+//! | `/api/whoami` | an API key or HTTP Basic | a machine endpoint |
+//!
+//! Two demo accounts: `admin` / `password` (in the admin group) and `alice` / `password` (not), so
+//! both sides of `/admin` can be seen. Also here: the `--set-admin-pw <pw>` break-glass startup path,
+//! and an **app-owned credential check** (`/api/whoami`, HTTP Basic) braked with the *same* attempt
+//! counters as the login form via `Auth::username_lockout` / `Auth::ip_lockout` — see below.
 //!
 //! **There is no registration page, and that is deliberate** (`docs/AUTH.md` §5j). An account comes
 //! into being one of four ways: an operator creates it (the panel here, or `auth::create_user`), SSO
@@ -38,7 +50,6 @@ use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Form, Router};
-use axum_extra::extract::CookieJar;
 use relativelylight::auth::api_key::{ApiKeys, KeyError};
 use relativelylight::auth::lockout::{IpLockout, Lockout, UsernameLockout};
 use relativelylight::auth::passkey::Passkeys;
@@ -90,6 +101,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Otherwise seed a demo admin (in the admin group) and serve. `make_admin` is idempotent and
     // leaves an existing account's `is_active` / 2FA alone, so it's safe on every start.
     auth::make_admin(&db, ADMIN_GROUP, "admin", "password").await?;
+    // An ordinary account beside it, so `/admin` can be seen refusing someone. A seeder's password, like
+    // `make_admin`'s, doesn't ask its owner to change it; one typed in the accounts panel would.
+    auth::create_user(&db, "alice", "password").await?;
 
     // Optional SSO from env (no hard-coded secrets). Decide whether it's configured *before* building
     // `auth`, because the login page shows the SSO buttons — and `auth` must be fully configured
@@ -127,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 StatusCode::FORBIDDEN,
                 Html(page(
                     "Security check failed",
+                    None,
                     r#"<div class="alert alert-danger">That form was stale, or the request didn't come
 from this site. Reload the page and try again.</div>
 <a class="btn btn-outline-secondary btn-sm" href="/">Start over</a>"#,
@@ -134,8 +149,10 @@ from this site. Reload the page and try again.</div>
             )
                 .into_response()
         })
-        .login_shell(move |form, _req| bootstrap_login(form, &sso_buttons))
-        .profile_shell(|frag, who, _req| bootstrap_profile(frag, who))
+        // The library's pages in the same shell as ours: the login form as a centered card, the
+        // profile with the navbar of a signed-in user.
+        .login_shell(move |form, _req| login_page(form, &sso_buttons))
+        .profile_shell(|frag, who, _req| profile_page(frag, who))
         // API keys: a card on /profile to mint (re-authenticated, shown once), list and revoke them.
         // `/api/whoami` accepts them; the accounts panel shows everyone's (docs/AUTH.md §5k).
         .api_keys(ApiKeys::new("demo_"))
@@ -183,7 +200,7 @@ from this site. Reload the page and try again.</div>
         .layer(axum::middleware::from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce));
 
     let mut app = Router::new()
-        .route("/", get(public))
+        .route("/", get(dashboard)) // signed in only; a card per thing this user may open
         .route("/secret", get(secret)) // gated on demand (see `secret`)
         .route("/api/whoami", get(whoami)) // the app's own credential check (see `whoami`)
         // The accounts panel: two handlers on one path, the model named by the path segment. Its
@@ -224,7 +241,7 @@ from this site. Reload the page and try again.</div>
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     println!("auth playground on http://localhost:3000/   (log in as admin / password; use localhost for passkeys)");
-    println!("accounts panel   http://127.0.0.1:3000/admin  (admin group only — the library has no sign-up page)");
+    println!("accounts panel   http://localhost:3000/admin  (admin only; alice / password is refused)");
     if sso.is_some() {
         println!("SSO enabled: 'Sign in with Google' button on the login page");
     }
@@ -263,60 +280,93 @@ fn build_sso(auth: &Auth, client_id: String, client_secret: String) -> Sso {
         )
 }
 
-/// Render the SSO login buttons (appended under the password form).
+/// Render the SSO login buttons, appended under the login form. With passkeys on, the library's
+/// fragment already ends in an "or" and the passkey button, so these join that list of alternatives
+/// (an app without passkeys would draw its own divider here).
 fn sso_buttons_html(buttons: &[SsoButton]) -> String {
-    if buttons.is_empty() {
-        return String::new();
-    }
-    let mut s = String::from(r#"<hr class="my-3"><p class="text-muted small mb-2">Or sign in with:</p>"#);
-    for b in buttons {
-        s.push_str(&format!(
-            r#"<a class="btn btn-outline-secondary w-100 mb-2" href="{}">{}</a>"#,
-            b.url, b.label
-        ));
-    }
-    s
+    buttons
+        .iter()
+        .map(|b| {
+            format!(
+                r#"<a class="btn btn-outline-secondary w-100 mt-2" href="{}">Sign in with {}</a>"#,
+                b.url, b.label
+            )
+        })
+        .collect()
 }
 
-/// Access log: one line per request — source IP, method, URI, and HTTP status.
-async fn public() -> Html<String> {
-    Html(page(
-        "Public page",
-        r#"<p><a href="/secret">/secret</a> requires a login · <a href="/login">/login</a></p>
-<p><a href="/admin">/admin</a> is the accounts panel — admin group only, reads included. There is no
-sign-up page: an operator creates accounts there, or SSO does on first login.</p>
-<p class="small text-muted"><code>GET /api/whoami</code> takes HTTP Basic — the app checks it itself,
-braked with the same attempt counters as the login form.</p>"#,
-    ))
-}
-
-// Requires an authenticated user: resolve the session on demand and redirect anonymous visitors to
-// the login page. `CookieJar` lets us show the session cookie (a playground affordance — don't
-// surface session tokens in real apps).
-async fn secret(State(app): State<AppState>, headers: HeaderMap, jar: CookieJar) -> Response {
-    let auth = &app.auth;
-    let Some(who) = auth.identify(&headers).await else {
-        return Redirect::to(auth.login_path()).into_response();
+/// `GET /` — the dashboard. Signed in only, like every page of an intranet app: an anonymous visitor
+/// is sent to the login page. A card per thing this user may open, decided by their groups — the same
+/// check the navbar and the pages themselves make.
+async fn dashboard(State(app): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(who) = app.auth.identify(&headers).await else {
+        return Redirect::to(app.auth.login_path()).into_response();
     };
-    let name = auth.session_cookie_name();
-    let cookie = jar.get(name).map(|c| c.value().to_string()).unwrap_or_default();
-    let body = Html(page(
-        "Protected page",
-        &format!(
-            r#"<p>Signed in as <b>{}</b> — groups: [{}].</p>
-<p class="small text-muted mb-1">session cookie</p>
-<pre class="bg-body-secondary p-2 rounded"><code>{name}={}</code></pre>
-<a class="btn btn-primary btn-sm" href="/profile">Profile, 2FA &amp; API keys</a>
-<a class="btn btn-outline-secondary btn-sm" href="/admin">Accounts</a>
-<a class="btn btn-outline-secondary btn-sm" href="/logout">Log out</a>
-<p class="small text-muted mt-3 mb-0">The API-token section on <a href="/profile">/profile</a> is this
-app's own, rendered into the library's page by <code>Auth::profile_extra</code>.</p>"#,
-            who.username,
-            who.groups.join(", "),
-            cookie,
-        ),
-    ));
-    (jar, body).into_response()
+    let mut cards = card(
+        "Secret page",
+        "An ordinary protected page: what any signed-in user may see.",
+        "/secret",
+        "Open",
+    );
+    if is_admin(&who) {
+        cards += &card(
+            "Accounts",
+            "Users, groups, everyone's API keys and passkeys, and who is locked out.",
+            "/admin",
+            "Open the panel",
+        );
+    }
+    cards += &card(
+        "Your profile",
+        "Password, two-factor authentication, passkeys, API keys, sessions.",
+        "/profile",
+        "Open your profile",
+    );
+    cards += &card(
+        "The API",
+        "<code>curl -H \"Authorization: Bearer demo_…\" localhost:3000/api/whoami</code> with a key \
+         from your profile, or <code>curl -u alice:password …</code>.",
+        "/profile",
+        "Create a key",
+    );
+    let body = format!(r#"<div class="row g-3">{cards}</div>"#);
+    Html(page("Dashboard", Some(&who), &body)).into_response()
+}
+
+/// One dashboard card.
+fn card(title: &str, text: &str, href: &str, button: &str) -> String {
+    format!(
+        r#"<div class="col-md-6"><div class="card h-100"><div class="card-body">
+<h2 class="h6 card-title">{title}</h2><p class="card-text small text-muted">{text}</p>
+<a href="{href}" class="btn btn-sm btn-outline-primary">{button}</a></div></div></div>"#
+    )
+}
+
+/// Whether `who` may open the accounts panel: the admin group, the one name used everywhere.
+fn is_admin(who: &Identity) -> bool {
+    who.in_group(ADMIN_GROUP)
+}
+
+/// `GET /secret` — an ordinary protected page. The whole of the check is `identify`: no session, or one
+/// below the site's sign-in policy, and the caller goes to the login page.
+async fn secret(State(app): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(who) = app.auth.identify(&headers).await else {
+        return Redirect::to(app.auth.login_path()).into_response();
+    };
+    let groups = match who.groups.is_empty() {
+        true => "none".to_string(),
+        false => who.groups.join(", "),
+    };
+    let body = format!(
+        r#"<p>Signed in as <b>{name}</b>.</p>
+<dl class="row small mb-0">
+<dt class="col-sm-3">Groups</dt><dd class="col-sm-9">{groups}</dd>
+<dt class="col-sm-3">Sign-in level</dt><dd class="col-sm-9">{level:?} <span class="text-muted">(docs/AUTH.md §5m)</span></dd>
+</dl>"#,
+        name = who.username,
+        level = who.level,
+    );
+    Html(page("Secret page", Some(&who), &body)).into_response()
 }
 
 /// **Extending the library's profile page** — `Auth::profile_extra` appends this below the
@@ -382,10 +432,11 @@ async fn rotate_webhook_secret(
             StatusCode::FORBIDDEN,
             Html(page(
                 "Confirm it's you",
+                Some(&who),
                 &format!(
                     r#"<div class="alert alert-danger">{msg}</div>
 <p class="small text-muted">Nothing was changed.</p>
-<a class="btn btn-outline-secondary btn-sm" href="/secret">Back</a>"#
+<a class="btn btn-outline-secondary btn-sm" href="/profile">Back to your profile</a>"#
                 ),
             )),
         )
@@ -395,10 +446,11 @@ async fn rotate_webhook_secret(
     // the point of the example is the check above.
     Html(page(
         "Webhook secret rotated",
+        Some(&who),
         &format!(
             r#"<div class="alert alert-success">Confirmed — a new webhook secret would now be issued for
 <b>{}</b>, and the old one revoked.</div>
-<a class="btn btn-outline-secondary btn-sm" href="/secret">Back</a>"#,
+<a class="btn btn-outline-secondary btn-sm" href="/profile">Back to your profile</a>"#,
             who.username
         ),
     ))
@@ -560,10 +612,9 @@ fn accounts(engine: &Engine) -> Admin<'_> {
         .entity_with("auth_username_lockout", |t| t.title("By account"))
         .entity_with("auth_ip_lockout", |t| t.title("By address"))
         .separator()
-        .group("Reference")
-        .link("Profile & 2FA", "/profile")
-        .link("Protected page", "/secret")
-        .link("Log out", "/logout")
+        .group("Elsewhere")
+        .link("Dashboard", "/")
+        .link("Your profile", "/profile")
 }
 
 /// `GET /admin/{entity}` — parse the URL, render the fragment, wrap it in our shell. The path names
@@ -574,16 +625,28 @@ async fn accounts_show(
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    if app.auth.identify(&headers).await.is_none() {
+    let Some(who) = app.auth.identify(&headers).await else {
         return Redirect::to(app.auth.login_path()).into_response();
-    }
+    };
     let mut state = ViewState::from_uri(&uri);
     state.entity = Some(entity);
     match accounts(&app.engine).render_for(&headers, &state).await {
-        Ok(body) => Html(admin_page("Accounts", &body)).into_response(),
-        // A logged-in non-admin lands here: the gate refuses the *read*, so there is no page.
+        Ok(body) => Html(wide_page("Accounts", &who, &body)).into_response(),
+        // A signed-in non-admin lands here: the gate refuses the *read*, so there is no panel — a page
+        // that says so, in our shell, rather than the library's bare status.
+        Err(relativelylight::crud::Error::Forbidden) => admins_only(&who),
         Err(e) => e.into_response(),
     }
+}
+
+/// The 403 a signed-in non-admin gets for `/admin`: in the shell, saying why.
+fn admins_only(who: &Identity) -> Response {
+    let body = format!(
+        r#"<div class="alert alert-warning">The accounts panel is for the <b>{ADMIN_GROUP}</b> group, and
+<b>{}</b> isn't in it.</div><a class="btn btn-outline-secondary btn-sm" href="/">Back to the dashboard</a>"#,
+        who.username
+    );
+    (StatusCode::FORBIDDEN, Html(page("Admins only", Some(who), &body))).into_response()
 }
 
 /// `POST /admin/{entity}` — hand the body to the library and redirect, or re-render with the
@@ -596,9 +659,9 @@ async fn accounts_save(
     RealIp(ip): RealIp,
     body: Bytes,
 ) -> Response {
-    if app.auth.identify(&headers).await.is_none() {
+    let Some(who) = app.auth.identify(&headers).await else {
         return Redirect::to(app.auth.login_path()).into_response();
-    }
+    };
     let mut state = ViewState::from_uri(&uri);
     state.entity = Some(entity);
     let panel = accounts(&app.engine);
@@ -606,10 +669,11 @@ async fn accounts_save(
         Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
         Ok(Outcome::Invalid(state)) => match panel.render_for(&headers, &state).await {
             Ok(body) => {
-                (StatusCode::UNPROCESSABLE_ENTITY, Html(admin_page("Accounts", &body))).into_response()
+                (StatusCode::UNPROCESSABLE_ENTITY, Html(wide_page("Accounts", &who, &body))).into_response()
             }
             Err(e) => e.into_response(),
         },
+        Err(relativelylight::crud::Error::Forbidden) => admins_only(&who),
         Err(e) => e.into_response(),
     }
 }
@@ -732,51 +796,84 @@ fn unauthorized(why: &str) -> Response {
         .into_response()
 }
 
-/// Bootstrap page wrapper for the app's own pages.
-fn page(title: &str, body: &str) -> String {
-    shell(title, body, "max-width:40rem")
-}
+// ── The shell ────────────────────────────────────────────────────────────────────────────────────
+//
+// One shell for every page, the library's included, as CLIMB and teleddns have: a navbar with the
+// links this user may follow (decided by their groups, the same check the pages make), their name
+// leading to their profile, and "log out". The library renders fragments; the page is ours.
 
-/// The same shell, full width and carrying `crud::ui::CSS` — the forty-odd rules the admin
-/// components need beyond Bootstrap (mostly the `<dialog>`). No JavaScript, here or there.
-fn admin_page(title: &str, body: &str) -> String {
-    shell(title, body, "")
-}
-
-fn shell(title: &str, body: &str, width: &str) -> String {
+/// The page around everything: the navbar for `who` (or none), `body` in the main column.
+fn shell(title: &str, who: Option<&Identity>, body: &str) -> String {
+    let mut left = String::new();
+    let mut right = String::new();
+    match who {
+        Some(w) => {
+            left += r#"<a class="nav-link" href="/secret">Secret page</a>"#;
+            if is_admin(w) {
+                left += r#"<a class="nav-link" href="/admin">Accounts</a>"#;
+            }
+            // `Identity::password_change`: a password someone else set, or an expired one.
+            if w.password_change.is_some() {
+                right += r#"<a class="badge text-bg-warning text-decoration-none" href="/profile">change your password</a>"#;
+            }
+            right += &format!(
+                r#"<span class="navbar-text"><a href="/profile" class="link-body-emphasis text-decoration-none fw-medium">{}</a>
+&middot; <a href="/logout" class="link-secondary text-decoration-none">log out</a></span>"#,
+                w.username
+            );
+        }
+        None => right += r#"<a class="nav-link" href="/login">Log in</a>"#,
+    }
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>{title} — auth example</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <style>{CSS}</style></head>
-<body class="bg-body-tertiary"><main class="container py-4" style="{width}">
-<h1 class="h4 mb-3">{title}</h1>{body}</main></body></html>"#
+<body class="bg-body-tertiary d-flex flex-column min-vh-100">
+<nav class="navbar bg-body border-bottom px-3 gap-3">
+<div class="d-flex align-items-center gap-3"><a class="navbar-brand" href="/">auth example</a>{left}</div>
+<div class="d-flex align-items-center gap-3 ms-auto">{right}</div></nav>
+<main class="container-fluid py-3 flex-grow-1">{body}</main>
+<footer class="border-top py-2 text-center small text-muted">relativelylight · demo accounts
+<code>admin</code> and <code>alice</code>, password <code>password</code></footer>
+</body></html>"#
     )
 }
 
-/// The app's shell for the library's profile/password page. The library hands us the caller's
-/// identity so the page can greet them; we wrap the change-password form in our Bootstrap chrome.
-fn bootstrap_profile(fragment: &str, who: &Identity) -> String {
-    page(
-        &format!("Profile — {}", who.username),
+/// An app page: a heading and `body`, in a readable column.
+fn page(title: &str, who: Option<&Identity>, body: &str) -> String {
+    shell(
+        title,
+        who,
+        &format!(r#"<div class="mx-auto" style="max-width:48rem"><h1 class="h4 mb-3">{title}</h1>{body}</div>"#),
+    )
+}
+
+/// A page at full width: the accounts panel's tables.
+fn wide_page(title: &str, who: &Identity, body: &str) -> String {
+    shell(title, Some(who), body)
+}
+
+/// The library's profile fragment in our shell, with the signed-in navbar.
+fn profile_page(fragment: &str, who: &Identity) -> String {
+    shell(
+        "Profile",
+        Some(who),
         &format!(
-            r#"<div class="card shadow-sm"><div class="card-body">{fragment}</div></div>
-<a class="d-inline-block mt-3" href="/secret">&larr; Back to /secret</a>"#
+            r#"<div class="card shadow-sm mx-auto" style="max-width:40rem"><div class="card-body">{fragment}</div></div>"#
         ),
     )
 }
 
-/// The app's shell for the library's login form — this is where the app styles it (Bootstrap card).
-/// `sso_buttons` is the optional SSO button block appended under the password form.
-fn bootstrap_login(form: &str, sso_buttons: &str) -> String {
-    format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Log in</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"></head>
-<body class="bg-body-tertiary"><main class="container" style="max-width:24rem">
-<div class="card shadow-sm mt-5"><div class="card-body">
-<h1 class="h4 mb-3">Log in</h1>{form}{sso_buttons}</div></div>
-<p class="text-center text-muted small mt-2">Demo: <code>admin</code> / <code>password</code></p>
-</main></body></html>"#
+/// The library's login fragment as a centered card: the form, then the alternatives — the library's
+/// "or" and passkey button, and our SSO buttons under them.
+fn login_page(form: &str, sso_buttons: &str) -> String {
+    shell(
+        "Log in",
+        None,
+        &format!(
+            r#"<div class="card shadow-sm mx-auto mt-4" style="max-width:24rem"><div class="card-body">
+<h1 class="h5 mb-3">Log in</h1>{form}{sso_buttons}</div></div>"#
+        ),
     )
 }

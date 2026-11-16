@@ -784,6 +784,15 @@ fn runtime(inner: &Inner) -> Option<Arc<Runtime>> {
     inner.passkeys.clone()
 }
 
+/// Whether the request asked for JSON — the passkey script on the login page does, to open the prompt
+/// on the user's click instead of on a second page.
+fn wants_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("application/json"))
+}
+
 /// The login page again, with a message and a status.
 fn login_again(
     inner: &Inner,
@@ -832,6 +841,23 @@ pub(super) async fn login_begin(
             );
         }
     };
+    // The script on the login page asks for JSON so the prompt opens on the same click: the challenge
+    // and its options, and where to post the answer. Everything else about the sign-in is unchanged —
+    // the answer is still a posted form, and a browser without the script gets the page below.
+    if wants_json(&req.headers) {
+        let options: serde_json::Value = serde_json::from_str(&ask.options).unwrap_or_default();
+        let body = serde_json::json!({
+            "challenge": ask.challenge,
+            "options": options,
+            "action": "/login/passkey/finish",
+        });
+        return (
+            [(header::CACHE_CONTROL, "no-store")],
+            [(header::CONTENT_TYPE, "application/json")],
+            body.to_string(),
+        )
+            .into_response();
+    }
     let (token, jar) = super::csrf_token(&inner, &req.headers, jar);
     let page = pages::passkey_ceremony_html(&pages::Ceremony {
         title: "Sign in with a passkey",

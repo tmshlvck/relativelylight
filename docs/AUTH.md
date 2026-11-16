@@ -1000,14 +1000,22 @@ and against open sessions: a session a passkey opened stops counting once its cl
 policy. `Class::Attested` needs `attestation_ca(pem, aaguid, description)` entries, the vendor's root
 CA and the model's AAGUID, and fails at startup without one. Synced passkeys can never be attested.
 
-**How a ceremony runs.** WebAuthn needs the browser's API, so passkeys need JavaScript, but no JSON
-API: the page embeds the challenge, the script (`GET /auth/passkey.js`, cacheable, allowed by a strict
-`script-src 'self'`) runs the browser's prompt on a click, puts the answer in a hidden field and
-submits the form. The server answers with the usual 303 or a page. A challenge is a database row
-(`auth_webauthn_challenge`), single-use and valid for five minutes, pruned by `auth.prune()`. A sign-in
-challenge is created only when the user clicks "Sign in with a passkey", so anonymous page views write
-nothing; a signed-in page with a confirm-it's-you form creates one per render. Without JavaScript the
-passkey buttons do nothing and everything else works.
+**How a ceremony runs.** WebAuthn needs the browser's API, so passkeys need JavaScript.
+- **The common case.** The page embeds the challenge. The script (`GET /auth/passkey.js`, cacheable,
+  allowed by a strict `script-src 'self'`) runs the browser's prompt on a click, puts the answer in
+  a hidden field and submits the form. The server answers with the usual 303 or a page.
+- **"Sign in with a passkey" on `/login`** has no challenge yet, because a page view writes nothing.
+  On the click, the script posts the same form asking for JSON (`Accept: application/json`) and
+  gets the challenge, its options and where to post the answer. The prompt opens on that same click,
+  and the answer is posted as a form. If no JSON comes back (a lockout page), or the browser won't
+  open the prompt after the round trip, the next click falls back to a page with its own button.
+  That is also what a browser without JavaScript gets.
+- **Challenges.** A challenge is a database row (`auth_webauthn_challenge`), single-use and valid for
+  five minutes, pruned by `auth.prune()`. A sign-in challenge is created only on the click, so
+  anonymous page views write nothing. A signed-in page with a confirm-it's-you form creates one per
+  render.
+- **Without JavaScript,** passkey sign-in still works through that page; the confirm-it's-you
+  buttons do nothing, and everything else works.
 
 **Registration asks for a discoverable credential** (one the authenticator can offer without a
 username). Phones and laptops always make one; a security key needs a free slot, and one that can't
@@ -1334,10 +1342,14 @@ port-scoped), exactly as with the session cookie.
 
 ## 8. Examples
 
-- **[`examples/auth`](../examples/auth/src/main.rs)** — `auth` up close: the login page, a `/secret`
-  page gated by `identify`, the self-service `/profile` with 2FA in the app's chrome, an accounts panel
-  at `/admin` (§5j) including everyone's API keys and passkeys, lockout tuned down to 5 failures per
-  account so it is easy to trip, API keys minted on `/profile` and accepted by `/api/whoami` beside
+- **[`examples/auth`](../examples/auth/src/main.rs)** — the skeleton of an intranet app.
+  - **The shell:** one shell around every page, the library's included: a navbar with the links the
+    user may follow and their name leading to `/profile`.
+  - **The pages:** a dashboard of cards by role, a `/secret` page gated by `identify`, and the
+    accounts panel at `/admin` (§5j: users, groups, everyone's API keys and passkeys, lockouts) for
+    the admin group, with a 403 page for anyone else.
+  - **Two demo accounts:** `admin` and `alice` (not an admin).
+  - **Also:** lockout tuned down to 5 failures per account so it is easy to trip, API keys minted on `/profile` and accepted by `/api/whoami` beside
   HTTP Basic (§5k), passkeys (§5l; browse to `http://localhost:3000`), and
   `POST /webhook-secret/rotate` — an app's own sensitive action behind `csrf::enforce` and
   `Auth::reauthenticate_with` (§5h, §7), reached from a `profile_extra` section and confirmable with

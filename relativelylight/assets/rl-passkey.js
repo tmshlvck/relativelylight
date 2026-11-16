@@ -88,6 +88,66 @@
     note.textContent = text;
   }
 
+  // "Sign in with a passkey" on the login page: one click opens the browser's prompt. The form posts to
+  // the same route a browser without this script uses, asking for JSON (the challenge and where to
+  // send the answer), then posts the answer as a form. If anything gets in the way — no JSON (a
+  // lockout page), or a browser that won't open the prompt after a fetch — the form falls back to
+  // its plain submit, the page with its own button.
+  function hidden(form, name, value) {
+    var input = document.createElement("input");
+    input.type = "hidden";
+    input.name = name;
+    input.value = value;
+    form.appendChild(input);
+  }
+  document.addEventListener("submit", function (ev) {
+    var form = ev.target;
+    if (!form.matches || !form.matches("form[data-rl-passkey-login]")) return;
+    if (form.hasAttribute("data-rl-fallback") || !window.PublicKeyCredential || !window.fetch) return;
+    ev.preventDefault();
+    var button = form.querySelector("button");
+    var fallback = function () {
+      form.setAttribute("data-rl-fallback", "");
+      form.submit();
+    };
+    if (button) button.disabled = true;
+    fetch(form.action, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(new FormData(form)).toString(),
+    })
+      .then(function (r) {
+        var json = (r.headers.get("content-type") || "").indexOf("application/json") >= 0;
+        if (!r.ok || !json) throw new Error("no challenge");
+        return r.json();
+      })
+      .then(function (ask) {
+        return navigator.credentials.get(requestOptions(ask.options)).then(assertion).then(
+          function (answer) {
+            var post = document.createElement("form");
+            post.method = "post";
+            post.action = ask.action;
+            post.hidden = true;
+            hidden(post, "_csrf", form.querySelector("input[name=_csrf]").value);
+            hidden(post, "passkey_challenge", ask.challenge);
+            hidden(post, "passkey_response", JSON.stringify(answer));
+            document.body.appendChild(post);
+            post.submit();
+          },
+          function (err) {
+            // Closed, timed out, or refused for lack of a direct click: the next click goes to the
+            // page that has its own button.
+            if (button) button.disabled = false;
+            form.setAttribute("data-rl-fallback", "");
+            say(button, err && err.name === "NotAllowedError"
+              ? "The passkey prompt was closed. Click again to continue."
+              : "The passkey didn't work here. Click again to continue.");
+          }
+        );
+      }, fallback);
+  });
+
   document.addEventListener("click", function (ev) {
     var button = ev.target.closest && ev.target.closest("[data-rl-passkey]");
     if (!button) return;

@@ -119,12 +119,18 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
     administrator's job. A later password-recovery flow would also reset passkeys, but not TOTP.
   - **A passkey is a local factor for re-authentication,** so an account without a password must
     present it there.
-- **WebAuthn needs a script, and it posts a form.** The page embeds the challenge options. The
-  script runs the browser ceremony, puts the result in a hidden field and submits; the server
-  answers with the usual 303. There is no JSON API and no `fetch`. The script is served by
-  `auth::routes()` as a file, so a strict CSP can allow it. Challenge state is a server-side row,
-  single-use and short-lived. It is created when the user asks for a challenge, not on every
-  `GET /login`, so anonymous traffic can't write rows.
+- **WebAuthn needs a script, and it posts a form.**
+  - **The common case.** The page embeds the challenge options. The script runs the browser
+    ceremony, puts the result in a hidden field and submits; the server answers with the usual 303.
+    The script is served by `auth::routes()` as a file, so a strict CSP can allow it.
+  - **Challenge state** is a server-side row, single-use and short-lived. It is created when the
+    user asks for a challenge, not on every `GET /login`, so anonymous traffic can't write rows.
+  - **The one exception is "Sign in with a passkey".** A second page between the click and the
+    prompt felt like a step too many, and rendering the challenge into `/login` would write a row
+    per anonymous view. So on the click the script posts the same form asking for JSON, gets the
+    challenge, and opens the prompt on that click. It is one JSON answer on an existing route, not
+    an API: the answer is still a posted form. The page with its own button remains for a browser
+    without JavaScript, or one that won't open a prompt after a round trip.
 - **What the passkey code relies on in `webauthn-rs` 0.6** (checked in a spike):
   - **Features.** `conditional-ui` for username-less login, `danger-allow-state-serialisation` to
     keep the ceremony state in our row, and `danger-credential-internals` to read the backup flags

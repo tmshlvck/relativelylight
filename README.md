@@ -147,7 +147,7 @@ All run on port 3000, so run one at a time; the database ones use a seeded in-me
 cargo run -p crud-example            # Table/Form on your own pages, CSV, timezones, the relation picker
 cargo run -p relationfield-example   # the admin's relation input in a hand-written form
 cargo run -p adminpanel-example      # Admin behind login + 2FA (admin / password)
-cargo run -p auth-example            # login, SSO wiring, 2FA, passkeys, re-auth, API keys, the accounts panel (admin / password)
+cargo run -p auth-example            # an intranet-app skeleton: login (password, 2FA, passkey, SSO), dashboard, admin, profile (admin|alice / password)
 cargo run -p audit-example           # a request log and a write observer over one resolved address
 cargo run -p files-example           # files in a directory: upload, preview, download, delete, thumbnails
 ```

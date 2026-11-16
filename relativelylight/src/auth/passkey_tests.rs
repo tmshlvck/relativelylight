@@ -1252,3 +1252,42 @@ async fn an_attested_passkey_meets_an_attested_minimum_and_a_password_does_not()
     let s = res.session(fx.auth.session_cookie_name()).unwrap();
     assert_eq!(fx.identify(&s).await.map(|w| w.level), Some(Level::Attested));
 }
+
+#[tokio::test]
+async fn the_login_pages_script_gets_the_challenge_as_json_and_the_answer_still_posts_a_form() {
+    let fx = Fx::new().await;
+    let (mut key, cred) = alice_with_key(&fx).await;
+    let ask = |csrf: bool| {
+        let body = if csrf { format!("_csrf={CSRF}") } else { String::new() };
+        Request::post("/login/passkey")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::ACCEPT, "application/json")
+            .header(header::COOKIE, format!("{}={CSRF}", fx.auth.csrf().cookie()))
+            .body(Body::from(body))
+            .unwrap()
+    };
+    // The CSRF check holds for the JSON answer too: no token, no challenge.
+    let before = fx.challenges().await;
+    assert_eq!(fx.send(ask(false)).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(fx.challenges().await, before);
+
+    let res = fx.send(ask(true)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert!(res.headers[header::CONTENT_TYPE].to_str().unwrap().starts_with("application/json"));
+    let v: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+    assert_eq!(v["action"], "/login/passkey/finish");
+    let challenge = v["challenge"].as_str().unwrap().to_string();
+    // Answer it as the script does: the options to the authenticator, the answer posted as a form.
+    let page = Resp {
+        status: StatusCode::OK,
+        headers: HeaderMap::new(),
+        body: format!(
+            r#"<input name="passkey_challenge" value="{challenge}"><script type="application/json" data-rl-passkey-options>{}</script>"#,
+            v["options"]
+        ),
+    };
+    let (challenge, answer) = fx.answer(&page, &mut key, &cred);
+    let fields = [("passkey_challenge", challenge.as_str()), ("passkey_response", answer.as_str())];
+    let res = fx.post("/login/passkey/finish", &fields, None).await;
+    assert_eq!(res.location(), Some("/"), "{} {}", res.status, res.body);
+}
