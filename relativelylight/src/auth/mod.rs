@@ -181,7 +181,7 @@ pub struct ReauthInput {
 }
 
 impl ReauthInput {
-    /// A password and/or a TOTP code — what [`Auth::reauthenticate`] takes.
+    /// A password and/or a TOTP code, for a caller that has no form to flatten this into (a CLI, a test).
     pub fn password_or_code(password: &str, totp_code: &str) -> Self {
         Self {
             current_password: password.to_string(),
@@ -789,7 +789,7 @@ impl Inner {
 
     /// Re-authenticate the holder of `user` with any factor the account has: its password, a fresh TOTP
     /// code, or its passkey. `Ok(())` on success **or** when the account has no local factor at all (an
-    /// SSO account). See [`Auth::reauthenticate`] for what this is protecting against and why the
+    /// SSO account). See [`Auth::reauthenticate_with`] for what this is protecting against and why the
     /// no-factor case passes.
     ///
     /// A passkey counts as a factor, so an account without a password but with a passkey **must**
@@ -1563,42 +1563,7 @@ impl Auth {
         self.inner.can_manage_others(who)
     }
 
-    /// **Re-authenticate** the caller before something sensitive: pass whatever the form submitted as
-    /// `password` and `totp_code` (empty strings for "not supplied"). `Ok(())` if either proves the
-    /// account holder is present; `Err(message)` is fit to render back into your form.
-    ///
-    /// A live session isn't evidence its owner is present. This module asks for a factor again before
-    /// its own sensitive changes; use this for yours (deleting an account, rotating a webhook secret):
-    ///
-    /// ```ignore
-    /// let Some(who) = auth.identify(&headers).await else { return redirect_to_login() };
-    /// if let Err(msg) = auth.reauthenticate(&who, &form.current_password, &form.totp_code).await {
-    ///     return render_form_with_error(&msg);   // 403, and nothing has happened yet
-    /// }
-    /// delete_everything(&who).await;
-    /// ```
-    ///
-    /// This takes a password or a code only. An account that has a passkey and no password can't confirm
-    /// with either, and is refused; use [`reauthenticate_with`](Auth::reauthenticate_with) and
-    /// [`reauth_fields`](Auth::reauth_fields), which take a passkey too.
-    ///
-    /// A TOTP code accepted here is **spent** (§5a). An account with no local factor (SSO, or a blank
-    /// password and no passkey) passes: there is nothing to ask it for, and re-auth through the IdP isn't built
-    /// (AUTH.md §5h). Not lockout-limited — the caller is authenticated, and counting would let a stolen
-    /// session lock the real user out (§5e).
-    pub async fn reauthenticate(
-        &self,
-        who: &Identity,
-        password: &str,
-        totp_code: &str,
-    ) -> Result<(), String> {
-        let Some(user) = target_user(&self.inner, &who.id).await else {
-            return Err("Your session is no longer valid — sign in again.".into());
-        };
-        self.inner.reauth(&user, &ReauthInput::password_or_code(password, totp_code)).await
-    }
-
-    /// Whether [`reauthenticate`](Auth::reauthenticate) can actually challenge this account — i.e. it has
+    /// Whether [`reauthenticate_with`](Auth::reauthenticate_with) can actually challenge this account: it has
     /// a local password, 2FA or a passkey. `false` for an SSO account (nothing to ask for, so re-auth
     /// passes), which is what to key a "you'll be asked to confirm" hint off in your own UI.
     pub async fn can_reauthenticate(&self, who: &Identity) -> bool {
@@ -1612,21 +1577,31 @@ impl Auth {
         }
     }
 
-    /// **Re-authenticate** with whatever factor the caller's form submitted — the password, a TOTP
-    /// code, or a passkey — read as a [`ReauthInput`] flattened into your form. Render the inputs with
-    /// [`reauth_fields`](Auth::reauth_fields) inside that form. This is [`reauthenticate`]'s full form:
-    /// an account that signs in with a passkey and has no password can only confirm this way.
+    /// **Re-authenticate** the caller before something sensitive, with whatever factor their form
+    /// submitted: the password, a TOTP code, or a passkey, read as a [`ReauthInput`] flattened into the
+    /// form. Render the inputs with [`reauth_fields`](Auth::reauth_fields) inside that form. `Ok(())` if
+    /// the factor proves the account holder is present; `Err(message)` is fit to render back.
+    ///
+    /// A live session isn't evidence its owner is present. This module asks for a factor again before
+    /// its own sensitive changes; use this for yours (deleting an account, rotating a secret):
     ///
     /// ```ignore
     /// #[derive(Deserialize)]
     /// struct DeleteForm { #[serde(flatten)] reauth: ReauthInput, #[serde(rename = "_csrf")] csrf: String }
     ///
+    /// let Some(who) = auth.identify(&headers).await else { return redirect_to_login() };
     /// if let Err(msg) = auth.reauthenticate_with(&who, &form.reauth).await {
-    ///     return (StatusCode::FORBIDDEN, render_form_with_error(&msg));
+    ///     return (StatusCode::FORBIDDEN, render_form_with_error(&msg));   // nothing has happened yet
     /// }
+    /// delete_everything(&who).await;
     /// ```
     ///
-    /// [`reauthenticate`]: Auth::reauthenticate
+    /// Without a form (a CLI, a test), build the input: `ReauthInput::password_or_code(pw, code)`.
+    ///
+    /// A TOTP code or passkey challenge accepted here is **spent** (§5a). An account with no local factor
+    /// (SSO, or no password, no TOTP and no passkey) passes: there is nothing to ask it for, and re-auth
+    /// through the IdP isn't built (AUTH.md §5h). Not lockout-limited — the caller is authenticated, and
+    /// counting would let a stolen session lock the real user out (§5e).
     pub async fn reauthenticate_with(&self, who: &Identity, proof: &ReauthInput) -> Result<(), String> {
         let Some(user) = target_user(&self.inner, &who.id).await else {
             return Err("Your session is no longer valid — sign in again.".into());

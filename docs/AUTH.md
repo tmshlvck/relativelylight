@@ -714,9 +714,8 @@ if let Err(msg) = auth.reauthenticate_with(&who, &form.reauth).await {
 delete_the_thing(&who).await;
 ```
 
-`Auth::reauthenticate(&who, password, code)` is the same check for a form with only a password and a
-code field; it can't confirm an account that has a passkey and no password, which it refuses.
-`Auth::can_reauthenticate(&who)` says whether the account *can* be challenged (false for SSO), for a UI
+Without a form to flatten into (a CLI, a test), build the input with
+`ReauthInput::password_or_code(password, code)`. `Auth::can_reauthenticate(&who)` says whether the account *can* be challenged (false for SSO), for a UI
 hint. `examples/auth` gates a `POST /webhook-secret/rotate` on it — the pattern to copy, including returning
 the refusal before anything is written.
 

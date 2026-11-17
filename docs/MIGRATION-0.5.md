@@ -87,6 +87,12 @@ ALTER TABLE auth_session ADD COLUMN passkey_class varchar NULL;
 -- and the two tables, from upgrade::table_create_statements
 ```
 
+**Code that builds the rows itself.** `auth::user::Model` gains `passkey_handle`,
+`password_changed_at` and `must_change_password`, and `auth::session::Model` gains `method` and
+`passkey_class`. A struct literal of either no longer compiles. Build an `ActiveModel` with
+`..Default::default()` instead, as the crate's helpers do. A test that inserts a session row should
+set `method` (`session::Method::Password.as_str()`), or it reads as a pre-upgrade row.
+
 **After the upgrade:**
 - Sessions from before the step keep working. Their `method` is empty, which counts as `Simple`.
 - A password from before has no `password_changed_at`; a maximum age counts it from `created_at`.
@@ -109,3 +115,37 @@ the top. Two things change for an app:
   one call per card, and concatenate them. A bare `<hr><h2>…` would sit in the grid as a stray column.
 - **`profile_shell` wraps a grid.** Give the fragment a wide column (say `max-width: 72rem`), not
   the narrow card that suited the old single column.
+
+## 6. `Auth::reauthenticate` is replaced by `reauthenticate_with`
+
+`Auth::reauthenticate(&who, password, code)` is gone. It took a password and a TOTP code only, so it
+couldn't confirm an account that signs in with a passkey and has no password.
+`Auth::reauthenticate_with(&who, &ReauthInput)` takes any factor the account has.
+
+| 0.4 | 0.5 |
+|---|---|
+| form fields `current_password`, `totp_code` you render yourself | `auth.reauth_fields(&who, "Confirm it's you.").await` inside the form; it offers only the factors the account has, a passkey included |
+| `struct MyForm { current_password: String, totp_code: String, … }` | `struct MyForm { #[serde(flatten)] reauth: auth::ReauthInput, … }` |
+| `auth.reauthenticate(&who, &f.current_password, &f.totp_code).await` | `auth.reauthenticate_with(&who, &f.reauth).await` |
+| no form (a CLI, a test): `auth.reauthenticate(&who, pw, code)` | `auth.reauthenticate_with(&who, &ReauthInput::password_or_code(pw, code))` |
+
+A section on the profile page gets the same inputs in `ProfileSection::reauth_fields`.
+
+## 7. Behaviour you will notice
+
+Nothing to change in code for these, but they change what users see.
+
+- **A password written for someone asks them to choose their own** (AUTH.md §5m). Any write that
+  sets `auth_user.password_hash` without setting `must_change_password` flags the account. That
+  covers an accounts-panel edit, an app's own form and a manager's reset at `/profile/{id}`. The
+  owner then lands on `/profile` after signing in, with a notice, and can still use the app.
+  - `create_user`, `set_password`, `make_admin` and `reset_admin_access` don't flag.
+  - **If your app sets passwords for users itself and doesn't want this**, set
+    `must_change_password` to `false` in the same write.
+  - **In an accounts panel**, show the column read-only: an editable checkbox posts `false` with
+    every save, and the flag is never set.
+- **SSO accounts may enrol TOTP** on `/profile`. Once one has, the TOTP step follows the identity
+  provider's callback. This is what `Auth::sso_level(Level::Simple)` relies on to require it (§5m).
+  A site that never sets that still lets SSO users opt in.
+- **The login page** shows "or" and "Sign in with a passkey" under the form when passkeys are on.
+  Draw your SSO buttons under them; they no longer need a divider of their own.

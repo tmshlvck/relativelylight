@@ -1803,7 +1803,7 @@ async fn an_account_with_no_local_factor_is_not_challenged() {
     // And the public API says so, which is what an app should key its own UI hint off.
     let who = fx.identify_token(&fx.session_for("boss").await).await.expect("identity");
     assert!(!fx.auth.can_reauthenticate(&who).await, "nothing to challenge with");
-    assert!(fx.auth.reauthenticate(&who, "", "").await.is_ok(), "so re-auth passes");
+    assert!(fx.auth.reauthenticate_with(&who, &ReauthInput::password_or_code("", "")).await.is_ok(), "so re-auth passes");
 }
 
 #[tokio::test]
@@ -1814,7 +1814,7 @@ async fn the_reauthenticate_api_accepts_a_password_or_a_code_and_nothing_else() 
     let who = fx.identify_token(&fx.session_for("alice").await).await.expect("identity");
 
     assert!(fx.auth.can_reauthenticate(&who).await, "a local account can be challenged");
-    assert!(fx.auth.reauthenticate(&who, PW, "").await.is_ok(), "the current password");
+    assert!(fx.auth.reauthenticate_with(&who, &ReauthInput::password_or_code(PW, "")).await.is_ok(), "the current password");
     for (pw, code, what) in [
         ("", "", "nothing"),
         (OTHER_PW, "", "the wrong password"),
@@ -1822,19 +1822,19 @@ async fn the_reauthenticate_api_accepts_a_password_or_a_code_and_nothing_else() 
         ("", "000000", "a code when the account has no 2FA"),
     ] {
         assert!(
-            fx.auth.reauthenticate(&who, pw, code).await.is_err(),
+            fx.auth.reauthenticate_with(&who, &ReauthInput::password_or_code(pw, code)).await.is_err(),
             "{what} must not re-authenticate"
         );
     }
 
     // With 2FA on, a current code works and a stale one doesn't.
     let secret = fx.enable_totp("alice").await;
-    assert!(fx.auth.reauthenticate(&who, "", &totp::current_code(&secret)).await.is_ok());
+    assert!(fx.auth.reauthenticate_with(&who, &ReauthInput::password_or_code("", &totp::current_code(&secret))).await.is_ok());
     assert!(
-        fx.auth.reauthenticate(&who, "", &totp::current_code(&secret)).await.is_err(),
+        fx.auth.reauthenticate_with(&who, &ReauthInput::password_or_code("", &totp::current_code(&secret))).await.is_err(),
         "the same code twice is a replay, even here"
     );
-    assert!(fx.auth.reauthenticate(&who, PW, "").await.is_ok(), "the password still works");
+    assert!(fx.auth.reauthenticate_with(&who, &ReauthInput::password_or_code(PW, "")).await.is_ok(), "the password still works");
 }
 
 #[tokio::test]

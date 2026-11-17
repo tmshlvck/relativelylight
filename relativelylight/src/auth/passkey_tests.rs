@@ -997,11 +997,11 @@ async fn a_passwordless_account_keeps_a_way_in_and_must_confirm_with_its_passkey
         .await
         .unwrap();
     assert!(
-        fx.auth.reauthenticate(&who, "", "").await.is_err(),
+        fx.auth.reauthenticate_with(&who, &ReauthInput::password_or_code("", "")).await.is_err(),
         "nothing is not a factor"
     );
     assert!(
-        fx.auth.reauthenticate(&who, PW, "").await.is_err(),
+        fx.auth.reauthenticate_with(&who, &ReauthInput::password_or_code(PW, "")).await.is_err(),
         "nor is a password it doesn't have"
     );
     let fields = fx.auth.reauth_fields(&who, "Confirm").await;

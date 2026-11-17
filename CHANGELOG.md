@@ -13,6 +13,13 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
+- **`Auth::reauthenticate(&who, password, code)` is removed**, in favour of
+  `Auth::reauthenticate_with(&who, &ReauthInput)`. That one takes every factor, a passkey included,
+  where the old one could not confirm an account with a passkey and no password. **Upgrade:** flatten
+  a `ReauthInput` into your form and render its inputs with `Auth::reauth_fields`. Without a form,
+  call `reauthenticate_with(&who, &ReauthInput::password_or_code(pw, code))`
+  ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#6-authreauthenticate-is-replaced-by-reauthenticate_with)).
+
 - **The profile page is a grid of cards**, one column on a phone and two on a wide screen.
   - The library's sections (password, passkeys, two-factor, recovery codes, sessions, API keys) are
     cards, with one message at the top.
@@ -44,7 +51,7 @@ is easy to miss in a diff.
   an app's own form, a manager's reset. The owner then lands on `/profile` after signing in, with a
   notice. `create_user`, `set_password`, `make_admin` and `reset_admin_access` don't flag. **Upgrade:**
   if an app sets passwords for users itself and doesn't want this, set `must_change_password` to
-  `false` in the same write.
+  `false` in the same write ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#7-behaviour-you-will-notice)).
 
 - **`Auth`'s page callbacks get the request.** `login_shell`, `profile_shell` and `csrf_rejection`
   now receive the request's `http::request::Parts` (URI, method, headers, extensions), so the pages
@@ -109,7 +116,7 @@ is easy to miss in a diff.
     account has. `Auth::reauthenticate_with(&who, &ReauthInput)` checks the post.
   - `ProfileSection::reauth_fields` hands a `profile_extra` section the same block.
   - An account with a passkey and no password must now confirm with a factor. It no longer passes
-    re-authentication with nothing, and `Auth::reauthenticate(&who, password, code)` refuses it.
+    re-authentication with nothing.
   - SSO accounts still pass.
 - **API keys** (`auth::api_key`, [AUTH.md §5k](docs/AUTH.md#5k-api-keys)): bearer keys for an app's
   machine endpoints. A key is its owner: `Auth::identify_key(token, ip)` returns the owner's
