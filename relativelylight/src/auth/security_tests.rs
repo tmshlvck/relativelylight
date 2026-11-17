@@ -3470,6 +3470,39 @@ async fn the_profile_extra_section_survives_disabling_2fa() {
     assert!(res.body.contains("app-extra"), "and the page still carries the app's section: {}", res.body);
 }
 
+/// An app's own card answers like the library's: the caller's profile, one message at the top,
+/// escaped, with the app's section still on the page. Signed out, the login page.
+#[tokio::test]
+async fn an_app_card_answers_with_the_profile_and_one_message() {
+    let fx = Fx::with(|a| a.profile_extra(|_| async { "<section id=\"app-extra\"></section>".to_string() })).await;
+    fx.user("alice").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    let parts = |cookie: Option<&str>| {
+        let mut b = Request::builder().uri("/webhook/rotate");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c);
+        }
+        b.body(()).unwrap().into_parts().0
+    };
+    let body = |res: Response| async move {
+        String::from_utf8(axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap()
+    };
+
+    let res = fx.auth.profile_reply(&parts(Some(&cookie)), StatusCode::OK, Ok("Rotated <b>now</b>.")).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let page = body(res).await;
+    assert!(page.contains("alert-success") && page.contains("Rotated &#60;b&#62;now&#60;/b&#62;."), "{page}");
+    assert!(page.contains("app-extra"), "the whole profile, the app's card included");
+
+    let res = fx.auth.profile_reply(&parts(Some(&cookie)), StatusCode::FORBIDDEN, Err("Wrong password.")).await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    assert!(body(res).await.contains("alert-danger"));
+
+    let res = fx.auth.profile_reply(&parts(None), StatusCode::OK, Ok("Rotated.")).await;
+    assert_eq!(res.status(), StatusCode::SEE_OTHER, "signed out: no profile, no message");
+    assert!(!body(res).await.contains("Rotated."));
+}
+
 #[tokio::test]
 async fn the_profile_extra_section_sees_the_request_it_renders_for() {
     // An app's section reads display preferences from the request — a profile-page timezone picker

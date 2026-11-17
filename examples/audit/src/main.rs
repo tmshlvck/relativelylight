@@ -57,16 +57,19 @@ use axum::routing::get;
 use axum::Router;
 use relativelylight::auth::api_key::{ApiKeys, KeyError};
 use relativelylight::auth::lockout::Lockout;
-use relativelylight::auth::{self, Auth, UserReadWrite};
+use relativelylight::auth::{self, Auth, GroupReadWrite, Identity, UserReadWrite};
 use relativelylight::authz::Operation;
 use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::{Admin, Outcome, ViewState, CSS};
+use relativelylight::crud::ui::{esc_str, Admin, Outcome, ViewState, CSS};
 use relativelylight::middleware::{resolve_real_ip, RealIp, TrustProxy};
 use relativelylight::observe::{ErrorEvent, ErrorObserver, WriteEvent, WriteObserver};
 use sea_orm::IdenStatic; // `post::Column::Title.as_str()` — a column name the compiler checks
 use serde_json::Value;
 use std::sync::{Arc, OnceLock};
+
+/// The group whose members manage accounts (and see them in the data panel).
+const ADMIN_GROUP: &str = "admin";
 
 /// The username to print for a request, put in the **response** extensions by a handler that has
 /// already resolved one. That's the trick that makes the cheap variant work: the log line is written
@@ -84,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // single-connection in-memory SQLite — see its docs for why the pool is pinned.
     let db = model::setup().await?;
     auth::migrate(&db).await?;
-    auth::make_admin(&db, "admin", "admin", "password").await?;
+    auth::make_admin(&db, ADMIN_GROUP, "admin", "password").await?;
 
     // **The audit sink, registered on both write paths.** One `Arc`, handed to `Auth::on_write` and
     // `Crud::on_write`, so a password change and a post edit land in the same place in the same
@@ -97,11 +100,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let auth = Auth::new(db.clone(), Lockout::default())
         .secure_cookies(false)
-        .admin_group("admin")
+        .admin_group(ADMIN_GROUP)
         // The library renders login/profile as *fragments*; without these two the app gets the bare
         // default document and `auth`'s Bootstrap-classed validation errors show up as unstyled text.
-        .login_shell(|form, _req| page("Log in", form))
-        .profile_shell(|frag, _who, _req| wide_page("Profile", frag))
+        .login_shell(|form, _req| page("Log in", None, form))
+        .profile_shell(|frag, who, _req| wide_page("Profile", Some(who), frag))
         .on_write(audit.clone())
         // API keys on /profile: minting and revoking one are `auth` writes, so they reach the same
         // audit sink; `/api/whoami` below accepts them.
@@ -124,6 +127,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut crud = Crud::new(db);
     crud.register(author, gate.clone());
     crud.register(post, gate);
+    // `auth`'s own tables, for the admin group only (reads included), configured by the library
+    // (docs/AUTH.md §5j). An operator's edit to an account is a CRUD write like any other, so it
+    // reaches the same audit sink.
+    let admins = Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP]));
+    crud.register(auth::user::meta_model(&auth), admins.clone());
+    crud.register(auth::group::meta_model(), admins.clone());
+    crud.register(auth::api_key::meta_model(), admins.clone());
+    crud.register(auth::lockout::username_meta_model(), admins.clone());
+    crud.register(auth::lockout::ip_meta_model(), admins);
     crud.csrf(auth.csrf());
     crud.on_write(audit.clone());
     let engine = Arc::new(crud.into_engine());
@@ -309,8 +321,8 @@ async fn panel_show(
     };
     let mut state = ViewState::from_uri(&uri);
     state.entity = Some(entity);
-    let mut res = match panel(&app.engine).render_for(&headers, &state).await {
-        Ok(body) => Html(page("Data", &body)).into_response(),
+    let mut res = match panel(&app, &who).render_for(&headers, &state).await {
+        Ok(body) => Html(wide_page("Data", Some(&who), &body)).into_response(),
         Err(e) => e.into_response(),
     };
     res.extensions_mut().insert(Actor(who.username));
@@ -331,11 +343,13 @@ async fn panel_save(
     };
     let mut state = ViewState::from_uri(&uri);
     state.entity = Some(entity);
-    let ui = panel(&app.engine);
+    let ui = panel(&app, &who);
     let mut res = match ui.submit(&headers, ip, &body, &state).await {
         Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
         Ok(Outcome::Invalid(state)) => match ui.render_for(&headers, &state).await {
-            Ok(body) => (StatusCode::UNPROCESSABLE_ENTITY, Html(page("Data", &body))).into_response(),
+            Ok(body) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, Html(wide_page("Data", Some(&who), &body))).into_response()
+            }
             Err(e) => e.into_response(),
         },
         Err(e) => e.into_response(),
@@ -345,19 +359,32 @@ async fn panel_save(
     res
 }
 
-fn panel(engine: &Engine) -> Admin<'_> {
-    Admin::new(engine)
-        .title("Data")
-        .base("/data")
-        .entity("post")
-        .entity("author")
-        .separator()
-        .link("Home", "/")
-        .link("Profile", "/profile")
+/// The data panel, for this caller: the accounts section only for those who manage accounts (the
+/// gate would refuse anyone else's read, so it isn't listed for them).
+fn panel<'a>(app: &'a AppState, who: &Identity) -> Admin<'a> {
+    let mut admin = Admin::new(&app.engine).title("Data").base("/data").entity("post").entity("author");
+    if app.auth.can_manage_others(who) {
+        // The id opens the account's credentials page: password reset, 2FA off.
+        let credentials = auth::user::credentials_link(app.auth.profile_path());
+        admin = admin
+            .separator()
+            .group("Accounts")
+            .entity_with("auth_user", |t| {
+                t.title("Users").format_cell("id", credentials.clone()).format_view("id", credentials)
+            })
+            .entity_with("auth_group", |t| t.title("Groups"))
+            // Minted on /profile, where the raw value can be shown once.
+            .entity_with("auth_api_key", |t| t.title("API keys").create(false))
+            // Deleting a row is the unlock.
+            .entity_with("auth_username_lockout", |t| t.title("Locked accounts").create(false).edit(false))
+            .entity_with("auth_ip_lockout", |t| t.title("Locked addresses").create(false).edit(false));
+    }
+    admin
 }
 
 /// **One page wrapper for every page in this example**, the library's own included — see
-/// `login_shell` / `profile_shell` at the call site.
+/// `login_shell` / `profile_shell` at the call site. The navbar is the one way around the app: its
+/// pages on the left, the account (Profile, Log out) under the user's name on the right.
 ///
 /// Bootstrap is loaded here, by the app, because that is the only place it can be: the library
 /// contributes *fragments* and never a document. Its fragments carry Bootstrap class names, so
@@ -365,30 +392,53 @@ fn panel(engine: &Engine) -> Admin<'_> {
 /// example fell into: `auth`'s validation errors are `<div class="alert alert-danger">`, and with no
 /// stylesheet a wrong-password message is plain black text in the middle of the form, easy to
 /// mistake for body copy. Style the shell, or your users won't see the errors.
-fn page(title: &str, body: &str) -> String {
+fn shell(title: &str, who: Option<&Identity>, body: &str) -> String {
+    let (left, right) = match who {
+        Some(w) => (
+            r#"<a class="nav-link" href="/data/post">Data</a><a class="nav-link" href="/private">Private</a>"#
+                .to_string(),
+            // A `<details>` disclosure rather than a Bootstrap dropdown, so it needs no JavaScript.
+            format!(
+                r#"<details class="user-menu">
+<summary class="link-body-emphasis fw-medium" title="Your account">{} <span aria-hidden="true">&#9662;</span></summary>
+<div class="position-absolute end-0 mt-1 py-1 bg-body border rounded shadow-sm">
+<a class="dropdown-item px-3 py-1" href="/profile">Profile</a>
+<a class="dropdown-item px-3 py-1" href="/logout">Log out</a>
+</div></details>"#,
+                esc_str(&w.username)
+            ),
+        ),
+        None => (String::new(), r#"<a class="nav-link" href="/login">Log in</a>"#.to_string()),
+    };
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>{title} — audit demo</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-<style>{CSS}</style></head><body class="bg-body-tertiary">
-<main class="container py-4" style="max-width:52rem"><h1 class="h4 mb-3">{title}</h1>{body}
-<p class="mt-4 mb-0"><a class="link-secondary small" href="/">&larr; home</a></p></main>
+<style>{CSS}</style>
+<style>details.user-menu{{position:relative}}details.user-menu>summary{{cursor:pointer;list-style:none}}
+details.user-menu>summary::-webkit-details-marker{{display:none}}details.user-menu>div{{min-width:9rem;z-index:1050}}</style></head>
+<body class="bg-body-tertiary">
+<nav class="navbar bg-body border-bottom px-3 gap-3">
+<div class="d-flex align-items-center gap-3"><a class="navbar-brand" href="/">audit demo</a>{left}</div>
+<div class="d-flex align-items-center gap-3 ms-auto">{right}</div></nav>
+<main class="container-fluid py-3">{body}</main>
 </body></html>"#
     )
 }
 
-/// The library's profile in the same document: it brings its own heading and a grid of cards, so a
-/// wide column and no title of ours.
-fn wide_page(title: &str, body: &str) -> String {
-    format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-<style>{CSS}</style></head><body class="bg-body-tertiary">
-<main class="container py-4">{body}
-<p class="mt-4 mb-0"><a class="link-secondary small" href="/">&larr; home</a></p></main>
-</body></html>"#
+/// A page of prose: a narrow column under a title.
+fn page(title: &str, who: Option<&Identity>, body: &str) -> String {
+    shell(
+        title,
+        who,
+        &format!(r#"<div class="mx-auto" style="max-width:52rem"><h1 class="h4 mb-3">{title}</h1>{body}</div>"#),
     )
+}
+
+/// A page at full width: the data panel, and the library's profile (it brings its own heading and a
+/// grid of cards).
+fn wide_page(title: &str, who: Option<&Identity>, body: &str) -> String {
+    shell(title, who, body)
 }
 
 // ─────────────────────────── the log line: variant 1, free ───────────────────────────
@@ -481,6 +531,7 @@ async fn public(State(app): State<AppState>, req: Request) -> Response {
     let who = app.auth.identify(req.headers()).await;
     let body = Html(page(
         "audit demo",
+        who.as_ref(),
         &format!(
             r#"<p>{}</p>
 <p>Watch the terminal — two records, one address:</p>
@@ -497,11 +548,7 @@ async fn public(State(app): State<AppState>, req: Request) -> Response {
       <code>-</code>. Restart with <code>NAME_EVERY_REQUEST=1</code> to name those too, at one
       session lookup per request.</li>
 </ul>
-<p><a class="btn btn-primary btn-sm" href="/data/post">Data</a>
-<a class="btn btn-outline-secondary btn-sm" href="/private">/private</a>
-<a class="btn btn-outline-secondary btn-sm" href="/profile">Profile</a>
-<a class="btn btn-outline-secondary btn-sm" href="/login">Log in</a>
-<a class="btn btn-outline-secondary btn-sm" href="/logout">Log out</a></p>"#,
+"#,
             match &who {
                 Some(id) => {
                     format!("Signed in as <b>{}</b> — this request's log line says so.", id.username)
@@ -591,6 +638,7 @@ async fn private(State(app): State<AppState>, req: Request) -> Response {
     };
     let body = Html(page(
         &format!("hello {}", who.username),
+        Some(&who),
         "<p>The log line for this request names you, because this handler resolved an identity \
          anyway and handed it to the log on the way out.</p>",
     ));

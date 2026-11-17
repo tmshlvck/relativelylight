@@ -1577,6 +1577,30 @@ impl Auth {
         }
     }
 
+    /// Answer a `POST` from the app's own profile card ([`profile_extra`](Auth::profile_extra)) the way
+    /// the library answers its own cards: the caller's profile page, with `result` as the one message
+    /// at the top (`Ok` a success, `Err` an error; plain text, escaped). `status` is the response's,
+    /// e.g. `403` when re-authentication failed. A caller who isn't signed in is sent to the login page.
+    ///
+    /// ```ignore
+    /// async fn rotate(State(app): State<App>, req: Parts, Form(f): Form<RotateForm>) -> Response {
+    ///     let Some(who) = app.auth.identify(&req.headers).await else { return Redirect::to("/login").into_response() };
+    ///     if let Err(msg) = app.auth.reauthenticate_with(&who, &f.reauth).await {
+    ///         return app.auth.profile_reply(&req, StatusCode::FORBIDDEN, Err(&msg)).await;
+    ///     }
+    ///     // … rotate …
+    ///     app.auth.profile_reply(&req, StatusCode::OK, Ok("Webhook secret rotated.")).await
+    /// }
+    /// ```
+    pub async fn profile_reply(&self, req: &Parts, status: StatusCode, result: Result<&str, &str>) -> Response {
+        let inner = &self.inner;
+        let Some((who, user)) = signed_in(inner, &req.headers).await else {
+            return Redirect::to(&inner.login_path).into_response();
+        };
+        let csrf = inner.csrf().token(&req.headers).unwrap_or_default();
+        profile_reply(inner, (&who, &user, &csrf, req), status, result).await
+    }
+
     /// **Re-authenticate** the caller before something sensitive, with whatever factor their form
     /// submitted: the password, a TOTP code, or a passkey, read as a [`ReauthInput`] flattened into the
     /// form. Render the inputs with [`reauth_fields`](Auth::reauth_fields) inside that form. `Ok(())` if

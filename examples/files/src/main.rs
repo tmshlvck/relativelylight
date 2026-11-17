@@ -249,7 +249,7 @@ async fn view(State(app): State<App>, Path(name): Path<String>) -> Response {
         }
         preview = preview.text(&head);
     }
-    shell(&format!("<p><a href=\"/\">← all files</a></p>{}", preview.render())).into_response()
+    shell(&preview.render()).into_response()
 }
 
 /// `GET /raw/{name}` — the content, inline when its type is safe to render.
@@ -368,6 +368,8 @@ fn shell(body: &str) -> Html<String> {
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Files</title>\
          <link href=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css\" rel=\"stylesheet\">\
-         </head><body class=\"bg-body-tertiary\"><main class=\"container my-4\">{body}</main></body></html>"
+         </head><body class=\"bg-body-tertiary\">\
+         <nav class=\"navbar bg-body border-bottom px-3\"><a class=\"navbar-brand\" href=\"/\">Files</a></nav>\
+         <main class=\"container my-4\">{body}</main></body></html>"
     ))
 }

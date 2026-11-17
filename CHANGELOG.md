@@ -87,8 +87,10 @@ is easy to miss in a diff.
   leaves it out, and an update through the engine that carries it is refused with `422`
   ([CRUD.md](docs/CRUD.md#metafield)).
 - **The examples follow one way to do each thing** ([DESIGN.md principle 9](docs/DESIGN.md#principles)):
-  their accounts panels are the library's models, their "Back to …" and "Your profile" links that
-  repeated the navbar are gone, and `examples/auth`'s user list shows the password's state.
+  their accounts panels are the library's models (`examples/audit` gains one, so account edits show
+  in its audit trail), every app with a login has one navbar with the user menu (Profile, Log out),
+  links that repeated it are gone, `examples/auth`'s user list shows the password's state, and its
+  webhook card answers on the profile like the library's cards.
 - **Passkeys** (feature `passkeys`, [AUTH.md §5l](docs/AUTH.md#5l-passkeys-feature-passkeys)), with
   `Auth::passkeys(Passkeys::new(rp_id, origin))`. It adds:
   - "Sign in with a passkey" on `/login`, without a username, followed by the TOTP step when the
@@ -141,6 +143,9 @@ is easy to miss in a diff.
   - `Auth::reauth_fields(&who, hint)` renders the confirm-it's-you inputs for whichever factors the
     account has. `Auth::reauthenticate_with(&who, &ReauthInput)` checks the post.
   - `ProfileSection::reauth_fields` hands a `profile_extra` section the same block.
+  - `Auth::profile_reply(&req, status, Ok(msg) | Err(msg))` answers an app card's form the way the
+    library answers its own: the profile page, with one message at the top
+    ([AUTH.md §5](docs/AUTH.md#5-authn--users-sessions-login-passwords)).
   - An account with a passkey and no password must now confirm with a factor. It no longer passes
     re-authentication with nothing.
   - SSO accounts still pass.

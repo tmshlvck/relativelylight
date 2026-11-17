@@ -225,7 +225,21 @@ What the hook is handed, in `ProfileSection`:
 
 A card's *handler* is an ordinary route of yours. Put
 [`reauthenticate_with`](#5h-re-authentication-before-sensitive-changes) at the top of it if the
-action is sensitive, as it is for a secret. `examples/auth` has both cards above.
+action is sensitive, as it is for a secret. Answer with **`Auth::profile_reply`**, as the library's
+own cards do: the profile page again, with one message at the top (`Ok` a success, `Err` an error).
+
+```rust
+async fn rotate(State(app): State<App>, req: Parts, Form(f): Form<RotateForm>) -> Response {
+    let Some(who) = app.auth.identify(&req.headers).await else { return Redirect::to("/login").into_response() };
+    if let Err(msg) = app.auth.reauthenticate_with(&who, &f.reauth).await {
+        return app.auth.profile_reply(&req, StatusCode::FORBIDDEN, Err(&msg)).await; // nothing changed
+    }
+    // … rotate …
+    app.auth.profile_reply(&req, StatusCode::OK, Ok("Webhook secret rotated.")).await
+}
+```
+
+`examples/auth` has both cards above.
 
 ### Admin helpers — who may re-open an account
 

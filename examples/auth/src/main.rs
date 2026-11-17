@@ -46,6 +46,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -436,40 +437,22 @@ struct RotateForm {
 /// to say so in your own UI.
 async fn rotate_webhook_secret(
     State(app): State<AppState>,
-    headers: HeaderMap,
+    req: Parts,
     Form(form): Form<RotateForm>,
 ) -> Response {
     let auth = &app.auth;
-    let Some(who) = auth.identify(&headers).await else {
+    let Some(who) = auth.identify(&req.headers).await else {
         return Redirect::to(auth.login_path()).into_response();
     };
+    // The answer is the profile page with one message at the top, as for the library's own cards.
     if let Err(msg) = auth.reauthenticate_with(&who, &form.reauth).await {
         // 403, and nothing has changed — the old secret is still the secret.
-        return (
-            StatusCode::FORBIDDEN,
-            Html(page(
-                "Confirm it's you",
-                Some(&who),
-                &format!(
-                    r#"<div class="alert alert-danger">{msg}</div>
-<p class="small text-muted">Nothing was changed.</p>"#
-                ),
-            )),
-        )
-            .into_response();
+        return auth.profile_reply(&req, StatusCode::FORBIDDEN, Err(&msg)).await;
     }
-    // Re-authenticated. A real app would mint and store a secret here; this one only says it would, since
-    // the point of the example is the check above.
-    Html(page(
-        "Webhook secret rotated",
-        Some(&who),
-        &format!(
-            r#"<div class="alert alert-success">Confirmed — a new webhook secret would now be issued for
-<b>{}</b>, and the old one revoked.</div>"#,
-            who.username
-        ),
-    ))
-    .into_response()
+    // Re-authenticated. A real app would mint and store a secret here; this one only says it would,
+    // since the point of the example is the check above.
+    auth.profile_reply(&req, StatusCode::OK, Ok("Webhook secret rotated: a new one would now be issued, and the old one revoked."))
+        .await
 }
 
 // ── The accounts panel ───────────────────────────────────────────────────────────────────────────
