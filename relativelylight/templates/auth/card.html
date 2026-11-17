@@ -1,0 +1,6 @@
+{%- import "auth/_macros.html" as m -%}
+{#- `auth::profile_card`: an app's card in the profile's grid, looking like the library's. `body` is
+    the app's HTML, inserted as is. -#}
+{%- call m::card_start(title) %}{% endcall %}
+{{ body|safe }}
+{%- call m::card_end() %}{% endcall %}

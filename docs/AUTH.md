@@ -184,39 +184,47 @@ fragment and your `Auth::profile_shell` wraps it, handed the `Identity` and the 
 `http::request::Parts` for your chrome. Both paths
 write only the password hash and revoke sessions (§5f).
 
-**Extending the profile page — `Auth::profile_extra`.** The password/2FA fragment is rarely the whole
-of "my account": an app wants notification preferences, a webhook secret, a data export, a list of
-the user's own things. (API keys are built in, §5k.) Register a hook and it renders **below** the
-library's fragment, on the caller's own `/profile` only (a manager's `/profile/{id}` doesn't get it —
-resetting someone's password is no licence to touch their settings):
+**The profile page is a grid of cards**, one column on a phone and two on a wide screen:
+- the password (or, for an SSO account, the provider);
+- passkeys (§5l) and two-factor;
+- recovery codes, when 2FA is on;
+- other sessions, and API keys (§5k).
+
+One message, at the top, answers whatever was just done. Your `profile_shell` gives it a wide
+column, not a narrow card of its own.
+
+**Your own cards — `Auth::profile_extra`.** "My account" is rarely only sign-in: an app wants
+preferences, a webhook secret, a data export, a list of the user's own things. The hook returns your
+cards, drawn with `auth::profile_card(title, body)` so they look like the library's, and they follow
+its own on the caller's own `/profile`. A manager's `/profile/{id}` doesn't get them — resetting
+someone's password is no licence to touch their settings — and neither does a restricted session
+(§5m):
 
 ```rust
-use relativelylight::auth::ProfileSection;
+use relativelylight::auth::{self, ProfileSection};
 use relativelylight::csrf::Csrf;
 
 let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
-    let hooks = my_webhooks(&s.who.id).await;                  // `s.who` is the caller
-    format!(r#"<hr><h2 class="h6">Webhooks</h2>{hooks}
-               <form method="post" action="/webhook-secret/rotate">{}
-               <button class="btn btn-sm btn-outline-primary">Rotate the secret</button></form>"#,
-            Csrf::hidden_input(&s.csrf))                        // `s.csrf` is *this request's* token
+    let zone = TzPicker::new().render(&Tz::from_headers(&s.headers), "/profile");   // a preference
+    let form = format!(r#"<form method="post" action="/webhook-secret/rotate">{}{}
+        <button class="btn btn-sm btn-outline-danger">Rotate the secret</button></form>"#,
+        Csrf::hidden_input(&s.csrf),   // `s.csrf` is *this request's* token
+        s.reauth_fields);              // the caller's confirm-it's-you inputs
+    auth::profile_card("Preferences", &zone) + &auth::profile_card("Webhook secret", &form)
 });
 ```
 
-`s.csrf` is what makes the section able to hold a real form. The hook can't mint a token itself, and
-a form without one is refused like any other POST (§7). `s.headers` are the request's headers, for a
-section that reads a preference cookie, such as a
-[timezone picker](TIME.md#3-the-picker-and-its-handler) showing the caller's current zone. The
-section's *handler* is an ordinary route of yours — put
-[`reauthenticate_with`](#5h-re-authentication-before-sensitive-changes) at the top of it if
-the action is sensitive, which for a secret it is, and put `s.reauth_fields` in the form: the caller's
-confirm-it's-you inputs (password, code, passkey), sharing the page's passkey challenge. `examples/auth` does exactly this: its
-`POST /webhook-secret/rotate` is reached from a `profile_extra` section and re-authenticates before it
-does anything.
+What the hook is handed, in `ProfileSection`:
+- **`s.csrf`** is what makes a card able to hold a real form. The hook can't mint a token itself, and
+  a form without one is refused like any other POST (§7).
+- **`s.headers`** are the request's headers, for a card that reads a preference cookie, such as a
+  [timezone picker](TIME.md#3-the-picker-and-its-handler) showing the caller's current zone.
+- **`s.reauth_fields`** are the caller's confirm-it's-you inputs (password, code, passkey), sharing
+  the page's passkey challenge.
 
-Three things it is not: it is **not** a way to replace the password/2FA fragment (that's
-`profile_shell`, which wraps the whole page in your chrome), it is **not** rendered for managers
-looking at someone else, and it is **not** run on the login page.
+A card's *handler* is an ordinary route of yours. Put
+[`reauthenticate_with`](#5h-re-authentication-before-sensitive-changes) at the top of it if the
+action is sensitive, as it is for a secret. `examples/auth` has both cards above.
 
 ### Admin helpers — who may re-open an account
 
@@ -971,7 +979,10 @@ refuse passkeys on a bare IP address; locally, use `localhost`.
 
 - "Sign in with a passkey" on `/login`. The passkey names the account, so no username is typed. When
   the account also has TOTP, the TOTP step follows.
-- A passkeys section on `/profile`: list, add (re-authenticated), remove, and "Remove my password".
+- A passkeys card on `/profile`: list, add, remove, and "Remove my password". Adding happens on the
+  page itself: the form carries the registration challenge, and "Add a passkey" runs the browser's
+  prompt, after the prompt that confirms it's you when nothing was typed, then posts. No page in
+  between, and nothing written to the account until a passkey is added.
 - A passkey on every confirm-it's-you form (§5h): the library's own, and the app's
   (`Auth::reauth_fields` / `reauthenticate_with`, or `ProfileSection::reauth_fields` in a
   `profile_extra` section).

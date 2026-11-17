@@ -196,6 +196,13 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
     user can go on into the app. `Identity::password_change` carries the reason, so the app's shell
     can show it (the "bell" belongs to the notifications design, [TODO.md](TODO.md#auth)). Accounts
     without a password (SSO, passkey-only) are never due.
+- **The profile is a grid of cards, not tabs.** Each concern (password, passkeys, 2FA, sessions,
+  API keys, the app's own) is a card, two columns on a wide screen. An app extends it by adding a
+  card (`auth::profile_card`).
+  - **Why not tabs:** they would need a `?tab=` on every form's answer, or a script, and a message
+    could land on a tab nobody is looking at. A grid needs neither.
+  - **One message, at the top,** answers whatever was just done, so no card carries its own.
+  - **If the cards ever outgrow a page,** grouping them into server-rendered tabs is the next step.
 - **Re-authentication is per request, not a window.** The proof travels with the sensitive form
   itself: a password, a TOTP code, or a passkey assertion over a challenge rendered into that form.
   Nothing records "re-authenticated at", so there is no grace period for a stolen session to ride

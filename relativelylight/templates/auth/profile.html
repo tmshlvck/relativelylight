@@ -1,84 +1,95 @@
 {%- import "auth/_macros.html" as m -%}
-{#- What the page must say first (AUTH.md §5m): the factor a restricted session must add, and a password
-    change that is due. #}
+{#- The caller's own profile (AUTH.md §5): a grid of cards, one column on a phone, two on a wide
+    screen. The library's cards first, then the passkey and API-key cards when those are on, then the
+    app's own (`Auth::profile_extra`, drawn with `auth::profile_card` so they match). One message, at
+    the top, for whatever was just done. -#}
+<h1 class="h4 mb-1">Profile</h1>
+<p class="text-muted small mb-3">Signed in as <strong>{{ username }}</strong>.</p>
 {%- if let Some(n) = notices.policy %}<div class="alert alert-warning" role="alert">{{ n }}</div>{% endif %}
 {%- if let Some(n) = notices.password %}<div class="alert alert-warning" role="alert">{{ n }}</div>{% endif %}
-{%- if let Some(provider) = sso %}
-<h1 class="h5 mb-3">Profile</h1>
-<p class="text-muted small">Signed in as <strong>{{ username }}</strong>.</p>
-<div class="alert alert-info">This account signs in through <strong>{{ provider }}</strong> (single
-sign-on). Its password and group memberships are managed by the identity provider.</div>
 {{ m::alert(error, success) }}
-{%- else %}
-{%- if has_password %}
-<h1 class="h5 mb-3">Change your password</h1>
-{%- else %}
-<h1 class="h5 mb-3">Set a password</h1>
-{%- endif %}
-<p class="text-muted small">Signed in as <strong>{{ username }}</strong>.
-{%- if !has_password %} This account signs in with a passkey and has no password.{% endif %}</p>
+<div class="row row-cols-1 row-cols-lg-2 g-3 align-items-start">
+{%- if let Some(provider) = sso %}
+{%- call m::card_start("Sign-in") %}{% endcall %}
+<p class="small mb-0">This account signs in through <strong>{{ provider }}</strong> (single sign-on).
+Its password and group memberships are managed by the identity provider.</p>
+{%- call m::card_end() %}{% endcall %}
+{%- else if has_password %}
+{%- call m::card_start("Password") %}{% endcall %}
 <form method="post" action="/profile">
   {{ m::csrf(csrf) }}
-  {{ m::alert(error, success) }}
-  {%- if has_password %}
-  <div class="mb-3">
-    <label class="form-label" for="rl-current">Current password</label>
-    <input class="form-control" id="rl-current" name="current_password" type="password" autocomplete="current-password" autofocus>
+  <div class="mb-2">
+    <label class="form-label small" for="rl-current">Current password</label>
+    <input class="form-control form-control-sm" id="rl-current" name="current_password" type="password" autocomplete="current-password">
   </div>
-  {%- endif %}
-  <div class="mb-3">
-    <label class="form-label" for="rl-new">New password</label>
-    <input class="form-control" id="rl-new" name="new_password" type="password" autocomplete="new-password">
+  <div class="mb-2">
+    <label class="form-label small" for="rl-new">New password</label>
+    <input class="form-control form-control-sm" id="rl-new" name="new_password" type="password" autocomplete="new-password">
   </div>
   <div class="mb-3">
-    <label class="form-label" for="rl-confirm">Confirm new password</label>
-    <input class="form-control" id="rl-confirm" name="confirm_password" type="password" autocomplete="new-password">
+    <label class="form-label small" for="rl-confirm">Confirm new password</label>
+    <input class="form-control form-control-sm" id="rl-confirm" name="confirm_password" type="password" autocomplete="new-password">
   </div>
-  {%- if has_password %}
-  <button class="btn btn-primary" type="submit">Change password</button>
-  {%- else %}
-  {{- m::reauth("rl-setpw", reauth, "Confirm it's you: a password is a new way into this account.") }}
-  <button class="btn btn-primary" type="submit">Set password</button>
-  {%- endif %}
+  <button class="btn btn-primary btn-sm" type="submit">Change password</button>
 </form>
+{%- call m::card_end() %}{% endcall %}
+{%- else %}
+{%- call m::card_start("Password") %}{% endcall %}
+<p class="text-muted small">This account signs in with a passkey and has no password.</p>
+<form method="post" action="/profile">
+  {{ m::csrf(csrf) }}
+  <div class="mb-2">
+    <label class="form-label small" for="rl-new">New password</label>
+    <input class="form-control form-control-sm" id="rl-new" name="new_password" type="password" autocomplete="new-password">
+  </div>
+  <div class="mb-3">
+    <label class="form-label small" for="rl-confirm">Confirm new password</label>
+    <input class="form-control form-control-sm" id="rl-confirm" name="confirm_password" type="password" autocomplete="new-password">
+  </div>
+  {{- m::reauth("rl-setpw", reauth, "Confirm it's you: a password is a new way into this account.") }}
+  <button class="btn btn-primary btn-sm" type="submit">Set password</button>
+</form>
+{%- call m::card_end() %}{% endcall %}
 {%- endif %}
-<hr class="my-4">
-<h2 class="h6">Two-factor authentication</h2>
+{%- if let Some(card) = passkeys %}{{ card|safe }}{% endif %}
+{%- call m::card_start("Two-factor authentication") %}{% endcall %}
 {%- if totp_on %}
-<p class="text-muted small mb-2">Enabled — a code from your authenticator app is required at login.</p>
+<p class="text-muted small mb-2">On: a code from your authenticator app is asked for at sign-in.</p>
 <form method="post" action="/profile/totp/disable">
   {{ m::csrf(csrf) }}
-  {{- m::reauth("rl-2fa-off", reauth, "Turning off your second factor needs confirming — this is what stops someone who has taken over your session from removing it.") }}
+  {{- m::reauth("rl-2fa-off", reauth, "Turning off your second factor needs confirming: this is what stops someone who has taken over your session from removing it.") }}
   <button class="btn btn-outline-danger btn-sm" type="submit">Disable 2FA</button>
 </form>
 {%- else %}
 <p class="text-muted small mb-2">Off. Add a second factor with an authenticator app (TOTP).</p>
 <a class="btn btn-outline-primary btn-sm" href="/profile/totp">Set up 2FA</a>
 {%- endif %}
+{%- call m::card_end() %}{% endcall %}
 {%- if let Some(left) = recovery_left %}
 {#- Only with 2FA on: codes recover a second factor, so without one there is nothing for them to do. #}
-<hr class="my-4">
-<h2 class="h6">Recovery codes</h2>
-<p class="text-muted small mb-2">Single-use codes that log you in when your authenticator isn't
+{%- call m::card_start("Recovery codes") %}{% endcall %}
+<p class="text-muted small mb-2">Single-use codes that sign you in when your authenticator isn't
 available.
 {%- if *left == 0 %} <strong>None left.</strong> If you lose your authenticator now, only an administrator can get you back in — generate a new set.
 {%- else if *left == 1 %} <strong>1 code left.</strong> Generate a new set soon.
 {%- else if *left <= 3 %} <strong>{{ left }} codes left.</strong> Generate a new set soon.
 {%- else %} {{ left }} unused codes.
-{%- endif %}</p>
+{%- endif %} Generating a set invalidates the previous one.</p>
 <form method="post" action="/profile/totp/recovery">
   {{ m::csrf(csrf) }}
-  {{- m::reauth("rl-rec", reauth, "Confirm it's you — a new set is a new way into this account.") }}
+  {{- m::reauth("rl-rec", reauth, "Confirm it's you: a new set is a new way into this account.") }}
   <button class="btn btn-outline-secondary btn-sm" type="submit">Generate new codes</button>
 </form>
-<p class="text-muted small mt-2 mb-0">Generating a set invalidates the previous one.</p>
+{%- call m::card_end() %}{% endcall %}
 {%- endif %}
-<hr class="my-4">
+{%- call m::card_start("Other sessions") %}{% endcall %}
 {#- Other sessions only: a button that signed you out of this page too would be no use. #}
-<h2 class="h6">Other sessions</h2>
 <p class="text-muted small mb-2">Signed in somewhere you'd rather not be — a shared or lost device? Sign
 out everywhere except here.</p>
 <form method="post" action="/profile/sessions/revoke">
   {{ m::csrf(csrf) }}
   <button class="btn btn-outline-secondary btn-sm" type="submit">Sign out other sessions</button>
 </form>
+{%- call m::card_end() %}{% endcall %}
+{{ more|safe }}
+</div>

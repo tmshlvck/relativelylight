@@ -136,6 +136,10 @@ struct Profile<'a> {
     totp_on: bool,
     recovery_left: Option<u64>,
     notices: &'a Notices,
+    /// The passkeys card, when passkeys are on, pre-rendered.
+    passkeys: Option<&'a str>,
+    /// The cards after the library's own: API keys, then the app's (`profile_extra`), pre-rendered.
+    more: &'a str,
     error: Option<&'a str>,
     success: Option<&'a str>,
     csrf: &'a str,
@@ -159,6 +163,8 @@ pub(super) struct ProfileView<'a> {
     pub totp_on: bool,
     pub recovery_left: Option<u64>,
     pub notices: &'a Notices,
+    pub passkeys: Option<&'a str>,
+    pub more: &'a str,
 }
 
 /// The self-service profile: change password, the 2FA state, recovery codes (with 2FA on) and
@@ -177,6 +183,8 @@ pub(super) fn change_form_html(
         totp_on: v.totp_on,
         recovery_left: v.recovery_left,
         notices: v.notices,
+        passkeys: v.passkeys,
+        more: v.more,
         error,
         success,
         csrf,
@@ -267,8 +275,8 @@ pub(super) struct PasskeysCard<'a> {
     pub has_password: bool,
     pub requirement: Option<&'a str>,
     pub reauth: &'a ReauthView,
-    pub error: Option<&'a str>,
-    pub success: Option<&'a str>,
+    /// The registration challenge the "Add a passkey" form carries; `None` when it couldn't be made.
+    pub register: Option<&'a PasskeyAsk>,
     pub csrf: &'a str,
 }
 
@@ -277,21 +285,12 @@ pub(super) fn passkeys_card_html(card: &PasskeysCard<'_>) -> String {
     card.render().unwrap_or_default()
 }
 
-/// A page whose one job is a passkey ceremony: the options, the button that starts it, and the form
-/// the script submits.
+/// The passkey sign-in page, for a browser that didn't open the prompt from the login page itself.
 #[cfg(feature = "passkeys")]
 #[derive(Template)]
 #[template(path = "auth/passkey_ceremony.html")]
 pub(super) struct Ceremony<'a> {
-    pub title: &'a str,
-    pub lead: &'a str,
-    pub action: &'a str,
-    /// `get` (sign in, confirm) or `create` (add a passkey).
-    pub mode: &'a str,
-    pub button: &'a str,
     pub cancel: &'a str,
-    /// Extra fields the post carries (the new passkey's label).
-    pub hidden: &'a [(&'a str, &'a str)],
     pub ask: &'a PasskeyAsk,
     pub csrf: &'a str,
 }
@@ -318,21 +317,25 @@ pub(super) fn recovery_codes_html(codes: &[String], headline: &str) -> String {
 struct ApiKeys<'a> {
     card: &'a api_key::Card,
     reauth: &'a ReauthView,
-    error: Option<&'a str>,
-    success: Option<&'a str>,
     csrf: &'a str,
 }
 
 /// The API-key card on the caller's own profile: their keys, a revoke button each, and the mint form,
 /// which re-authenticates when the account has a factor to ask for.
-pub(super) fn api_keys_html(
-    card: &api_key::Card,
-    reauth: &ReauthView,
-    error: Option<&str>,
-    success: Option<&str>,
-    csrf: &str,
-) -> String {
-    render(ApiKeys { card, reauth, error, success, csrf })
+pub(super) fn api_keys_html(card: &api_key::Card, reauth: &ReauthView, csrf: &str) -> String {
+    render(ApiKeys { card, reauth, csrf })
+}
+
+#[derive(Template)]
+#[template(path = "auth/card.html")]
+struct Card<'a> {
+    title: &'a str,
+    body: &'a str,
+}
+
+/// A card of the profile's grid around `body` (`auth::profile_card`).
+pub(super) fn card_html(title: &str, body: &str) -> String {
+    render(Card { title, body })
 }
 
 #[derive(Template)]
@@ -381,6 +384,8 @@ mod tests {
             totp_on: has_password,
             recovery_left: Some(2),
             notices: &notices,
+            passkeys: None,
+            more: "",
         };
         let pages = [
             login_form_html(Some(bad), bad, true),
@@ -392,8 +397,8 @@ mod tests {
             reset_form_html(&Target { sso: Some(bad), ..target }, &none, None, Some(bad), bad),
             recovery_codes_html(&[], bad),
             csrf_rejected_html(bad),
-            api_keys_html(&card, &none, Some(bad), None, bad),
-            api_keys_html(&card, &none, None, Some(bad), bad),
+            api_keys_html(&card, &none, bad),
+            card_html(bad, "<p>body</p>"),
             api_key_minted_html(bad, bad),
         ];
         for html in pages {

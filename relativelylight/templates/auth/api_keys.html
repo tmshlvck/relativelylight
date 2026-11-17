@@ -1,11 +1,9 @@
 {%- import "auth/_macros.html" as m -%}
-{#- The API-key card (AUTH.md §5k), below the library's own sections on the caller's /profile. #}
-<hr class="my-4">
-<h2 class="h6" id="api-keys">API keys</h2>
+{#- The API-key card (AUTH.md §5k) on the caller's /profile. #}
+{%- call m::card_start("API keys") %}{% endcall %}
 <p class="text-muted small mb-2">Keys for scripts, devices and agents calling this app's API. A key acts
 as <em>you</em>: it can do what your account can, checked on every request, and stops working when your
 access changes. It can't sign in to these pages. Revoke a key here if a device is lost.</p>
-{{ m::alert(error, success) }}
 {%- if card.rows.is_empty() %}
 <p class="text-muted small">No keys yet.</p>
 {%- else %}
@@ -50,3 +48,4 @@ access changes. It can't sign in to these pages. Revoke a key here if a device i
   {{- m::reauth("rl-key", reauth, "Confirm it's you. A key is a new way into this account that doesn't ask for your second factor.") }}
   <button class="btn btn-outline-primary btn-sm" type="submit">Create key</button>
 </form>
+{%- call m::card_end() %}{% endcall %}

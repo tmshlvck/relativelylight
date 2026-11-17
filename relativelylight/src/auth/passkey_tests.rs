@@ -71,6 +71,21 @@ impl Resp {
         let options = b[o..o + b[o..].find("</script>").unwrap()].to_string();
         (challenge, options)
     }
+
+    /// The registration challenge the profile's "Add a passkey" form carries, and its options.
+    fn register(&self) -> (String, String) {
+        let b = &self.body;
+        let field = r#"name="register_challenge" value=""#;
+        let c = b
+            .find(field)
+            .unwrap_or_else(|| panic!("no registration challenge: {b}"));
+        let rest = &b[c + field.len()..];
+        let challenge = rest[..rest.find('"').unwrap()].to_string();
+        let tag = "data-rl-passkey-register>";
+        let o = b.find(tag).expect("no options") + tag.len();
+        let options = b[o..o + b[o..].find("</script>").unwrap()].to_string();
+        (challenge, options)
+    }
 }
 
 impl Fx {
@@ -194,37 +209,38 @@ impl Fx {
             .len()
     }
 
-    /// Add a passkey to `cookie`'s account through the profile, confirming with the password. Returns
-    /// the finishing response.
+    /// Add a passkey to `cookie`'s account through the profile, confirming with the password: the
+    /// registration challenge the page carries, answered by `auth`, posted with the label in one go —
+    /// what the page's script does. Returns the response.
     async fn enrol(&self, cookie: &str, auth: &mut impl AuthenticatorBackend, label: &str) -> Resp {
-        let page = self
-            .post(
-                "/profile/passkeys",
-                &[("name", label), ("current_password", PW)],
-                Some(cookie),
-            )
-            .await;
-        assert_eq!(
-            page.status,
-            StatusCode::OK,
-            "the ceremony page: {}",
-            page.body
-        );
-        let (challenge, options) = page.ask();
-        let reg = auth
+        let (challenge, answer) = self.registration(cookie, auth, false).await;
+        let fields = [
+            ("name", label),
+            ("current_password", PW),
+            ("register_challenge", challenge.as_str()),
+            ("register_response", answer.as_str()),
+        ];
+        self.post("/profile/passkeys", &fields, Some(cookie)).await
+    }
+
+    /// The profile's registration challenge for `cookie`, answered by `auth` (made to look synced when
+    /// `synced`): `(challenge, answer)`.
+    async fn registration(
+        &self,
+        cookie: &str,
+        auth: &mut impl AuthenticatorBackend,
+        synced: bool,
+    ) -> (String, String) {
+        let page = self.get("/profile", Some(cookie)).await;
+        assert_eq!(page.status, StatusCode::OK, "the profile: {}", page.body);
+        let (challenge, options) = page.register();
+        let mut reg = auth
             .do_registration(origin(), soft(&options))
             .expect("the authenticator registers");
-        let answer = serde_json::to_string(&reg).unwrap();
-        self.post(
-            "/profile/passkeys/finish",
-            &[
-                ("passkey_challenge", &challenge),
-                ("passkey_response", &answer),
-                ("name", label),
-            ],
-            Some(cookie),
-        )
-        .await
+        if synced {
+            as_synced(&mut reg);
+        }
+        (challenge, serde_json::to_string(&reg).unwrap())
     }
 
     /// Answer the passkey challenge on `page` with `auth`, naming `cred` (the soft authenticators can't
@@ -311,7 +327,14 @@ async fn a_passkey_is_added_and_then_signs_in_alone() {
     let cookie = fx.cookie_for("alice").await;
     let mut key = SoftPasskey::new(true);
 
-    let res = fx.enrol(&cookie, &mut key, "laptop").await;
+    let (challenge, answer) = fx.registration(&cookie, &mut key, false).await;
+    let fields = [
+        ("name", "laptop"),
+        ("current_password", PW),
+        ("register_challenge", challenge.as_str()),
+        ("register_response", answer.as_str()),
+    ];
+    let res = fx.post("/profile/passkeys", &fields, Some(&cookie)).await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.body);
     assert!(res.body.contains("Passkey “laptop” added"), "{}", res.body);
     let row = &fx.keys().await[0];
@@ -323,18 +346,11 @@ async fn a_passkey_is_added_and_then_signs_in_alone() {
         fx.row("alice").await.passkey_handle.is_some(),
         "the account got its user handle"
     );
-    let left = passkey::challenge::Entity::find()
-        .all(&fx.db)
+    let spent = passkey::challenge::Entity::find_by_id(challenge)
+        .one(&fx.db)
         .await
         .unwrap();
-    assert!(
-        left.iter().all(|c| c.purpose != "register"),
-        "the registration challenge was spent"
-    );
-    assert!(
-        left.iter().all(|c| c.purpose == "reauth"),
-        "only the new page's re-auth challenge is left"
-    );
+    assert!(spent.is_none(), "the registration challenge was spent");
 
     // Positive control for everything below: a username-less sign-in, the session saying how.
     let res = fx.sign_in(&mut key, &row.credential_id).await;
@@ -368,52 +384,11 @@ async fn adding_a_passkey_needs_a_session_csrf_and_reauthentication() {
     let fx = Fx::new().await;
     fx.user("alice").await;
     let cookie = fx.cookie_for("alice").await;
-
-    let res = fx
-        .post("/profile/passkeys", &[("name", "x")], Some(&cookie))
-        .await;
-    assert_eq!(res.status, StatusCode::FORBIDDEN, "no factor");
-    let res = fx
-        .post(
-            "/profile/passkeys",
-            &[("current_password", "wrong")],
-            Some(&cookie),
-        )
-        .await;
-    assert_eq!(res.status, StatusCode::FORBIDDEN, "a wrong password");
-    let req = Request::post("/profile/passkeys")
-        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .header(header::COOKIE, &cookie)
-        .body(Body::from(format!("current_password={PW}")))
-        .unwrap();
-    assert_eq!(
-        fx.send(req).await.status,
-        StatusCode::FORBIDDEN,
-        "no CSRF token"
-    );
-    assert!(fx
-        .post("/profile/passkeys", &[("current_password", PW)], None)
-        .await
-        .status
-        .is_redirection());
-    assert_eq!(
-        fx.challenges().await,
-        0,
-        "none of those created a challenge"
-    );
-
-    // Control: the password opens the ceremony — asking for a discoverable credential, since a passkey
-    // here signs in without a username (the library's own default discourages one).
-    let res = fx
-        .post(
-            "/profile/passkeys",
-            &[("current_password", PW)],
-            Some(&cookie),
-        )
-        .await;
-    assert_eq!(res.status, StatusCode::OK);
-    assert_eq!(fx.challenges().await, 1);
-    let (_, options) = res.ask();
+    let mut key = SoftPasskey::new(true);
+    // The profile carries the challenge, asking for a discoverable credential (a passkey here signs in
+    // without a username; the library's own default discourages one) with the user verified.
+    let page = fx.get("/profile", Some(&cookie)).await;
+    let (_, options) = page.register();
     let o: serde_json::Value = serde_json::from_str(&options).unwrap();
     let sel = &o["publicKey"]["authenticatorSelection"];
     assert_eq!(
@@ -429,6 +404,62 @@ async fn adding_a_passkey_needs_a_session_csrf_and_reauthentication() {
         Some("required"),
         "a passkey verifies the user itself"
     );
+
+    let (challenge, answer) = fx.registration(&cookie, &mut key, false).await;
+    let with = |extra: &[(&'static str, &str)]| {
+        let mut f = vec![
+            ("register_challenge", challenge.clone()),
+            ("register_response", answer.clone()),
+        ];
+        f.extend(extra.iter().map(|(k, v)| (*k, v.to_string())));
+        f
+    };
+    let post = |fields: Vec<(&'static str, String)>, cookie: Option<String>| {
+        let fx = &fx;
+        async move {
+            let pairs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            fx.post("/profile/passkeys", &pairs, cookie.as_deref())
+                .await
+        }
+    };
+    let res = post(with(&[]), Some(cookie.clone())).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "no factor");
+    let res = post(with(&[("current_password", "wrong")]), Some(cookie.clone())).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "a wrong password");
+    let req = Request::post("/profile/passkeys")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(header::COOKIE, &cookie)
+        .body(Body::from(format!("current_password={PW}")))
+        .unwrap();
+    assert_eq!(
+        fx.send(req).await.status,
+        StatusCode::FORBIDDEN,
+        "no CSRF token"
+    );
+    assert!(
+        post(with(&[("current_password", PW)]), None)
+            .await
+            .status
+            .is_redirection(),
+        "no session"
+    );
+    let res = post(
+        vec![("current_password", PW.to_string())],
+        Some(cookie.clone()),
+    )
+    .await;
+    assert_eq!(
+        res.status,
+        StatusCode::BAD_REQUEST,
+        "no answer: the browser ran no script"
+    );
+    assert!(res.body.contains("needs JavaScript"), "{}", res.body);
+    assert!(fx.keys().await.is_empty(), "none of those added a passkey");
+
+    // Control: confirmed, with the answer, it's added.
+    let res = post(with(&[("current_password", PW)]), Some(cookie)).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(fx.keys().await.len(), 1);
 }
 
 #[tokio::test]
@@ -440,29 +471,13 @@ async fn a_registration_answer_works_once_and_only_for_its_account() {
     let bob = fx.cookie_for("bob").await;
     let mut key = SoftPasskey::new(true);
 
-    let page = fx
-        .post(
-            "/profile/passkeys",
-            &[("current_password", PW)],
-            Some(&alice),
-        )
-        .await;
-    let (challenge, options) = page.ask();
-    let reg = key.do_registration(origin(), soft(&options)).unwrap();
-    let answer = serde_json::to_string(&reg).unwrap();
-    let post = |cookie: String| {
-        let (c, a) = (challenge.clone(), answer.clone());
-        let fx = &fx;
-        async move {
-            fx.post(
-                "/profile/passkeys/finish",
-                &[("passkey_challenge", &c), ("passkey_response", &a)],
-                Some(&cookie),
-            )
-            .await
-        }
-    };
-    let res = post(bob).await;
+    let (challenge, answer) = fx.registration(&alice, &mut key, false).await;
+    let fields = [
+        ("current_password", PW),
+        ("register_challenge", challenge.as_str()),
+        ("register_response", answer.as_str()),
+    ];
+    let res = fx.post("/profile/passkeys", &fields, Some(&bob)).await;
     assert_eq!(
         res.status,
         StatusCode::BAD_REQUEST,
@@ -470,9 +485,11 @@ async fn a_registration_answer_works_once_and_only_for_its_account() {
     );
     assert!(fx.keys().await.is_empty());
     // Taking it for bob spent it: the real owner must start again. A challenge is single-use.
-    let res = post(alice.clone()).await;
+    let res = fx.post("/profile/passkeys", &fields, Some(&alice)).await;
     assert_eq!(res.status, StatusCode::BAD_REQUEST, "already taken");
     assert!(fx.keys().await.is_empty());
+    // Viewing the profile wrote nothing to the account: the handle comes with the first passkey.
+    assert!(fx.row("alice").await.passkey_handle.is_none());
 }
 
 /// Make a soft authenticator's registration look like a synced passkey: backup-eligible and backed up,
@@ -499,27 +516,15 @@ fn as_synced(reg: &mut webauthn_rs::prelude::RegisterPublicKeyCredential) {
 }
 
 async fn enrol_synced(fx: &Fx, cookie: &str) -> Resp {
-    let mut key = SoftPasskey::new(true);
-    let page = fx
-        .post(
-            "/profile/passkeys",
-            &[("current_password", PW)],
-            Some(cookie),
-        )
+    let (challenge, answer) = fx
+        .registration(cookie, &mut SoftPasskey::new(true), true)
         .await;
-    let (challenge, options) = page.ask();
-    let mut reg = key.do_registration(origin(), soft(&options)).unwrap();
-    as_synced(&mut reg);
-    let answer = serde_json::to_string(&reg).unwrap();
-    fx.post(
-        "/profile/passkeys/finish",
-        &[
-            ("passkey_challenge", &challenge),
-            ("passkey_response", &answer),
-        ],
-        Some(cookie),
-    )
-    .await
+    let fields = [
+        ("current_password", PW),
+        ("register_challenge", challenge.as_str()),
+        ("register_response", answer.as_str()),
+    ];
+    fx.post("/profile/passkeys", &fields, Some(cookie)).await
 }
 
 #[tokio::test]
@@ -858,10 +863,16 @@ async fn a_passkey_is_a_second_factor_only_when_enabled() {
     // An expired or unknown challenge checks nothing, so it counts nothing.
     let page = fx.get("/login/totp", Some(&cookie)).await;
     let (_, answer) = fx.answer(&page, &mut key, &cred);
-    let fields = [("passkey_challenge", "gone"), ("passkey_response", answer.as_str())];
+    let fields = [
+        ("passkey_challenge", "gone"),
+        ("passkey_response", answer.as_str()),
+    ];
     let res = fx.post("/login/totp/passkey", &fields, Some(&cookie)).await;
     assert_eq!(res.status, StatusCode::UNAUTHORIZED);
-    let row = lockout::username_entity::Entity::find_by_id("alice".to_string()).one(&fx.db).await.unwrap();
+    let row = lockout::username_entity::Entity::find_by_id("alice".to_string())
+        .one(&fx.db)
+        .await
+        .unwrap();
     assert_eq!(row.map(|r| r.failures), Some(1), "still one");
 
     // Control: the passkey finishes it.
@@ -1223,34 +1234,49 @@ async fn without_passkeys_there_is_no_button_section_or_route() {
 async fn an_attested_passkey_meets_an_attested_minimum_and_a_password_does_not() {
     let (mut token, ca) = SoftToken::new(true).unwrap();
     let pem = ca_pem(&ca);
-    let cfg = Passkeys::new("localhost", ORIGIN).require(Class::Attested).attestation_ca(
-        &pem,
-        &AAGUID.to_string(),
-        "soft token",
-    );
-    let fx = Fx::build_with(Lockout::default(), Some(cfg), |a| a.min_level(Level::Attested)).await;
+    let cfg = Passkeys::new("localhost", ORIGIN)
+        .require(Class::Attested)
+        .attestation_ca(&pem, &AAGUID.to_string(), "soft token");
+    let fx = Fx::build_with(Lockout::default(), Some(cfg), |a| {
+        a.min_level(Level::Attested)
+    })
+    .await;
     fx.user("alice").await;
 
     // A password alone is restricted to the profile, which asks for a security key…
-    let res = fx.post("/login", &[("username", "alice"), ("password", PW)], None).await;
+    let res = fx
+        .post("/login", &[("username", "alice"), ("password", PW)], None)
+        .await;
     assert_eq!(res.location(), Some("/profile"));
     let restricted = res.session(fx.auth.session_cookie_name()).unwrap();
     assert!(fx.identify(&restricted).await.is_none());
     let cookie = format!("{}={restricted}", fx.auth.session_cookie_name());
-    assert!(fx.get("/profile", Some(&cookie)).await.body.contains("security key"));
+    assert!(fx
+        .get("/profile", Some(&cookie))
+        .await
+        .body
+        .contains("security key"));
 
     // …and adding the attested passkey steps that session up to Attested.
     let res = fx.enrol(&cookie, &mut token, "yubikey").await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.body);
-    let stepped = res.session(fx.auth.session_cookie_name()).expect("a new session");
-    assert_eq!(fx.identify(&stepped).await.map(|w| w.level), Some(Level::Attested));
+    let stepped = res
+        .session(fx.auth.session_cookie_name())
+        .expect("a new session");
+    assert_eq!(
+        fx.identify(&stepped).await.map(|w| w.level),
+        Some(Level::Attested)
+    );
 
     // Control: signing in with it lands in the app at Attested.
     let row = fx.keys().await.remove(0);
     let res = fx.sign_in(&mut token, &row.credential_id).await;
     assert_eq!(res.location(), Some("/"));
     let s = res.session(fx.auth.session_cookie_name()).unwrap();
-    assert_eq!(fx.identify(&s).await.map(|w| w.level), Some(Level::Attested));
+    assert_eq!(
+        fx.identify(&s).await.map(|w| w.level),
+        Some(Level::Attested)
+    );
 }
 
 #[tokio::test]
@@ -1258,11 +1284,18 @@ async fn the_login_pages_script_gets_the_challenge_as_json_and_the_answer_still_
     let fx = Fx::new().await;
     let (mut key, cred) = alice_with_key(&fx).await;
     let ask = |csrf: bool| {
-        let body = if csrf { format!("_csrf={CSRF}") } else { String::new() };
+        let body = if csrf {
+            format!("_csrf={CSRF}")
+        } else {
+            String::new()
+        };
         Request::post("/login/passkey")
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
-            .header(header::COOKIE, format!("{}={CSRF}", fx.auth.csrf().cookie()))
+            .header(
+                header::COOKIE,
+                format!("{}={CSRF}", fx.auth.csrf().cookie()),
+            )
             .body(Body::from(body))
             .unwrap()
     };
@@ -1273,7 +1306,10 @@ async fn the_login_pages_script_gets_the_challenge_as_json_and_the_answer_still_
 
     let res = fx.send(ask(true)).await;
     assert_eq!(res.status, StatusCode::OK);
-    assert!(res.headers[header::CONTENT_TYPE].to_str().unwrap().starts_with("application/json"));
+    assert!(res.headers[header::CONTENT_TYPE]
+        .to_str()
+        .unwrap()
+        .starts_with("application/json"));
     let v: serde_json::Value = serde_json::from_str(&res.body).unwrap();
     assert_eq!(v["action"], "/login/passkey/finish");
     let challenge = v["challenge"].as_str().unwrap().to_string();
@@ -1287,7 +1323,54 @@ async fn the_login_pages_script_gets_the_challenge_as_json_and_the_answer_still_
         ),
     };
     let (challenge, answer) = fx.answer(&page, &mut key, &cred);
-    let fields = [("passkey_challenge", challenge.as_str()), ("passkey_response", answer.as_str())];
+    let fields = [
+        ("passkey_challenge", challenge.as_str()),
+        ("passkey_response", answer.as_str()),
+    ];
     let res = fx.post("/login/passkey/finish", &fields, None).await;
     assert_eq!(res.location(), Some("/"), "{} {}", res.status, res.body);
+}
+
+#[tokio::test]
+async fn a_passwordless_account_adds_a_second_passkey_confirming_with_the_first() {
+    let fx = Fx::new().await;
+    let (mut first, cred) = alice_with_key(&fx).await;
+    let cookie = fx.cookie_for("alice").await;
+    let res = go_passwordless(&fx, &mut first, &cred, &cookie).await;
+    let cookie = format!(
+        "{}={}",
+        fx.auth.session_cookie_name(),
+        res.session(fx.auth.session_cookie_name())
+            .expect("resessioned")
+    );
+    // What the page's script sends: the first passkey's answer to the confirm challenge, and the new
+    // one's to the registration challenge, in one post.
+    let page = fx.get("/profile", Some(&cookie)).await;
+    let (confirm, confirmed) = fx.answer(&page, &mut first, &cred);
+    let (register, registered) = {
+        let (c, options) = page.register();
+        let mut second = SoftPasskey::new(true);
+        let reg = second.do_registration(origin(), soft(&options)).unwrap();
+        (c, serde_json::to_string(&reg).unwrap())
+    };
+    let mut fields = vec![
+        ("name", "phone"),
+        ("register_challenge", register.as_str()),
+        ("register_response", registered.as_str()),
+    ];
+    let res = fx.post("/profile/passkeys", &fields, Some(&cookie)).await;
+    assert_eq!(
+        res.status,
+        StatusCode::FORBIDDEN,
+        "no confirmation: {}",
+        res.body
+    );
+    fields.extend([
+        ("passkey_challenge", confirm.as_str()),
+        ("passkey_response", confirmed.as_str()),
+    ]);
+    // The registration challenge above was taken by nothing (the refusal came first), so it still works.
+    let res = fx.post("/profile/passkeys", &fields, Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(fx.keys().await.len(), 2);
 }

@@ -101,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The library renders login/profile as *fragments*; without these two the app gets the bare
         // default document and `auth`'s Bootstrap-classed validation errors show up as unstyled text.
         .login_shell(|form, _req| page("Log in", form))
-        .profile_shell(|frag, _who, _req| page("Profile", frag))
+        .profile_shell(|frag, _who, _req| wide_page("Profile", frag))
         .on_write(audit.clone())
         // API keys on /profile: minting and revoking one are `auth` writes, so they reach the same
         // audit sink; `/api/whoami` below accepts them.
@@ -372,6 +372,20 @@ fn page(title: &str, body: &str) -> String {
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <style>{CSS}</style></head><body class="bg-body-tertiary">
 <main class="container py-4" style="max-width:52rem"><h1 class="h4 mb-3">{title}</h1>{body}
+<p class="mt-4 mb-0"><a class="link-secondary small" href="/">&larr; home</a></p></main>
+</body></html>"#
+    )
+}
+
+/// The library's profile in the same document: it brings its own heading and a grid of cards, so a
+/// wide column and no title of ours.
+fn wide_page(title: &str, body: &str) -> String {
+    format!(
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>{CSS}</style></head><body class="bg-body-tertiary">
+<main class="container py-4">{body}
 <p class="mt-4 mb-0"><a class="link-secondary small" href="/">&larr; home</a></p></main>
 </body></html>"#
     )

@@ -13,7 +13,7 @@
 //! signed-in user. Anonymous page views write nothing.
 
 use super::pages::{self, PasskeyAsk, ReauthView};
-use super::{passkey, session, user, Auth, Card, Identity, Inner};
+use super::{passkey, session, user, Auth, Inner};
 use crate::middleware::RealIp;
 use axum::extract::{Form, Path, State};
 use axum::http::request::Parts;
@@ -271,6 +271,14 @@ enum RegState {
     Attested(AttestedPasskeyRegistration),
 }
 
+/// A registration challenge's row: the state, and the WebAuthn user handle it was made with. The handle
+/// is saved on the account only when a passkey is added, so rendering the profile writes nothing to it.
+#[derive(Serialize, Deserialize)]
+struct Registration {
+    handle: Uuid,
+    state: RegState,
+}
+
 /// A credential ID as stored: base64url without padding.
 fn cred_id(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -465,27 +473,19 @@ impl Runtime {
     }
 
     /// Start registering a passkey for `user`: a challenge, with their existing passkeys excluded so an
-    /// authenticator can't register twice. Gives the account its WebAuthn user handle on first use.
+    /// authenticator can't register twice. An account with no WebAuthn user handle yet gets a new one,
+    /// kept in the challenge and saved with the passkey.
     async fn begin_registration(
         &self,
         inner: &Inner,
         user: &user::Model,
     ) -> Result<PasskeyAsk, String> {
         let failed = |_| "Could not start adding a passkey.".to_string();
-        let handle = match user
+        let handle = user
             .passkey_handle
             .as_deref()
             .and_then(|h| Uuid::parse_str(h).ok())
-        {
-            Some(h) => h,
-            None => {
-                let h = Uuid::new_v4();
-                let mut am: user::ActiveModel = user.clone().into();
-                am.passkey_handle = Set(Some(h.to_string()));
-                am.update(&inner.db).await.map_err(failed)?;
-                h
-            }
-        };
+            .unwrap_or_else(Uuid::new_v4);
         let exclude: Vec<_> = passkey::list(&inner.db, user.id)
             .await
             .map_err(failed)?
@@ -525,7 +525,8 @@ impl Runtime {
             sel.resident_key = Some(ResidentKeyRequirement::Required);
             sel.require_resident_key = true;
         }
-        let id = put(inner, Purpose::Register, Some(user.id), &state)
+        let row = Registration { handle, state };
+        let id = put(inner, Purpose::Register, Some(user.id), &row)
             .await
             .map_err(failed)?;
         Ok(ask(id, &ccr))
@@ -541,11 +542,20 @@ impl Runtime {
         name: &str,
     ) -> Result<entity::Model, String> {
         let refused = "The passkey could not be added. Try again.";
-        let Some(state) =
-            take::<RegState>(inner, challenge_id, Purpose::Register, Some(user.id)).await
+        let Some(Registration { handle, state }) =
+            take::<Registration>(inner, challenge_id, Purpose::Register, Some(user.id)).await
         else {
-            return Err("Adding the passkey took too long. Try again.".into());
+            return Err("Adding the passkey took too long. Reload the page and try again.".into());
         };
+        // The account's handle is the one the challenge was made with, or none yet — then it becomes
+        // this one. Anything else is a challenge from before another passkey was added.
+        let ours = user
+            .passkey_handle
+            .as_deref()
+            .and_then(|h| Uuid::parse_str(h).ok());
+        if ours.is_some_and(|h| h != handle) {
+            return Err("Adding the passkey took too long. Reload the page and try again.".into());
+        }
         let Ok(reg) = serde_json::from_str::<RegisterPublicKeyCredential>(response) else {
             return Err(refused.into());
         };
@@ -586,7 +596,7 @@ impl Runtime {
                 _ => policy_message(self.require),
             });
         }
-        entity::ActiveModel {
+        let row = entity::ActiveModel {
             user_id: Set(user.id),
             name: Set(name.to_string()),
             credential_id: Set(cred_id(cred.cred_id.as_slice())),
@@ -601,7 +611,15 @@ impl Runtime {
         }
         .insert(&inner.db)
         .await
-        .map_err(|_| "That passkey is already registered.".to_string())
+        .map_err(|_| "That passkey is already registered.".to_string())?;
+        if ours.is_none() {
+            let mut am: user::ActiveModel = user.clone().into();
+            am.passkey_handle = Set(Some(handle.to_string()));
+            am.update(&inner.db)
+                .await
+                .map_err(|_| "Could not add the passkey.".to_string())?;
+        }
+        Ok(row)
     }
 
     /// Start a sign-in with a passkey: a username-less challenge, any passkey of this site's.
@@ -673,18 +691,18 @@ impl Runtime {
         Ok((account, row))
     }
 
-    /// The passkeys section of the caller's own profile page.
-    #[allow(clippy::too_many_arguments)]
+    /// The passkeys card of the caller's own profile page.
     pub(super) async fn card_html(
         &self,
         inner: &Inner,
         user: &user::Model,
         reauth: &ReauthView,
-        error: Option<&str>,
-        success: Option<&str>,
         csrf: &str,
         headers: &HeaderMap,
     ) -> String {
+        // The "Add a passkey" form carries its registration challenge, so its button runs the
+        // browser's prompt on the spot: no page in between.
+        let register = self.begin_registration(inner, user).await.ok();
         let (zone, fmt) = super::api_key::clock(headers);
         let rows: Vec<pages::PasskeyRow> = passkey::list(&inner.db, user.id)
             .await
@@ -705,8 +723,7 @@ impl Runtime {
             has_password: !user.password_hash.is_empty(),
             requirement: requirement_label(self.require),
             reauth,
-            error,
-            success,
+            register: register.as_ref(),
             csrf,
         };
         pages::passkeys_card_html(&view)
@@ -748,37 +765,34 @@ fn policy_message(require: Class) -> String {
 
 // ===================== Routes =====================
 
-/// The body of a form a ceremony page posts.
+/// The body of a passkey sign-in: the challenge and the browser's answer.
 #[derive(Deserialize)]
 pub(super) struct CeremonyForm {
     #[serde(default)]
     passkey_challenge: String,
     #[serde(default)]
     passkey_response: String,
-    /// The label of a passkey being added.
-    #[serde(default)]
-    name: String,
     #[serde(default, rename = "_csrf")]
     csrf: Option<String>,
 }
 
-/// A post that carries a re-authentication and, when adding a passkey, its label.
+/// "Add a passkey": its label, the caller's re-authentication, and the browser's answer to the
+/// registration challenge the form carried.
 #[derive(Deserialize)]
 pub(super) struct AddForm {
     #[serde(default)]
     name: String,
     #[serde(flatten)]
     reauth: super::ReauthInput,
+    #[serde(default)]
+    register_challenge: String,
+    #[serde(default)]
+    register_response: String,
     #[serde(default, rename = "_csrf")]
     csrf: Option<String>,
 }
 
-/// A post that carries nothing but the CSRF token.
-#[derive(Deserialize)]
-pub(super) struct CsrfForm {
-    #[serde(default, rename = "_csrf")]
-    csrf: Option<String>,
-}
+use super::CsrfOnlyForm as CsrfForm;
 
 fn runtime(inner: &Inner) -> Option<Arc<Runtime>> {
     inner.passkeys.clone()
@@ -860,13 +874,7 @@ pub(super) async fn login_begin(
     }
     let (token, jar) = super::csrf_token(&inner, &req.headers, jar);
     let page = pages::passkey_ceremony_html(&pages::Ceremony {
-        title: "Sign in with a passkey",
-        lead: "Your browser will ask you to choose a passkey and confirm it's you.",
-        action: "/login/passkey/finish",
-        mode: "get",
-        button: "Use your passkey",
         cancel: &inner.login_path,
-        hidden: &[],
         ask: &ask,
         csrf: &token,
     });
@@ -953,7 +961,9 @@ pub(super) async fn login_finish(
         return (jar, Redirect::to("/login/totp")).into_response();
     }
     super::stamp_login(&inner.db, account.id, None).await;
-    let to = inner.landing(&account, session::Method::Passkey, Some(row.class())).to_string();
+    let to = inner
+        .landing(&account, session::Method::Passkey, Some(row.class()))
+        .to_string();
     (jar, Redirect::to(&to)).into_response()
 }
 
@@ -1010,7 +1020,9 @@ pub(super) async fn second_factor_finish(
         }
     };
     let method = session::Method::PasswordPasskey;
-    let to = inner.landing(&account, method, Some(row.class())).to_string();
+    let to = inner
+        .landing(&account, method, Some(row.class()))
+        .to_string();
     let Some(token) = super::rotate_session(&inner, pending, method, Some(row.class())).await
     else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
@@ -1024,28 +1036,15 @@ pub(super) async fn second_factor_finish(
     (jar, Redirect::to(&to)).into_response()
 }
 
-/// The profile page with a message on the passkeys section.
-#[allow(clippy::too_many_arguments)]
-async fn card_page(
-    inner: &Inner,
-    who: &Identity,
-    user: &user::Model,
-    status: StatusCode,
-    error: Option<&str>,
-    success: Option<&str>,
-    csrf: &str,
-    req: &Parts,
-) -> Response {
-    let page =
-        super::profile_page_card(inner, who, user, Card::Passkeys, error, success, csrf, req).await;
-    (status, page).into_response()
-}
-
-/// `POST /profile/passkeys` — the caller asks to add a passkey: re-authenticated (a passkey is a new way
-/// into the account), then the page that runs the browser's registration.
-pub(super) async fn add_begin(
+/// `POST /profile/passkeys` — add a passkey, in one post: the label, the caller's re-authentication (a
+/// passkey is a new way into the account), and the browser's answer to the registration challenge the
+/// profile page carried. The script fills that answer in; without it there is none, and the page says
+/// adding a passkey needs JavaScript.
+pub(super) async fn add(
     State(inner): State<Arc<Inner>>,
     req: Parts,
+    RealIp(client_ip): RealIp,
+    jar: CookieJar,
     Form(form): Form<AddForm>,
 ) -> Response {
     let Some(rt) = runtime(&inner) else {
@@ -1058,97 +1057,31 @@ pub(super) async fn add_begin(
     if user.is_sso() {
         return Redirect::to(&inner.profile_path).into_response(); // SSO: the IdP's factors
     }
+    let refuse = |status: StatusCode, msg: String| {
+        let (inner, who, user, csrf, req) = (&inner, &who, &user, &csrf, &req);
+        async move { super::profile_reply(inner, (who, user, csrf, req), status, Err(&msg)).await }
+    };
     if let Err(msg) = inner.reauth(&user, &form.reauth).await {
-        return card_page(
-            &inner,
-            &who,
-            &user,
-            StatusCode::FORBIDDEN,
-            Some(&msg),
-            None,
-            &csrf,
-            &req,
-        )
-        .await;
+        return refuse(StatusCode::FORBIDDEN, msg).await;
     }
-    let name = match super::api_key::clean_name(&form.name) {
-        Ok(_) if form.name.trim().is_empty() => "passkey".to_string(),
-        Ok(n) => n,
-        Err(msg) => {
-            return card_page(
-                &inner,
-                &who,
-                &user,
-                StatusCode::BAD_REQUEST,
-                Some(msg),
-                None,
-                &csrf,
-                &req,
-            )
-            .await
-        }
+    if form.register_response.trim().is_empty() {
+        let msg = "Adding a passkey needs JavaScript in this browser.".to_string();
+        return refuse(StatusCode::BAD_REQUEST, msg).await;
+    }
+    let name = match form.name.trim() {
+        "" => "passkey".to_string(),
+        _ => match super::api_key::clean_name(&form.name) {
+            Ok(n) => n,
+            Err(msg) => return refuse(StatusCode::BAD_REQUEST, msg.to_string()).await,
+        },
     };
-    let ask = match rt.begin_registration(&inner, &user).await {
-        Ok(a) => a,
-        Err(msg) => {
-            let status = StatusCode::INTERNAL_SERVER_ERROR;
-            return card_page(&inner, &who, &user, status, Some(&msg), None, &csrf, &req).await;
-        }
-    };
-    let page = pages::passkey_ceremony_html(&pages::Ceremony {
-        title: "Add a passkey",
-        lead: "Your browser will ask where to keep the passkey: this device, your phone, or a security key.",
-        action: "/profile/passkeys/finish",
-        mode: "create",
-        button: "Create the passkey",
-        cancel: &inner.profile_path,
-        hidden: &[("name", &name)],
-        ask: &ask,
-        csrf: &csrf,
-    });
-    inner.page(&who, &page, &req).into_response()
-}
-
-/// `POST /profile/passkeys/finish` — store the new passkey, if it meets the policy.
-pub(super) async fn add_finish(
-    State(inner): State<Arc<Inner>>,
-    req: Parts,
-    RealIp(client_ip): RealIp,
-    jar: CookieJar,
-    Form(form): Form<CeremonyForm>,
-) -> Response {
-    let Some(rt) = runtime(&inner) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let (who, user, csrf) = match super::self_post(&inner, &req, form.csrf.as_deref()).await {
-        Ok(v) => v,
-        Err(res) => return res,
-    };
-    let name = super::api_key::clean_name(&form.name).unwrap_or_else(|_| "passkey".into());
+    let (challenge, answer) = (&form.register_challenge, &form.register_response);
     let row = match rt
-        .finish_registration(
-            &inner,
-            &user,
-            &form.passkey_challenge,
-            &form.passkey_response,
-            &name,
-        )
+        .finish_registration(&inner, &user, challenge, answer, &name)
         .await
     {
         Ok(row) => row,
-        Err(msg) => {
-            return card_page(
-                &inner,
-                &who,
-                &user,
-                StatusCode::BAD_REQUEST,
-                Some(&msg),
-                None,
-                &csrf,
-                &req,
-            )
-            .await
-        }
+        Err(msg) => return refuse(StatusCode::BAD_REQUEST, msg).await,
     };
     inner
         .notify_event(super::Event {
@@ -1167,8 +1100,10 @@ pub(super) async fn add_finish(
     let factor = super::Factor::Passkey(row.class());
     let (jar, csrf) = super::step_up(&inner, &req.headers, jar, csrf, factor).await;
     let who = super::refreshed(&inner, &req, &jar, who).await;
+    let user = super::target_user(&inner, &who.id).await.unwrap_or(user);
     let msg = format!("Passkey “{}” added.", row.name);
-    let page = card_page(&inner, &who, &user, StatusCode::OK, None, Some(&msg), &csrf, &req).await;
+    let page =
+        super::profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::OK, Ok(&msg)).await;
     (jar, page).into_response()
 }
 
@@ -1196,29 +1131,21 @@ pub(super) async fn remove(
         Err(_) => None,
     };
     let Some(row) = row else {
-        return card_page(
+        return super::profile_reply(
             &inner,
-            &who,
-            &user,
+            (&who, &user, &csrf, &req),
             StatusCode::NOT_FOUND,
-            Some("No such passkey."),
-            None,
-            &csrf,
-            &req,
+            Err("No such passkey."),
         )
         .await;
     };
     if user.password_hash.is_empty() && passkey::count(&inner.db, user.id).await <= 1 {
         let msg = "This is your only way to sign in. Set a password first, or add another passkey.";
-        return card_page(
+        return super::profile_reply(
             &inner,
-            &who,
-            &user,
+            (&who, &user, &csrf, &req),
             StatusCode::CONFLICT,
-            Some(msg),
-            None,
-            &csrf,
-            &req,
+            Err(msg),
         )
         .await;
     }
@@ -1245,17 +1172,7 @@ pub(super) async fn remove(
             .await;
     }
     let msg = format!("Passkey “{}” removed.", row.name);
-    card_page(
-        &inner,
-        &who,
-        &user,
-        StatusCode::OK,
-        None,
-        Some(&msg),
-        &csrf,
-        &req,
-    )
-    .await
+    super::profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::OK, Ok(&msg)).await
 }
 
 /// `POST /profile/password/remove` — an account with a passkey drops its password, re-authenticated. Its
@@ -1279,28 +1196,20 @@ pub(super) async fn password_remove(
     }
     if passkey::count(&inner.db, user.id).await == 0 {
         let msg = "Add a passkey first: without a password it is your way to sign in.";
-        return card_page(
+        return super::profile_reply(
             &inner,
-            &who,
-            &user,
+            (&who, &user, &csrf, &req),
             StatusCode::CONFLICT,
-            Some(msg),
-            None,
-            &csrf,
-            &req,
+            Err(msg),
         )
         .await;
     }
     if let Err(msg) = inner.reauth(&user, &form.reauth).await {
-        return card_page(
+        return super::profile_reply(
             &inner,
-            &who,
-            &user,
+            (&who, &user, &csrf, &req),
             StatusCode::FORBIDDEN,
-            Some(&msg),
-            None,
-            &csrf,
-            &req,
+            Err(&msg),
         )
         .await;
     }
@@ -1317,7 +1226,8 @@ pub(super) async fn password_remove(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Could not remove the password.",
             );
-            return card_page(&inner, &who, &user, status, Some(msg), None, &csrf, &req).await;
+            return super::profile_reply(&inner, (&who, &user, &csrf, &req), status, Err(msg))
+                .await;
         }
     };
     let method = super::current_session(&inner, &req.headers)
@@ -1349,17 +1259,7 @@ pub(super) async fn password_remove(
     let msg = "Your password is removed: you sign in with a passkey. Other sessions have been signed out.";
     (
         jar,
-        card_page(
-            &inner,
-            &who,
-            &user,
-            StatusCode::OK,
-            None,
-            Some(msg),
-            &csrf,
-            &req,
-        )
-        .await,
+        super::profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::OK, Ok(msg)).await,
     )
         .into_response()
 }
@@ -1397,8 +1297,7 @@ pub(super) fn routes(router: axum::Router<Arc<Inner>>) -> axum::Router<Arc<Inner
         .route("/login/passkey", post(login_begin))
         .route("/login/passkey/finish", post(login_finish))
         .route("/login/totp/passkey", post(second_factor_finish))
-        .route("/profile/passkeys", post(add_begin))
-        .route("/profile/passkeys/finish", post(add_finish))
+        .route("/profile/passkeys", post(add))
         .route("/profile/passkeys/{id}/remove", post(remove))
         .route("/profile/password/remove", post(password_remove))
 }

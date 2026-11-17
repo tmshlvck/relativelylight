@@ -166,8 +166,8 @@ from this site. Reload the page and try again.</div>
             _ => Level::Simple,
         })
         .password_max_age_days(std::env::var("PASSWORD_MAX_AGE_DAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
-        // The app's own section on the library's profile page — see `webhook_section`.
-        .profile_extra(|s| async move { webhook_section(&s) });
+        // The app's own cards on the library's profile page — see `app_cards`.
+        .profile_extra(|s| async move { app_cards(&s) });
 
     // auth is now fully configured — safe to clone it into the Sso.
     let sso = google.map(|(id, secret)| build_sso(&auth, id, secret));
@@ -202,6 +202,7 @@ from this site. Reload the page and try again.</div>
     let mut app = Router::new()
         .route("/", get(dashboard)) // signed in only; a card per thing this user may open
         .route("/secret", get(secret)) // gated on demand (see `secret`)
+        .route("/tz", post(set_tz)) // the timezone preference, from the profile's Preferences card
         .route("/api/whoami", get(whoami)) // the app's own credential check (see `whoami`)
         // The accounts panel: two handlers on one path, the model named by the path segment. Its
         // gate is `GroupReadWrite`, so a logged-in non-admin gets 403 rather than a list of accounts.
@@ -369,32 +370,49 @@ async fn secret(State(app): State<AppState>, headers: HeaderMap) -> Response {
     Html(page("Secret page", Some(&who), &body)).into_response()
 }
 
-/// **Extending the library's profile page** — `Auth::profile_extra` appends this below the
-/// password/2FA fragment on `/profile` (the caller's own page only; a manager's `/profile/{id}` does
-/// not get it). This is where an app puts the things that belong beside "change my password": API
-/// webhooks, notification preferences, a data export. (API keys are built in: `Auth::api_keys`.)
+/// **The app's own cards on the profile page** — `Auth::profile_extra`. The profile is a grid of cards;
+/// these follow the library's, drawn with `auth::profile_card` so they look the same. This is where an
+/// app puts what belongs beside "change my password": preferences, a webhook secret, a data export.
+/// (API keys and passkeys are built in.) A restricted session (§5m) doesn't get them.
 ///
-/// The hook is handed the caller's identity *and this request's CSRF token*, which is what lets the
-/// section contain a real `<form>` rather than just text — the app never sees the request, so it
-/// could not mint one itself.
-fn webhook_section(s: &relativelylight::auth::ProfileSection) -> String {
-    format!(
-        r#"<hr class="my-4">
-<h2 class="h6">Webhook secret</h2>
-<p class="small text-muted">Rotating <b>{}</b>'s webhook signing secret is the kind of thing a live session alone
-shouldn't be enough for — a stolen cookie <em>is</em> a live session. So the app asks the caller to prove
-they are present, with <code>Auth::reauthenticate_with</code>: the same factors the library's own
-sensitive pages take (your password, a fresh 2FA code, or your passkey), and the same single-use rule.
-The CSRF token and the confirm-it's-you inputs come from the hook; the check happens in the handler.</p>
-<form method="post" action="/webhook-secret/rotate" style="max-width:22rem">
-  {csrf_input}
+/// The hook is handed the caller, *this request's CSRF token* (so a card can hold a real `<form>`), the
+/// request's headers (for a preference cookie), and the confirm-it's-you inputs for a sensitive form.
+fn app_cards(s: &relativelylight::auth::ProfileSection) -> String {
+    let csrf = relativelylight::csrf::Csrf::hidden_input(&s.csrf);
+    // A preference: the display timezone, a cookie the app's tables format times in.
+    let zone = relativelylight::time::Tz::from_headers(&s.headers);
+    let preferences = auth::profile_card(
+        "Preferences",
+        &format!(
+            r#"<p class="text-muted small mb-2">Times on these pages are shown in this zone.</p>{}"#,
+            relativelylight::time::TzPicker::new().render(&zone, "/profile")
+        ),
+    );
+    // A sensitive action of the app's own: re-authenticated in its handler.
+    let webhook = auth::profile_card(
+        "Webhook secret",
+        &format!(
+            r#"<p class="text-muted small mb-2">Rotating <b>{who}</b>'s signing secret is the kind of thing a
+live session alone shouldn't be enough for, so the handler asks for a factor again with
+<code>Auth::reauthenticate_with</code> — your password, a 2FA code or your passkey.</p>
+<form method="post" action="/webhook-secret/rotate">
+  {csrf}
   {reauth}
   <button class="btn btn-outline-danger btn-sm" type="submit">Rotate webhook secret</button>
 </form>"#,
-        s.who.username,
-        csrf_input = relativelylight::csrf::Csrf::hidden_input(&s.csrf),
-        reauth = s.reauth_fields,
-    )
+            who = s.who.username,
+            reauth = s.reauth_fields,
+        ),
+    );
+    preferences + &webhook
+}
+
+/// `POST /tz` — the Preferences card's picker: set the zone cookie and return to the profile
+/// (`TzPicker::submitted` keeps only a local `back`, so this can't redirect elsewhere). A display
+/// preference, like a theme: no session needed.
+async fn set_tz(Form(form): Form<std::collections::HashMap<String, String>>) -> Response {
+    let (cookie, back) = relativelylight::time::TzPicker::submitted(form.get("tz"), form.get("back"));
+    ([(axum::http::header::SET_COOKIE, cookie)], Redirect::to(&back)).into_response()
 }
 
 /// What an app's own sensitive route submits: the caller's re-authentication — any of their factors,
@@ -854,15 +872,10 @@ fn wide_page(title: &str, who: &Identity, body: &str) -> String {
     shell(title, Some(who), body)
 }
 
-/// The library's profile fragment in our shell, with the signed-in navbar.
+/// The library's profile fragment in our shell, with the signed-in navbar. The fragment is a grid of
+/// cards (two columns on a wide screen), so it gets a wide column, not a card of its own.
 fn profile_page(fragment: &str, who: &Identity) -> String {
-    shell(
-        "Profile",
-        Some(who),
-        &format!(
-            r#"<div class="card shadow-sm mx-auto" style="max-width:40rem"><div class="card-body">{fragment}</div></div>"#
-        ),
-    )
+    shell("Profile", Some(who), &format!(r#"<div class="mx-auto" style="max-width:72rem">{fragment}</div>"#))
 }
 
 /// The library's login fragment as a centered card: the form, then the alternatives — the library's

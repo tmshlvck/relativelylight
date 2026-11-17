@@ -1,18 +1,13 @@
 {%- import "auth/_macros.html" as m -%}
-{#- A page whose one job is a passkey ceremony (AUTH.md §5l). The script runs it on the button's click
-    (browsers want a click before they show a passkey prompt), puts the answer in the form and posts it. #}
-<h1 class="h5 mb-3">{{ title }}</h1>
-<p class="text-muted small">{{ lead }}</p>
-<form method="post" action="{{ action }}">
+{#- The passkey sign-in page, for a browser that didn't open the prompt from the login page itself (no
+    JavaScript, or a prompt refused after the round trip). Its button opens the prompt; the script puts
+    the answer in the form and posts it. #}
+<h1 class="h5 mb-3">Sign in with a passkey</h1>
+<p class="text-muted small">Your browser will ask you to choose a passkey and confirm it's you.</p>
+<form method="post" action="/login/passkey/finish">
   {{ m::csrf(csrf) }}
-  {%- for (k, v) in hidden %}
-  <input type="hidden" name="{{ k }}" value="{{ v }}">
-  {%- endfor %}
-  <input type="hidden" name="passkey_challenge" value="{{ ask.challenge }}">
-  <input type="hidden" name="passkey_response" value="">
-  <script type="application/json" data-rl-passkey-options>{{ ask.options|safe }}</script>
-  <button class="btn btn-primary" type="button" data-rl-passkey="{{ mode }}" autofocus>{{ button }}</button>
+  {%- call m::passkey_data(ask) %}{% endcall %}
+  <button class="btn btn-primary" type="button" data-rl-passkey="get" autofocus>Use your passkey</button>
   <a class="btn btn-link" href="{{ cancel }}">Cancel</a>
 </form>
 <noscript><p class="text-danger small mt-2">Passkeys need JavaScript in this browser.</p></noscript>
-<script src="/auth/passkey.js" defer></script>

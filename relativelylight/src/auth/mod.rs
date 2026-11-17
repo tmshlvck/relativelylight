@@ -684,6 +684,18 @@ pub struct ProfileSection {
     pub reauth_fields: String,
 }
 
+/// A card for the profile page's grid, for [`Auth::profile_extra`]: `title` (escaped) over `body` (HTML,
+/// inserted as is), drawn like the library's own cards so the page stays one grid.
+///
+/// ```ignore
+/// .profile_extra(|s: ProfileSection| async move {
+///     auth::profile_card("Notifications", &my_notification_form(&s))
+/// })
+/// ```
+pub fn profile_card(title: &str, body: &str) -> String {
+    card_html(title, body)
+}
+
 type ProfileShell = Arc<dyn Fn(&str, &Identity, &Parts) -> String + Send + Sync>;
 /// Renders an extra app-owned section appended below the password/2FA fragment on the *self* profile
 /// page (e.g. API-token management). Handed a [`ProfileSection`]; returns an HTML fragment.
@@ -1054,27 +1066,46 @@ impl Inner {
         Html((self.profile_shell)(frag, who, req))
     }
 
-    /// Append the app's profile-extra section (if configured) to a self-profile fragment.
-    async fn with_profile_extra(
+    /// The app's own cards for the caller's profile (`Auth::profile_extra`), or nothing.
+    async fn profile_extra(
         &self,
-        frag: String,
         who: &Identity,
         reauth: &ReauthView,
         csrf: &str,
         headers: &HeaderMap,
     ) -> String {
-        match &self.profile_extra {
-            Some(hook) => {
-                let ctx = ProfileSection {
-                    who: who.clone(),
-                    csrf: csrf.to_string(),
-                    headers: headers.clone(),
-                    reauth_fields: reauth_fields_html(reauth, "Confirm it's you."),
-                };
-                format!("{frag}{}", hook(ctx).await)
-            }
-            None => frag,
-        }
+        let Some(hook) = &self.profile_extra else { return String::new() };
+        let ctx = ProfileSection {
+            who: who.clone(),
+            csrf: csrf.to_string(),
+            headers: headers.clone(),
+            reauth_fields: reauth_fields_html(reauth, "Confirm it's you."),
+        };
+        hook(ctx).await
+    }
+
+    /// The passkeys card, when passkeys are on and the account isn't SSO.
+    #[cfg(feature = "passkeys")]
+    async fn passkeys_card(
+        &self,
+        user: &user::Model,
+        reauth: &ReauthView,
+        csrf: &str,
+        headers: &HeaderMap,
+    ) -> Option<String> {
+        let rt = self.passkeys.clone().filter(|_| !user.is_sso())?;
+        Some(rt.card_html(self, user, reauth, csrf, headers).await)
+    }
+
+    #[cfg(not(feature = "passkeys"))]
+    async fn passkeys_card(
+        &self,
+        _user: &user::Model,
+        _reauth: &ReauthView,
+        _csrf: &str,
+        _headers: &HeaderMap,
+    ) -> Option<String> {
+        None
     }
 
     /// Fire the audit observer for a mutating auth action (no-op if none registered). `after` should
@@ -1263,22 +1294,23 @@ impl Auth {
         self
     }
 
-    /// Append an app-rendered section below the password/2FA fragment on the caller's **own** profile
-    /// page (preferences, a webhook secret; API keys are built in, [`api_keys`](Auth::api_keys)). The hook gets a [`ProfileSection`] — the identity and the CSRF
-    /// token this request's forms must carry — and returns an HTML fragment.
+    /// The app's own **cards** on the caller's own profile page (preferences, a webhook secret; API
+    /// keys and passkeys are built in). The profile is a grid of cards; the hook returns the app's,
+    /// drawn with [`profile_card`] so they match, and they follow the library's. It gets a
+    /// [`ProfileSection`]: the caller, the CSRF token their forms must carry, the request's headers,
+    /// and the confirm-it's-you inputs for a sensitive form.
     ///
     /// ```ignore
     /// let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
-    ///     let hooks = list_webhooks(&s.who.id).await;
-    ///     format!(r#"<hr><h2 class="h6">Webhooks</h2>{hooks}
-    ///                <form method="post" action="/webhook-secret/rotate">{}
-    ///                <button class="btn btn-sm btn-outline-primary">Rotate the secret</button></form>"#,
-    ///             relativelylight::csrf::Csrf::hidden_input(&s.csrf))
+    ///     let form = format!(r#"<form method="post" action="/webhook-secret/rotate">{}{}
+    ///         <button class="btn btn-sm btn-outline-danger">Rotate the secret</button></form>"#,
+    ///         relativelylight::csrf::Csrf::hidden_input(&s.csrf), s.reauth_fields);
+    ///     auth::profile_card("Webhooks", &form)
     /// });
     /// ```
     ///
-    /// A manager's `/profile/{id}` doesn't include it. Gate a sensitive action's *handler* with
-    /// [`reauthenticate`](Auth::reauthenticate).
+    /// Not shown to a restricted session (§5m), nor on a manager's `/profile/{id}`. Check a sensitive
+    /// action's *handler* with [`reauthenticate_with`](Auth::reauthenticate_with).
     pub fn profile_extra<F, Fut>(mut self, hook: F) -> Self
     where
         F: Fn(ProfileSection) -> Fut + Send + Sync + 'static,
@@ -2014,7 +2046,8 @@ struct TotpForm {
     csrf: Option<String>,
 }
 
-/// The body of a post that carries nothing but the CSRF token (`/profile/sessions/revoke`).
+/// The body of a post that carries nothing but the CSRF token: signing out other sessions, revoking an
+/// API key, removing a passkey.
 #[derive(serde::Deserialize)]
 struct CsrfOnlyForm {
     #[serde(default, rename = "_csrf")]
@@ -2290,14 +2323,12 @@ async fn profile_submit(
             .map(|e| format!("Your new password {e}."))
     };
     if let Some(msg) = error {
-        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf, &req).await;
-        return (StatusCode::BAD_REQUEST, page).into_response();
+        return profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::BAD_REQUEST, Err(&msg)).await;
     }
 
     if set_password(&inner.db, &who.username, &form.new_password).await.is_err() {
         let msg = "Could not change the password.";
-        let page = profile_page(&inner, &who, &user, Some(msg), None, &csrf, &req).await;
-        return (StatusCode::INTERNAL_SERVER_ERROR, page).into_response();
+        return profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::INTERNAL_SERVER_ERROR, Err(msg)).await;
     }
     // The password is changed, so every session it ever unlocked is void: mint one fresh session for
     // the caller and delete the rest. Without this, a password changed *because* someone else got in
@@ -2648,8 +2679,7 @@ async fn recovery_regenerate(
         return Redirect::to(&inner.profile_path).into_response();
     }
     if let Err(msg) = inner.reauth(&user, &form.reauth).await {
-        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf, &req).await;
-        return (StatusCode::FORBIDDEN, page).into_response();
+        return profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::FORBIDDEN, Err(&msg)).await;
     }
     match recovery::issue(&inner.db, user.id).await {
         Ok(codes) => {
@@ -2728,8 +2758,7 @@ async fn totp_self_disable(
         Err(res) => return res,
     };
     if let Err(msg) = inner.reauth(&user, &form.reauth).await {
-        let page = profile_page(&inner, &who, &user, Some(&msg), None, &csrf, &req).await;
-        return (StatusCode::FORBIDDEN, page).into_response();
+        return profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::FORBIDDEN, Err(&msg)).await;
     }
     let user = clear_totp(&inner, user).await;
     let msg = "Two-factor authentication disabled.";
@@ -2822,20 +2851,10 @@ async fn passkeys_manage_remove(
     manager_page(&inner, &who, &manager, &target, None, Some(&msg), &csrf, &req).await.into_response()
 }
 
-/// Which part of the profile page a message belongs to: the top (password and 2FA), the API-key
-/// section or the passkeys section. Each shows its own, next to the form it is about.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Card {
-    Top,
-    ApiKeys,
-    #[cfg_attr(not(feature = "passkeys"), allow(dead_code))]
-    Passkeys,
-}
-
-/// The whole self-service profile fragment for `user`: the password form, the 2FA section, the recovery
-/// codes section (only when 2FA is on — it needs a count from the DB, which is why this is async), the
-/// sessions section, the passkeys and API-key sections when switched on, and the app's `profile_extra`
-/// appended. An SSO account gets the read-only notice in place of the password and 2FA sections.
+/// The whole self-service profile fragment for `user`: a grid of cards — the password (or the SSO
+/// notice), passkeys when on, 2FA, the recovery codes (only with 2FA on — the count is why this is
+/// async), other sessions, API keys when on, and the app's `profile_extra` cards. `error` / `success` is
+/// the one message, at the top, for whatever was just done.
 async fn profile_fragment(
     inner: &Inner,
     who: &Identity,
@@ -2845,23 +2864,6 @@ async fn profile_fragment(
     csrf: &str,
     headers: &HeaderMap,
 ) -> String {
-    profile_fragment_with(inner, who, user, Card::Top, (error, success), csrf, headers).await
-}
-
-/// [`profile_fragment`] with the message on `card`.
-async fn profile_fragment_with(
-    inner: &Inner,
-    who: &Identity,
-    user: &user::Model,
-    card: Card,
-    (error, success): (Option<&str>, Option<&str>),
-    csrf: &str,
-    headers: &HeaderMap,
-) -> String {
-    let on = |c: Card| match c == card {
-        true => (error, success),
-        false => (None, None),
-    };
     let totp_on = user.has_totp();
     // One view per render: every confirm-it's-you block on the page shares its passkey challenge.
     let reauth = inner.reauth_view(user).await;
@@ -2869,7 +2871,6 @@ async fn profile_fragment_with(
         true => Some(recovery::remaining(&inner.db, user.id).await),
         false => None,
     };
-    let (e, s) = on(Card::Top);
     let restricted = inner.restricted(who);
     let notices = Notices {
         policy: restricted.then(|| inner.policy_notice(user)),
@@ -2877,6 +2878,17 @@ async fn profile_fragment_with(
             .password_change(inner.password_max_age_days, now_secs())
             .map(|r| inner.password_notice(r)),
     };
+    let passkeys = inner.passkeys_card(user, &reauth, csrf, headers).await;
+    // A restricted session sees only what adds the factor it lacks: no API keys (a key would carry the
+    // account past the policy) and none of the app's own cards.
+    let mut more = String::new();
+    if !restricted {
+        if inner.api_keys.is_some() {
+            let keys = api_key::card(&inner.db, user.id, headers).await;
+            more.push_str(&api_keys_html(&keys, &reauth, csrf));
+        }
+        more.push_str(&inner.profile_extra(who, &reauth, csrf, headers).await);
+    }
     let view = ProfileView {
         who,
         sso: user.sso_key(),
@@ -2885,54 +2897,25 @@ async fn profile_fragment_with(
         totp_on,
         recovery_left: left,
         notices: &notices,
+        passkeys: passkeys.as_deref(),
+        more: &more,
     };
-    let mut frag = change_form_html(&view, e, s, csrf);
-    #[cfg(feature = "passkeys")]
-    if let (Some(rt), false) = (&inner.passkeys, user.is_sso()) {
-        let (e, s) = on(Card::Passkeys);
-        frag.push_str(&rt.card_html(inner, user, &reauth, e, s, csrf, headers).await);
-    }
-    // A restricted session sees only what adds the factor it lacks: no API keys (a key would carry the
-    // account past the policy) and none of the app's own sections.
-    if restricted {
-        return frag;
-    }
-    if inner.api_keys.is_some() {
-        let keys = api_key::card(&inner.db, user.id, headers).await;
-        let (e, s) = on(Card::ApiKeys);
-        frag.push_str(&api_keys_html(&keys, &reauth, e, s, csrf));
-    }
-    inner.with_profile_extra(frag, who, &reauth, csrf, headers).await
+    change_form_html(&view, error, success, csrf)
 }
 
-/// The caller's own profile page with a message on the API-key card — what the key routes answer.
-async fn profile_page_keys(
+/// The caller's own profile again, answering a post: `result` is the message at the top (`Ok` a success,
+/// `Err` a refusal) and `status` the response's. What every profile handler answers with.
+async fn profile_reply(
     inner: &Inner,
-    who: &Identity,
-    user: &user::Model,
-    error: Option<&str>,
-    success: Option<&str>,
-    csrf: &str,
-    req: &Parts,
-) -> Html<String> {
-    profile_page_card(inner, who, user, Card::ApiKeys, error, success, csrf, req).await
-}
-
-/// The caller's own profile page with a message on `card`.
-#[allow(clippy::too_many_arguments)]
-async fn profile_page_card(
-    inner: &Inner,
-    who: &Identity,
-    user: &user::Model,
-    card: Card,
-    error: Option<&str>,
-    success: Option<&str>,
-    csrf: &str,
-    req: &Parts,
-) -> Html<String> {
-    let frag =
-        profile_fragment_with(inner, who, user, card, (error, success), csrf, &req.headers).await;
-    inner.page(who, &frag, req)
+    (who, user, csrf, req): (&Identity, &user::Model, &str, &Parts),
+    status: StatusCode,
+    result: Result<&str, &str>,
+) -> Response {
+    let (error, success) = match result {
+        Ok(msg) => (None, Some(msg)),
+        Err(msg) => (Some(msg), None),
+    };
+    (status, profile_page(inner, who, user, error, success, csrf, req).await).into_response()
 }
 
 /// The caller's own profile page — [`profile_fragment`] in the app's profile shell.

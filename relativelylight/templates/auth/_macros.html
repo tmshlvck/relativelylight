@@ -10,13 +10,35 @@
 {%- endif -%}
 {%- endmacro -%}
 
-{#- The confirm-it's-you inputs for a sensitive action (AUTH.md §5h), from a `ReauthView`: the
-    account's password, a fresh code when it has 2FA, and its passkey when it has one. Only the factors
-    the account has are offered; an account with none (SSO) gets nothing to fill in. `prefix` keeps the
-    input ids unique when two render on one page. -#}
+{#- The confirm-it's-you block for a sensitive action (AUTH.md §5h), from a `ReauthView`: the account's
+    password, a fresh code when it has 2FA, and its passkey when it has one. Only the factors the
+    account has are offered; an account with none (SSO) gets nothing to fill in. `prefix` keeps the
+    input ids unique when two render on one page. The passkey button sits next to the form's own
+    submit button, the same size. -#}
 {%- macro reauth(prefix, r, hint) %}
   {%- if r.has_password || r.totp_on || r.passkey.is_some() %}
   <p class="text-muted small mb-2">{{ hint }}</p>
+  {%- call typed(prefix, r) %}{% endcall %}
+  {%- if let Some(p) = r.passkey %}
+  {%- call passkey_data(p) %}{% endcall %}
+  <button class="btn btn-outline-primary btn-sm me-2" type="button" data-rl-passkey="get">Confirm with your passkey</button>
+  {%- endif %}
+  {%- endif %}
+{%- endmacro -%}
+
+{#- The same block where the form's own button runs the passkey ceremony (adding a passkey): the
+    passkey's challenge is carried, but the script answers it on that button's click, and only when
+    nothing was typed. -#}
+{%- macro reauth_quiet(prefix, r, hint) %}
+  {%- if r.has_password || r.totp_on || r.passkey.is_some() %}
+  <p class="text-muted small mb-2">{{ hint }}{% if r.passkey.is_some() %} Leave it empty to confirm with your passkey.{% endif %}</p>
+  {%- call typed(prefix, r) %}{% endcall %}
+  {%- if let Some(p) = r.passkey %}{% call passkey_data(p) %}{% endcall %}{% endif %}
+  {%- endif %}
+{%- endmacro -%}
+
+{#- The typed factors: the password, and a code when the account has 2FA. -#}
+{%- macro typed(prefix, r) %}
   {%- if r.has_password %}
   <div class="mb-2">
     <label class="form-label small" for="{{ prefix }}-reauth">Your current password</label>
@@ -31,20 +53,18 @@
            inputmode="numeric" autocomplete="one-time-code" placeholder="123456">
   </div>
   {%- endif %}
-  {%- if let Some(p) = r.passkey %}
-  {%- call passkey_get(p, "Confirm with your passkey") %}{% endcall %}
-  {%- endif %}
-  {%- endif %}
 {%- endmacro -%}
 
-{#- A passkey ceremony inside the enclosing form: the challenge, an empty field for the browser's
-    answer, the options for the script, and the button that starts it. The script fills the answer and
-    submits the form; without JavaScript the button does nothing and the form's other fields still
-    work. `p.options` is JSON made safe for a script element on the server. -#}
-{%- macro passkey_get(p, label) %}
+{#- A passkey challenge inside the enclosing form: its id, an empty field for the browser's answer, and
+    the options for the script (`p.options` is JSON made safe for a script element on the server). -#}
+{%- macro passkey_data(p) %}
   <input type="hidden" name="passkey_challenge" value="{{ p.challenge }}">
   <input type="hidden" name="passkey_response" value="">
   <script type="application/json" data-rl-passkey-options>{{ p.options|safe }}</script>
-  <button class="btn btn-outline-primary btn-sm mb-2" type="button" data-rl-passkey="get">{{ label }}</button>
   <script src="/auth/passkey.js" defer></script>
 {%- endmacro -%}
+
+{#- A card on the profile and manager pages: one of the grid's columns. -#}
+{%- macro card_start(title) %}<div class="col"><div class="card"><div class="card-body">
+<h2 class="h6 card-title mb-3">{{ title }}</h2>{%- endmacro -%}
+{%- macro card_end() %}</div></div></div>{%- endmacro -%}

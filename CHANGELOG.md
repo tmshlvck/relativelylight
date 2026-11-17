@@ -13,6 +13,15 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
+- **The profile page is a grid of cards**, one column on a phone and two on a wide screen.
+  - The library's sections (password, passkeys, two-factor, recovery codes, sessions, API keys) are
+    cards, with one message at the top.
+  - `Auth::profile_extra`'s hook now returns **cards**: draw them with the new
+    `auth::profile_card(title, body)`.
+  - **Upgrade:** wrap what your hook returned in `auth::profile_card("Title", &html)`. Give the
+    fragment a wide column in `profile_shell` instead of a narrow card
+    ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#5-the-profile-page-is-a-grid-of-cards)).
+
 - **MSRV 1.89** (was 1.88), for `webauthn-rs` 0.6, the passkeys dependency. **Upgrade:** a 1.89 or
   newer toolchain ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#4-msrv-189)).
 

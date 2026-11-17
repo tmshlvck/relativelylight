@@ -28,6 +28,7 @@
 {%- if let Some(p) = passkey %}
 <form method="post" action="/login/totp/passkey" class="mt-3">
   {{ m::csrf(csrf) }}
-  {%- call m::passkey_get(p, "Use your passkey") %}{% endcall %}
+  {%- call m::passkey_data(p) %}{% endcall %}
+  <button class="btn btn-outline-primary" type="button" data-rl-passkey="get">Use your passkey</button>
 </form>
 {%- endif %}

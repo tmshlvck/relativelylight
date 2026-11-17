@@ -101,15 +101,15 @@ async fn set_tz(Form(fields): Form<HashMap<String, String>>) -> Response {
   ```
 
   `examples/adminpanel` does this.
-- **On the profile page** — either in your own `/settings` page, or appended to the library's profile
-  page with [`Auth::profile_extra`](AUTH.md). Better when the zone is a rarely changed personal
-  preference rather than a working control. The hook gets the request's headers, so the picker
-  shows the caller's current zone, and `back` returns to the profile page:
+- **On the profile page** — either in your own `/settings` page, or as a card on the library's
+  profile page with [`Auth::profile_extra`](AUTH.md). Better when the zone is a rarely changed
+  personal preference rather than a working control. The hook gets the request's headers, so the
+  picker shows the caller's current zone, and `back` returns to the profile page:
 
   ```rust
   let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
       let picker = TzPicker::new().render(&Tz::from_headers(&s.headers), "/profile");
-      format!(r#"<hr><h2 class="h6">Timezone</h2>{picker}"#)
+      auth::profile_card("Timezone", &picker)
   });
   ```
 

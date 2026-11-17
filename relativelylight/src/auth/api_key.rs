@@ -537,17 +537,20 @@ pub(super) async fn mint_submit(
     // past the policy for good.
     if inner.restricted(&who) {
         let msg = "Add the second factor this site needs before creating an API key.";
-        return refuse(&inner, (&who, &user, &csrf, &req), StatusCode::FORBIDDEN, msg).await;
-    }
-    if let Err(msg) = inner
-        .reauth(&user, &form.reauth)
-        .await
-    {
-        return refuse(
+        return super::profile_reply(
             &inner,
             (&who, &user, &csrf, &req),
             StatusCode::FORBIDDEN,
-            &msg,
+            Err(msg),
+        )
+        .await;
+    }
+    if let Err(msg) = inner.reauth(&user, &form.reauth).await {
+        return super::profile_reply(
+            &inner,
+            (&who, &user, &csrf, &req),
+            StatusCode::FORBIDDEN,
+            Err(&msg),
         )
         .await;
     }
@@ -557,11 +560,11 @@ pub(super) async fn mint_submit(
     let (name, expires_at) = match fields {
         Ok(v) => v,
         Err(msg) => {
-            return refuse(
+            return super::profile_reply(
                 &inner,
                 (&who, &user, &csrf, &req),
                 StatusCode::BAD_REQUEST,
-                msg,
+                Err(msg),
             )
             .await
         }
@@ -573,11 +576,11 @@ pub(super) async fn mint_submit(
                 .report("auth-api-key", "key mint", &e, client_ip)
                 .await;
             let msg = "Could not create the key.";
-            return refuse(
+            return super::profile_reply(
                 &inner,
                 (&who, &user, &csrf, &req),
                 StatusCode::INTERNAL_SERVER_ERROR,
-                msg,
+                Err(msg),
             )
             .await;
         }
@@ -600,25 +603,7 @@ pub(super) async fn mint_submit(
     inner.page(&who, &frag, &req).into_response()
 }
 
-/// The profile page again, with `msg` on the key card and nothing changed.
-async fn refuse(
-    inner: &Inner,
-    (who, user, csrf, req): (&Identity, &super::user::Model, &str, &Parts),
-    status: StatusCode,
-    msg: &str,
-) -> Response {
-    (
-        status,
-        super::profile_page_keys(inner, who, user, Some(msg), None, csrf, req).await,
-    )
-        .into_response()
-}
-
-#[derive(serde::Deserialize)]
-pub(super) struct RevokeForm {
-    #[serde(default, rename = "_csrf")]
-    csrf: Option<String>,
-}
+use super::CsrfOnlyForm as RevokeForm;
 
 /// `POST /profile/api-keys/{id}/revoke` — delete one of the caller's own keys. Not re-authenticated:
 /// it only removes access. Someone else's key, or none, changes nothing and gets a `404`.
@@ -677,7 +662,7 @@ pub(super) async fn revoke_submit(
             )
         }
     };
-    let page = super::profile_page_keys(
+    let page = super::profile_page(
         &inner,
         &who,
         &user,

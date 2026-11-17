@@ -148,6 +148,16 @@
       }, fallback);
   });
 
+  // Why a ceremony didn't finish, for the note under the button.
+  function failed(err) {
+    return err && err.name === "NotAllowedError"
+      ? "The passkey prompt was closed or timed out. Try again."
+      : "The passkey didn't work here: " + (err && err.message ? err.message : err);
+  }
+
+  // A "Confirm with your passkey" button (`data-rl-passkey="get"`): answer the form's challenge and
+  // submit the form. The form's other inputs may be empty on purpose: the server reads the passkey
+  // first.
   document.addEventListener("click", function (ev) {
     var button = ev.target.closest && ev.target.closest("[data-rl-passkey]");
     if (!button) return;
@@ -160,25 +170,55 @@
       say(button, "This browser doesn't support passkeys.");
       return;
     }
-    var options = JSON.parse(holder.textContent);
-    var create = button.getAttribute("data-rl-passkey") === "create";
     button.disabled = true;
-    var ceremony = create
-      ? navigator.credentials.create(creationOptions(options)).then(registration)
-      : navigator.credentials.get(requestOptions(options)).then(assertion);
-    ceremony.then(
+    navigator.credentials.get(requestOptions(JSON.parse(holder.textContent))).then(assertion).then(
       function (answer) {
         field.value = JSON.stringify(answer);
-        // The confirm-it's-you block may sit in a form whose other inputs the user left empty on
-        // purpose: submit as is, the server reads the passkey first.
         if (form.requestSubmit) form.requestSubmit(); else form.submit();
       },
       function (err) {
         button.disabled = false;
-        say(button, err && err.name === "NotAllowedError"
-          ? "The passkey prompt was closed or timed out. Try again."
-          : "The passkey didn't work here: " + (err && err.message ? err.message : err));
+        say(button, failed(err));
       }
     );
+  });
+
+  // "Add a passkey" (`form[data-rl-passkey-add]`): the form carries the registration challenge, so the
+  // button runs the browser's prompt right here. When nothing was typed to confirm it's you and the
+  // account has a passkey, that passkey's prompt comes first. Then the form posts both answers.
+  document.addEventListener("submit", function (ev) {
+    var form = ev.target;
+    if (!form.matches || !form.matches("form[data-rl-passkey-add]")) return;
+    var register = form.querySelector("[data-rl-passkey-register]");
+    if (!register || !window.PublicKeyCredential || !navigator.credentials) return; // the server says why
+    ev.preventDefault();
+    var button = form.querySelector("button[type=submit]");
+    var typed = Array.prototype.some.call(
+      form.querySelectorAll("input[name=current_password], input[name=totp_code]"),
+      function (input) { return input.value.trim() !== ""; }
+    );
+    var confirm = form.querySelector("[data-rl-passkey-options]");
+    if (button) button.disabled = true;
+    var first = typed || !confirm
+      ? Promise.resolve()
+      : navigator.credentials.get(requestOptions(JSON.parse(confirm.textContent))).then(assertion)
+          .then(function (answer) {
+            form.querySelector("input[name=passkey_response]").value = JSON.stringify(answer);
+          });
+    first
+      .then(function () {
+        return navigator.credentials.create(creationOptions(JSON.parse(register.textContent)));
+      })
+      .then(registration)
+      .then(
+        function (answer) {
+          form.querySelector("input[name=register_response]").value = JSON.stringify(answer);
+          form.submit();
+        },
+        function (err) {
+          if (button) button.disabled = false;
+          say(button, failed(err));
+        }
+      );
   });
 })();

@@ -99,3 +99,13 @@ ALTER TABLE auth_session ADD COLUMN passkey_class varchar NULL;
 The minimum Rust version is **1.89** (was 1.88), for `webauthn-rs` 0.6, the passkeys dependency. It
 applies with or without the `passkeys` feature: `rustup update`, and raise `rust-version` in your
 own `Cargo.toml` if you pin one.
+
+## 5. The profile page is a grid of cards
+
+`/profile` is now a grid of cards: one column on a phone, two on a wide screen, with one message at
+the top. Two things change for an app:
+
+- **`profile_extra`'s hook returns cards.** Wrap what it returned in `auth::profile_card(title, body)`,
+  one call per card, and concatenate them. A bare `<hr><h2>…` would sit in the grid as a stray column.
+- **`profile_shell` wraps a grid.** Give the fragment a wide column (say `max-width: 72rem`), not
+  the narrow card that suited the old single column.

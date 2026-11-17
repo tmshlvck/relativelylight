@@ -607,9 +607,10 @@ fn login_shell(form: &str, req: &Parts) -> String {
 // identity and the request, so the navbar shows their username (and Log out) and their timezone just
 // like the admin page — on /profile, /profile/totp and a manager's /profile/{id} alike.
 fn profile_shell(fragment: &str, who: &Identity, req: &Parts) -> String {
+    // The fragment is a grid of cards (two columns on a wide screen): a wide column, no card around it.
     let body = format!(
-        r#"<div class="card shadow-sm mx-auto" style="max-width:32rem"><div class="card-body">{fragment}
-<a class="d-inline-block mt-3" href="/">&larr; Back to admin</a></div></div>"#
+        r#"<div class="mx-auto" style="max-width:72rem">{fragment}
+<a class="d-inline-block mt-3" href="/">&larr; Back to admin</a></div>"#
     );
     Shell::page("Profile", who.username.clone(), body, &req.headers, back_to(req, "/profile"))
         .for_user(who)
