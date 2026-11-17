@@ -6,7 +6,8 @@ you keep your own router and page shell; `relativelylight` contributes the HTML.
 
 No JavaScript framework, no JSON API in between: the columns it introspects go straight into rendered
 HTML, and writes come back as posted forms (`POST` → `303` → `GET`). Your page needs Bootstrap 5's
-stylesheet, the crate's forty lines of CSS, and, for the relation picker, one small script.
+stylesheet, the crate's forty lines of CSS and one small script (modal dialogs, the relation picker;
+everything works without it, only plainer).
 
 ## What it looks like
 
@@ -60,7 +61,7 @@ URL, verified (and re-authenticated) before it's on.</sub></td>
 
 ```toml
 [dependencies]
-relativelylight = { version = "0.4", features = ["ui", "csv"] }
+relativelylight = { version = "0.5", features = ["ui", "csv"] }
 sea-orm = { version = "2.0", features = ["macros", "with-json"] }
 ```
 

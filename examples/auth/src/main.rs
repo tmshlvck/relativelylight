@@ -343,9 +343,13 @@ fn card(title: &str, text: &str, href: &str, button: &str) -> String {
     )
 }
 
-/// Whether `who` may open the accounts panel: the admin group, the one name used everywhere.
+/// The accounts tables' gate, set once at startup. It decides who may read those tables, so it also
+/// decides who is shown the way to them (the navbar, the dashboard): one rule, asked without a second
+/// session lookup.
+static ACCOUNTS: std::sync::OnceLock<Arc<GroupReadWrite>> = std::sync::OnceLock::new();
+
 fn is_admin(who: &Identity) -> bool {
-    who.in_group(ADMIN_GROUP)
+    ACCOUNTS.get().is_some_and(|gate| gate.admits(who))
 }
 
 /// `GET /secret` — an ordinary protected page. The whole of the check is `identify`: no session, or one
@@ -473,6 +477,7 @@ async fn rotate_webhook_secret(
 /// enforced — a non-admin gets 403, not a page with the buttons greyed out.
 fn accounts_engine(db: DatabaseConnection, auth: &Auth) -> Arc<Engine> {
     let gate = Arc::new(GroupReadWrite::new(auth, [ADMIN_GROUP]));
+    ACCOUNTS.set(gate.clone()).ok();
     let mut crud = Crud::new(db);
     crud.register(auth::user::meta_model(auth), gate.clone());
     crud.register(auth::group::meta_model(), gate.clone());

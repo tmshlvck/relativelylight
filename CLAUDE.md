@@ -14,10 +14,8 @@ Start with [README.md](README.md) (features, quick start, examples) and [docs/AP
 [docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md);
 the design is [docs/DESIGN.md](docs/DESIGN.md) and open work [docs/TODO.md](docs/TODO.md).
 
-**One way to do each thing** ([DESIGN.md principle 9](docs/DESIGN.md#principles)): APIs, pages and
-the design stay orthogonal. Before adding a second way (a shortcut, a convenience link, a second
-helper), find the first and extend it; a convenience must earn its place by removing harder
-navigation, not by repeating it.
+**One way to do each thing** ([DESIGN.md principle 9](docs/DESIGN.md#principles)), in the code and
+in the docs: before adding a second way, or a second explanation, find the first and extend it.
 
 ## Things that are easy to get wrong
 
@@ -53,8 +51,8 @@ navigation, not by repeating it.
   own `/profile` serves it. Keep it that way for anything new: an API key minted, a manager action or
   an app section reached from a restricted session would carry the account past the policy.
 - **`must_change_password` is set by the `auth_user` row hook** whenever a write sets `password_hash`
-  without setting it. Keep it read-only in an accounts panel (an editable checkbox posts `false` and
-  wins); a helper that writes the owner's own password sets it to `false` explicitly.
+  without setting it; a new helper that writes the owner's own password sets it to `false`
+  explicitly ([AUTH.md §5m](docs/AUTH.md#5m-the-sign-in-policy-and-password-change-required)).
 - **Configure `Auth` fully before `Sso::new(&auth)`** clones it.
 - Entities need a single-column primary key and single-column to-one FKs; N:M junction tables are
   never registered (`post.relate(&tag)` declares N:M).
@@ -85,17 +83,15 @@ cargo build --workspace      # the examples pin their own narrow feature sets
 
 Don't run `rustfmt` over the whole repo; format only what you touch.
 
-**Security behaviour is tested by rejection.** `auth/security_tests.rs`, `auth/sso_tests.rs` (a fake
-IdP), `auth/passkey_tests.rs` (a software authenticator) and `crud/gate_tests.rs` assert the negative
-cases over in-memory SQLite: bad credentials, unusable sessions, API keys and passkeys, replayed
-codes, non-manager profile writes, each gate's decision, refused reads, CSRF on every write. `crud/ui_tests.rs` covers escaping and form decoding; `crud/transform_tests.rs`
-covers a value's way through form, CSV and the codec against a real database. `files/tests.rs` covers
-the CSRF token required before the first file, limits holding while streaming, and escaping in the
-components. Touching login, sessions, 2FA, API keys, passkeys, the profile pages, a gate or the upload
-path means extending them, with a positive control so the negatives can't
-pass vacuously ([AUTH.md §9](docs/AUTH.md#9-tests--the-negative-paths)).
+**Security behaviour is tested by rejection**, over in-memory SQLite: `auth/security_tests.rs`,
+`auth/sso_tests.rs` (a fake IdP), `auth/passkey_tests.rs` (a software authenticator),
+`crud/gate_tests.rs`; also `crud/ui_tests.rs` (escaping, form decoding), `crud/transform_tests.rs` (a
+value's way through form, CSV and codec) and `files/tests.rs`. What each covers is listed in
+[AUTH-SECURITY.md → Tests](docs/AUTH-SECURITY.md#tests--the-negative-paths). Touching login,
+sessions, 2FA, API keys, passkeys, the profile pages, a gate or the upload path means extending them,
+with a positive control so the negatives can't pass vacuously.
 
-**The docs are part of the change.**
+**The docs are part of the change, and each fact has one home.**
 
 - Update the guide that owns the behaviour, and the doc comments.
 - Demonstrate user-facing features in an example (a new one goes in the root `Cargo.toml` `members`
@@ -105,9 +101,11 @@ pass vacuously ([AUTH.md §9](docs/AUTH.md#9-tests--the-negative-paths)).
 - Anything a user would notice gets a `CHANGELOG.md` entry under `## Unreleased` in the same change,
   breaking items first with the upgrade step — and, for a breaking change, a step in the current
   `docs/MIGRATION-x.y.md`.
-- `DESIGN.md` holds the design and its decisions, `TODO.md` is the only place for open work and
-  future ideas, the guides describe what ships. `README.md` is the starting point; this file is
-  orientation. Cross-link rather than copy.
+- Each document has one job, and a fact lives in the one whose job it is; the others link to it:
+  `DESIGN.md` the design and its decisions (why), `AUTH-SECURITY.md` the security reasoning, the
+  guides what ships and how to use it, `APP.md` one whole app built from them, `TODO.md` open work
+  and future ideas (the only place), `MIGRATION-x.y.md` upgrade steps. `README.md` is the starting
+  point; this file is orientation. A guide's "why" is a `[why]` link, not a copy.
 
 **Releasing:** run the feature matrix above, rename `## Unreleased` to `## [x.y.z] — YYYY-MM-DD`
 with its compare link (keep an empty `## Unreleased` above it), bump `relativelylight/Cargo.toml`,

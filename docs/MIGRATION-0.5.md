@@ -96,9 +96,8 @@ set `method` (`session::Method::Password.as_str()`), or it reads as a pre-upgrad
 **After the upgrade:**
 - Sessions from before the step keep working. Their `method` is empty, which counts as `Simple`.
 - A password from before has no `password_changed_at`; a maximum age counts it from `created_at`.
-- **Accounts panel:** hide `passkey_handle` with the TOTP columns (the user's authenticators hold
-  it, so an edited one orphans every passkey). Show `must_change_password` read-only (an editable
-  one would never be set, §5m).
+- **Accounts panel:** the new columns need the rules §8's models apply (`passkey_handle` hidden,
+  `must_change_password` read-only).
 
 ## 4. MSRV 1.89
 
@@ -142,8 +141,6 @@ Nothing to change in code for these, but they change what users see.
   - `create_user`, `set_password`, `make_admin` and `reset_admin_access` don't flag.
   - **If your app sets passwords for users itself and doesn't want this**, set
     `must_change_password` to `false` in the same write.
-  - **In an accounts panel**, show the column read-only: an editable checkbox posts `false` with
-    every save, and the flag is never set.
 - **SSO accounts may enrol TOTP** on `/profile`. Once one has, the TOTP step follows the identity
   provider's callback. This is what `Auth::sso_level(Level::Simple)` relies on to require it (§5m).
   A site that never sets that still lets SSO users opt in.
@@ -154,8 +151,9 @@ Nothing to change in code for these, but they change what users see.
 
 ## 8. The accounts panel comes from `auth`'s `meta_model()`s
 
-Recommended, not required: a panel configured by hand keeps working. But it lets an operator change
-someone's password **without signing them out**, which the manager's reset at `/profile/{id}` does.
+A panel configured by hand still compiles, but it is no longer the way: it lets an operator change
+someone's password **without signing them out**, which the manager's reset at `/profile/{id}` does,
+and it misses the rules for the new columns (§3).
 The library's models make the panel set only an account's **first** password, and link each account
 to its credentials page for everything after ([AUTH.md §5j](AUTH.md#the-accounts-panel)).
 

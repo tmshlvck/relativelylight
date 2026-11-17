@@ -65,6 +65,8 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
   self-registration (today's decision is no sign-up page, §5j: both need a verified e-mail or
   similar). It resets passkeys too, but not TOTP: the user needs recovery codes or an administrator
   for that.
+- **The profile stays one page of cards.** If the cards ever outgrow it, server-rendered tabs (a
+  `?tab=` on every form's answer) are the next step; not before.
 - **No scopes on API keys.** A key is its owner (AUTH.md §5k); narrower access is an account of its
   own in a narrower group. Revisit only for a third-party OAuth client, which is a different design.
 - **Expired API keys are not pruned.** They stay listed as expired, as evidence, until someone

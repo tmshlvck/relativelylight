@@ -135,12 +135,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.register(auth::group::meta_model(), admins.clone());
     crud.register(auth::api_key::meta_model(), admins.clone());
     crud.register(auth::lockout::username_meta_model(), admins.clone());
-    crud.register(auth::lockout::ip_meta_model(), admins);
+    crud.register(auth::lockout::ip_meta_model(), admins.clone());
     crud.csrf(auth.csrf());
     crud.on_write(audit.clone());
     let engine = Arc::new(crud.into_engine());
 
-    let state = AppState { auth: auth.clone(), engine, audit: audit.clone() };
+    let state = AppState { auth: auth.clone(), engine, audit: audit.clone(), accounts: admins };
     let app = Router::new()
         .route("/", get(public))
         .route("/private", get(private))
@@ -359,11 +359,11 @@ async fn panel_save(
     res
 }
 
-/// The data panel, for this caller: the accounts section only for those who manage accounts (the
-/// gate would refuse anyone else's read, so it isn't listed for them).
+/// The data panel, for this caller: the accounts section only when its gate admits them (anyone else
+/// would get 403 reading it).
 fn panel<'a>(app: &'a AppState, who: &Identity) -> Admin<'a> {
     let mut admin = Admin::new(&app.engine).title("Data").base("/data").entity("post").entity("author");
-    if app.auth.can_manage_others(who) {
+    if app.accounts.admits(who) {
         // The id opens the account's credentials page: password reset, 2FA off.
         let credentials = auth::user::credentials_link(app.auth.profile_path());
         admin = admin
@@ -522,6 +522,8 @@ struct AppState {
     engine: Arc<Engine>,
     /// The audit sink, for the app's own writes (`set_title`) — the same one `Auth` and `Crud` report to.
     audit: Arc<AuditLog>,
+    /// The accounts tables' gate: it decides who may read them, so it also decides who sees them.
+    accounts: Arc<GroupReadWrite>,
 }
 
 /// The app's own landing page, and the first thing you see after logging in — so this is where the

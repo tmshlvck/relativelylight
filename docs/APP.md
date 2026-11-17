@@ -6,7 +6,7 @@ workflows.
 
 The library contributes fragments and a write path. *You* own the router, the `<html>`, and every
 decision about layout. This document is the worked example of that division, using
-`relativelylight = { version = "0.4", features = ["ui", "csv", "auth"] }`.
+`relativelylight = { version = "0.5", features = ["ui", "csv", "auth"] }`.
 
 - [1. The skeleton](#1-the-skeleton) — one shell, one state, one layer
 - [2. The page shell and the nav bar](#2-the-page-shell-and-the-nav-bar)
@@ -31,6 +31,7 @@ Runnable versions of §§2–6 are `examples/adminpanel` (gated: login, 2FA, loc
 struct App {
     engine: Arc<Engine>,
     auth: Auth,
+    admins: Arc<GroupReadWrite>, // the accounts tables' gate, which also decides who sees them (§4)
     db: DatabaseConnection,      // for the queries the engine doesn't cover (§6, §7)
 }
 
@@ -53,15 +54,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // auth's own tables, configured by the library; admins only, reads included (AUTH.md §5j)
     let admins = Arc::new(GroupReadWrite::new(&auth, ["admin"]));
     crud.register(auth::user::meta_model(&auth), admins.clone());
-    crud.register(auth::group::meta_model(), admins);
+    crud.register(auth::group::meta_model(), admins.clone());
     crud.csrf(auth.csrf());                              // cookie-authenticated writes → one token
     let engine = Arc::new(crud.into_engine());
 
-    let app = Arc::new(App { engine, auth: auth.clone(), db: db.clone() });
+    let app = Arc::new(App { engine, auth: auth.clone(), admins, db: db.clone() });
 
     let router = Router::new()
         .route("/", get(dashboard))                      // §6
-        .route("/admin", get(admin_show).post(admin_save))   // §4
+        .route("/admin", get(|| async { Redirect::to("/admin/post") }))  // the panel's first table
+        .route("/admin/{entity}", get(admin_show).post(admin_save))   // §4
         .route("/tickets/new", get(ticket_new).post(ticket_create))  // §5
         .route("/tz", post(set_tz))                      // §2
         .with_state(app)
@@ -257,7 +259,7 @@ fn panel<'a>(app: &'a App, who: &Identity) -> Admin<'a> {
             format!(r#"<a href="?entity=post&amp;edit={}">{}</a>"#, esc(&row["id"]), esc(v))
         }))
         .entity("tag");
-    if app.auth.can_manage_others(who) {                 // admins also get the accounts section
+    if app.admins.admits(who) {                          // the accounts tables' own gate decides
         let link = auth::user::credentials_link(app.auth.profile_path()); // id → /profile/{id}
         admin = admin.separator().group("Accounts")
             .entity_with("auth_user", |t| {
@@ -268,7 +270,6 @@ fn panel<'a>(app: &'a App, who: &Identity) -> Admin<'a> {
     admin
 }
 
-// .route("/admin/{entity}", get(admin_show).post(admin_save))
 async fn admin_show(
     State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri, Path(entity): Path<String>,
 ) -> Response {
@@ -288,11 +289,13 @@ async fn admin_show(
 }
 
 async fn admin_save(
-    State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri, RealIp(ip): RealIp,
+    State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri, Path(entity): Path<String>,
+    RealIp(ip): RealIp,
     body: Bytes,                               // raw bytes — the CSV import dialog uploads a file
 ) -> Response {
     let who = match require_login(&app, &headers).await { Ok(w) => w, Err(r) => return r };
-    let state = ViewState::from_uri(&uri);
+    let mut state = ViewState::from_uri(&uri);
+    state.entity = Some(entity);
     match panel(&app, &who).submit(&headers, ip, &body, &state).await {
         Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
         Ok(Outcome::Invalid(state)) => match panel(&app, &who).render_for(&headers, &state).await {
@@ -434,12 +437,11 @@ if let Err(msg) = validate::int_range(1, 65535)(input.port.into()) { errors.fiel
 
 Two things to carry over from the library's own forms, because they are easy to forget:
 
-- **The CSRF token.** Issue-and-echo in your own handler:
+- **The CSRF token.** Render it in the form, and put the POST routes behind the layer, which checks
+  it ([AUTH.md §7](AUTH.md#7-csrf-double-submit-token-feature-csrf)):
   ```rust
   let (token, set_cookie) = auth.csrf().ensure(&headers);     // render Csrf::hidden_input(&token)
-  ```
-  …or put the routes behind the layer and stop thinking about it:
-  ```rust
+  // …
   .layer(from_fn_with_state(auth.csrf(), relativelylight::csrf::enforce))
   ```
 - **Re-authentication before anything sensitive.** A live session is not evidence its owner is
@@ -523,9 +525,9 @@ Before a deployment goes out:
 
 - [ ] `resolve_real_ip` is the **outermost** layer, and `serve` uses
       `into_make_service_with_connect_info::<SocketAddr>()`.
-- [ ] `crud.csrf(auth.csrf())` is set, and any hand-written POST route is behind `csrf::enforce` or
-      checks the token itself. If a guarded route accepts uploads, `Csrf::max_upload` is set above
-      the largest one.
+- [ ] `crud.csrf(auth.csrf())` is set, and every hand-written POST route is behind `csrf::enforce`
+      (a multipart one also checks the token itself). If a guarded route accepts uploads,
+      `Csrf::max_upload` is set above the largest one.
 - [ ] `secure_cookies(true)` in production; the app is behind TLS.
 - [ ] Every model is registered with a real gate — `Open` is public, including writes.
 - [ ] `auth.prune()` runs on a schedule (the crate spawns nothing).
@@ -535,9 +537,9 @@ Before a deployment goes out:
       form of the app's own that sets a password applies it too ([AUTH.md §5g](AUTH.md)).
 - [ ] A `WriteObserver` is registered if you need an audit trail, and its rows are retained somewhere
       you can read them.
-- [ ] Your shell loads Bootstrap 5's stylesheet **and** `crud::ui::CSS` (and `crud::ui::JS`, with a
-      `/pick` route and `Crud::picker_path`, if any relation outgrows `picker_threshold` —
-      [CRUD.md → Picker](CRUD.md#picker--choosing-from-a-large-relation)).
+- [ ] Your shell loads Bootstrap 5's stylesheet, `crud::ui::CSS` and `crud::ui::JS`
+      ([CRUD.md → What to put in your shell](CRUD.md#web-ui-ui)), and a `/pick` route with
+      `Crud::picker_path` if any relation outgrows `picker_threshold`.
 
 ## See also
 

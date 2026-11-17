@@ -38,8 +38,9 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 6. **State and audit are different things.** A table says what something *is*; `observe` says what
    someone *did*.
 7. **Server-rendered, no JavaScript framework, the URL is the state.** Page, sort, filters, search and
-   the open dialog live in the query string. The scripts are the relation picker's, without which the
-   field still saves, and the passkey ceremony's, a browser API no form can reach.
+   the open dialog live in the query string. Two small scripts, no framework: `crud::ui::JS` makes the
+   dialogs modal and drives the relation picker (everything works without it, only plainer), and the
+   passkey script reaches a browser API no form can.
 8. **Policy belongs to the app; mechanism belongs here.** Retention, ownership, registration,
    thumbnails, request logging: the crate can't know, and a wrong default is worse than none. The
    crate spawns no tasks and writes nothing to stdout or stderr.
@@ -99,131 +100,46 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 - **A key never opens the UI.** `identify` reads only the session cookie, and keys have their own
   entry point, `identify_key`, which the app calls on the routes that take one. The crate doesn't
   read the header itself: where the credential arrives is the app's choice.
-- **Passkeys (feature `passkeys`, `webauthn-rs`).** The policy is **app-wide**. It sets
-  the lowest class of passkey accepted, `Synced < DeviceBound < Attested`, and whether a passkey may
-  be a second factor after a password.
-  - *Device-bound* means the authenticator reports itself non-backup-eligible. That is cheap, but
-    self-reported.
-  - *Attested* means the authenticator proves its make and model with a manufacturer certificate
-    chain. That is the only hardware binding a server can verify. Synced passkeys never attest.
-
-  Each credential's class is recorded when it is registered and checked on every use, so a policy
-  made stricter takes effect at the next sign-in.
-- **An account's life, and who may change what.**
-  - **Accounts come from an administrator, with a password** (no self-registration, §5j). The user
-    can change the password and add TOTP or passkeys.
-  - **With a passkey, the user can remove their password.** They choose whether to keep TOTP as a
-    second step after the passkey. With no password, the last passkey can't be removed until a
-    password is set again, so the account always keeps a way in.
-  - **TOTP is a second factor after any primary method.** Recovery codes belong to TOTP alone.
-  - **SSO accounts get no local password or passkeys;** their primary factor is the IdP's. They may
-    enrol TOTP, which a policy can require (`sso_level(1)`, above), and then the TOTP step follows
-    the IdP's callback.
-  - **A manager can always** reset a password, disable TOTP and remove passkeys, each
-    re-authenticated, each independent of the others.
+- **Passkeys: one app-wide policy, by class.** The lowest class accepted (`Synced < DeviceBound <
+  Attested`) and whether a passkey may be a second factor are the site's, not the user's. *Attested*
+  is the only hardware binding a server can verify; *device-bound* is the authenticator's word.
+  Each credential's class is recorded at registration and checked at every use, so a stricter
+  policy applies at the next sign-in ([AUTH.md §5l](AUTH.md#5l-passkeys-feature-passkeys)).
+- **An account always keeps a way in.** Accounts come from an administrator, with a password (no
+  self-registration). With a passkey the user may drop the password, but not the last passkey of an
+  account without one. TOTP is a second factor after any primary method; SSO accounts get no local
+  password or passkey. A manager can always reset a password, disable TOTP and remove passkeys,
+  each independently. Recovery is the administrator's ([TODO.md](TODO.md#auth) holds self-service).
 - **The accounts panel holds account data; the credentials page holds credentials** (principle 9).
-  - **The panel** (the CRUD admin over `auth_*`, each table configured by the library's
-    `meta_model()`) edits who an account is: username, active, SSO provider, groups. It sets the
-    **first** password when it creates an account (`MetaField::create_only`) and shows the
-    password's state (set when, change required) read-only. It lists API keys (disable, re-date,
-    delete) and passkeys (read-only), and deleting a lockout row is the unlock.
-  - **The credentials page** (`/profile/{id}`, the manager's) resets a password, disables TOTP and
-    removes passkeys, each under re-authentication, and signs the account out where that applies. The
-    panel's id column links to it; nothing else on the panel changes a credential.
-  - **Why:** a password set in the panel used to skip the sign-out of the manager's reset; a passkey
-    deleted in the panel skipped the re-authentication. One place per task keeps the rules in one
-    place too.
-  - **There is no self-service recovery** for a lost password or passkey; that is the
-    administrator's job. A later password-recovery flow would also reset passkeys, but not TOTP.
-  - **A passkey is a local factor for re-authentication,** so an account without a password must
-    present it there.
-- **WebAuthn needs a script, and it posts a form.**
-  - **The common case.** The page embeds the challenge options. The script runs the browser
-    ceremony, puts the result in a hidden field and submits; the server answers with the usual 303.
-    The script is served by `auth::routes()` as a file, so a strict CSP can allow it.
-  - **Challenge state** is a server-side row, single-use and short-lived. It is created when the
-    user asks for a challenge, not on every `GET /login`, so anonymous traffic can't write rows.
-  - **The one exception is "Sign in with a passkey".** A second page between the click and the
-    prompt felt like a step too many, and rendering the challenge into `/login` would write a row
-    per anonymous view. So on the click the script posts the same form asking for JSON, gets the
-    challenge, and opens the prompt on that click. It is one JSON answer on an existing route, not
-    an API: the answer is still a posted form. The page with its own button remains for a browser
-    without JavaScript, or one that won't open a prompt after a round trip.
-- **What the passkey code relies on in `webauthn-rs` 0.6** (checked in a spike):
-  - **Features.** `conditional-ui` for username-less login, `danger-allow-state-serialisation` to
-    keep the ceremony state in our row, and `danger-credential-internals` to read the backup flags
-    at registration.
-  - **Lookup.** A sign-in looks the credential up by its ID and finishes with
-    `finish_discoverable_authentication_v2`. `userHandle` is optional, so it is checked against
-    `passkey_handle` only when present.
-  - **Attestation.** It is checked against an app-supplied CA list (PEM plus AAGUID).
-  - **The backup flag.** The library refuses an assertion whose backup-eligible flag went from true
-    to false. False to true is legal in a user's own ceremony (re-auth, the second factor), where we
-    reclassify the credential as synced. The username-less sign-in refuses it, before checking the
-    signature, so it fails like an unknown passkey: the user signs in another way and re-adds it.
-  - **Discoverable credentials.** The library's registration discourages a discoverable credential.
-    A passkey here signs in without a username, so the options the browser receives require one; the
-    server's verification doesn't depend on that hint. A security key with no free slot can't be
-    added.
-  - **Tests.** `webauthn-authenticator-rs`'s software authenticators answer only for a named
-    credential, can't store a discoverable one, and always report device-bound. So the tests name the
-    credential, relax the discoverable hint, make a synced registration by rewriting the response,
-    and check a sign-in's class by editing the row. The browser script is checked in Chromium's
-    virtual authenticator, which also covers what the software ones can't.
-- **A ceremony starts on a click.** Browsers want a user gesture before a passkey prompt (Safari
-  insists), so every ceremony page has a button, never an automatic start.
-- **The sign-in policy is one minimum assurance level**, `Auth::min_level`. Each way of signing in
-  has a level:
-
-  | Signed in with | Level |
-  |---|---|
-  | a password | `Simple` (1) |
-  | a password + TOTP (or a recovery code), a password + passkey | `Mfa` (2) |
-  | a passkey | `Mfa` (2) |
-  | an attested passkey, alone or with anything | `Attested` (3) |
-  | SSO | `Mfa` by default (the IdP is trusted to have asked for its own second factor); `Auth::sso_level(Level::Simple)` to distrust it |
-  | SSO + TOTP | at least `Mfa` |
-
-  - **TOTP lifts a method to `Mfa`, never higher.** `Attested` means an attested passkey and
-    nothing else, so "attested hardware only" stays expressible. (The first draft had TOTP add one
-    level, which made passkey + TOTP equal to attested hardware.)
-  - **The default minimum is `Simple`**, which changes nothing for an existing app. "Password +
-    TOTP or SSO" is `Mfa`. "SSO must add our TOTP" is `sso_level(Simple)` with `Mfa`, which is
-    why an SSO account may enrol TOTP. `Attested` needs passkeys requiring `Class::Attested`,
-    checked at startup.
-  - **The level comes from the session's recorded method and passkey class**, read on every
-    request, so a stricter policy applies to sessions already open. `Identity::level` carries it,
-    for an app that wants more for one page (a signature) than for the rest.
-  - **A session below the minimum is restricted.** `identify` returns `None`, so the app and every
-    gate treat it as anonymous. Its own `/profile` still works so the user can add the factor; the
-    login lands there, with a notice saying what to add. A restricted session can't mint API keys,
-    manage others, or show `profile_extra`. Enrolling a factor **steps the session up** (a new id,
-    the stronger method), so the user goes on without signing in again.
-  - **API keys are outside the policy.** A key is a machine credential, minted only from a session
-    that meets the minimum.
-- **"Password change required" is a flag and a timestamp,** not `updated_at`, which any edit to the
-  account moves. `auth_user.must_change_password` and `password_changed_at`.
-  - **The row hook decides the default.** Any write that sets a password stamps
-    `password_changed_at`, and flags the account unless the writer said otherwise. So an
-    administrator's panel edit, a manager's reset, or an app's own form flag it, because someone
-    other than the owner knows the password. The self-service change and the programmatic helpers
-    (`create_user`, `set_password`, `make_admin`, `reset_admin_access`) clear it.
-  - **`Auth::password_max_age_days(n)` is optional, `0` (off) by default.** NIST SP 800-63B advises
-    against periodic rotation. A row from before the column existed counts from `created_at`.
-  - **A change due is a notice, not a lock.** The login lands on `/profile`, which says why, and the
-    user can go on into the app. `Identity::password_change` carries the reason, so the app's shell
-    can show it (the "bell" belongs to the notifications design, [TODO.md](TODO.md#auth)). Accounts
-    without a password (SSO, passkey-only) are never due.
-- **The profile is a grid of cards, not tabs.** Each concern (password, passkeys, 2FA, sessions,
-  API keys, the app's own) is a card, two columns on a wide screen. An app extends it by adding a
-  card (`auth::profile_card`).
-  - **Columns, not rows.** The cards flow down the first column, then the second (CSS columns), so a
-    card that grows (a passkey added) pushes only the cards under it. A row grid left a gap beside
-    every tall card.
-  - **Why not tabs:** they would need a `?tab=` on every form's answer, or a script, and a message
-    could land on a tab nobody is looking at. A grid needs neither.
-  - **One message, at the top,** answers whatever was just done, so no card carries its own.
-  - **If the cards ever outgrow a page,** grouping them into server-rendered tabs is the next step.
+  The panel (the CRUD admin over `auth_*`, configured by the library's `meta_model()`s) edits who an
+  account is and sets only its first password; `/profile/{id}` changes credentials, under
+  re-authentication, signing the account out where that applies
+  ([AUTH.md → The accounts panel](AUTH.md#the-accounts-panel)). **Why:** a password set in the
+  panel used to skip the reset's sign-out, and a passkey deleted there skipped re-authentication.
+- **WebAuthn posts a form, with one JSON answer.** The page embeds the challenge, the script runs the
+  browser's prompt and submits; the challenge is a single-use row, created on demand so anonymous
+  page views write nothing. **The exception** is "Sign in with a passkey": a page between the click
+  and the prompt was a step too many, and a challenge in every `/login` view would write a row per
+  anonymous visit. So the click posts the same form asking for JSON and opens the prompt on that
+  click. One answer on an existing route, not an API. Every ceremony starts on a click, since
+  browsers want a gesture (Safari insists). What the code relies on in `webauthn-rs` is in
+  [AUTH-SECURITY.md → Passkeys](AUTH-SECURITY.md#passkeys).
+- **The sign-in policy is one minimum assurance level** (`Simple < Mfa < Attested`), not a set of
+  flags: each way of signing in has a level, and the session's recorded method decides it on every
+  request, so a stricter policy applies to sessions already open
+  ([AUTH.md §5m](AUTH.md#5m-the-sign-in-policy-and-password-change-required) has the table).
+  - **TOTP lifts a method to `Mfa`, never higher**, so "attested hardware only" stays expressible.
+    (The first draft had TOTP add a level, which made passkey + TOTP equal to attested hardware.)
+  - **Below the minimum a session is restricted, not refused:** it is anonymous to the app, and its
+    own `/profile` lets the user add the factor, which steps the session up.
+- **"Password change required" is a flag and a timestamp,** not `updated_at`, which any edit moves.
+  The row hook sets the flag whenever someone other than the owner writes a password, so no path
+  has to remember. A change due is a notice, not a lock; a maximum age is off by default (NIST SP
+  800-63B advises against rotation).
+- **The profile is cards in columns, not tabs.** Tabs would need a `?tab=` on every form's answer or
+  a script, and a message could land on a tab nobody is looking at. Columns, not rows: a card that
+  grows pushes only the cards under it. **One message at the top** answers whatever was just done,
+  an app's card included (`Auth::profile_reply`).
 - **Re-authentication is per request, not a window.** The proof travels with the sensitive form
   itself: a password, a TOTP code, or a passkey assertion over a challenge rendered into that form.
   Nothing records "re-authenticated at", so there is no grace period for a stolen session to ride

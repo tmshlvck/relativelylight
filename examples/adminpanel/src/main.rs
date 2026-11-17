@@ -113,12 +113,14 @@ fn timezones() -> TzPicker {
 struct App {
     engine: Arc<Engine>,
     auth: Auth,
+    /// The accounts tables' gate: it decides who may read them, so it also decides who sees them.
+    accounts: Arc<GroupReadWrite>,
 }
 
 // The admin fragment's structure (nav groups, per-model table config). Built fresh per request so it
-// can be rendered *for the caller*. `is_manager` marks callers in the admin group: only they get the
-// `GroupReadWrite`-gated Accounts section (the auth users/groups), where each user-id links to its
-// credentials page. Non-managers would get 403 reading those models, so we omit the section for them.
+// can be rendered *for the caller*. `is_manager` says the accounts tables' gate admits the caller:
+// only then is the Accounts section listed (anyone else would get 403 reading it). Each user-id links
+// to its credentials page.
 fn build_admin<'a>(engine: &'a Engine, auth: &Auth, is_manager: bool) -> Admin<'a> {
     let mut admin = Admin::new(engine)
         .title("relativelylight")
@@ -364,7 +366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // write — and a forged write is refused by the same gate regardless.
     let engine = Arc::new(crud.into_engine());
 
-    let app = Arc::new(App { engine: engine.clone(), auth: auth.clone() });
+    let app = Arc::new(App { engine: engine.clone(), auth: auth.clone(), accounts: admin_gate });
 
     let ui = Router::new()
         // One pair of handlers for every model: the path says which one. Both are login-gated
@@ -501,11 +503,10 @@ async fn set_tz(Form(fields): Form<HashMap<String, String>>) -> Response {
     ([(header::SET_COOKIE, cookie)], Redirect::to(&back)).into_response()
 }
 
-/// The panel for this caller. Managers (members of the admin group) get the accounts section and the
-/// user-id → password-reset links; for anyone else those models would refuse a read, so the section
-/// isn't listed at all.
+/// The panel for this caller: the accounts section when the accounts gate admits them — the gate that
+/// guards those tables, asked without a second session lookup.
 fn panel<'a>(app: &'a App, who: &Identity) -> Admin<'a> {
-    build_admin(&app.engine, &app.auth, app.auth.can_manage_others(who))
+    build_admin(&app.engine, &app.auth, app.accounts.admits(who))
 }
 
 fn page(body: String, who: &Identity, headers: &HeaderMap, uri: &Uri) -> Response {

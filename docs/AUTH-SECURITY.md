@@ -302,6 +302,26 @@ site's domain, so there is nothing a fake site can capture.
 until it is verified. A failed passkey second factor is the same step as a TOTP code, so it counts
 against the account and the address.
 
+**What the code relies on in `webauthn-rs` 0.6** (checked in a spike):
+- **Features:** `conditional-ui` for the username-less sign-in, `danger-allow-state-serialisation` to
+  keep the ceremony state in our row, `danger-credential-internals` to read the backup flags at
+  registration.
+- **Lookup:** a sign-in finds the credential by its ID and finishes with
+  `finish_discoverable_authentication_v2`. `userHandle` is optional, so it is checked against
+  `passkey_handle` only when present.
+- **The backup flag:** an assertion whose backup-eligible flag went from true to false is refused.
+  False to true is legal in a user's own ceremony (re-auth, the second factor), and the passkey is
+  reclassified synced; the username-less sign-in refuses it before checking the signature, so it
+  fails like an unknown passkey.
+- **Discoverable credentials:** the library's registration discourages one; the options sent to the
+  browser require it, since a passkey here signs in without a username. The server's verification
+  doesn't depend on that hint.
+- **Tests:** the software authenticators of `webauthn-authenticator-rs` answer only for a named
+  credential, can't store a discoverable one and always report device-bound. So the tests name the
+  credential, relax the discoverable hint, make a synced registration by rewriting the response and
+  check a sign-in's class by editing the row. The script is checked in Chromium's virtual
+  authenticator.
+
 ## The sign-in policy and password change
 
 Explains [AUTH.md §5m](AUTH.md#5m-the-sign-in-policy-and-password-change-required).

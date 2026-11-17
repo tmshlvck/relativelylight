@@ -76,7 +76,7 @@ address is the network's first.
 
 | Validator | Signature | Semantics |
 |---|---|---|
-| `password` | `fn(PasswordPolicy) -> impl Fn(&str) -> Result<(),String>` | a [`PasswordPolicy`] as a string predicate, for the crud write path. **Wrap in `optional`** where blank has a meaning (it does on `MetaField::password()`: blank on create = no password, blank on edit = keep current). |
+| `password` | `fn(PasswordPolicy) -> impl Fn(&str) -> Result<(),String>` | a [`PasswordPolicy`] as a string predicate, for a `crud` password field of your own. **Wrap in `optional`** where blank has a meaning (on `MetaField::password()` it does: no password, or on edit keep the current one). `auth`'s accounts panel needs none of this: `auth::user::meta_model(&auth)` applies `Auth`'s policy. |
 | `PasswordPolicy::check` | `fn(&self, &str, &[&str]) -> Result<(),String>` | the policy itself; the second argument is context words to reject as substrings (`auth` passes the account's username, which a single-field validator can't know). |
 
 `PasswordPolicy` is **length-first with composition rules off**, per NIST SP 800-63B: screen for length
@@ -100,8 +100,8 @@ digit/symbol tail, and undoubling), so `Password1!` and `passwordpassword` are c
 don't reject every passphrase containing them. Real breach screening means a corpus or HIBP's k-anonymity
 API — app-level, so not built in; add words via `blocklist` or replace the check.
 
-`auth` applies this to `/profile` and a manager's reset by default and can be opted out of two ways — see
-[AUTH.md §5g](AUTH.md#5g-password-strength), which also explains why both this surface *and* the admin form need wiring.
+`auth` applies this wherever a password is typed — `/profile`, a manager's reset, the accounts panel's
+first password — and can be opted out of two ways: see [AUTH.md §5g](AUTH.md#5g-password-strength).
 
 ### Host and DNS names
 

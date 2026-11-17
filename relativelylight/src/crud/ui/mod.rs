@@ -81,10 +81,11 @@ use std::sync::Arc;
 /// Inline it once in your shell: `<style>{{ relativelylight::crud::ui::CSS }}</style>`.
 pub const CSS: &str = include_str!("../../../assets/rl.css");
 
-/// The relation picker's script — the one script the components ship. Include it once per page
-/// that renders a form, as `<script>{{ relativelylight::crud::ui::JS }}</script>` or served from a
-/// file of your own (a strict CSP). It is needed only once `Crud::picker_path` is set; without it a
-/// large relation still shows its selection and saves it unchanged, it just can't be edited.
+/// The components' script: it makes the dialogs real modals (Esc closes them) and drives the relation
+/// picker. Include it once per page with a table or a form, as
+/// `<script>{{ relativelylight::crud::ui::JS }}</script>` or served from a file of your own (a strict
+/// CSP). Everything works without it, only plainer: a dialog is a page section, and a large
+/// relation shows its selection and saves it unchanged but can't be edited.
 pub const JS: &str = include_str!("../../../assets/rl.js");
 
 /// A custom renderer, `(value, row) -> HTML`, as [`Table::format_cell`] and [`Table::format_view`]

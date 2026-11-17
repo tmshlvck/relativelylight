@@ -175,17 +175,18 @@ impl MigrationTrait for InitAuth {
 the cookie; a failure re-renders the form with a generic error. **Logout** deletes the row and clears
 the cookie.
 
-**The profile pages.** `Auth::routes()` serves a self-service page at `GET/POST /profile` (change
-your own password, given the current one; 2FA; recovery codes; sign out other sessions) and a
-manager's reset at `GET/POST /profile/{id}` (set another user's password without theirs). Managing
-someone else needs membership in a **profile-manager group** (default the admin group, `"admin"`;
-override with `Auth::profile_managers([..])`); `/profile/{self}` redirects to `/profile`, and
-`Auth::can_manage_others(&who)` tells you whether to show a reset link. The library renders the
-fragment and your `Auth::profile_shell` wraps it, handed the `Identity` and the request's
-`http::request::Parts` for your chrome. Both paths
-write only the password hash and revoke sessions (§5f).
+**The profile pages.** `Auth::routes()` serves the caller's own page at `GET/POST /profile` (their
+password, passkeys, 2FA, recovery codes, sessions, API keys) and a manager's **credentials page** at
+`GET /profile/{id}`: reset another user's password without theirs (which signs them out
+everywhere, §5f), disable their 2FA, remove their passkeys, each confirmed with the manager's own
+factor (§5h). Managing someone else needs membership in a **profile-manager group**, which is the
+admin group (`Auth::admin_group`, default `"admin"`) unless `Auth::profile_managers([..])` names
+others; `Auth::can_manage_others(&who)` answers it. `/profile/{self}` redirects to `/profile`. The
+library renders the fragment and your `Auth::profile_shell` wraps it, handed the `Identity` and the
+request's `http::request::Parts` for your chrome.
 
-**The profile page is a grid of cards**, one column on a phone and two on a wide screen:
+**The profile page is cards in columns**, one on a phone and two on a wide screen
+([why](DESIGN.md#auth)):
 - the password (or, for an SSO account, the provider);
 - passkeys (§5l) and two-factor;
 - recovery codes, when 2FA is on;
@@ -539,11 +540,9 @@ turned away *because* it was locked ([why](AUTH-SECURITY.md#lockout)).
 `record_failure` returns whether *this* failure tripped the lock, so you log once instead of on every
 subsequent attempt. `examples/auth` has a working one (`GET /api/whoami`).
 
-**The unlock is a row delete.** The two entities (`lockout::username_entity`, `lockout::ip_entity`) are
-ordinary SeaORM models: register `lockout::username_meta_model()` and `lockout::ip_meta_model()` in
-your admin panel and an operator can see who is being guessed at and clear a row — gated by your
-`Authz`, CSRF-checked, and audited by your `WriteObserver` like any other write. Show them with
-`Table::create(false).edit(false)`: deleting is the one thing to do there.
+**The unlock is a row delete.** Both counters are ordinary tables: in the accounts panel
+([§5j](#the-accounts-panel)) an operator sees who is being guessed at and deletes a row — gated,
+CSRF-checked and audited like any other write.
 
 **Housekeeping is the app's.** Nothing in this crate schedules anything — no background task, no timer.
 `Auth::prune()` deletes dead sessions *and* expired lockout rows from both tables; call
@@ -719,8 +718,7 @@ submission — no code and no recovery code — is refused *without* counting
 ([why](AUTH-SECURITY.md#recovery-codes)).
 
 **Schema.** `auth_totp_recovery` is in `table_create_statements`, so an app with its own migrations needs
-a step for it. **Never register the entity in an admin panel**: every row is a hash of a credential
-([why](AUTH-SECURITY.md#recovery-codes)).
+a step for it. It is the one `auth` table an admin panel never shows (§5j).
 
 ## 5j. Where accounts come from — there is **no registration page**
 
@@ -739,10 +737,9 @@ So an account comes into being in exactly four ways, all of them the app's own c
 The last two are deliberately exempt from the password policy (§5g), which governs *typed* input only
 ([why](AUTH-SECURITY.md#password-policy)).
 
-**Want public signup anyway?** Write the page: a `crud::ui::Form` over `auth_user` (or a hand-written
-form) posting to a route of yours that validates whatever you require and calls `create_user` +
-`add_to_group`, behind whatever you require first: an invite token, a rate limit, an email round
-trip.
+**Want public signup anyway?** Write the page: a form posting to a route of yours that checks
+whatever you require first (an invite token, a rate limit, an email round trip) and calls
+`create_user` + `add_to_group`, which validate the username as every creation path does.
 
 ### The accounts panel
 
@@ -760,12 +757,22 @@ crud.register(auth::lockout::username_meta_model(), gate.clone()); // §5e, dele
 crud.register(auth::lockout::ip_meta_model(), gate);
 ```
 
-and in the panel, the account's id links to its credentials page:
+and in the panel, the account's id links to its credentials page, and each table offers only what
+is done there:
 
 ```rust
 let link = auth::user::credentials_link(auth.profile_path());
-admin.entity_with("auth_user", |t| t.format_cell("id", link.clone()).format_view("id", link))
+admin
+    .entity_with("auth_user", |t| t.format_cell("id", link.clone()).format_view("id", link))
+    .entity("auth_group")
+    .entity_with("auth_api_key", |t| t.create(false))      // minted on /profile, shown once
+    .entity_with("auth_passkey", |t| t.read_only(true))    // removed on /profile/{id}
+    .entity_with("auth_username_lockout", |t| t.create(false).edit(false))  // delete = unlock
+    .entity_with("auth_ip_lockout", |t| t.create(false).edit(false))
 ```
+
+Register only the tables your features use (`api_key` and `passkey` need theirs). This is the whole
+setup; the sections below point here.
 
 **The panel holds account data; the credentials page holds credentials.** One place for each, so
 the rules that go with a task can't be skipped by doing it in the other place:
@@ -895,19 +902,10 @@ goes with it), `name`, `hashed_key` (unique), `prefix`, `created_at`, `expires_a
 migrations adds a step when it starts using keys (`api_key::table_create_statement`). Expired keys are
 not pruned. They stay listed as expired until their owner or an administrator deletes them.
 
-**In the accounts panel**, register `api_key::meta_model()` (feature `crud`). It applies the rules
-that keep the panel from becoming a way around the above:
-
-- `hashed_key` is hidden;
-- the owner, the prefix, `created_at` and `last_used_at` are read-only ([why](AUTH-SECURITY.md#api-keys));
-- labels and datetimes are set.
-
-An administrator can disable, re-enable, re-label, re-date or delete any key. Turn creation off in
-the panel (`Table::create(false)`): a key minted there would have no raw value anyone could see.
-
-```rust
-crud.register(auth::api_key::meta_model(), Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP])));
-```
+**In the accounts panel** ([§5j](#the-accounts-panel)), `api_key::meta_model()` hides the hash and
+keeps the owner, the prefix and the timestamps read-only ([why](AUTH-SECURITY.md#api-keys)). An
+administrator can disable, re-label, re-date or delete any key, but not mint one: a key minted there
+would have no raw value anyone could see.
 
 ## 5l. Passkeys (feature `passkeys`)
 
@@ -1003,14 +1001,9 @@ second factor), and the passkey is reclassified `synced`. It refuses it in the u
 before checking the signature, so that sign-in fails like an unknown passkey. The user signs in
 another way, removes the passkey and adds it again.
 
-**In the accounts panel**, register `auth::passkey::meta_model()` and show it read-only
-(`Table::read_only(true)`): an inventory of who holds which kind of passkey and when it was last
-used, the credential hidden. Removing someone's passkey is the manager's, on `/profile/{id}`, under
-re-authentication; only an authenticator makes one.
-
-```rust
-crud.register(auth::passkey::meta_model(), Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP])));
-```
+**In the accounts panel** ([§5j](#the-accounts-panel)) passkeys are an inventory, read-only: who
+holds which kind and when it was last used, the credential hidden. Removing someone's passkey is
+the manager's, on `/profile/{id}`; only an authenticator makes one.
 
 **Audit** (§5d). Adding and removing a passkey fire `Create` / `Delete` on `auth_passkey` with its
 label, class and AAGUID, never the credential. Removing a password and a manager's removal fire
@@ -1161,54 +1154,8 @@ answering **401** (`NeedsLogin`) or **403** (`Denied`) before the database is to
 also hides the controls the gate would refuse, and a hidden control's write is refused too. A handler
 of yours that calls `Engine` directly must call `Engine::decide` first.
 
-### App-side API (the whole picture)
-
-What the app writes to wire it all up — the library gives login routes, the gate trait, gate
-builders, and on-demand `identify`; the app composes them (it still owns the router):
-
-```rust
-use relativelylight::auth::{lockout::Lockout, Auth, GroupReadWrite, UserReadGroupWrite};
-use relativelylight::authz::Open;
-use relativelylight::crud::seaorm::Crud;
-use std::sync::Arc;
-use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Redirect, Response};
-
-// 1. authn: SeaORM-backed sessions + login/logout/password. Cheap to clone (Arc inside).
-//    The brute-force brake is a `new` argument, not a builder call — it isn't optional (§5e).
-let auth = Auth::new(db.clone(), Lockout::default())
-    .admin_group("admin")        // group that may reset others' passwords (configurable)
-    .secure_cookies(true)        // false for local http
-    .session_idle_secs(8 * 3600); // idle timeout inside the 7-day absolute one (§5f); 0 disables
-
-// 2. crud: each model registered with its gate. Share one gate via Arc, or vary per model.
-let content = Arc::new(UserReadGroupWrite::new(&auth, ["editors", "admin"]));
-let mut crud = Crud::new(db);
-crud.register(post_mm, content.clone());                          // logged-in read, group write
-crud.register(user_mm, GroupReadWrite::new(&auth, ["admin"]));    // admins only (read + write)
-crud.register(healthcheck_mm, Open);                              // ungated
-
-// 3. compose — the app owns the root router. No middleware, no wrapping.
-let engine = Arc::new(crud.into_engine());
-let app = axum::Router::new()
-    .merge(auth.routes())              // /login, /login/totp, /logout, /profile…
-    .route("/", get(admin_page))       // the app's own (gated) pages/handlers
-    ;                                  // your own gated admin routes (see CRUD.md § Quick start)
-
-// The app's own page resolves the caller on demand — this is the whole of page-level auth:
-async fn admin_page(headers: HeaderMap, State(app): State<AppState>) -> Response {
-    let Some(who) = app.auth.identify(&headers).await else {
-        return Redirect::to(app.auth.login_path()).into_response();
-    };
-    // Render the admin *for this caller* — write controls hide where the gate denies a write:
-    let body = build_admin(&app.engine).render_for(&headers).await.unwrap_or_default();
-    // …wrap `body` (and use who.username / who.in_group("admin") …) in your shell
-    todo!()
-}
-```
-
-The one thing the app must **schedule** is housekeeping: `auth.prune()` on its own loop (§5e) — the
-crate spawns no tasks.
+**The whole app** — `Auth`, the gates, the panel, the router and the shell put together — is
+[APP.md](APP.md).
 
 ## 7. CSRF (double-submit token, feature `csrf`)
 
@@ -1232,7 +1179,7 @@ An unsafe request presents it in either:
 |---|---|---|
 | `Auth::routes()` — `/login`, `/login/totp`, `/profile*` | **always on** | `403` + a bare "Security check failed" page |
 | the `crud` admin UI's writes | **opt-in**: `crud.csrf(auth.csrf())` | `403`, before the gate or the database |
-| your own unsafe routes | **`csrf::enforce`** as a layer, or call `Csrf::verify` yourself | the shared page (see below) |
+| your own unsafe routes | **`csrf::enforce`** as a layer (a multipart route checks it itself, below) | the shared page (see below) |
 
 On the auth routes the check runs **first** — before the password comparison, before any DB work.
 Same in the engine: the CSRF check precedes the gate ([why](AUTH-SECURITY.md#csrf)). Safe methods
@@ -1242,8 +1189,7 @@ Same in the engine: the CSRF check precedes the gate ([why](AUTH-SECURITY.md#csr
 **`Authorization`-bearing requests are exempt** ([why](AUTH-SECURITY.md#csrf)). Your own token-authenticated API routes need
 no CSRF token.
 
-**A layer for your own routes.** Rather than calling `Csrf::verify` in every handler, put
-`csrf::enforce` in front of the ones that need it:
+**Your own routes: the layer.** Put `csrf::enforce` in front of the routes that need it:
 
 ```rust
 use axum::middleware::from_fn_with_state;
@@ -1263,7 +1209,8 @@ exempt anyway, being `Authorization`-bearing).
 It checks, in order: safe methods pass; `Authorization`-bearing requests pass; the `X-CSRF-Token` header;
 and failing that, for `application/x-www-form-urlencoded` bodies **under 64 KiB**, the `_csrf` field — the
 body is buffered, checked, and handed to the handler intact, so a plain MPA `<form>` post needs nothing
-from the handler. A **multipart** body is deliberately *not* parsed ([why](AUTH-SECURITY.md#csrf)): send the header there, or check it in the handler. `examples/auth` guards its
+from the handler. A **multipart** body is deliberately *not* parsed ([why](AUTH-SECURITY.md#csrf)):
+send the header there, or check the field in the handler with `Csrf::verify` — the one case for it. `examples/auth` guards its
 `POST /webhook-secret/rotate` this way.
 
 **Your own rejection page.** The built-in `403` is shell-less and static on purpose: nothing about the
@@ -1286,14 +1233,12 @@ crud.csrf(auth.csrf());          // every rendered form now carries `_csrf`, and
 
 `Table`/`Form`/`Admin` then render a hidden `_csrf` input in every form they emit, and `submit` checks
 it on every write (create, update, both deletes, CSV import) — nothing to pass in. The **cookie must
-already exist** when the page renders: `auth`'s login issues it. An app-owned page that posts to its own
-route does the two halves itself:
+already exist** when the page renders: `auth`'s login issues it. An app-owned page with a form of its
+own issues the token and renders it; the route it posts to sits behind the layer:
 
 ```rust
-let (token, set) = auth.csrf().ensure(&headers);          // → hidden input / JS-readable cookie
+let (token, set) = auth.csrf().ensure(&headers);          // Csrf::hidden_input(&token) in the form
 let jar = if let Some(c) = set { jar.add(c) } else { jar };
-// …and in the POST handler:
-if !auth.csrf().verify(&headers, form.csrf.as_deref()) { return StatusCode::FORBIDDEN.into_response(); }
 ```
 
 `crud::ui` reads the token from the cookie at request time rather than baking it into the fragment
@@ -1306,7 +1251,7 @@ port-scoped), exactly as with the session cookie.
 
 - **[`examples/auth`](../examples/auth/src/main.rs)** — the skeleton of an intranet app.
   - **The shell:** one shell around every page, the library's included: a navbar with the links the
-    user may follow and their name leading to `/profile`.
+    user may follow, and their name opening Profile and Log out (the only links to either).
   - **The pages:** a dashboard of cards by role, a `/secret` page gated by `identify`, and the
     accounts panel at `/admin` (§5j: users, groups, everyone's API keys and passkeys, lockouts) for
     the admin group, with a 403 page for anyone else.
@@ -1314,17 +1259,18 @@ port-scoped), exactly as with the session cookie.
   - **Also:** lockout tuned down to 5 failures per account so it is easy to trip, API keys minted on `/profile` and accepted by `/api/whoami` beside
   HTTP Basic (§5k), passkeys (§5l; browse to `http://localhost:3000`), and
   `POST /webhook-secret/rotate` — an app's own sensitive action behind `csrf::enforce` and
-  `Auth::reauthenticate_with` (§5h, §7), reached from a `profile_extra` section and confirmable with
-  a passkey. SSO is wired in when
+  `Auth::reauthenticate_with` (§5h, §7), reached from a `profile_extra` card, confirmable with
+  a passkey, and answered with `Auth::profile_reply`. SSO is wired in when
   `SSO_GOOGLE_CLIENT_ID` / `SSO_GOOGLE_CLIENT_SECRET` are set. `--set-admin-pw` is the break-glass path.
 - **[`examples/adminpanel`](../examples/adminpanel/src/main.rs)** — a login-gated `crud::ui::Admin`
   with CSRF on, content models behind `UserReadGroupWrite` (everyone reads, `admin` writes), the
-  account tables behind `GroupReadWrite` and shown only to managers, and the password policy wired into
-  both `Auth` and the account form. Logins: `admin` and `editor` (read-only).
+  account tables (the library's `meta_model()`s) behind `GroupReadWrite` and shown only to managers,
+  and the password policy from one `PASSWORD_LEVEL` setting. Logins: `admin` and `editor` (read-only).
 - **[`examples/audit`](../examples/audit/src/main.rs)** — one observer on both `Auth` and `Crud` (API
   key mint and revoke included) and on the app's own API write (`WriteEvent::new`), and a request log
   built on `RealIp` that names an API-key caller from its handler (`/api/whoami`,
-  `PUT /api/posts/{id}/title`).
+  `PUT /api/posts/{id}/title`). Its accounts tables, for the admin, show an account edit in the
+  same audit trail.
 
 ## 9. Tests — the negative paths
 

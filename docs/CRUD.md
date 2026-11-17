@@ -12,10 +12,9 @@ An app that wants to publish a JSON API writes those handlers itself over the sa
 deliberately doesn't make.
 
 New here? **[APP.md](APP.md)** builds a whole app end to end (shell, nav bar, login, admin, your own
-pages); this document is the reference for the parts. Upgrading from 0.3? **[MIGRATION-0.4.md](MIGRATION-0.4.md)**.
+pages); this document is the reference for the parts. Upgrading? **[MIGRATION-0.5.md](MIGRATION-0.5.md)** (and from 0.3, [MIGRATION-0.4.md](MIGRATION-0.4.md)).
 
-- [Install & features](#install--features)
-- [Quick start](#quick-start)
+- [Install & quick start](#install--quick-start)
 - [Configuring a model](#configuring-a-model) — `MetaModel`, `MetaField`, `MetaRelation`
 - [Reading and writing](#reading-and-writing) — the engine API, the URL as state, errors, CSRF
 - [Validation & transforms](#validation--transforms)
@@ -28,90 +27,16 @@ pages); this document is the reference for the parts. Upgrading from 0.3? **[MIG
 
 ---
 
-## Install & features
+## Install & quick start
 
-```toml
-[dependencies]
-relativelylight = { version = "0.4", features = ["ui", "csv"] }
-sea-orm = { version = "2.0", features = ["macros", "with-json"] }
-```
+The dependency lines, the feature table and the whole quick start — models, `Crud`, and the two
+handlers (`render_for` on `get`, `submit` on `post`) — are in the
+[README](../README.md#quick-start). Runnable: `cargo run -p crud-example` (five related entities,
+ungated) and `cargo run -p adminpanel-example` (the same, login-gated).
 
-| Feature | Default | Pulls | Gives you |
-|---|---|---|---|
-| `crud` | ✅ | `sea-orm` | the CRUD engine + SeaORM backend (this module) |
-| `axum` | ✅ | `axum` | the request plumbing the UI needs, and the `middleware` module |
-| `ui` | | `askama` | the server-rendered components (`crud::ui::Table`, `::Form`, `::Admin`); implies `axum` + `tz` |
-| `csv` | | `csv` | CSV import/export for the UI + `crud::csv_io`; implies `tz` |
-| `tz` | | `jiff` | timezone-aware rendering of integer-UTC timestamps (`time`) |
-| `csrf` | | `getrandom` | `Crud::csrf` — require a token on writes (implied by `auth`) |
-
-Enable only what you use — an unused feature pulls no dependencies.
-
-Entities must serialize to JSON — derive `Serialize` (SeaORM's `with-json` feature enables it on
-generated models). **Requirements:** a single-column primary key and single-column to-one foreign
-keys (any URL-safe scalar type — int, UUID, string slug). N:M junction tables are never registered,
-so their composite keys are fine.
-
-## Quick start
-
-```rust
-use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::{Admin, Outcome, ViewState};
-use relativelylight::authz::Open;                  // per-model auth gate; Open = ungated
-
-let db = /* sea_orm::DatabaseConnection */;
-
-let author = MetaModel::new(author::Entity);       // fully auto: fields, PK, FK relations
-let tag    = MetaModel::new(tag::Entity);
-
-let mut post = MetaModel::new(post::Entity);
-post.relate(&tag);                                 // declare the N:M (FK relations are automatic)
-
-let mut crud = Crud::new(db);
-crud.register(author, Open);                       // pass an auth gate to restrict — see docs/AUTH.md
-crud.register(post, Open);
-crud.register(tag, Open);
-
-let engine = Arc::new(crud.into_engine());
-```
-
-Then **two handlers** on one route of your own — a `get` that renders, a `post` that writes:
-
-```rust
-fn panel(engine: &Engine) -> Admin<'_> {           // one definition, used by both
-    Admin::new(engine).title("Admin").entity("author").entity("post").entity("tag")
-}
-
-let app = Router::new().route("/admin", get(show).post(save)).with_state(engine);
-
-async fn show(headers: HeaderMap, uri: Uri, State(engine): State<Arc<Engine>>) -> Response {
-    let state = ViewState::from_uri(&uri);         // page, sort, filters, search, ?edit=…
-    match panel(&engine).render_for(&headers, &state).await {
-        Ok(fragment) => Html(my_shell(fragment)).into_response(),
-        Err(e) => e.into_response(),               // 401/403 from the model's gate, or a config error
-    }
-}
-
-async fn save(headers: HeaderMap, uri: Uri, RealIp(ip): RealIp,
-              State(engine): State<Arc<Engine>>, body: Bytes) -> Response {
-    let state = ViewState::from_uri(&uri);
-    match panel(&engine).submit(&headers, ip, &body, &state).await {
-        Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),          // 303 back to the list
-        Ok(Outcome::Invalid(state)) => {                                     // re-render with messages
-            let fragment = panel(&engine).render_for(&headers, &state).await.unwrap_or_default();
-            (StatusCode::UNPROCESSABLE_ENTITY, Html(my_shell(fragment))).into_response()
-        }
-        Err(e) => e.into_response(),
-    }
-}
-```
-
-That is the whole shape, and it is the same for `Table` and `Form`. `middleware::resolve_real_ip` is
-**mandatory** (the write path reads `RealIp` for the audit trail) — see
-[Composing with your app](#composing-with-your-app).
-
-Runnable: `cargo run -p crud-example` (five related entities, ungated) and
-`cargo run -p adminpanel-example` (the same thing login-gated, with 2FA and lockout panels).
+**Requirements.** Entities serialize to JSON (`Serialize`/`Deserialize`; SeaORM's `with-json`), with
+a single-column primary key and single-column to-one foreign keys (any URL-safe scalar: int, UUID,
+string slug). N:M junction tables are never registered, so their composite keys are fine.
 
 ## Configuring a model
 
@@ -244,9 +169,12 @@ whole write-only-secret setup in one call — write-only, labelled `"Password"`,
 write, blank by default:
 
 ```rust
-let mut user = MetaModel::new(auth::user::Entity);
-user.field("password_hash").password();   // plaintext in the form → hash in the column, never read back
+let mut device = MetaModel::new(device::Entity);   // an app's own table with a secret
+device.field("password_hash").password();  // plaintext in the form → hash in the column, never read back
 ```
+
+`auth`'s own accounts don't need this: `auth::user::meta_model(&auth)` configures them
+([AUTH.md §5j](AUTH.md#the-accounts-panel)).
 
 In the admin form it renders as a **masked input**; a blank value on *edit* keeps the current hash
 (so editing other fields doesn't wipe the password). A blank on *create* stores an **empty hash**,
@@ -879,8 +807,8 @@ Writes post back to that same path:
 | `csv(&headers, &state) -> Result<String>` | the view as CSV, when `state.csv` is set (feature `csv`) |
 
 Both are `async`, and both take the request's headers — which is how the timezone cookie, the session
-cookie and the CSRF token reach the render. The full worked shape is in [Quick start](#quick-start)
-and in all three examples.
+cookie and the CSRF token reach the render. The full worked shape is in the [README's quick start](../README.md#quick-start)
+and in the examples.
 
 ### `Table`
 
@@ -1500,18 +1428,12 @@ relativelylight is meant to be **part of** a larger app, not the whole thing. Yo
 this module contributes into them.
 
 - **The router is yours.** This module adds no routes at all. You write `get(show).post(save)` on a
-  path of your choosing and call `render_for` / `submit` from them ([Quick start](#quick-start)), so
+  path of your choosing and call `render_for` / `submit` from them ([quick start](../README.md#quick-start)), so
   the login redirect, the error page and the shell stay yours. Every link the components render is
   relative to that path, so they never need to know it.
-- **`middleware::resolve_real_ip` is mandatory**, as the outermost layer:
-  ```rust
-  let app = app.layer(axum::middleware::from_fn_with_state(
-      relativelylight::middleware::TrustProxy(cfg.trust_proxy),
-      relativelylight::middleware::resolve_real_ip,
-  ));
-  ```
-  `submit` takes the address from the `RealIp` extension it inserts, so the audit events, the auth
-  lockout and your own request log can't disagree about who called.
+- **`middleware::resolve_real_ip` is mandatory**, as the outermost layer
+  ([AUTH.md §4](AUTH.md#4-middleware-the-module-provides)): `submit` takes the address from the
+  `RealIp` extension it inserts, so the audit events, the lockout and your request log agree.
 - **The page shell is yours.** `render_for` returns an **HTML fragment**, never a full page. Your app
   owns the `<html>`, the navbar, the Bootstrap stylesheet and `crud::ui::CSS`. Your askama templates
   and the library's live in separate crates, so they can't collide.
