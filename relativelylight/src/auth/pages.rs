@@ -7,6 +7,26 @@ use super::{api_key, recovery, totp, Identity};
 use axum::http::request::Parts;
 use askama::Template;
 
+/// The passkey script — `assets/rl-passkey.js`, served at `/auth/passkey.js`.
+pub(super) const PASSKEY_JS: &str = include_str!("../../assets/rl-passkey.js");
+
+/// A short hash of [`PASSKEY_JS`]: its `ETag`, and the version in its URL.
+pub(super) fn passkey_js_version() -> &'static str {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(PASSKEY_JS.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect()
+    })
+}
+
+/// The script's URL as the pages link it: versioned by its content, so a page always loads the script
+/// it was written for. A browser holding an older copy (a long-lived cache, an ordinary reload, which
+/// may not revalidate scripts) sees a new URL and fetches it.
+pub(super) fn passkey_js_url() -> &'static str {
+    static URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    URL.get_or_init(|| format!("/auth/passkey.js?v={}", passkey_js_version()))
+}
+
 /// Askama renders into a `String` and these templates insert only `&str`s and integers, so this
 /// cannot fail in practice; an empty body is the safe answer if it ever did.
 fn render(t: impl Template) -> String {

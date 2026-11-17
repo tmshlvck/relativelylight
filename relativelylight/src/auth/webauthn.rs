@@ -1270,9 +1270,10 @@ pub(super) async fn password_remove(
 
 /// `GET /auth/passkey.js` — the one script passkeys need, as a file so a strict CSP can allow it.
 ///
-/// Revalidated on every use (`no-cache` with an `ETag` of its content): a page and its script change
-/// together on an upgrade, and a browser holding the old script against a new page would post a form
-/// the old script doesn't know how to fill. An unchanged script costs a `304`.
+/// The pages link it with its content hash in the URL (`?v=…`), so a page always loads the script it
+/// was written for: a browser holding an older copy against a newer page would post forms the old
+/// script doesn't know how to fill. It is also revalidated on every use (`no-cache` with an `ETag` of
+/// its content), for anything that links it without the version. An unchanged script costs a `304`.
 pub(super) async fn script(headers: HeaderMap) -> Response {
     let etag = script_etag();
     let fresh = headers
@@ -1296,22 +1297,13 @@ pub(super) async fn script(headers: HeaderMap) -> Response {
         .into_response()
 }
 
-/// The script's `ETag`: a hash of its content, computed once.
+/// The script's `ETag`: the hash its URL is versioned by.
 fn script_etag() -> &'static str {
     static ETAG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    ETAG.get_or_init(|| {
-        use sha2::{Digest, Sha256};
-        let hex: String = Sha256::digest(SCRIPT.as_bytes())
-            .iter()
-            .take(8)
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        format!("\"{hex}\"")
-    })
+    ETAG.get_or_init(|| format!("\"{}\"", pages::passkey_js_version()))
 }
 
-/// The passkey script — `assets/rl-passkey.js`.
-pub(super) const SCRIPT: &str = include_str!("../../assets/rl-passkey.js");
+use pages::PASSKEY_JS as SCRIPT;
 
 /// A passkey as the audit trail sees it: label, class, model. Never the credential.
 fn describe(row: &entity::Model) -> serde_json::Value {

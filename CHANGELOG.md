@@ -88,8 +88,9 @@ is easy to miss in a diff.
   - `passkey::meta_model()` adds the passkeys table to an accounts panel;
   - adding and removing a passkey are audited, without the credential.
 
-  The passkey script (`GET /auth/passkey.js`) is revalidated on every use (`no-cache` with an
-  `ETag`), so a browser never runs an older copy against a newer page.
+  The pages link the passkey script by a URL versioned with its content
+  (`/auth/passkey.js?v=…`), and it is revalidated on every use (`no-cache` with an `ETag`), so a
+  browser never runs an older copy against a newer page.
   "Sign in with a passkey" opens the browser's prompt on the click: the script fetches the challenge
   as JSON from the same route. A browser without JavaScript gets a page with its own button. On
   `/login` the alternatives sit under an "or" divider, and an app's SSO buttons join them.

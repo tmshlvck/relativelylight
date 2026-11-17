@@ -23,5 +23,5 @@
   {{ m::csrf(csrf) }}
   <button class="btn btn-outline-primary w-100" type="submit">Sign in with a passkey</button>
 </form>
-<script src="/auth/passkey.js" defer></script>
+<script src="{{ crate::auth::pages::passkey_js_url() }}" defer></script>
 {%- endif %}

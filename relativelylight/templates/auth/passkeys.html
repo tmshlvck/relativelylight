@@ -41,7 +41,7 @@ nothing to type and nothing a fake site can capture.
   <input type="hidden" name="register_challenge" value="{{ reg.challenge }}">
   <input type="hidden" name="register_response" value="">
   <script type="application/json" data-rl-passkey-register>{{ reg.options|safe }}</script>
-  <script src="/auth/passkey.js" defer></script>
+  <script src="{{ crate::auth::pages::passkey_js_url() }}" defer></script>
   <button class="btn btn-outline-primary btn-sm" type="submit">Add a passkey</button>
   <noscript><p class="text-danger small mt-2 mb-0">Adding a passkey needs JavaScript in this browser.</p></noscript>
 </form>

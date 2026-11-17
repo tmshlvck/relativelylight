@@ -61,7 +61,7 @@
   <input type="hidden" name="passkey_challenge" value="{{ p.challenge }}">
   <input type="hidden" name="passkey_response" value="">
   <script type="application/json" data-rl-passkey-options>{{ p.options|safe }}</script>
-  <script src="/auth/passkey.js" defer></script>
+  <script src="{{ crate::auth::pages::passkey_js_url() }}" defer></script>
 {%- endmacro -%}
 
 {#- A card on the profile and manager pages: one of the grid's columns. -#}

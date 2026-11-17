@@ -1384,6 +1384,15 @@ async fn a_passwordless_account_adds_a_second_passkey_confirming_with_the_first(
 #[tokio::test]
 async fn the_script_is_revalidated_so_a_new_page_never_runs_an_old_script() {
     let fx = Fx::new().await;
+    // The pages link it versioned by its content, so a new page never loads a cached old copy.
+    let page = fx.get("/login", None).await;
+    let url = format!("/auth/passkey.js?v={}", super::pages::passkey_js_version());
+    assert!(page.body.contains(&url), "{}", page.body);
+    assert_eq!(
+        fx.get(&url, None).await.status,
+        StatusCode::OK,
+        "the versioned URL serves it"
+    );
     let res = fx.get("/auth/passkey.js", None).await;
     assert_eq!(res.status, StatusCode::OK);
     assert_eq!(
