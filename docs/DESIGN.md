@@ -12,7 +12,7 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 |---|---|---|
 | `crud` | SeaORM entities → a typed engine: list/read/write/validate/gate | [CRUD.md](CRUD.md) |
 | `crud::ui` | the web UI: form, table, admin panel, relation picker, CSV | [CRUD.md → Web UI](CRUD.md#web-ui-ui) |
-| `auth` | users/groups, sessions, login, TOTP 2FA, OIDC SSO, API keys, gate presets | [AUTH.md](AUTH.md) |
+| `auth` | users/groups, sessions, login, TOTP 2FA, OIDC SSO, API keys, gate presets | [AUTH.md](AUTH.md); the reasoning in [AUTH-SECURITY.md](AUTH-SECURITY.md) |
 | `middleware` | `resolve_real_ip` — required; the caller's address, resolved once | [AUTH.md §4](AUTH.md#4-middleware-the-module-provides) |
 | `observe` | the write observer for audit logging, and the error observer for failures a response hides | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
 | `time` | integer-UTC timestamps rendered in the request's zone | [TIME.md](TIME.md) |

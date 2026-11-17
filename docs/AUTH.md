@@ -21,7 +21,8 @@ needs to know who is asking, and nothing is injected into the request.
 The pages are plain `<form>` posts with no JavaScript (the enrolment QR is an inline PNG). The library
 renders fragments; the app wraps them with `Auth::login_shell` / `Auth::profile_shell`. See
 [APP.md](APP.md) for the whole composition and [DESIGN.md](DESIGN.md#auth) for why it is built this
-way.
+way. This file is the usage guide; the reasoning behind each security rule — what it defends
+against, and why it is that way — is in [AUTH-SECURITY.md](AUTH-SECURITY.md).
 
 ## 1. How it fits
 
@@ -228,8 +229,8 @@ action is sensitive, as it is for a secret. `examples/auth` has both cards above
 
 ### Admin helpers — who may re-open an account
 
-Three helpers with deliberately different blast radii, so a routine password reset can never restore
-login capability by accident:
+Three helpers with deliberately different blast radii
+([why](AUTH-SECURITY.md#the-admin-helpers)):
 
 | helper | creates? | password | `is_active` | TOTP 2FA | group |
 |---|---|---|---|---|---|
@@ -238,7 +239,7 @@ login capability by accident:
 | `reset_admin_access(db, group, user, pw)` | ✅ (active) | set | **→ true** | **cleared** | ensured |
 
 - **`set_password`** is a *reset*, not an upsert: an unknown username is an error (creating accounts is
-  `create_user`'s job), so a typo can't silently become a new login. A **disabled** account gets the new
+  `create_user`'s job). A **disabled** account gets the new
   password and stays disabled; 2FA stays on; an SSO account still refuses password login. This is what
   `POST /profile` and `POST /profile/{id}` call.
 - **`make_admin`** is the **boot-time seeder** (what the examples call on every start): idempotent, and
@@ -246,9 +247,7 @@ login capability by accident:
 - **`reset_admin_access`** is **break-glass recovery**, for an operator-invoked `--set-admin-pw` flag:
   it re-activates the account and **discards its TOTP enrolment** so a locked-out admin can get back in
   and re-enrol from `/profile`. Destructive by design — don't call it on every start. It **refuses an
-  SSO account** (`Err` naming the provider): grafting a local password on would quietly take the
-  account out of the identity provider's hands (and out of its group reconciliation), so point
-  break-glass at a local username instead.
+  SSO account** (`Err` naming the provider); point break-glass at a local username instead.
 
 Re-enabling a disabled *non-admin* account stays an explicit `is_active` edit (e.g. in the admin UI).
 
@@ -272,20 +271,12 @@ the code is confirmed.
   session's user and, on success, **rotates the session id** (§5f) into a full login → `/`. A
   wrong code → 401, re-render.
 
-**Replay guard (RFC 6238 §5.2).** A code is valid for its own 30-second step *and* the two neighbours
-(±1 skew for clock drift), so the same six digits work for about 90 seconds. `totp_last_step` records
-the step each accepted code belonged to, and a later code must match a **strictly greater** step — so a
-code can be used exactly once. Enrolment spends a step too, or the code that confirmed setup would still
-work at `/login/totp` afterwards. Turning 2FA off clears the guard in the same write that clears the
-secret; leaving a stale ceiling would silently refuse the first codes of a re-enrolment.
-
-A replayed code is refused with the *same* message as a wrong one — "already used" would confirm to
-someone holding a captured code that they hold a real one — and it counts against the account's lockout
-budget like any other failure.
-
-It stops a spent code being reused by someone who also has the password (a shoulder-surf, a screen
-share). It does nothing against real-time phishing, where a proxy relays the code once; that needs a
-phishing-resistant factor such as WebAuthn ([TODO.md](TODO.md#auth)).
+**Replay guard (RFC 6238 §5.2).** A code is accepted for its own 30-second step and the two
+neighbours (±1 skew). `totp_last_step` records the step each accepted code belonged to, and a later
+code must match a **strictly greater** step, so a code can be used exactly once. Enrolment spends a
+step too, and turning 2FA off clears the guard with the secret. A replayed code is refused with the
+same message as a wrong one and counts against the account's lockout budget. It does not stop
+real-time phishing; a passkey does (§5l). ([why](AUTH-SECURITY.md#totp))
 
 **Enrolment (self-service, verify-before-activate).** `GET /profile/totp` mints a fresh secret, stores
 it as `totp_pending`, and shows **both** a QR code (a server-rendered inline PNG — no JS) **and** the
@@ -295,9 +286,8 @@ re-shows the same QR. `Auth::totp_issuer(name)` sets the issuer label authentica
 (default `"relativelylight"`).
 
 **Blank = off.** As with `sso_provider`, a blank `totp_secret` counts as *no* secret (`Model::totp_key`
-/ `has_totp`), and a blank `totp_pending` as *no* enrolment in progress. Treating `Some("")` as "2FA on"
-would demand a login code no authenticator can produce — an account locked out of its own login — and
-an empty text input in an admin form is exactly how that value appears.
+/ `has_totp`), and a blank `totp_pending` as *no* enrolment in progress
+([why](AUTH-SECURITY.md#totp)).
 
 **Recovery codes.** A lost authenticator is handled by single-use recovery codes, issued with the
 enrolment — see §5i.
@@ -325,8 +315,7 @@ provider's **auto-registration** on, an unknown user is created on first login; 
 must pre-create the user and set its `sso_provider` to the provider key first, else the login is
 refused. A local (password) account can't be signed into via SSO, and an account bound to one provider
 can't sign in through another. A **blank** `sso_provider` counts as *no* provider, exactly
-like `NULL`: an admin form that leaves the column empty writes `""`, and the account it creates must stay
-an ordinary local one. Ask `user::Model::sso_key()` / `is_sso()` rather than testing the column — the
+like `NULL` ([why](AUTH-SECURITY.md#totp)). Ask `user::Model::sso_key()` / `is_sso()` rather than testing the column — the
 normalization then holds everywhere (password login, the profile page, break-glass recovery, and the SSO
 callback's own account check). `auth::normalize_blank_user_columns(&db)` rewrites blank
 `sso_provider` / `totp_secret` / `totp_pending` values to `NULL` if you want the column tidy;
@@ -370,41 +359,27 @@ let sso = Sso::new(&auth)                                   // build auth fully 
 let app = app.merge(sso.routes());
 ```
 
-**Account resolution.** The username claim is matched **case-insensitively**, because providers are not
-consistent about case and an IdP that switched from `alice@corp` to `Alice@corp` would otherwise miss the
-existing account and — with auto-registration on — create a second one: two rows, two group sets, one
-human. A pre-created account keeps its own spelling; ties (rows differing only in case, which nothing
-here creates) go to the lowest id. Local password login still matches **exactly** — changing that would
-be a behaviour break for every existing account. The refusals are the same whatever the case: a local
-account is recognised as local, and an account bound to another provider as bound.
+**Account resolution.** The username claim is matched **case-insensitively**
+([why](AUTH-SECURITY.md#sso)). A pre-created account keeps its own spelling; ties (rows differing
+only in case, which nothing here creates) go to the lowest id. Local password login still matches
+**exactly**. The refusals are the same whatever the case: a local account is recognised as local, and
+an account bound to another provider as bound.
 
 A **disabled** account (`is_active = false`) is refused before anything is written, as password
 login refuses it.
 
-**Discovery is cached** per provider for an hour, with the signing keys it carries, so a sign-in costs
-no extra round trips and looping on `/sso/{key}/login` can't flood your provider. An hour is safe for
-key rotation: providers publish a new key well before retiring the old one.
+**Discovery is cached** per provider for an hour, with the signing keys it carries
+([why](AUTH-SECURITY.md#sso)).
 
-> **The transaction cookie is not signed — and signing it would not help.** `state`, `nonce` and the PKCE
-> verifier ride in a `HttpOnly` cookie as base64 JSON, so the `state` check compares two values that both
-> came from that cookie. Anyone who can **write** a cookie for your host (a sibling-host XSS,
-> cookie-tossing, an active attacker on plain http) can therefore supply a transaction of their choosing
-> and complete a login in the victim's browser — *login CSRF*: the victim ends up signed in as the
-> **attacker's** identity. Note the direction: the attacker gains none of the victim's access; the harm is
-> a victim who acts inside an account someone else controls.
->
-> Signing the cookie would stop forgery and change nothing here, because forgery isn't needed:
-> `/sso/{key}/login` hands a genuine transaction to whoever asks, so an attacker can plant a validly
-> signed one of their own. The protection therefore rests on the same assumption as the double-submit
-> CSRF token (§7) — a cross-site attacker can neither read your cookies nor set one for your host — which
-> in practice means HTTPS (ideally HSTS), no XSS, and not sharing a registrable domain with something you
-> don't trust.
+> **The transaction cookie** (`state`, `nonce` and the PKCE verifier, base64 JSON in an `HttpOnly`
+> cookie) is not signed, and is protected against login CSRF only as well as your cookies are: serve
+> the site over HTTPS (ideally HSTS), keep it free of XSS, and don't share a registrable domain with
+> something you don't trust ([why](AUTH-SECURITY.md#the-transaction-cookie)).
 
-**`cargo audit` reports `rsa` (RUSTSEC-2023-0071, the Marvin attack)** in any build with `sso`:
-`openidconnect` depends on it to check RS256 ID-token signatures, and no fixed `rsa` release exists.
-The attack recovers a **private** key from the timing of decryption or signing. SSO here only verifies
-signatures, using the provider's public key, so this crate holds no RSA private key to leak. Ignore the
-advisory in your `.cargo/audit.toml`, with that reason, until `openidconnect` moves to a fixed `rsa`.
+**`cargo audit` reports `rsa` (RUSTSEC-2023-0071, the Marvin attack)** in any build with `sso`. It
+does not apply here: SSO only verifies signatures and holds no RSA private key. Ignore the advisory
+in your `.cargo/audit.toml`, with that reason, until `openidconnect` moves to a fixed `rsa`
+([why](AUTH-SECURITY.md#the-rsa-advisory)).
 
 ## 5c. Lifecycle timestamps
 
@@ -467,33 +442,31 @@ let auth = Auth::new(db.clone(), lockout).on_write(audit.clone()).on_error(Arc::
 
 The brake in front of the **unauthenticated** credential checks: one counter per account name and one
 per source address (`auth::lockout::{UsernameLockout, IpLockout}`), each in its own table. The rows are
-durable and shared, so a restart or a second replica doesn't hand an attacker a fresh budget.
+durable and shared across restarts and replicas.
 
 **The rule.** A checked-and-rejected credential upserts a row (`failures += 1`, `last_failure_at =
-now`) *unless* the key is already at the limit — a locked key records nothing, so an attacker cannot
-push the expiry out by continuing. A key is locked while `failures >= after` **and** `last_failure_at +
-duration > now`; the handler then answers **`429` with `Retry-After`** and never looks at the submitted
-secret, so a locked account costs no argon2 work and the response is identical for a real and a
-made-up username (no enumeration hint). Once the window passes the row reads as absent and the pruner
-deletes it. Effective semantics: **"`after` failures, each within `duration` of the previous, lock the
-key for `duration` after the last one"** — a decaying window, not a strict sliding one.
+now`) *unless* the key is already at the limit — a locked key records nothing. A key is locked while
+`failures >= after` **and** `last_failure_at + duration > now`; the handler then answers **`429` with
+`Retry-After`** and never looks at the submitted secret, the same for a real and a made-up username.
+Once the window passes the row reads as absent and the pruner deletes it. Effective semantics:
+**"`after` failures, each within `duration` of the previous, lock the key for `duration` after the
+last one"** — a decaying window, not a strict sliding one. ([why](AUTH-SECURITY.md#lockout))
 
-**What is braked — and what deliberately isn't:**
+**What is braked — and what deliberately isn't** ([why each](AUTH-SECURITY.md#lockout)):
 
-| Check | Counted against | Why |
-|---|---|---|
-| `POST /login` (password) | account + address | the anonymous guessing surface |
-| `POST /login/totp` (second factor) | account + address | still unauthenticated (the session grants nothing until the code is confirmed), and 6 digits are the most guessable secret we hold |
-| the app's own checks (`Auth::username_lockout` / `ip_lockout`) | whichever it passes | same counters, so one account has one budget everywhere |
-| `POST /profile` (current password) | **not limited** | the caller is *authenticated*: that's session theft, whose mitigations are short TTLs and re-authentication (§5h) — and counting it would let a stolen session lock the real user out of logging in |
-| `POST /profile/totp` (enrolment code) | **not limited** | authenticated, and the code guessed is the caller's *own* pending secret |
-| `POST /profile/{id}` (manager reset) | **not limited** | verifies no secret; gated by group membership instead |
-| `POST /login/passkey/finish` (passkey sign-in, §5l) | address | the passkey names no account until it is verified |
-| `POST /login/totp/passkey` (passkey second factor, §5l) | account + address | the same step as a TOTP code |
-| `Auth::identify_key` (API key, §5k) | address | a key names no account, so the address is all there is to count |
+| Check | Counted against |
+|---|---|
+| `POST /login` (password) | account + address |
+| `POST /login/totp` (second factor) | account + address |
+| the app's own checks (`Auth::username_lockout` / `ip_lockout`) | whichever it passes |
+| `POST /profile` (current password) | **not limited** (authenticated; see re-authentication, §5h) |
+| `POST /profile/totp` (enrolment code) | **not limited** (authenticated) |
+| `POST /profile/{id}` (manager reset) | **not limited** (verifies no secret; gated by group membership) |
+| `POST /login/passkey/finish` (passkey sign-in, §5l) | address |
+| `POST /login/totp/passkey` (passkey second factor, §5l) | account + address |
+| `Auth::identify_key` (API key, §5k) | address |
 
-**Configuration is mandatory** — it is an argument to `Auth::new`, not a builder call, so there is no
-way to end up with an unbraked login by forgetting one:
+**Configuration is mandatory** — it is an argument to `Auth::new`, not a builder call:
 
 ```rust
 // `Lockout` is #[non_exhaustive]: build from the defaults, which are exactly the values below.
@@ -508,10 +481,9 @@ lockout.ip_whitelist = relativelylight::net::parse_nets(&cfg.office_ranges);
 
 `*_after: 0` switches a counter off completely — nothing is read, nothing is written. A `*_duration_secs`
 of `0` is *not* the way to do that: it is clamped to 1 second, so rows are still written and the lock
-just expires immediately. The two windows are independent on purpose (an address is a coarser subject
-than an account, so it usually deserves a different one). The address budget is far looser than the
-account one because a locked address turns away *valid* callers too, which matters when users share
-one (CGNAT, an office NAT).
+just expires immediately. The two windows are independent, and the address budget is far looser
+than the account one, since a locked address turns away every caller sharing it (CGNAT, an office
+NAT) ([why](AUTH-SECURITY.md#lockout)).
 
 **Who is the client?** The per-address half uses the `RealIp` that `middleware::resolve_real_ip`
 resolved (§4). Use the same value for your own logging, audit rows and limits, so a failed login and a
@@ -524,17 +496,16 @@ probe, the host a fleet NATs through. It matches across families and representat
 `::ffff:198.51.100.0/120` covers a client that arrives as plain `198.51.100.9`, and vice versa. The
 exemption applies on **every** surface, this module's and the app's, since both go through `IpLockout`.
 
-It does *not* exempt the account counter, and there is deliberately **no username whitelist**: an
-account that can never be locked out is an account whose password can be guessed at forever. The
-address list exists for the opposite reason — so one shared address cannot take everyone down with it.
+It does *not* exempt the account counter, and there is deliberately **no username whitelist**
+([why](AUTH-SECURITY.md#lockout)).
 
 Setting `ip_after: 0` turns per-address counting off everywhere, leaving the per-account brake — which
 still covers the common case of one account being guessed at, just not spraying across many.
 
 **The app's own credential checks share these counters.** An app that authenticates callers itself —
-HTTP Basic on a machine endpoint, a DDNS update URL — must not keep a second limiter, or an account
-gets two budgets and an unlock frees only half of them. (API keys, §5k, already count against the
-address counter inside `identify_key`.)
+HTTP Basic on a machine endpoint, a DDNS update URL — must not keep a second limiter
+([why](AUTH-SECURITY.md#lockout)). (API keys, §5k, already count against the address counter inside
+`identify_key`.)
 
 ```rust
 let usernames = auth.username_lockout();   // in AppState; cheap to clone
@@ -550,27 +521,24 @@ match check_credential(...) {
 Rules that matter: pass **no** username when the credential names no account (a bearer token) and let
 the address counter carry it; pass the **real** client address; and only ever record a credential you
 actually checked and rejected — never one with no credential at all, a failed CSRF check, or one you
-turned away *because* it was locked, or a third party can spend someone else's budget.
+turned away *because* it was locked ([why](AUTH-SECURITY.md#lockout)).
 `record_failure` returns whether *this* failure tripped the lock, so you log once instead of on every
 subsequent attempt. `examples/auth` has a working one (`GET /api/whoami`).
 
 **The unlock is a row delete.** The two entities (`lockout::username_entity`, `lockout::ip_entity`) are
 ordinary SeaORM models: register them in your admin panel and an operator can see who is being guessed
 at and clear a row — gated by your `Authz`, CSRF-checked, and audited by your `WriteObserver` like any
-other write. No bespoke endpoint, no CLI, no shelling into the host. `examples/adminpanel` registers
-both as read-only-plus-delete panels.
+other write. `examples/adminpanel` registers both as read-only-plus-delete panels.
 
 **Housekeeping is the app's.** Nothing in this crate schedules anything — no background task, no timer.
 `Auth::prune()` deletes dead sessions *and* expired lockout rows from both tables; call
 it at startup and from whatever periodic loop the app already has (both examples do). Prefer it over the
 free `auth::prune(&db, lockout)`, which takes no `Auth` and so can only see the absolute session deadline,
-not the idle one (§5f). Skipping either is
-safe: a dead session never authenticates and an expired lockout row reads as unlocked and resets
-itself on the next failure — the rows just accumulate.
+not the idle one (§5f). Skipping either is safe; the rows just accumulate.
 
-**The trade-off.** Someone who knows an account name can keep it locked by failing on purpose. That is
-why the lock is short, lifts on its own, and can be cleared from the admin panel; the alternative,
-progressive delays, holds a server task open per attempt.
+**The trade-off.** Someone who knows an account name can keep it locked by failing on purpose; the
+lock is short, lifts on its own, and can be cleared from the admin panel
+([why](AUTH-SECURITY.md#lockout)).
 
 ## 5f. Session lifetime & revocation
 
@@ -583,30 +551,24 @@ A session is a row, so revoking one is a `DELETE` (§3).
 | absolute | `expires_at` | `Auth::session_ttl_secs` | 7 days | how long a session can *ever* live, however busy |
 | idle | `last_seen_at` | `Auth::session_idle_secs` | 8 hours | how long an *unused* session survives |
 
-The idle clock is the one that bounds a stolen cookie: without it an attacker who lifts a cookie has the
-full absolute window, whether or not the victim ever comes back. `session_idle_secs(0)` switches it off
-leaving only the absolute deadline. The absolute deadline always wins — a session used a second
-ago but past `expires_at` is dead.
+The idle clock is the one that bounds a stolen cookie ([why](AUTH-SECURITY.md#sessions-and-cookies)).
+`session_idle_secs(0)` switches it off leaving only the absolute deadline. The absolute deadline
+always wins — a session used a second ago but past `expires_at` is dead.
 
 `last_seen_at` is refreshed **lazily**: a read only writes when the stamp is more than a minute stale.
-That matters because `identify` is called once per gated model — an `Admin` page with five tables
-resolves the caller five times — so an eager refresh would turn one page render into five writes.
 
-**`Auth::identify(&headers) -> Option<Identity>` does not change**, and shouldn't: it stays a cheap call
-that needs no response to write into. Everything that changes a session **id** happens inside a POST
-handler that already owns its response.
+**`Auth::identify(&headers) -> Option<Identity>` never changes a session id.** Everything that changes
+a session **id** happens inside a POST handler that already owns its response.
 
 **Rotation on privilege gain.** Password login always mints a new row with a server-generated id, and
-confirming the second factor issues **another new id** and deletes the half-authenticated one. So a
-session cookie an attacker planted in the victim's browser (cookie-tossing, an XSS) is never elevated
-by the victim's own login. The CSRF token rotates with it.
+confirming the second factor issues **another new id** and deletes the half-authenticated one, so a
+planted session cookie is never elevated by the victim's own login
+([why](AUTH-SECURITY.md#sessions-and-cookies)). The CSRF token rotates with it.
 
-**A password change signs out everything else.** The commonest reason to change a password is "I think
-someone else is in my account", and a session that outlives the credential that created it defeats
-exactly that. So `POST /profile` mints one fresh session for the caller and **deletes every other
-session they hold** — including their own previous id, since that's one of the values that might have
-been copied. A manager's reset at `POST /profile/{id}` deletes **all** of the target's sessions (there is
-no session of theirs to spare).
+**A password change signs out everything else** ([why](AUTH-SECURITY.md#sessions-and-cookies)).
+`POST /profile` mints one fresh session for the caller and **deletes every other session they hold**,
+including their own previous id. A manager's reset at `POST /profile/{id}` deletes **all** of the
+target's sessions (there is no session of theirs to spare).
 
 **On demand.** `POST /profile/sessions/revoke` — the "Sign out other sessions" button on the profile
 page — deletes the caller's other sessions and keeps the one they're using. The app-facing forms are
@@ -639,7 +601,7 @@ auth.password_check(|pw, username| my_rules(pw, username))  // your own predicat
 
 **It governs typed input, not code.** `create_user` / `set_password` / `make_admin` /
 `reset_admin_access` are unaffected, so a seeder or a break-glass CLI still sets whatever the operator
-says — if the policy governed those, a deployment could be left with no way to set a first password.
+says ([why](AUTH-SECURITY.md#password-policy)).
 
 **Both surfaces or neither.** `Auth` covers its own pages; the admin UI's writes are a separate
 `crud` field validator, and whichever you skip becomes the way around the other:
@@ -658,44 +620,40 @@ both halves from one `PASSWORD_LEVEL` env value, `0` switching them off together
 
 ## 5h. Re-authentication before sensitive changes
 
-A live session proves that **someone** logged in once. It does not prove that the account's owner is the
-one asking now — a stolen cookie *is* a live session. The idle clock (§5f) bounds how long such a cookie
-lasts; this bounds what it can **do** while it lasts. So the actions that would let an intruder entrench
-ask for a factor again, per request:
+A live session proves only that someone logged in once, so the actions that would let an intruder
+holding a stolen session entrench ask for a factor again, per request
+([why](AUTH-SECURITY.md#re-authentication)):
 
-| route | whose factor | why this one |
-|---|---|---|
-| `POST /profile/totp/disable` | the caller's | removing the second factor is step one for an intruder |
-| `POST /profile/totp` (enrol) | the caller's | otherwise they enrol *their own* authenticator — which doesn't just persist access, it **locks the real user out**, since login then wants a code only they can produce |
-| `POST /profile/{id}` (reset) | the **manager's** | sets a password without knowing the old one; every account it reaches is one the session can then log in as |
-| `POST /profile/{id}/totp/disable` | the **manager's** | strips a victim's second factor |
-| `POST /profile/api-keys` (mint, §5k) | the caller's | a key outlives the session and skips the second factor — a stolen session must not become a permanent credential |
-| `POST /profile/passkeys` (add, §5l) | the caller's | a passkey is a new way into the account |
-| `POST /profile/password/remove` (§5l) | the caller's | it changes how the account signs in |
-| `POST /profile` without a password (setting one) | the caller's | a password is a new way into the account |
-| `POST /profile/{id}/passkeys/remove` | the **manager's** | strips a victim's passkeys |
+| route | whose factor |
+|---|---|
+| `POST /profile/totp/disable` | the caller's |
+| `POST /profile/totp` (enrol) | the caller's |
+| `POST /profile/{id}` (reset) | the **manager's** |
+| `POST /profile/{id}/totp/disable` | the **manager's** |
+| `POST /profile/api-keys` (mint, §5k) | the caller's |
+| `POST /profile/passkeys` (add, §5l) | the caller's |
+| `POST /profile/password/remove` (§5l) | the caller's |
+| `POST /profile` without a password (setting one) | the caller's |
+| `POST /profile/{id}/passkeys/remove` | the **manager's** |
 
 `POST /profile` (your own password change) asks for the current password anyway.
 `POST /profile/sessions/revoke`, `POST /profile/api-keys/{id}/revoke` and
-`POST /profile/passkeys/{id}/remove` are **not** re-authenticated: each only removes access, and a user racing to evict an intruder shouldn't be slowed down.
+`POST /profile/passkeys/{id}/remove` are **not** re-authenticated: each only removes access.
 
 **Any factor the account has.** A `current_password`, a `totp_code`, or a passkey (§5l) satisfies it;
 the confirm block offers only the factors the account has. A **fresh code is preferred** when
-the account has 2FA — it proves presence, where a password may have been filled in by the browser for
-whoever is sitting there — and a code accepted here is **spent** (§5a), so one captured code can't wave
-through both a sensitive action and a login. Enrolment is the one asymmetric case: a *first* enrolment has
-no active secret to check a code against, so the password is the factor; a re-enrolment can use either.
+the account has 2FA, and a code accepted here is **spent** (§5a). Enrolment is the one asymmetric
+case: a *first* enrolment has no active secret to check a code against, so the password is the
+factor; a re-enrolment can use either.
 
-**An account with no local factor passes.** An SSO account has neither password nor local 2FA nor a
-passkey, so there is nothing to ask it for, and refusing would lock every SSO administrator out of the
-manager pages permanently. Their assurance is whatever the IdP gave them; re-authenticating through the
-provider is [open work](TODO.md#auth). The same holds for a local account with no password, no TOTP
-and no passkey, which can't log in at all. An account with a passkey and no password **does** have a
+**An account with no local factor passes** ([why](AUTH-SECURITY.md#re-authentication)). An SSO
+account has neither password nor local 2FA nor a passkey, so there is nothing to ask it for; its
+assurance is whatever the IdP gave it, and re-authenticating through the provider is
+[open work](TODO.md#auth). The same holds for a local account with no password, no TOTP and no
+passkey, which can't log in at all. An account with a passkey and no password **does** have a
 factor, and must present it.
 
-**Not lockout-limited**, for §5e's reason: the caller is authenticated, so counting failures here would let
-a stolen session lock the real user out of logging in. Nor is it needed — guessing a password is no easier
-here than at `/login`, and a 6-digit code would take ~10⁶ requests inside its 90-second window.
+**Not lockout-limited**: the caller is authenticated (§5e; [why](AUTH-SECURITY.md#re-authentication)).
 
 **For your own routes**, which is where most sensitive actions live:
 
@@ -719,15 +677,13 @@ Without a form to flatten into (a CLI, a test), build the input with
 hint. `examples/auth` gates a `POST /webhook-secret/rotate` on it — the pattern to copy, including returning
 the refusal before anything is written.
 
-**Per request, not a window.** There is no "you confirmed five minutes ago" grace period, which would
-reopen exactly the window a stolen session needs; resetting two users means confirming twice.
+**Per request, not a window.** There is no "you confirmed five minutes ago" grace period
+([why](AUTH-SECURITY.md#re-authentication)); resetting two users means confirming twice.
 
 ## 5i. TOTP recovery codes
 
-The answer to "my phone is gone". Without them, an enrolled user who loses their authenticator can only
-be let back in by a manager disabling their 2FA (§5a) — workable for staff with an IT department, useless
-for everyone else, and an availability problem the moment §5h means a live session can no longer simply
-switch 2FA off.
+The answer to "my phone is gone"; otherwise only a manager disabling their 2FA (§5a) lets such a user
+back in ([why](AUTH-SECURITY.md#recovery-codes)).
 
 **Ten single-use codes**, issued automatically **with** the enrolment and shown once. `auth::recovery`
 owns them: `issue`, `consume`, `remaining`, `clear`, plus the `entity` (table `auth_totp_recovery`).
@@ -738,43 +694,31 @@ owns them: `issue`, `consume`, `remaining`, `clear`, plus the `entity` (table `a
 - **Spent on use**, so each code works once; the row is *marked* rather than deleted, which keeps "a
   recovery code was used" visible afterwards.
 - **Regenerate** from the profile page (`POST /profile/totp/recovery`), which is **re-authenticated**
-  (§5h) — a new set is a new way into the account, so an intruder holding a session must not be able to
-  mint one. Issuing a set invalidates the previous one, which is what makes regeneration the right
-  response to "I think my codes leaked".
-- **Destroyed when 2FA is turned off**, self-service or by a manager: they are a way past a second factor,
-  so without one they would just be a weaker second password — and a later re-enrolment must not inherit
-  a set the user threw away with their old phone.
+  (§5h). Issuing a set invalidates the previous one, so regenerate when codes may have leaked.
+- **Destroyed when 2FA is turned off**, self-service or by a manager
+  ([why](AUTH-SECURITY.md#recovery-codes)).
 - The profile page shows how many are unused, and says so more loudly at ≤ 3 and at 0.
 - 2FA stays **on** after a recovery login. The code got them in; it didn't decide their factor policy.
 
-**Hashed with SHA-256, not argon2 — deliberately.** Codes are machine-generated with ~49 bits of entropy
-(10 characters from a 30-symbol Crockford-style alphabet, so nothing reads as `0`/`1`), which is exactly
-the case argon2 is *not* for: no attacker enumerates a 49-bit space however cheap the hash. What a slow
-hash would cost is real and paid by the defender — a submitted code must be matched against the user's
-whole set, so up to ten argon2 verifications (≈190 MiB transient, most of a second) on the
-**unauthenticated** login path, per attempt. A single SHA-256 makes it one indexed equality lookup: O(1),
-no comparison loop, and nothing whose duration depends on how far into the set the match was. The hash is
-domain-separated by user id, so a row lifted from one account cannot be replayed against another.
+**Hashed with SHA-256, not argon2** — deliberately ([why](AUTH-SECURITY.md#recovery-codes)). Codes
+are 10 characters from a 30-symbol Crockford-style alphabet (nothing reads as `0`/`1`), ~49 bits of
+entropy, and the hash is domain-separated by user id.
 
 **A recovery code does not satisfy re-authentication** (§5h). It gets you *in*; it does not authorise
-entrenching. Otherwise one leaked code would be both a login *and* a licence to remove the second factor
-it just bypassed — and for re-auth the password already covers the lost-authenticator case.
+entrenching ([why](AUTH-SECURITY.md#recovery-codes)).
 
 **Guessing is braked** by the same per-account counter as a wrong TOTP code (§5e). An **empty**
-submission — no code and no recovery code — is refused *without* counting, since presenting nothing is
-not a failed check, and counting it would let a stray double-submit or a forged post grief the real user's
-login.
+submission — no code and no recovery code — is refused *without* counting
+([why](AUTH-SECURITY.md#recovery-codes)).
 
 **Schema.** `auth_totp_recovery` is in `table_create_statements`, so an app with its own migrations needs
-a step for it. Don't register the entity in an admin panel: every row is a hash of a credential, and there
-is nothing an operator can usefully do to one that the "generate new codes" button doesn't do properly.
+a step for it. **Never register the entity in an admin panel**: every row is a hash of a credential
+([why](AUTH-SECURITY.md#recovery-codes)).
 
 ## 5j. Where accounts come from — there is **no registration page**
 
-This module ships login, not sign-up, and that is a decision rather than a gap. Who may join, what is
-verified before they do (an email? an invite? a payment? a manager's approval?), and what an account is
-worth on arrival are product questions with no defensible default — a library that answered them would
-be wrong for most apps and, in the wrong deployment, wrong in the direction of letting strangers in.
+This module ships login, not sign-up, and that is a decision rather than a gap
+([why](AUTH-SECURITY.md#accounts)).
 
 So an account comes into being in exactly four ways, all of them the app's own call:
 
@@ -785,14 +729,13 @@ So an account comes into being in exactly four ways, all of them the app's own c
 | the app's boot seeder | `auth::make_admin(db, group, user, pw)` — idempotent | the first admin |
 | break-glass, from a shell | `auth::reset_admin_access(db, group, user, pw)` behind a CLI flag | nobody can get in |
 
-The last two are deliberately exempt from the password policy (§5g), which governs *typed* input only —
-otherwise a deployment could be left with no way to set a first password at all.
+The last two are deliberately exempt from the password policy (§5g), which governs *typed* input only
+([why](AUTH-SECURITY.md#password-policy)).
 
 **Want public signup anyway?** Write the page: a `crud::ui::Form` over `auth_user` (or a hand-written
 form) posting to a route of yours that validates whatever you require and calls `create_user` +
-`add_to_group`. Doing it in the app is what lets you put an invite token, a rate limit or an email
-round trip in front of it — and it keeps that policy visible in your code rather than buried in a
-library default.
+`add_to_group`, behind whatever you require first: an invite token, a rate limit, an email round
+trip.
 
 ### The accounts panel
 
@@ -824,18 +767,17 @@ Five things are load-bearing:
    of its own, so without this declaration the panel can create an account and cannot put it in a
    group. Since the gate checks *group membership*, that is a screen that can make users who can do
    nothing. (It also gives you the reverse view: a group's Members picker.)
-2. **`GroupReadWrite`, not `UserReadGroupWrite`** — reads included. A list of accounts is not
-   something a logged-in stranger should be able to enumerate, and `render_for` is where that is
-   enforced: a non-admin gets `403`, not a page with the buttons greyed out.
+2. **`GroupReadWrite`, not `UserReadGroupWrite`** — reads included, so a non-admin can't list the
+   accounts: `render_for` answers `403` ([why](AUTH-SECURITY.md#accounts)).
 3. **`field("password_hash").password()` plus the policy** — wire the policy into `Auth` *and* this form, or
    the form becomes the way around it (§5g).
-4. **Hide the TOTP columns and `passkey_handle`.** The secret and the pending secret are credentials;
-   `totp_last_step` is the replay guard, and hand-editing it either lets a code be replayed or locks
-   the user out of their own authenticator. `passkey_handle` is held by the user's authenticators,
-   so an edited one orphans every passkey. 2FA is managed from `/profile`, never from a CRUD form. **Never register
-   `auth::recovery::entity`** at all — every row of it is a credential hash.
+4. **Hide the TOTP columns and `passkey_handle`.** They are credentials, the replay guard and the
+   key every passkey hangs on ([why](AUTH-SECURITY.md#accounts)). 2FA is managed from `/profile`,
+   never from a CRUD form. **Never register `auth::recovery::entity`** at all — every row of it is a
+   credential hash.
 5. **Keep `must_change_password` read-only** (§5m). The hook sets it when the panel writes someone's
-   password; an editable checkbox would post `false` with every save and the flag would never be set.
+   password; an editable checkbox would keep it from ever being set
+   ([why](AUTH-SECURITY.md#the-sign-in-policy-and-password-change)).
 
 Register `lockout::username_entity` / `lockout::ip_entity` in the same panel (§5e) and the unlock
 becomes an ordinary gated, CSRF-checked, audited `DELETE` rather than a bespoke endpoint.
@@ -891,8 +833,8 @@ header of its own (teleddns's Cloudflare-compatible `X-Auth-Key`) passes that va
 **Lockout.** A key carries no account name, so only the **source address** is braked, on the same
 `IpLockout` counter as `/login` (§5e). While the address is locked, `identify_key` answers
 `Locked(retry)` without looking up the key. A rejected key counts one failure. An empty token
-presents no credential and is refused without counting. A good key clears nothing: one valid
-credential shouldn't refund a spraying address's budget. A database failure is `Internal`, goes to
+presents no credential and is refused without counting. A good key clears nothing
+([why](AUTH-SECURITY.md#api-keys)). A database failure is `Internal`, goes to
 the `on_error` observer and is not counted.
 
 **What a request logs is the app's.** `identify_key` writes nothing to stdout. Request logging
@@ -915,10 +857,8 @@ and offers:
 | `POST /profile/api-keys` | mint a key with a label and an optional expiry in days, and show the raw key **once** | CSRF + **re-authentication** (§5h) |
 | `POST /profile/api-keys/{id}/revoke` | delete one of the caller's own keys | CSRF |
 
-Minting is re-authenticated because a key is a credential that outlives the session and skips the
-second factor. An intruder holding a session must not be able to turn it into a permanent one.
-Revoking only removes access, so it is not re-authenticated, as with signing out other sessions. A
-request naming someone else's key changes nothing. Both fire a `WriteEvent` (`auth_api_key`,
+Minting is re-authenticated; revoking is not ([why](AUTH-SECURITY.md#api-keys)). A request naming
+someone else's key changes nothing. Both fire a `WriteEvent` (`auth_api_key`,
 `Create` / `Delete`) with the label, the prefix and the expiry, never the key or its hash. A
 manager's `/profile/{id}` doesn't show the card. An administrator manages other users' keys in the
 panel (below). Without `api_keys` the card and its routes are absent, and `identify_key` still
@@ -926,11 +866,9 @@ works, for keys an app mints itself with `api_key::mint`.
 
 **The key.** `{prefix}` followed by 40 random alphanumeric characters (≈ 238 bits). The prefix makes
 a leaked key recognisable (secret scanners, logs). The table stores the first `prefix + 6` characters
-for telling keys apart in a listing, and the **SHA-256** of the whole key. It is SHA-256 and not
-argon2 for §5i's reason, made stronger: a machine-generated 238-bit secret can't be enumerated
-however cheap the hash is, and a deterministic hash makes the lookup one indexed equality match on
-an unauthenticated path. `last_used_at` is refreshed lazily, at most once a minute per key, as the
-session idle clock is (§5f).
+for telling keys apart in a listing, and the **SHA-256** of the whole key, not argon2
+([why](AUTH-SECURITY.md#api-keys)). `last_used_at` is refreshed lazily, at most once a minute per
+key, as the session idle clock is (§5f).
 
 **Schema.** `auth_api_key`: `id`, `user_id` (FK `auth_user`, **cascade**: a key is its owner and
 goes with it), `name`, `hashed_key` (unique), `prefix`, `created_at`, `expires_at`, `last_used_at`,
@@ -942,8 +880,7 @@ not pruned. They stay listed as expired until their owner or an administrator de
 that keep the panel from becoming a way around the above:
 
 - `hashed_key` is hidden;
-- the owner, the prefix, `created_at` and `last_used_at` are read-only, because moving a key to
-  another account would hand that account's rights to whoever holds it;
+- the owner, the prefix, `created_at` and `last_used_at` are read-only ([why](AUTH-SECURITY.md#api-keys));
 - labels and datetimes are set.
 
 An administrator can disable, re-enable, re-label, re-date or delete any key. Turn creation off in
@@ -956,9 +893,8 @@ crud.register(auth::api_key::meta_model(), Arc::new(GroupReadWrite::new(&auth, [
 ## 5l. Passkeys (feature `passkeys`)
 
 Passkeys (WebAuthn) sign a user in with a fingerprint, face, device PIN or security key, with nothing
-to type and nothing a fake site can capture. They are phishing-resistant where TOTP is not: a relaying
-proxy can pass a code on, but a passkey is bound to the site's domain. The crate uses `webauthn-rs`
-(pure Rust).
+to type. They are phishing-resistant where TOTP is not ([why](AUTH-SECURITY.md#passkeys)). The crate
+uses `webauthn-rs` (pure Rust).
 
 ```rust
 use relativelylight::auth::passkey::{Class, Passkeys};
@@ -1031,9 +967,9 @@ CA and the model's AAGUID, and fails at startup without one. Synced passkeys can
 username). Phones and laptops always make one; a security key needs a free slot, and one that can't
 make a discoverable credential can't be added.
 
-**Lockout** (§5e). A failed passkey sign-in counts against the **address**: the credential names no
-account until it is verified. A failed passkey second factor counts against the account and the
-address, like a TOTP code. An expired or unknown challenge checks nothing and counts nothing.
+**Lockout** (§5e). A failed passkey sign-in counts against the **address**; a failed passkey second
+factor counts against the account and the address, like a TOTP code
+([why](AUTH-SECURITY.md#passkeys)). An expired or unknown challenge checks nothing and counts nothing.
 
 **Re-authentication** (§5h) accepts the passkey, and an account with a passkey and no password
 **must** use one of its factors: it no longer passes with nothing. Only an account with no local
@@ -1083,8 +1019,8 @@ let auth = Auth::new(db, lockout)
 | SSO | `sso_level`, `Mfa` by default |
 | SSO + TOTP | at least `Mfa` |
 
-TOTP lifts a method to `Mfa`, never higher: `Attested` means an attested passkey, so "security keys
-of trusted models only" stays expressible. `min_level(Level::Attested)` needs passkeys requiring
+TOTP lifts a method to `Mfa`, never higher ([why](AUTH-SECURITY.md#the-sign-in-policy-and-password-change)).
+`min_level(Level::Attested)` needs passkeys requiring
 `Class::Attested`; `routes()` panics otherwise. Typical settings:
 
 | The site wants | Set |
@@ -1125,12 +1061,13 @@ was last set) and `must_change_password` (someone other than the owner set it).
   owner to choose their own. The owner's change on `/profile` clears it, and so do the programmatic
   helpers (`create_user`, `set_password`, `make_admin`, `reset_admin_access`): those are the
   owner's or a seeder's.
-- **In an accounts panel, keep `must_change_password` read-only** (shown, not edited). The form posts
-  every editable field, and an unticked checkbox is an explicit `false`, which the hook respects: the
-  flag would never be set. `password_changed_at` is the library's to stamp; show it read-only too.
+- **In an accounts panel, keep `must_change_password` read-only** (shown, not edited), or the flag
+  would never be set ([why](AUTH-SECURITY.md#the-sign-in-policy-and-password-change)).
+  `password_changed_at` is the library's to stamp; show it read-only too.
 - **`Auth::password_max_age_days(n)`**, default `0` (no limit), makes a password older than `n` days
-  due. NIST SP 800-63B advises against periodic rotation; set it only where a rotation is required. A
-  row from before the column existed counts from `created_at`.
+  due. Set it only where a rotation is required
+  ([why](AUTH-SECURITY.md#the-sign-in-policy-and-password-change)). A row from before the column
+  existed counts from `created_at`.
 - **Due is a notice, not a lock.** The login lands on `/profile`, which says why, and the user can go
   on into the app. `Identity::password_change` (`SetByAnother` or `Expired`) is there for the app's
   shell, as `examples/adminpanel`'s navbar badge shows. Accounts with no password (SSO, passkey-only)
@@ -1261,10 +1198,8 @@ is `relativelylight::csrf` (feature `csrf`, implied by `auth`); the type is `Csr
 
 **The token.** 256 random bits (hex) in the `rl_csrf` cookie (name configurable) — `SameSite=Strict`,
 `Path=/`, `Secure` unless told otherwise, lifetime matching the session TTL, and deliberately **not
-`HttpOnly`**: the admin UI's JS must read it. That is safe because the token is *not a credential* —
-it grants nothing on its own. A same-site client can always satisfy the check (read your own cookie,
-echo it); a cross-site attacker cannot, because they can neither read your cookie nor set one for your
-host. That asymmetry *is* the protection.
+`HttpOnly`**: the admin UI's JS must read it, and the token grants nothing on its own
+([why](AUTH-SECURITY.md#csrf)).
 
 An unsafe request presents it in either:
 - the **`_csrf` form field** — MPA `<form>` posts (every fragment `auth` renders embeds the hidden
@@ -1279,14 +1214,12 @@ An unsafe request presents it in either:
 | the `crud` admin UI's writes | **opt-in**: `crud.csrf(auth.csrf())` | `403`, before the gate or the database |
 | your own unsafe routes | **`csrf::enforce`** as a layer, or call `Csrf::verify` yourself | the shared page (see below) |
 
-On the auth routes the check runs **first** — before the password comparison, before any DB work — so a
-forged post costs nothing and can't be used as an argon2 amplifier. Same in the engine: the CSRF check
-precedes the gate, so a forged write never reaches a session lookup, let alone the backend. Safe methods
+On the auth routes the check runs **first** — before the password comparison, before any DB work.
+Same in the engine: the CSRF check precedes the gate ([why](AUTH-SECURITY.md#csrf)). Safe methods
 (GET/HEAD, i.e. every read) need no token. A page render **issues** the cookie if the request has none
 (`Csrf::ensure`), and login / 2FA-completion **rotate** it along with the session; logout clears it.
 
-**`Authorization`-bearing requests are exempt** — an API credential isn't ambient, so a cross-site
-request can't borrow it and there's nothing to protect. Your own token-authenticated API routes need
+**`Authorization`-bearing requests are exempt** ([why](AUTH-SECURITY.md#csrf)). Your own token-authenticated API routes need
 no CSRF token.
 
 **A layer for your own routes.** Rather than calling `Csrf::verify` in every handler, put
@@ -1310,12 +1243,11 @@ exempt anyway, being `Authorization`-bearing).
 It checks, in order: safe methods pass; `Authorization`-bearing requests pass; the `X-CSRF-Token` header;
 and failing that, for `application/x-www-form-urlencoded` bodies **under 64 KiB**, the `_csrf` field — the
 body is buffered, checked, and handed to the handler intact, so a plain MPA `<form>` post needs nothing
-from the handler. A **multipart** body is deliberately *not* parsed (an upload shouldn't be buffered to
-find a token): send the header there, or check it in the handler. `examples/auth` guards its
+from the handler. A **multipart** body is deliberately *not* parsed ([why](AUTH-SECURITY.md#csrf)): send the header there, or check it in the handler. `examples/auth` guards its
 `POST /webhook-secret/rotate` this way.
 
-**Your own rejection page.** The built-in `403` is shell-less and static on purpose: a rejected request
-hasn't proved it came from your site, so nothing about the caller is rendered and no cookies are set.
+**Your own rejection page.** The built-in `403` is shell-less and static on purpose: nothing about the
+caller is rendered and no cookies are set ([why](AUTH-SECURITY.md#csrf)).
 `Auth::csrf_rejection(|req| ..)` (or `Csrf::on_reject`) replaces it with your own, and because the closure
 travels on the `csrf()` handle, one setting covers the library's forms **and** `csrf::enforce` on your
 routes. The closure gets the request's `http::request::Parts`, for display preferences such as a
@@ -1344,8 +1276,8 @@ let jar = if let Some(c) = set { jar.add(c) } else { jar };
 if !auth.csrf().verify(&headers, form.csrf.as_deref()) { return StatusCode::FORBIDDEN.into_response(); }
 ```
 
-`crud::ui` reads the token from the cookie at request time rather than baking it into the fragment,
-so a fragment rendered before a rotation (or cached) can't go stale.
+`crud::ui` reads the token from the cookie at request time rather than baking it into the fragment
+([why](AUTH-SECURITY.md#csrf)).
 
 A **co-hosted** app sharing the host must use a distinct `csrf_cookie_name` (cookies aren't
 port-scoped), exactly as with the session cookie.
@@ -1376,36 +1308,8 @@ port-scoped), exactly as with the session cookie.
 
 ## 9. Tests — the negative paths
 
-The rejection paths are pinned by `cargo test --all-features`, which drives the shipped routers over
-in-memory SQLite:
-
-- **`auth/security_tests.rs`** — sessions (expired, idle, half-authenticated, deactivated, forged and
-  bearer-presented tokens all resolve to anonymous), login, TOTP and its replay guard, recovery codes,
-  the profile and manager pages, re-authentication, the password policy, lockout (including the proxy
-  flag and the whitelist), session rotation and revocation, CSRF on every unsafe route, the gate
-  presets as a matrix of caller × operation, and API keys (unknown, expired, disabled, inactive owner,
-  locked address, a key never opening the UI, minting without re-authentication, revoking someone
-  else's key).
-- **`auth/passkey_tests.rs`** (feature `passkeys`) — every ceremony through the shipped routes with a
-  software authenticator: adding needs a session, CSRF and re-authentication; an answer works once
-  and only for its account; a synced passkey under a device-bound policy and an untrusted model under
-  an attested one are refused; an unknown, garbled or deactivated owner's passkey signs nobody in and
-  counts against the address; a locked address gets no challenge; a stricter policy ends open
-  sessions; the second factor only when enabled; a passwordless account keeps a way in and must
-  confirm with its passkey; managers, audit, and nothing at all with the feature off. The browser
-  script is checked in Chromium's virtual authenticator (Playwright).
-- The sign-in policy and password change, also in `auth/security_tests.rs`: each method's level; a
-  restricted session sees only its profile, can't mint a key or manage anyone, and steps up when it
-  adds TOTP; a stricter minimum ends open sessions; a `Attested` minimum without attested passkeys is a
-  startup error; who flags a password and who doesn't (through the CRUD engine too); the maximum age.
-  `sso_tests.rs` covers `sso_level` and the TOTP step after a callback, `passkey_tests.rs` the
-  `Attested` level.
-- **`auth/sso_tests.rs`** (feature `sso`) — the OIDC callback against a **fake IdP** on a loopback
-  port (real discovery, real RSA signatures): missing or forged state, wrong key, audience, issuer,
-  nonce, an expired token, missing claims, auto-registration off, disabled, local and
-  other-provider accounts.
-- **`crud/gate_tests.rs`** — every UI write asks its gate with the right `Operation` and a refused one
-  never reaches the backend; CSRF on every write.
-
-Each group has a **positive control** — a correct login, a valid code, an allowing gate — so a change
-that breaks everything can't make the negatives pass vacuously.
+Security behaviour is tested by rejection: `cargo test --all-features` drives the shipped routers
+over in-memory SQLite and asserts the negative cases (bad credentials, unusable sessions, replayed
+codes, refused writes, CSRF), each group with a positive control. What each test file covers is listed
+in [AUTH-SECURITY.md → Tests](AUTH-SECURITY.md#tests--the-negative-paths); a change to login,
+sessions, 2FA, passkeys, the profile pages, a gate or API keys extends them.

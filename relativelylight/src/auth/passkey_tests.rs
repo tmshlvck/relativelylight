@@ -453,7 +453,7 @@ async fn adding_a_passkey_needs_a_session_csrf_and_reauthentication() {
         StatusCode::BAD_REQUEST,
         "no answer: the browser ran no script"
     );
-    assert!(res.body.contains("needs JavaScript"), "{}", res.body);
+    assert!(res.body.contains("sent no passkey"), "{}", res.body);
     assert!(fx.keys().await.is_empty(), "none of those added a passkey");
 
     // Control: confirmed, with the answer, it's added.
@@ -997,11 +997,17 @@ async fn a_passwordless_account_keeps_a_way_in_and_must_confirm_with_its_passkey
         .await
         .unwrap();
     assert!(
-        fx.auth.reauthenticate_with(&who, &ReauthInput::password_or_code("", "")).await.is_err(),
+        fx.auth
+            .reauthenticate_with(&who, &ReauthInput::password_or_code("", ""))
+            .await
+            .is_err(),
         "nothing is not a factor"
     );
     assert!(
-        fx.auth.reauthenticate_with(&who, &ReauthInput::password_or_code(PW, "")).await.is_err(),
+        fx.auth
+            .reauthenticate_with(&who, &ReauthInput::password_or_code(PW, ""))
+            .await
+            .is_err(),
         "nor is a password it doesn't have"
     );
     let fields = fx.auth.reauth_fields(&who, "Confirm").await;
@@ -1373,4 +1379,35 @@ async fn a_passwordless_account_adds_a_second_passkey_confirming_with_the_first(
     let res = fx.post("/profile/passkeys", &fields, Some(&cookie)).await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.body);
     assert_eq!(fx.keys().await.len(), 2);
+}
+
+#[tokio::test]
+async fn the_script_is_revalidated_so_a_new_page_never_runs_an_old_script() {
+    let fx = Fx::new().await;
+    let res = fx.get("/auth/passkey.js", None).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(
+        res.headers[header::CACHE_CONTROL],
+        "no-cache",
+        "no max-age: a browser must ask again"
+    );
+    let etag = res.headers[header::ETAG].to_str().unwrap().to_string();
+    let req = Request::get("/auth/passkey.js")
+        .header(header::IF_NONE_MATCH, &etag)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        fx.send(req).await.status,
+        StatusCode::NOT_MODIFIED,
+        "unchanged: a 304"
+    );
+    let req = Request::get("/auth/passkey.js")
+        .header(header::IF_NONE_MATCH, "\"old\"")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        fx.send(req).await.status,
+        StatusCode::OK,
+        "changed: the new script"
+    );
 }

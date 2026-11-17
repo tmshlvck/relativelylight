@@ -7,7 +7,8 @@ write path behind them. There is no JSON API and no JavaScript framework — ren
 on typed columns, writes are posted forms (`POST` → `303` → `GET`).
 
 Start with [README.md](README.md) (features, quick start, examples) and [docs/APP.md](docs/APP.md)
-(a whole app). The reference guides are [docs/CRUD.md](docs/CRUD.md), [docs/AUTH.md](docs/AUTH.md),
+(a whole app). The reference guides are [docs/CRUD.md](docs/CRUD.md), [docs/AUTH.md](docs/AUTH.md)
+(its security reasoning in [docs/AUTH-SECURITY.md](docs/AUTH-SECURITY.md)),
 [docs/TIME.md](docs/TIME.md), [docs/DATAINPUT.md](docs/DATAINPUT.md) and
 [docs/FILES.md](docs/FILES.md); upgrading is [docs/MIGRATION-0.5.md](docs/MIGRATION-0.5.md) (unreleased) and
 [docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md);

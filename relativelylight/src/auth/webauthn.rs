@@ -1065,7 +1065,11 @@ pub(super) async fn add(
         return refuse(StatusCode::FORBIDDEN, msg).await;
     }
     if form.register_response.trim().is_empty() {
-        let msg = "Adding a passkey needs JavaScript in this browser.".to_string();
+        // The page's script fills the answer in. None means no script ran: JavaScript is off, or the
+        // browser holds an older copy of the script than this page needs.
+        let msg = "The browser sent no passkey. Reload the page and try again; adding a passkey \
+                   needs JavaScript."
+            .to_string();
         return refuse(StatusCode::BAD_REQUEST, msg).await;
     }
     let name = match form.name.trim() {
@@ -1265,15 +1269,45 @@ pub(super) async fn password_remove(
 }
 
 /// `GET /auth/passkey.js` — the one script passkeys need, as a file so a strict CSP can allow it.
-pub(super) async fn script() -> Response {
+///
+/// Revalidated on every use (`no-cache` with an `ETag` of its content): a page and its script change
+/// together on an upgrade, and a browser holding the old script against a new page would post a form
+/// the old script doesn't know how to fill. An unchanged script costs a `304`.
+pub(super) async fn script(headers: HeaderMap) -> Response {
+    let etag = script_etag();
+    let fresh = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag));
+    if fresh {
+        return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag.to_string())]).into_response();
+    }
     (
         [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "public, max-age=3600"),
+            (
+                header::CONTENT_TYPE,
+                "text/javascript; charset=utf-8".to_string(),
+            ),
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+            (header::ETAG, etag.to_string()),
         ],
         SCRIPT,
     )
         .into_response()
+}
+
+/// The script's `ETag`: a hash of its content, computed once.
+fn script_etag() -> &'static str {
+    static ETAG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ETAG.get_or_init(|| {
+        use sha2::{Digest, Sha256};
+        let hex: String = Sha256::digest(SCRIPT.as_bytes())
+            .iter()
+            .take(8)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("\"{hex}\"")
+    })
 }
 
 /// The passkey script — `assets/rl-passkey.js`.
