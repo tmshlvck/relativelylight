@@ -2865,7 +2865,6 @@ async fn profile_fragment(
         more.push_str(&inner.profile_extra(who, &reauth, csrf, headers).await);
     }
     let view = ProfileView {
-        who,
         sso: user.sso_key(),
         has_password: !user.password_hash.is_empty(),
         reauth: &reauth,

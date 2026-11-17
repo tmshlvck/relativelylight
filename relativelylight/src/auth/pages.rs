@@ -129,7 +129,6 @@ pub(super) fn totp_setup_html(
 #[derive(Template)]
 #[template(path = "auth/profile.html")]
 struct Profile<'a> {
-    username: &'a str,
     sso: Option<&'a str>,
     has_password: bool,
     reauth: &'a ReauthView,
@@ -155,7 +154,6 @@ pub(super) struct Notices {
 
 /// The caller's own profile, as the page shows it.
 pub(super) struct ProfileView<'a> {
-    pub who: &'a Identity,
     /// The provider of an SSO account, which has no password here.
     pub sso: Option<&'a str>,
     pub has_password: bool,
@@ -176,7 +174,6 @@ pub(super) fn change_form_html(
     csrf: &str,
 ) -> String {
     render(Profile {
-        username: &v.who.username,
         sso: v.sso,
         has_password: v.has_password,
         reauth: v.reauth,
@@ -359,7 +356,6 @@ mod tests {
     #[test]
     fn every_value_a_page_shows_is_escaped() {
         let bad = r#"<script>x</script>""#;
-        let who = Identity::new(bad, bad, vec![]);
         let prov = totp::Provisioning { url: bad.into(), qr_data_uri: bad.into() };
         let row = || api_key::Row {
             id: 1,
@@ -377,7 +373,6 @@ mod tests {
             Target { id: bad, sso: None, username: bad, totp_on: true, has_password: false, passkeys: 2 };
         let notices = Notices { policy: Some(bad.into()), password: Some(bad.into()) };
         let view = |has_password: bool, sso: Option<&'static str>| ProfileView {
-            who: &who,
             sso,
             has_password,
             reauth: &none,

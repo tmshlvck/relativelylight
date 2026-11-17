@@ -834,9 +834,15 @@ fn shell(title: &str, who: Option<&Identity>, body: &str) -> String {
             if w.password_change.is_some() {
                 right += r#"<a class="badge text-bg-warning text-decoration-none" href="/profile">change your password</a>"#;
             }
+            // The user menu: the name, which opens Profile and Log out. A `<details>` disclosure, not a
+            // Bootstrap dropdown, so it needs no JavaScript; following a link closes it.
             right += &format!(
-                r#"<span class="navbar-text"><a href="/profile" class="link-body-emphasis text-decoration-none fw-medium">{}</a>
-&middot; <a href="/logout" class="link-secondary text-decoration-none">log out</a></span>"#,
+                r#"<details class="user-menu">
+<summary class="link-body-emphasis fw-medium" title="Your account">{} <span aria-hidden="true">&#9662;</span></summary>
+<div class="position-absolute end-0 mt-1 py-1 bg-body border rounded shadow-sm">
+<a class="dropdown-item px-3 py-1" href="/profile">Profile</a>
+<a class="dropdown-item px-3 py-1" href="/logout">Log out</a>
+</div></details>"#,
                 w.username
             );
         }
@@ -846,7 +852,9 @@ fn shell(title: &str, who: Option<&Identity>, body: &str) -> String {
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>{title} — auth example</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-<style>{CSS}</style></head>
+<style>{CSS}</style>
+<style>details.user-menu{{position:relative}}details.user-menu>summary{{cursor:pointer;list-style:none}}
+details.user-menu>summary::-webkit-details-marker{{display:none}}details.user-menu>div{{min-width:9rem;z-index:1050}}</style></head>
 <body class="bg-body-tertiary d-flex flex-column min-vh-100">
 <nav class="navbar bg-body border-bottom px-3 gap-3">
 <div class="d-flex align-items-center gap-3"><a class="navbar-brand" href="/">auth example</a>{left}</div>

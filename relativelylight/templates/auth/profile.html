@@ -3,8 +3,7 @@
     screen. The library's cards first, then the passkey and API-key cards when those are on, then the
     app's own (`Auth::profile_extra`, drawn with `auth::profile_card` so they match). One message, at
     the top, for whatever was just done. -#}
-<h1 class="h4 mb-1">Profile</h1>
-<p class="text-muted small mb-3">Signed in as <strong>{{ username }}</strong>.</p>
+<h1 class="h4 mb-3">Profile</h1>
 {%- if let Some(n) = notices.policy %}<div class="alert alert-warning" role="alert">{{ n }}</div>{% endif %}
 {%- if let Some(n) = notices.password %}<div class="alert alert-warning" role="alert">{{ n }}</div>{% endif %}
 {{ m::alert(error, success) }}
