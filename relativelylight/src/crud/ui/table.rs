@@ -906,11 +906,17 @@ impl<'a> Table<'a> {
         out
     }
 
-    /// The columns this table puts on screen: [`columns`](Table::columns) if set, else all of them.
-    /// A name that isn't a column is an error rather than a silently missing one.
+    /// The columns this table puts on screen: [`columns`](Table::columns) if set, else every one a
+    /// read returns — not a write-only one (a password), whose cell could only ever be blank, the
+    /// same rule as the View dialog and CSV export. A name that isn't a column is an error rather
+    /// than a silently missing one.
     fn shown_columns(&self, cols: &[Column]) -> Result<Vec<Column>> {
         if self.columns.is_empty() {
-            return Ok(cols.to_vec());
+            return Ok(cols
+                .iter()
+                .filter(|c| !matches!(c, Column::Field { write_only: true, .. }))
+                .cloned()
+                .collect());
         }
         self.columns
             .iter()

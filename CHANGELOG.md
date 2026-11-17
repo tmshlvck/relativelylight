@@ -44,7 +44,8 @@ is easy to miss in a diff.
   creates the tables but never alters one. **Upgrade:** a migration step applying
   `auth::upgrade::{table_create_statements, table_alter_statements, index_create_statements}`
   ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#3-new-auth-columns-and-tables)). In an accounts panel,
-  hide `passkey_handle` and show `must_change_password` read-only. Each session now records its
+  hide `passkey_handle` and show `must_change_password` read-only, which `auth::user::meta_model`
+  does (below). Each session now records its
   method, and `auth.prune()` deletes expired challenges.
 - **A password written for someone asks them to choose their own.** Any write that sets
   `password_hash` without setting `must_change_password` flags the account: an accounts-panel edit,
@@ -52,6 +53,11 @@ is easy to miss in a diff.
   notice. `create_user`, `set_password`, `make_admin` and `reset_admin_access` don't flag. **Upgrade:**
   if an app sets passwords for users itself and doesn't want this, set `must_change_password` to
   `false` in the same write ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#7-behaviour-you-will-notice)).
+- **`crud::Column::Field` has a new field, `create_only`.** Only an app with its own `Accessor`, or
+  code building or exhaustively matching a `Column::Field`, notices. **Upgrade:** add
+  `create_only: false` ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#9-crudcolumnfield-gains-create_only)).
+- **A table no longer lists write-only columns.** A password's cell was always blank; the column now
+  leaves the list as it already left the View dialog and CSV. The form still takes it.
 
 - **`Auth`'s page callbacks get the request.** `login_shell`, `profile_shell` and `csrf_rejection`
   now receive the request's `http::request::Parts` (URI, method, headers, extensions), so the pages
@@ -67,6 +73,22 @@ is easy to miss in a diff.
 
 ### Added
 
+- **The accounts panel from the library** ([AUTH.md §5j](docs/AUTH.md#the-accounts-panel)).
+  `auth::user::meta_model(&auth)`, `auth::group::meta_model()` and
+  `auth::lockout::{username_meta_model, ip_meta_model}()` configure `auth`'s tables for a CRUD panel,
+  so an app no longer repeats the rules: secrets hidden, the hook-maintained columns
+  (`must_change_password`, `password_changed_at`, the timestamps) shown read-only, the username
+  checked, groups as an N:M relation. The panel sets an account's **first** password only, screened
+  by the policy `Auth` was given; every later change is the manager's reset at `/profile/{id}`,
+  which also signs the account out. `auth::user::credentials_link` links an account's id there.
+  **Upgrade (recommended):** replace a hand-configured panel
+  ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#8-the-accounts-panel-comes-from-auths-meta_models)).
+- **`MetaField::create_only`**: a column a create writes and an update never does. The edit form
+  leaves it out, and an update through the engine that carries it is refused with `422`
+  ([CRUD.md](docs/CRUD.md#metafield)).
+- **The examples follow one way to do each thing** ([DESIGN.md principle 9](docs/DESIGN.md#principles)):
+  their accounts panels are the library's models, their "Back to …" and "Your profile" links that
+  repeated the navbar are gone, and `examples/auth`'s user list shows the password's state.
 - **Passkeys** (feature `passkeys`, [AUTH.md §5l](docs/AUTH.md#5l-passkeys-feature-passkeys)), with
   `Auth::passkeys(Passkeys::new(rp_id, origin))`. It adds:
   - "Sign in with a passkey" on `/login`, without a username, followed by the TOTP step when the
@@ -85,7 +107,8 @@ is easy to miss in a diff.
   - a failed passkey sign-in counts against the address, a failed second factor against the
     account;
   - a manager removes someone's passkeys at `POST /profile/{id}/passkeys/remove`;
-  - `passkey::meta_model()` adds the passkeys table to an accounts panel;
+  - `passkey::meta_model()` adds the passkeys table to an accounts panel, read-only (an inventory:
+    removing is the manager's, re-authenticated);
   - adding and removing a passkey are audited, without the credential.
 
   The pages link the passkey script by a URL versioned with its content
@@ -193,6 +216,14 @@ is easy to miss in a diff.
   `examples/adminpanel`: the same, for the admin only, with `user` excepted.
 - `examples/crud`: a date range on `/event`, a views range on `/post`, initial values on
   `/post/new`, and `/queue`, a post table pinned to the draft and review statuses.
+
+### Fixed
+
+- **An accounts panel can create an account without a password**, as its help text always said
+  (blank = none, for an SSO or passkey-only account). A blank write-only field is never sent, and
+  `auth_user.password_hash` is NOT NULL, so the create was refused as "required". The `auth_user`
+  row hook now stores no password (an empty hash) when an insert leaves it out, and nothing is
+  flagged or stamped.
 
 ## [0.4.3] — 2026-11-05
 

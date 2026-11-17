@@ -116,6 +116,10 @@ pub(crate) async fn fields(
 ) -> Result<Vec<FieldV>> {
     let mut out = Vec::new();
     for col in cols.iter().filter(|c| writable(c) && rendered(super::render::name_of(c))) {
+        // Set when the row is created; an edit has no say in it (`MetaField::create_only`).
+        if row.is_some() && matches!(col, Column::Field { create_only: true, .. }) {
+            continue;
+        }
         let name = super::render::name_of(col).to_string();
         let (widget, create) = match presets.set_of(&name) {
             // A pinned set is a choice among rows the view already names; a new row isn't one.

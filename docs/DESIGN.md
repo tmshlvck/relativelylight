@@ -38,11 +38,17 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 6. **State and audit are different things.** A table says what something *is*; `observe` says what
    someone *did*.
 7. **Server-rendered, no JavaScript framework, the URL is the state.** Page, sort, filters, search and
-   the open dialog live in the query string. The one script is the relation picker's, and without it
-   the field still saves.
+   the open dialog live in the query string. The scripts are the relation picker's, without which the
+   field still saves, and the passkey ceremony's, a browser API no form can reach.
 8. **Policy belongs to the app; mechanism belongs here.** Retention, ownership, registration,
    thumbnails, request logging: the crate can't know, and a wrong default is worse than none. The
    crate spawns no tasks and writes nothing to stdout or stderr.
+9. **One way to do each thing, and an obvious one.** The API, the pages and the design stay
+   orthogonal: each task has one place where it is done, and that place is where a reader would look
+   for it. A second way, even a convenience, must earn its place by removing something harder: a
+   link that saves a long walk through navigation, not one that repeats the navbar. Two ways drift
+   apart: the panel's password field once skipped the sign-out the manager's reset does. When a
+   second way turns up, remove one, or make one call the other.
 
 ## crud and crud::ui
 
@@ -115,6 +121,18 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
     the IdP's callback.
   - **A manager can always** reset a password, disable TOTP and remove passkeys, each
     re-authenticated, each independent of the others.
+- **The accounts panel holds account data; the credentials page holds credentials** (principle 9).
+  - **The panel** (the CRUD admin over `auth_*`, each table configured by the library's
+    `meta_model()`) edits who an account is: username, active, SSO provider, groups. It sets the
+    **first** password when it creates an account (`MetaField::create_only`) and shows the
+    password's state (set when, change required) read-only. It lists API keys (disable, re-date,
+    delete) and passkeys (read-only), and deleting a lockout row is the unlock.
+  - **The credentials page** (`/profile/{id}`, the manager's) resets a password, disables TOTP and
+    removes passkeys, each under re-authentication, and signs the account out where that applies. The
+    panel's id column links to it; nothing else on the panel changes a credential.
+  - **Why:** a password set in the panel used to skip the sign-out of the manager's reset; a passkey
+    deleted in the panel skipped the re-authentication. One place per task keeps the rules in one
+    place too.
   - **There is no self-service recovery** for a lost password or passkey; that is the
     administrator's job. A later password-recovery flow would also reset passkeys, but not TOTP.
   - **A passkey is a local factor for re-authentication,** so an account without a password must

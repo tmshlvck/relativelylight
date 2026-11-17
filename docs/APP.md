@@ -50,6 +50,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gate = Arc::new(UserReadGroupWrite::new(&auth, ["admin"]));
     crud.register(MetaModel::new(post::Entity), gate.clone());   // configure fields here as you like
     crud.register(MetaModel::new(tag::Entity), gate.clone());
+    // auth's own tables, configured by the library; admins only, reads included (AUTH.md §5j)
+    let admins = Arc::new(GroupReadWrite::new(&auth, ["admin"]));
+    crud.register(auth::user::meta_model(&auth), admins.clone());
+    crud.register(auth::group::meta_model(), admins);
     crud.csrf(auth.csrf());                              // cookie-authenticated writes → one token
     let engine = Arc::new(crud.into_engine());
 
@@ -254,8 +258,11 @@ fn panel<'a>(app: &'a App, who: &Identity) -> Admin<'a> {
         }))
         .entity("tag");
     if app.auth.can_manage_others(who) {                 // admins also get the accounts section
+        let link = auth::user::credentials_link(app.auth.profile_path()); // id → /profile/{id}
         admin = admin.separator().group("Accounts")
-            .entity_with("auth_user", |t| t.title("Login accounts"))
+            .entity_with("auth_user", |t| {
+                t.title("Login accounts").format_cell("id", link.clone()).format_view("id", link)
+            })
             .entity_with("auth_group", |t| t.title("Groups"));
     }
     admin
@@ -522,10 +529,10 @@ Before a deployment goes out:
 - [ ] `secure_cookies(true)` in production; the app is behind TLS.
 - [ ] Every model is registered with a real gate — `Open` is public, including writes.
 - [ ] `auth.prune()` runs on a schedule (the crate spawns nothing).
-- [ ] Secrets are `write_only` / `hidden`; `auth::recovery::entity` is **not** registered in an admin
-      panel, and `totp_secret` / `totp_pending` / `totp_last_step` are hidden.
-- [ ] A password policy is configured on **both** surfaces — `Auth::password_policy` *and* the
-      `auth_user` form's validator ([AUTH.md §5g](AUTH.md)).
+- [ ] Secrets are `write_only` / `hidden`; `auth`'s tables are registered only through their
+      `meta_model()`, and `auth::recovery::entity` not at all ([AUTH.md §5j](AUTH.md)).
+- [ ] A password policy is configured on `Auth` (the accounts panel reads it from there), and any
+      form of the app's own that sets a password applies it too ([AUTH.md §5g](AUTH.md)).
 - [ ] A `WriteObserver` is registered if you need an audit trail, and its rows are retained somewhere
       you can read them.
 - [ ] Your shell loads Bootstrap 5's stylesheet **and** `crud::ui::CSS` (and `crud::ui::JS`, with a

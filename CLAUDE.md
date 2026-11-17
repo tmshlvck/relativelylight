@@ -14,6 +14,11 @@ Start with [README.md](README.md) (features, quick start, examples) and [docs/AP
 [docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md);
 the design is [docs/DESIGN.md](docs/DESIGN.md) and open work [docs/TODO.md](docs/TODO.md).
 
+**One way to do each thing** ([DESIGN.md principle 9](docs/DESIGN.md#principles)): APIs, pages and
+the design stay orthogonal. Before adding a second way (a shortcut, a convenience link, a second
+helper), find the first and extend it; a convenience must earn its place by removing harder
+navigation, not by repeating it.
+
 ## Things that are easy to get wrong
 
 - **`middleware::resolve_real_ip` is mandatory and outermost** (the last `.layer`). The login routes
@@ -29,11 +34,13 @@ the design is [docs/DESIGN.md](docs/DESIGN.md) and open work [docs/TODO.md](docs
   ([CRUD.md → A column's way in and out](docs/CRUD.md#a-columns-way-in-and-out)).
 - **The form and CSV read typed text through one function** (`crud::text`); the engine then applies
   `blank_is_null`, `required`, `options`, validators and `on_write` on every surface.
-- **The password policy covers typed input only.** Wire the same policy into an admin form's password
-  field too, or that form is the way around it (`examples/adminpanel`).
-- **Never register `auth_totp_recovery` in an admin panel** (every row is a credential hash), and hide
-  `auth_user.totp_last_step` and `auth_user.passkey_handle`. Register `auth_api_key` only through `auth::api_key::meta_model()`, which
-  hides the hash and pins the owner (moving a key to another account hands it that account's rights).
+- **The password policy covers typed input only** (not the seeders and break-glass helpers).
+  `auth::user::meta_model(&auth)` carries `Auth`'s policy into the panel's password field; an app's
+  own password form must call it too, or that form is the way around it.
+- **Register `auth_*` tables only through their `meta_model()`** (`user`, `group`, `api_key`,
+  `passkey`, `lockout::{username,ip}_meta_model`): they hide the secrets, pin owners and keep the
+  hook-maintained columns read-only. Never register `auth_totp_recovery` (every row is a credential
+  hash). The panel holds account data; changing someone's credentials is `/profile/{id}`'s alone.
 - **An API key never opens the UI.** `Auth::identify` reads only the session cookie; keys are checked
   only by `Auth::identify_key`, called by the machine endpoints that take one. Keep it that way: a gate
   or page that accepted a key would let a credential that skips 2FA into the UI

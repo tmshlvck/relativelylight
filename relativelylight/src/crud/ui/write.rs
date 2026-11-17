@@ -72,6 +72,17 @@ pub(crate) async fn apply(
         Op::Create | Op::Update => {
             let id = posted.one("_id").unwrap_or("").to_string();
             let mut write_body = decode::to_write_body(cols, s.renders, &posted, &tz);
+            if matches!(op, Op::Update) {
+                // The edit form doesn't render a create-only field; whatever was posted for one is
+                // dropped rather than refused, so a stale or hand-made form still saves the rest.
+                if let Some(body) = write_body.as_object_mut() {
+                    for c in cols {
+                        if let Column::Field { name, create_only: true, .. } = c {
+                            body.remove(name);
+                        }
+                    }
+                }
+            }
             s.pins.apply(&mut write_body, cols, &tz);
             if matches!(op, Op::Update) {
                 in_view(s, &id).await?;

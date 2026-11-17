@@ -34,7 +34,7 @@
 //! **The sign-in policy** (docs/AUTH.md §5m): `MIN_LEVEL=2` makes a password alone too little — the
 //! login lands on /profile, which asks for TOTP or a passkey, and adding one lets you in.
 //! `PASSWORD_MAX_AGE_DAYS=30` makes an older password a change due. A password set for someone in the
-//! accounts panel asks them to choose their own.
+//! accounts panel (its first one) or on their credentials page asks them to choose their own.
 //!
 //! **Passkeys** are on: add one on `/profile`, remove your password there if you like, and sign in with
 //! "Sign in with a passkey". Browse to **http://localhost:3000**, not 127.0.0.1: a passkey belongs to a
@@ -57,11 +57,10 @@ use relativelylight::middleware::RealIp;
 use relativelylight::auth::sso::{Sso, SsoButton, SsoProvider};
 use relativelylight::auth::{self, Auth, GroupReadWrite, Identity, Level};
 use relativelylight::crud::engine::Engine;
-use relativelylight::crud::seaorm::{Crud, MetaModel};
+use relativelylight::crud::seaorm::Crud;
 use relativelylight::crud::ui::{Admin, Outcome, ViewState, CSS};
-use relativelylight::validate;
 use sea_orm::{
-    ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait, IdenStatic, QueryFilter,
+    ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait, QueryFilter,
 };
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -453,8 +452,7 @@ async fn rotate_webhook_secret(
                 Some(&who),
                 &format!(
                     r#"<div class="alert alert-danger">{msg}</div>
-<p class="small text-muted">Nothing was changed.</p>
-<a class="btn btn-outline-secondary btn-sm" href="/profile">Back to your profile</a>"#
+<p class="small text-muted">Nothing was changed.</p>"#
                 ),
             )),
         )
@@ -467,8 +465,7 @@ async fn rotate_webhook_secret(
         Some(&who),
         &format!(
             r#"<div class="alert alert-success">Confirmed — a new webhook secret would now be issued for
-<b>{}</b>, and the old one revoked.</div>
-<a class="btn btn-outline-secondary btn-sm" href="/profile">Back to your profile</a>"#,
+<b>{}</b>, and the old one revoked.</div>"#,
             who.username
         ),
     ))
@@ -484,113 +481,22 @@ async fn rotate_webhook_secret(
 
 /// Register `auth`'s tables and hand back the engine the panel renders from.
 ///
+/// Each table comes configured from the library (`meta_model`): what is hidden, what is read-only,
+/// the password policy on the first password, the N:M membership. The panel adds nothing of its own,
+/// which is the point — one set of rules for every app's accounts screen (docs/AUTH.md §5j).
+///
 /// The gate is `GroupReadWrite`: **reads included**, admin group only. An accounts list is not a
 /// thing a logged-in stranger should be able to enumerate, and `render_for` is where that is
 /// enforced — a non-admin gets 403, not a page with the buttons greyed out.
 fn accounts_engine(db: DatabaseConnection, auth: &Auth) -> Arc<Engine> {
-    use auth::lockout::{ip_entity::Column as IpCol, username_entity::Column as NameCol};
-    use auth::{group::Column as GroupCol, user::Column as UserCol};
-    let mut user = MetaModel::new(auth::user::Entity);
-    let mut group = MetaModel::new(auth::group::Entity);
-
-    // `.password()` makes `password_hash` a write-only, argon2-hashed "Password" field: plaintext in
-    // the form, a hash in the column, never returned in a read. Blank on create = an account with no
-    // password (login by password disabled — how you pre-create an SSO-only user); blank on edit =
-    // keep the current one, which is what `validate::optional` below preserves.
-    user.field(UserCol::PasswordHash.as_str()).password();
-    user.field(UserCol::PasswordHash.as_str()).description = Some(
-        "Blank on create = no password (SSO-only account). Blank on edit = keep the current one. \
-         At least 12 characters, and not a common one."
-            .into(),
-    );
-    // The *same* policy `Auth` applies to /profile, applied to this form too. Wire only one of the
-    // two and the other becomes the way around it. (`examples/adminpanel` drives both from a single
-    // configurable level; this one takes the recommended default.)
-    user.field(UserCol::PasswordHash.as_str())
-        .validate_str(validate::optional(Box::new(validate::password(
-            validate::PasswordPolicy::recommended(),
-        ))));
-    // Secrets and machinery: the 2FA columns are managed from /profile, never from a form. Note
-    // `totp_last_step` is not a secret but is still hidden — it is the replay guard, and an operator
-    // editing it either lets a code be replayed or locks the user out of their own authenticator.
-    // `passkey_handle` is the WebAuthn user handle the authenticators hold; an edited one orphans
-    // every passkey on the account.
-    for f in [
-        UserCol::TotpSecret.as_str(),
-        UserCol::TotpPending.as_str(),
-        UserCol::TotpLastStep.as_str(),
-        UserCol::PasskeyHandle.as_str(),
-    ] {
-        user.field(f).hidden = true;
-    }
-    // "Password change required" (docs/AUTH.md §5m): the row hook flags an account whenever a password
-    // is written for it — this panel's password field included — so the owner is asked for their own.
-    // Read-only here, or the form's unticked checkbox would post an explicit `false` with every save.
-    user.field(UserCol::MustChangePassword.as_str()).label = Some("Must change password".into());
-    user.field(UserCol::MustChangePassword.as_str()).read_only = true;
-    user.field(UserCol::PasswordChangedAt.as_str()).label = Some("Password set".into());
-    // Lifecycle stamps are the library's to write: show them, formatted in the caller's zone.
-    for f in [
-        UserCol::CreatedAt.as_str(),
-        UserCol::UpdatedAt.as_str(),
-        UserCol::LastLoginAt.as_str(),
-        UserCol::PasswordChangedAt.as_str(),
-    ] {
-        user.field(f).read_only = true;
-        user.field(f).datetime();
-    }
-    user.field(UserCol::IsActive.as_str()).default = Some(serde_json::json!(true));
-    for f in [GroupCol::CreatedAt.as_str(), GroupCol::UpdatedAt.as_str()] {
-        group.field(f).read_only = true;
-        group.field(f).datetime();
-    }
-    // Labels for the relation pickers, and the N:M membership itself. **This is the line that makes
-    // the panel able to create a working account**: the gate checks group membership, so a screen
-    // that can create a user but not put them in a group can't finish the job. `auth_user_group` is
-    // a junction table and is never registered as a model of its own — declaring the relation is how
-    // it is reached.
-    user.label_column(UserCol::Username.as_str());
-    group.label_column(GroupCol::Name.as_str());
-    user.relate(&group);
-    group.relate(&user);
-    user.relation("auth_group").label = Some("Groups".into());
-    group.relation("auth_user").label = Some("Members".into());
-    user.field(UserCol::Username.as_str()).label = Some("Username".into());
-    user.field(UserCol::IsActive.as_str()).label = Some("Active".into());
-    user.field(UserCol::IsActive.as_str()).description =
-        Some("Unticked = refused at the door, password or SSO alike, session or not.".into());
-    user.field(UserCol::LastLoginAt.as_str()).label = Some("Last login".into());
-    group.field(GroupCol::Name.as_str()).label = Some("Group".into());
-
-    // The lockout counters. Everything about them is the library's to maintain, so they are
-    // read-only — and the unlock is *deleting the row*, which needs no button of its own: it is an
-    // ordinary gated, CSRF-checked, audited DELETE.
-    let mut locked_names = MetaModel::new(auth::lockout::username_entity::Entity);
-    let mut locked_ips = MetaModel::new(auth::lockout::ip_entity::Entity);
-    for f in [
-        &mut locked_names.field(NameCol::Failures.as_str()),
-        &mut locked_ips.field(IpCol::Failures.as_str()),
-    ] {
-        f.read_only = true;
-    }
-    for f in [
-        &mut locked_names.field(NameCol::LastFailureAt.as_str()),
-        &mut locked_ips.field(IpCol::LastFailureAt.as_str()),
-    ] {
-        f.read_only = true;
-        f.datetime();
-    }
-
     let gate = Arc::new(GroupReadWrite::new(auth, [ADMIN_GROUP]));
     let mut crud = Crud::new(db);
-    crud.register(user, gate.clone());
-    crud.register(group, gate.clone());
-    // Everyone's API keys: the hash hidden, the owner pinned, disable/re-date/delete allowed.
+    crud.register(auth::user::meta_model(auth), gate.clone());
+    crud.register(auth::group::meta_model(), gate.clone());
     crud.register(auth::api_key::meta_model(), gate.clone());
-    // Everyone's passkeys: the credential hidden, the owner pinned; relabel or delete.
     crud.register(auth::passkey::meta_model(), gate.clone());
-    crud.register(locked_names, gate.clone());
-    crud.register(locked_ips, gate);
+    crud.register(auth::lockout::username_meta_model(), gate.clone());
+    crud.register(auth::lockout::ip_meta_model(), gate);
     // These writes are cookie-authenticated, so they must carry the double-submit token — the same
     // handle `auth`'s own forms and `csrf::enforce` use, so one cookie serves the whole app.
     crud.csrf(auth.csrf());
@@ -598,41 +504,31 @@ fn accounts_engine(db: DatabaseConnection, auth: &Auth) -> Arc<Engine> {
 }
 
 /// The panel's shape. Built per request (it borrows the engine), which is also what lets it be
-/// rendered *for a caller*.
-fn accounts(engine: &Engine) -> Admin<'_> {
+/// rendered *for a caller*. Each table offers only what is done here and nowhere else.
+fn accounts<'a>(engine: &'a Engine, auth: &Auth) -> Admin<'a> {
+    // The account's id opens its credentials page (`/profile/{id}`): resetting the password, turning
+    // 2FA off and removing passkeys happen there, under re-authentication, and nowhere else.
+    let credentials = auth::user::credentials_link(auth.profile_path());
     Admin::new(engine)
         .title("Accounts")
         .base("/admin")
         .group("People")
-        // `columns` trims the *table*; the dialog still edits every writable column — which is how
-        // the write-only password stays out of a list where its cell could only ever be blank.
         .entity_with("auth_user", |t| {
-            t.title("Users").columns([
-                auth::user::Column::Id.as_str(),
-                auth::user::Column::Username.as_str(),
-                auth::user::Column::IsActive.as_str(),
-                "auth_group", // a relation: no column enum, so the name stays a string
-                auth::user::Column::LastLoginAt.as_str(),
-            ])
+            t.title("Users")
+                .format_cell("id", credentials.clone())
+                .format_view("id", credentials)
         })
-        .entity_with("auth_group", |t| t.title("Groups").columns([
-                auth::group::Column::Id.as_str(),
-                auth::group::Column::Name.as_str(),
-                "auth_user",
-            ]))
+        .entity_with("auth_group", |t| t.title("Groups"))
         // Keys are minted on /profile, where the raw value can be shown once; one made here would
-        // have no value anyone could see, so the panel offers no "+ New".
+        // have no value anyone could see. Disabling, re-dating and deleting someone's key is here.
         .entity_with("auth_api_key", |t| t.title("API keys").create(false))
-        // A passkey is made by its authenticator, on /profile; there is nothing to create here.
-        .entity_with("auth_passkey", |t| t.title("Passkeys").create(false))
+        // The inventory: removing a passkey is the credentials page's.
+        .entity_with("auth_passkey", |t| t.title("Passkeys").read_only(true))
         .separator()
         .group("Locked out")
-        .entity_with("auth_username_lockout", |t| t.title("By account"))
-        .entity_with("auth_ip_lockout", |t| t.title("By address"))
-        .separator()
-        .group("Elsewhere")
-        .link("Dashboard", "/")
-        .link("Your profile", "/profile")
+        // Deleting a row is the unlock; the counters are the library's.
+        .entity_with("auth_username_lockout", |t| t.title("By account").create(false).edit(false))
+        .entity_with("auth_ip_lockout", |t| t.title("By address").create(false).edit(false))
 }
 
 /// `GET /admin/{entity}` — parse the URL, render the fragment, wrap it in our shell. The path names
@@ -648,7 +544,7 @@ async fn accounts_show(
     };
     let mut state = ViewState::from_uri(&uri);
     state.entity = Some(entity);
-    match accounts(&app.engine).render_for(&headers, &state).await {
+    match accounts(&app.engine, &app.auth).render_for(&headers, &state).await {
         Ok(body) => Html(wide_page("Accounts", &who, &body)).into_response(),
         // A signed-in non-admin lands here: the gate refuses the *read*, so there is no panel — a page
         // that says so, in our shell, rather than the library's bare status.
@@ -661,7 +557,7 @@ async fn accounts_show(
 fn admins_only(who: &Identity) -> Response {
     let body = format!(
         r#"<div class="alert alert-warning">The accounts panel is for the <b>{ADMIN_GROUP}</b> group, and
-<b>{}</b> isn't in it.</div><a class="btn btn-outline-secondary btn-sm" href="/">Back to the dashboard</a>"#,
+<b>{}</b> isn't in it.</div>"#,
         who.username
     );
     (StatusCode::FORBIDDEN, Html(page("Admins only", Some(who), &body))).into_response()
@@ -682,7 +578,7 @@ async fn accounts_save(
     };
     let mut state = ViewState::from_uri(&uri);
     state.entity = Some(entity);
-    let panel = accounts(&app.engine);
+    let panel = accounts(&app.engine, &app.auth);
     match panel.submit(&headers, ip, &body, &state).await {
         Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
         Ok(Outcome::Invalid(state)) => match panel.render_for(&headers, &state).await {

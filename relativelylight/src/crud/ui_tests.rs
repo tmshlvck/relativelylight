@@ -41,6 +41,7 @@ fn field(name: &str, required: bool, read_only: bool, default: Option<Value>) ->
         logical_type: LogicalType::Text,
         read_only,
         write_only: false,
+        create_only: false,
         nullable: !required,
         required,
         options: Vec::new(),
@@ -59,6 +60,7 @@ fn typed(name: &str, lt: LogicalType, nullable: bool) -> Column {
         logical_type: lt,
         read_only: false,
         write_only: false,
+        create_only: false,
         nullable,
         required: false,
         options: Vec::new(),
@@ -77,6 +79,7 @@ fn with_display(name: &str, lt: LogicalType, options: Vec<String>, d: Option<Fie
         logical_type: lt,
         read_only: false,
         write_only: false,
+        create_only: false,
         nullable: true,
         required: false,
         options,
@@ -226,6 +229,7 @@ fn post_columns() -> Vec<Column> {
             logical_type: LogicalType::Enum,
             read_only: false,
             write_only: false,
+            create_only: false,
             nullable: true,
             required: false,
             options: vec!["draft".into(), "published".into()],
@@ -241,6 +245,7 @@ fn post_columns() -> Vec<Column> {
             logical_type: LogicalType::Text,
             read_only: false,
             write_only: true,
+            create_only: false,
             nullable: true,
             required: false,
             options: Vec::new(),
@@ -250,6 +255,22 @@ fn post_columns() -> Vec<Column> {
             default: None,
             display: None,
             sortable: false,
+        },
+        Column::Field {
+            name: "pin".into(),
+            logical_type: LogicalType::Text,
+            read_only: false,
+            write_only: false,
+            create_only: true, // set by a create, never by an edit
+            nullable: true,
+            required: false,
+            options: Vec::new(),
+            option_labels: Vec::new(),
+            label: None,
+            description: None,
+            default: None,
+            display: None,
+            sortable: true,
         },
         Column::Relation {
             name: "author".into(),
@@ -1029,6 +1050,53 @@ async fn a_blank_write_only_field_keeps_the_stored_value() {
     assert!(!blank.as_object().unwrap().contains_key("secret"), "blank means keep: {blank}");
     let typed = decoded("_op=update&_id=7&title=t&slug=s&secret=hunter2").await;
     assert_eq!(typed["secret"], json!("hunter2"));
+}
+
+#[tokio::test]
+async fn a_write_only_column_has_no_place_in_the_list() {
+    let (e, _) = engine();
+    let html = render(&Table::new(&e, "post"), &list()).await;
+    assert!(html.contains("sort=title"), "the positive control: the other headers are there");
+    assert!(html.contains("\">body"), "and an unsortable one's label: {html}");
+    assert!(!html.contains("\">secret"), "{html}");
+    let creating = render(&Table::new(&e, "post"), &ViewState::from_query("new=1")).await;
+    assert!(creating.contains(r#"name="secret""#), "while the form still takes it");
+}
+
+#[tokio::test]
+async fn a_create_only_field_is_in_the_new_form_and_not_in_the_edit_form() {
+    let (e, _) = engine();
+    let table = Table::new(&e, "post");
+    let creating = render(&table, &ViewState::from_query("new=1")).await;
+    assert!(
+        creating.contains(r#"name="pin""#),
+        "a create sets it: {creating}"
+    );
+    let editing = render(&table, &ViewState::from_query("edit=7")).await;
+    assert!(
+        editing.contains(r#"name="title""#),
+        "the edit form renders the rest"
+    );
+    assert!(
+        !editing.contains(r#"name="pin""#),
+        "an edit has no say in it: {editing}"
+    );
+}
+
+#[tokio::test]
+async fn a_create_only_field_posted_with_an_update_never_reaches_the_backend() {
+    let created = decoded("_op=create&title=t&slug=s&pin=1234").await;
+    assert_eq!(
+        created["pin"],
+        json!("1234"),
+        "the positive control: a create writes it"
+    );
+    let updated = decoded("_op=update&_id=7&title=t&slug=s&pin=1234").await;
+    assert!(
+        !updated.as_object().unwrap().contains_key("pin"),
+        "dropped from an update: {updated}"
+    );
+    assert_eq!(updated["title"], json!("t"), "and the rest is saved");
 }
 
 #[tokio::test]
@@ -2279,6 +2347,7 @@ async fn a_select_offers_a_blank_only_where_the_column_takes_one() {
             logical_type: LogicalType::Enum,
             read_only: false,
             write_only: false,
+            create_only: false,
             nullable: false,
             required: true,
             options: vec!["a".into(), "b".into()],
@@ -2294,6 +2363,7 @@ async fn a_select_offers_a_blank_only_where_the_column_takes_one() {
             logical_type: LogicalType::Enum,
             read_only: false,
             write_only: false,
+            create_only: false,
             nullable: true,
             required: false,
             options: vec!["a".into()],
@@ -2322,6 +2392,7 @@ async fn a_required_field_is_marked_and_help_text_is_shown() {
         logical_type: LogicalType::Text,
         read_only: false,
         write_only: false,
+        create_only: false,
         nullable: false,
         required: true,
         options: Vec::new(),

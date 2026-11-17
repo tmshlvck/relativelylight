@@ -162,6 +162,112 @@ impl ActiveModelBehavior for ActiveModel {
         if insert && !self.must_change_password.is_set() {
             self.must_change_password = Set(false);
         }
+        // An account created without a password has none (an empty hash, which nothing verifies
+        // against): an SSO or passkey-only account. Not a password written, so nothing is stamped.
+        if insert && !self.password_hash.is_set() {
+            self.password_hash = Set(String::new());
+        }
         Ok(self)
+    }
+}
+
+/// The table for an accounts panel (feature `crud`), configured once here so every panel gets the
+/// same rules (docs/AUTH.md §5j):
+///
+/// - **`password_hash`** is the write-only, argon2-hashed "Password" field, screened by `auth`'s own
+///   password policy (`Auth::password_policy` / `password_check`), and **create-only**: it sets an
+///   account's first password (blank = none, for an SSO-only account). Every later change is the
+///   manager's reset at `/profile/{id}`, which also signs the account out everywhere.
+/// - The TOTP columns and `passkey_handle` are hidden: credentials, the replay guard, and the handle
+///   every passkey hangs on.
+/// - `must_change_password`, `password_changed_at` and the timestamps are shown, read-only: the row
+///   hook maintains them, and an editable checkbox would post `false` and keep the flag from ever
+///   being set.
+/// - `username` is checked with [`valid_username`](super::valid_username); groups are edited through
+///   the N:M relation `auth_group` (`auth_user_group` is never a model of its own).
+///
+/// Register it behind an admin gate, with [`group::meta_model`](super::group::meta_model) for the
+/// relation's other side:
+///
+/// ```ignore
+/// let gate = Arc::new(GroupReadWrite::new(&auth, ["admin"]));
+/// crud.register(auth::user::meta_model(&auth), gate.clone());
+/// crud.register(auth::group::meta_model(), gate.clone());
+/// ```
+#[cfg(feature = "crud")]
+pub fn meta_model(auth: &super::Auth) -> crate::crud::seaorm::MetaModel<Entity> {
+    use sea_orm::IdenStatic;
+    use Column as C;
+    let mut m = crate::crud::seaorm::MetaModel::new(Entity);
+    m.label_column(C::Username.as_str());
+    let f = m.field(C::Username.as_str());
+    f.label = Some("Username".into());
+    f.validate_str(super::valid_username);
+
+    let check = auth.inner.password_check.clone();
+    let f = m.field(C::PasswordHash.as_str());
+    f.password();
+    f.create_only = true;
+    // Optional: the row hook stores "no password" when a create leaves it out.
+    f.required = false;
+    f.description = Some(
+        "The first password, set once here; later ones from the account's credentials page. \
+         Blank = no password (sign-in through SSO or a passkey only)."
+            .into(),
+    );
+    if let Some(check) = check {
+        // The plaintext, before `password()`'s hook hashes it: the same policy `/profile` applies.
+        // The username isn't in a field validator's reach, so that one rule is `/profile`'s alone.
+        f.validate_str(move |pw| if pw.is_empty() { Ok(()) } else { check(pw, "") });
+    }
+
+    for c in [C::TotpSecret, C::TotpPending, C::TotpLastStep, C::PasskeyHandle] {
+        m.field(c.as_str()).hidden = true;
+    }
+    let f = m.field(C::IsActive.as_str());
+    f.label = Some("Active".into());
+    f.default = Some(serde_json::json!(true));
+    f.description =
+        Some("Unticked = refused at the door, password or SSO alike, session or not.".into());
+    let f = m.field(C::SsoProvider.as_str());
+    f.label = Some("SSO provider".into());
+    f.description =
+        Some("The provider key this account signs in through; blank = a local account.".into());
+    for (c, label) in [
+        (C::MustChangePassword, "Must change password"),
+        (C::PasswordChangedAt, "Password set"),
+        (C::LastLoginAt, "Last login"),
+        (C::CreatedAt, "Created"),
+        (C::UpdatedAt, "Updated"),
+    ] {
+        let f = m.field(c.as_str());
+        f.label = Some(label.into());
+        f.read_only = true;
+        if !matches!(c, C::MustChangePassword) {
+            f.datetime();
+        }
+    }
+    // The relation needs only the other side's identity, not its configuration.
+    m.relate(&crate::crud::seaorm::MetaModel::new(super::group::Entity));
+    m.relation("auth_group").label = Some("Groups".into());
+    m
+}
+
+/// An account's id as a link to its credentials page, `{profile_path}/{id}` — where a manager resets
+/// the password, turns 2FA off and removes passkeys. For an accounts panel's id column, in the cells
+/// and the View dialog (feature `ui`):
+///
+/// ```ignore
+/// let link = auth::user::credentials_link(auth.profile_path());
+/// t.format_cell("id", link.clone()).format_view("id", link)
+/// ```
+#[cfg(feature = "ui")]
+pub fn credentials_link(
+    profile_path: &str,
+) -> impl Fn(&serde_json::Value, &serde_json::Value) -> String + Clone + Send + Sync + 'static {
+    let base = crate::crud::ui::esc_str(profile_path.trim_end_matches('/'));
+    move |v, _row| {
+        let id = crate::crud::ui::esc(v);
+        format!(r#"<a href="{base}/{id}" title="Password, two-factor and passkeys">{id}</a>"#)
     }
 }

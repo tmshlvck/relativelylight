@@ -191,13 +191,11 @@ pub async fn remove_all(db: &DatabaseConnection, user_id: i32) -> Result<u64, Db
         .rows_affected)
 }
 
-/// The passkey table for an accounts panel: the credential hidden, everything the ceremonies maintain
-/// read-only, and the owner pinned (a passkey moved to another account would sign that account in).
-/// The label is editable; deleting a row removes the passkey. Turn creation off in the panel
-/// (`Table::create(false)`): a passkey is made only by its authenticator, on `/profile`.
-///
-/// Deleting the last passkey of an account with no password leaves it no way in until a manager sets
-/// a password; the profile pages refuse that, the panel leaves it to the administrator.
+/// The passkey table for an accounts panel: an inventory (who holds which kind, last used), so the
+/// credential is hidden and every column read-only, the owner most of all (a passkey moved to another
+/// account would sign that account in). Show it with `Table::read_only(true)`. Removing someone's
+/// passkey is the manager's, on their credentials page `/profile/{id}`, under re-authentication; a
+/// passkey is made only by its authenticator, on `/profile`.
 ///
 /// ```ignore
 /// crud.register(auth::passkey::meta_model(), Arc::new(GroupReadWrite::new(&auth, ["admin"])));
@@ -209,8 +207,8 @@ pub fn meta_model() -> crate::crud::seaorm::MetaModel<entity::Entity> {
     let mut m = crate::crud::seaorm::MetaModel::new(entity::Entity);
     m.label_column(C::Name.as_str());
     m.field(C::Credential.as_str()).hidden = true;
-    m.field(C::Name.as_str()).label = Some("Label".into());
     for (col, label) in [
+        (C::Name, "Label"),
         (C::UserId, "Owner"),
         (C::CredentialId, "Credential ID"),
         (C::Class, "Kind"),
@@ -250,11 +248,12 @@ mod tests {
 
     #[cfg(feature = "crud")]
     #[test]
-    fn the_panel_model_hides_the_credential_and_pins_the_owner() {
+    fn the_panel_model_hides_the_credential_and_reads_only() {
         let mut m = meta_model();
         assert!(m.field("credential").hidden);
         assert!(m.field("user_id").read_only && m.relation("user").read_only);
         for f in [
+            "name",
             "credential_id",
             "class",
             "aaguid",
@@ -264,10 +263,6 @@ mod tests {
         ] {
             assert!(m.field(f).read_only, "{f}");
         }
-        assert!(
-            !m.field("name").read_only && !m.field("name").hidden,
-            "the label stays editable"
-        );
     }
 
     #[test]

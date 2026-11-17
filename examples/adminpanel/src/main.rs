@@ -30,7 +30,6 @@ use relativelylight::crud::ui::{esc, truncate, Admin, Outcome, Picker, ViewState
 use relativelylight::middleware::RealIp;
 use relativelylight::time::{Tz, TzPicker};
 use relativelylight::validate;
-use relativelylight::auth::{group::Column as GroupCol, user::Column as UserCol};
 use sea_orm::IdenStatic; // `post::Column::Title.as_str()` — a column name the compiler checks
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -119,8 +118,8 @@ struct App {
 // The admin fragment's structure (nav groups, per-model table config). Built fresh per request so it
 // can be rendered *for the caller*. `is_manager` marks callers in the admin group: only they get the
 // `GroupReadWrite`-gated Accounts section (the auth users/groups), where each user-id links to its
-// password-reset page. Non-managers would get 403 reading those models, so we omit the section for them.
-fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
+// credentials page. Non-managers would get 403 reading those models, so we omit the section for them.
+fn build_admin<'a>(engine: &'a Engine, auth: &Auth, is_manager: bool) -> Admin<'a> {
     let mut admin = Admin::new(engine)
         .title("relativelylight")
         // Each model gets a path of its own: /admin/post, /admin/auth_user. Only the side panel's
@@ -151,6 +150,8 @@ fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
         .entity_with("user", |t| t.read_only(true))
         .entity("profile");
     if is_manager {
+        // The id opens the account's credentials page: password reset, 2FA off, passkeys removed.
+        let credentials = auth::user::credentials_link(auth.profile_path());
         admin = admin
             .separator()
             .group("Accounts (auth)")
@@ -159,22 +160,25 @@ fn build_admin(engine: &Engine, is_manager: bool) -> Admin<'_> {
             .entity_with("auth_user", |t| {
                 // Wanted in the cells *and* the View dialog: the two are independent, so one
                 // function, passed to both.
-                let id = UserCol::Id.as_str();
-                t.title("Login accounts").format_cell(id, reset_link).format_view(id, reset_link)
+                t.title("Login accounts")
+                    .format_cell("id", credentials.clone())
+                    .format_view("id", credentials)
             })
             .entity_with("auth_group", |t| t.title("Groups"))
             .entity_with("auth_username_lockout", |t| {
-                t.title("Locked accounts").description(
+                t.title("Locked accounts").create(false).edit(false).description(
                     "Accounts with recent failed logins. Delete a row to unlock one (the count \
                      clears itself once the lockout expires).",
                 )
             })
             .entity_with("auth_ip_lockout", |t| {
                 t.title("Locked addresses")
+                    .create(false)
+                    .edit(false)
                     .description("Source addresses with recent failed credential checks.")
             });
     }
-    admin.separator().group("Reference").link("Profile & 2FA", "/profile").link("Log out", "/logout")
+    admin
 }
 
 #[tokio::main]
@@ -285,70 +289,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     post_mm.relate(&tag_mm);
     tag_mm.relate(&post_mm);
 
-    // The auth login accounts + groups, surfaced in the admin. `.password()` turns `password_hash`
-    // into a write-only, argon2-hashed "Password" field in one call: plaintext in the form, a hash in
-    // the column, never returned in reads. An empty password stores an empty hash — no password can
-    // verify against it, so password login is disabled (e.g. for future SSO / PassKey users).
-    let mut auth_user_mm = MetaModel::new(auth::user::Entity);
-    auth_user_mm.field(UserCol::PasswordHash.as_str()).password();
-    auth_user_mm.field(UserCol::PasswordHash.as_str()).description = Some(
-        "Optional. Leave blank to create an account with no password (password login disabled). \
-         On edit, blank keeps the current password. At least 12 characters, and not a common one."
-            .into(),
-    );
-    // The admin-form half of the policy decided above (the `Auth` half is on the builder). The pipeline
-    // is coerce → validate → transform, so this validator sees the **plaintext** the form submitted,
-    // before `.password()`'s argon2 hook hashes it. `optional` is what keeps blank meaningful (blank on
-    // create = no password / login disabled; blank on edit = keep the current one) — without it, "leave
-    // blank to keep the current password" would become a validation error.
-    if let Some(policy) = password_policy.clone() {
-        auth_user_mm
-            .field(UserCol::PasswordHash.as_str())
-            .validate_str(validate::optional(Box::new(validate::password(policy))));
-    }
-    // The TOTP secret columns are secrets — never expose them in reads/writes/metadata. (2FA is
-    // managed from the profile page, not the crud form.)
-    auth_user_mm.field(UserCol::TotpSecret.as_str()).hidden = true;
-    auth_user_mm.field(UserCol::TotpPending.as_str()).hidden = true;
-    // `totp_last_step` is the replay guard (the last 30s step accepted for this account). Not a secret,
-    // but nothing an operator should see or edit — the library maintains it, and hand-editing it either
-    // lets a code be replayed or locks the user out of their own authenticator for a while.
-    auth_user_mm.field(UserCol::TotpLastStep.as_str()).hidden = true;
-    // The WebAuthn user handle: the authenticators hold it, so an edited one orphans every passkey.
-    auth_user_mm.field(UserCol::PasskeyHandle.as_str()).hidden = true;
-    // Note what is *not* registered: `auth::recovery::entity` (the TOTP recovery codes). Every row is a
-    // hash of a credential, and there is nothing an operator can usefully do to one — a user who needs a
-    // fresh set generates it from /profile, and a user who has lost their authenticator is helped by the
-    // "Disable 2FA" button on their manage page, which clears the codes with it. Contrast the two lockout
-    // tables below, which *are* registered, because deleting one of those rows is the whole unlock.
-    // New accounts are active by default (so a freshly created user with a password can log in).
-    auth_user_mm.field(UserCol::IsActive.as_str()).default = Some(serde_json::json!(true));
-    // "Password change required": the row hook sets the flag whenever a password is written for
-    // someone (this panel's password field included), so a password an administrator chose asks its
-    // owner for their own. **Read-only here**: an editable checkbox would post `false` with every save,
-    // which the hook takes as the writer's explicit choice, and the flag would never be set. The owner
-    // clears it by choosing a password. When it was last set is the library's to stamp.
-    auth_user_mm.field(UserCol::MustChangePassword.as_str()).label = Some("Must change password".into());
-    auth_user_mm.field(UserCol::MustChangePassword.as_str()).read_only = true;
-    auth_user_mm.field(UserCol::PasswordChangedAt.as_str()).label = Some("Password set".into());
-    auth_user_mm.field(UserCol::PasswordChangedAt.as_str()).read_only = true;
-    auth_user_mm.field(UserCol::PasswordChangedAt.as_str()).datetime();
-    // Lifecycle timestamps are maintained by the library (hooks / login flow) — show, don't edit.
-    // Lifecycle stamps: read-only + rendered as timezone-aware datetimes (see .datetime() + the
-    // $store.tz picker wired into the shell). They follow the picker's zone; storage stays UTC.
-    for f in [
-        UserCol::CreatedAt.as_str(),
-        UserCol::UpdatedAt.as_str(),
-        UserCol::LastLoginAt.as_str(),
-    ] {
-        auth_user_mm.field(f).read_only = true;
-        auth_user_mm.field(f).datetime();
-    }
-    let mut auth_group_mm = MetaModel::new(auth::group::Entity);
-    for f in [GroupCol::CreatedAt.as_str(), GroupCol::UpdatedAt.as_str()] {
-        auth_group_mm.field(f).read_only = true;
-        auth_group_mm.field(f).datetime();
-    }
+    // The auth login accounts, groups and lockout counters come configured from the library: the
+    // secrets hidden, the stamps read-only, the first password write-only, argon2-hashed and screened by
+    // the same policy `Auth` was given above, the group membership as an N:M relation. Later passwords,
+    // 2FA and passkeys of someone else are their credentials page's (`/profile/{id}`), which the id
+    // column links to. Note what is *not* registered: `auth::recovery::entity` (every row is a hash of
+    // a credential).
+    let auth_user_mm = auth::user::meta_model(&auth);
+    let auth_group_mm = auth::group::meta_model();
 
     // Per-field presentation + validation (drives the labels / help / defaults / errors in the form).
     post_mm.field(post::Column::Title.as_str()).label = Some("Title".into());
@@ -388,21 +336,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.register(auth_user_mm, admin_gate.clone());
     crud.register(auth_group_mm, admin_gate.clone());
     // The lockout tables — this is what makes the unlock an ordinary, gated, audited DELETE instead of
-    // a bespoke endpoint: an operator sees who is locked out and deletes the row. Counts and
-    // timestamps are maintained by the library, so everything is read-only except the delete.
-    let mut username_lockout_mm = MetaModel::new(auth::lockout::username_entity::Entity);
-    let mut ip_lockout_mm = MetaModel::new(auth::lockout::ip_entity::Entity);
-    for mm in [&mut username_lockout_mm.field("failures"), &mut ip_lockout_mm.field("failures")] {
-        mm.read_only = true;
-    }
-    for mm in
-        [&mut username_lockout_mm.field("last_failure_at"), &mut ip_lockout_mm.field("last_failure_at")]
-    {
-        mm.read_only = true;
-        mm.datetime();
-    }
-    crud.register(username_lockout_mm, admin_gate.clone());
-    crud.register(ip_lockout_mm, admin_gate.clone());
+    // a bespoke endpoint: an operator sees who is locked out and deletes the row.
+    crud.register(auth::lockout::username_meta_model(), admin_gate.clone());
+    crud.register(auth::lockout::ip_meta_model(), admin_gate.clone());
     // CSRF: these writes are cookie-authenticated, so every posted form must echo the double-submit
     // token. Sharing `auth.csrf()` puts the panel's forms and the login/profile forms on one token
     // cookie; the library renders the hidden `_csrf` input itself. See docs/AUTH.md §7.
@@ -569,7 +505,7 @@ async fn set_tz(Form(fields): Form<HashMap<String, String>>) -> Response {
 /// user-id → password-reset links; for anyone else those models would refuse a read, so the section
 /// isn't listed at all.
 fn panel<'a>(app: &'a App, who: &Identity) -> Admin<'a> {
-    build_admin(&app.engine, app.auth.can_manage_others(who))
+    build_admin(&app.engine, &app.auth, app.auth.can_manage_others(who))
 }
 
 fn page(body: String, who: &Identity, headers: &HeaderMap, uri: &Uri) -> Response {
@@ -609,8 +545,7 @@ fn login_shell(form: &str, req: &Parts) -> String {
 fn profile_shell(fragment: &str, who: &Identity, req: &Parts) -> String {
     // The fragment is a grid of cards (two columns on a wide screen): a wide column, no card around it.
     let body = format!(
-        r#"<div class="mx-auto" style="max-width:72rem">{fragment}
-<a class="d-inline-block mt-3" href="/">&larr; Back to admin</a></div>"#
+        r#"<div class="mx-auto" style="max-width:72rem">{fragment}</div>"#
     );
     Shell::page("Profile", who.username.clone(), body, &req.headers, back_to(req, "/profile"))
         .for_user(who)
@@ -618,7 +553,3 @@ fn profile_shell(fragment: &str, who: &Identity, req: &Parts) -> String {
         .unwrap_or_default()
 }
 
-/// An account id as a link to its password-reset page — the auth_user table's id, in both places.
-fn reset_link(v: &serde_json::Value, _row: &serde_json::Value) -> String {
-    format!(r#"<a href="/profile/{}" title="Reset password">{}</a>"#, esc(v), esc(v))
-}

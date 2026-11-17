@@ -71,6 +71,7 @@ impl Accessor for Stub {
             logical_type: crate::crud::LogicalType::Text,
             read_only: false,
             write_only: false,
+            create_only: false,
             nullable,
             label: None,
             description: None,

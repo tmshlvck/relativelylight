@@ -149,3 +149,30 @@ Nothing to change in code for these, but they change what users see.
   A site that never sets that still lets SSO users opt in.
 - **The login page** shows "or" and "Sign in with a passkey" under the form when passkeys are on.
   Draw your SSO buttons under them; they no longer need a divider of their own.
+- **A list no longer shows write-only columns.** A password's column was always blank there; it is
+  gone from the table as it already was from the View dialog and CSV. The form still takes it.
+
+## 8. The accounts panel comes from `auth`'s `meta_model()`s
+
+Recommended, not required: a panel configured by hand keeps working. But it lets an operator change
+someone's password **without signing them out**, which the manager's reset at `/profile/{id}` does.
+The library's models make the panel set only an account's **first** password, and link each account
+to its credentials page for everything after ([AUTH.md §5j](AUTH.md#the-accounts-panel)).
+
+| 0.4 (by hand) | 0.5 |
+|---|---|
+| `MetaModel::new(auth::user::Entity)` + `.password()`, the policy validator, hidden TOTP columns, read-only stamps, `relate(&group)` | `auth::user::meta_model(&auth)` (the policy comes from `Auth`) |
+| `MetaModel::new(auth::group::Entity)` + read-only stamps, `relate(&user)` | `auth::group::meta_model()` |
+| `MetaModel::new(auth::lockout::username_entity::Entity)` / `ip_entity` + read-only counters | `auth::lockout::username_meta_model()` / `ip_meta_model()`, shown with `Table::create(false).edit(false)` |
+| a `format_cell` linking the id to `/profile/{id}` | `auth::user::credentials_link(auth.profile_path())` |
+| — | `auth::passkey::meta_model()`, shown with `Table::read_only(true)` |
+
+Drop the hand-written configuration with it: the hook-maintained columns, the hidden ones and the
+username check are all in the model. A table that trimmed its columns with `Table::columns` to hide
+the password's blank cell no longer needs to (§7).
+
+## 9. `crud::Column::Field` gains `create_only`
+
+Only for an app with its **own `Accessor`** (or code that builds a `Column::Field` literal or
+matches one without `..`): add `create_only: false`, or `true` for a column a create sets and an
+update must not (`MetaField::create_only`, [CRUD.md](CRUD.md#metafield)).

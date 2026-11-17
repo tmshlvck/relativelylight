@@ -123,8 +123,8 @@ The tables, all ordinary SeaORM entities an admin panel can register (§5j):
   `sso_provider` (§5b), the 2FA columns `totp_secret` / `totp_pending` / `totp_last_step` (§5a),
   `passkey_handle` (the WebAuthn user handle, set at the first passkey enrolment),
   `password_changed_at` / `must_change_password` (§5m), and timestamps (§5c). Every creation path validates the username with `auth::valid_username`
-  (non-empty, ≤ 254 bytes, no spaces or control characters); wire the same check into an admin form
-  with `user_mm.field("username").validate_str(auth::valid_username)`.
+  (non-empty, ≤ 254 bytes, no spaces or control characters), the accounts panel's
+  `user::meta_model` included.
 - **`auth_group`** + **`auth_user_group`** (N:M) — group membership drives the gates.
 - **`auth_session`** — the opaque id, `user_id`, `expires_at` (absolute deadline), `last_seen_at`
   (idle clock, §5f), `awaiting_totp` (password accepted, second factor pending), and `method` /
@@ -392,8 +392,8 @@ The auth entities carry UTC timestamps (`i64` Unix seconds), maintained automati
 insert, updated on every save) — so they're correct no matter who writes (admin CRUD, the profile page,
 `create_user`/`set_password`, …). `last_login_at` is **not** a hook; the login flows stamp it with a
 set-based update (so it doesn't bump `updated_at`) on completion: `login_submit` (no-2FA), the TOTP
-confirm (`login/totp`), and the SSO callback. Mark these fields `read_only` on the `MetaModel` so the
-admin shows but doesn't edit them (see `examples/adminpanel`). All times are UTC; rendering them in the
+confirm (`login/totp`), and the SSO callback. The accounts panel's `user::meta_model` shows them
+read-only. All times are UTC; rendering them in the
 viewer's timezone is a frontend concern (see [docs/TIME.md](TIME.md)).
 
 ## 5d. Write observer — audit hook
@@ -526,9 +526,10 @@ turned away *because* it was locked ([why](AUTH-SECURITY.md#lockout)).
 subsequent attempt. `examples/auth` has a working one (`GET /api/whoami`).
 
 **The unlock is a row delete.** The two entities (`lockout::username_entity`, `lockout::ip_entity`) are
-ordinary SeaORM models: register them in your admin panel and an operator can see who is being guessed
-at and clear a row — gated by your `Authz`, CSRF-checked, and audited by your `WriteObserver` like any
-other write. `examples/adminpanel` registers both as read-only-plus-delete panels.
+ordinary SeaORM models: register `lockout::username_meta_model()` and `lockout::ip_meta_model()` in
+your admin panel and an operator can see who is being guessed at and clear a row — gated by your
+`Authz`, CSRF-checked, and audited by your `WriteObserver` like any other write. Show them with
+`Table::create(false).edit(false)`: deleting is the one thing to do there.
 
 **Housekeeping is the app's.** Nothing in this crate schedules anything — no background task, no timer.
 `Auth::prune()` deletes dead sessions *and* expired lockout rows from both tables; call
@@ -603,20 +604,12 @@ auth.password_check(|pw, username| my_rules(pw, username))  // your own predicat
 `reset_admin_access` are unaffected, so a seeder or a break-glass CLI still sets whatever the operator
 says ([why](AUTH-SECURITY.md#password-policy)).
 
-**Both surfaces or neither.** `Auth` covers its own pages; the admin UI's writes are a separate
-`crud` field validator, and whichever you skip becomes the way around the other:
-
-```rust
-user_mm.field("password_hash").password();
-user_mm.field("password_hash")
-    .validate_str(validate::optional(Box::new(validate::password(policy))));
-```
-
-`optional` matters: blank has a meaning on that column (blank on create = no password / login disabled,
-blank on edit = keep the current one), and without it "leave blank" becomes a validation error. The crud
-pipeline is **coerce → validate → transform**, so the validator sees the plaintext before
-`MetaField::password()`'s argon2 hook hashes it — no engine change needed. `examples/adminpanel` wires
-both halves from one `PASSWORD_LEVEL` env value, `0` switching them off together.
+**One policy, every surface.** `Auth` applies it on its own pages, and the accounts panel's
+`user::meta_model(&auth)` reads it from the same `Auth` for the first password an operator types.
+An app's **own** form that sets a password is a third surface: screen it the same way (with the
+policy you gave `Auth`, or `validate::password(policy)` on a `crud` field), or that form is the way
+around it. `examples/adminpanel` drives the policy from one `PASSWORD_LEVEL` env value, `0`
+switching it off.
 
 ## 5h. Re-authentication before sensitive changes
 
@@ -740,51 +733,63 @@ trip.
 ### The accounts panel
 
 `auth`'s tables are ordinary SeaORM entities, so an operator's screen is the ordinary admin over them —
-no bespoke user-management UI, and no second permission model. [`examples/auth`](../examples/auth/src/main.rs)
-builds one in about sixty lines; the parts that matter:
+no bespoke user-management UI, and no second permission model. Each table comes configured from the
+library, so every app's panel follows the same rules:
 
 ```rust
-let mut user  = MetaModel::new(auth::user::Entity);
-let mut group = MetaModel::new(auth::group::Entity);
-
-user.field("password_hash").password();          // write-only, argon2 on write, never read back
-user.field("password_hash")                       // the *same* policy Auth applies to /profile
-    .validate_str(validate::optional(Box::new(validate::password(policy))));
-for f in ["totp_secret", "totp_pending", "totp_last_step", "passkey_handle"] { user.field(f).hidden = true; }
-
-user.label_column("username");
-group.label_column("name");
-user.relate(&group);                              // ← the line that makes the panel *useful*
-group.relate(&user);
-
-crud.register(user,  Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP])));
-crud.register(group, Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP])));
+let gate = Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP]));
+crud.register(auth::user::meta_model(&auth), gate.clone());   // accounts, and their groups
+crud.register(auth::group::meta_model(), gate.clone());       // groups, and their members
+crud.register(auth::api_key::meta_model(), gate.clone());     // §5k
+crud.register(auth::passkey::meta_model(), gate.clone());     // §5l, read-only
+crud.register(auth::lockout::username_meta_model(), gate.clone()); // §5e, delete = unlock
+crud.register(auth::lockout::ip_meta_model(), gate);
 ```
 
-Five things are load-bearing:
+and in the panel, the account's id links to its credentials page:
 
-1. **`user.relate(&group)`** — `auth_user_group` is an N:M junction and is never registered as a model
-   of its own, so without this declaration the panel can create an account and cannot put it in a
-   group. Since the gate checks *group membership*, that is a screen that can make users who can do
-   nothing. (It also gives you the reverse view: a group's Members picker.)
-2. **`GroupReadWrite`, not `UserReadGroupWrite`** — reads included, so a non-admin can't list the
-   accounts: `render_for` answers `403` ([why](AUTH-SECURITY.md#accounts)).
-3. **`field("password_hash").password()` plus the policy** — wire the policy into `Auth` *and* this form, or
-   the form becomes the way around it (§5g).
-4. **Hide the TOTP columns and `passkey_handle`.** They are credentials, the replay guard and the
-   key every passkey hangs on ([why](AUTH-SECURITY.md#accounts)). 2FA is managed from `/profile`,
-   never from a CRUD form. **Never register `auth::recovery::entity`** at all — every row of it is a
-   credential hash.
-5. **Keep `must_change_password` read-only** (§5m). The hook sets it when the panel writes someone's
-   password; an editable checkbox would keep it from ever being set
-   ([why](AUTH-SECURITY.md#the-sign-in-policy-and-password-change)).
+```rust
+let link = auth::user::credentials_link(auth.profile_path());
+admin.entity_with("auth_user", |t| t.format_cell("id", link.clone()).format_view("id", link))
+```
 
-Register `lockout::username_entity` / `lockout::ip_entity` in the same panel (§5e) and the unlock
-becomes an ordinary gated, CSRF-checked, audited `DELETE` rather than a bespoke endpoint.
+**The panel holds account data; the credentials page holds credentials.** One place for each, so
+the rules that go with a task can't be skipped by doing it in the other place:
 
-What the panel deliberately cannot do: **enrol or reset someone's 2FA** (a manager can only *disable*
-it, from `/profile/{id}`, under re-auth — §5h), and **reset an SSO account's password** (there is none
-to reset — §5b).
+| | the panel (`/admin`, the CRUD admin) | the credentials page (`/profile/{id}`) |
+|---|---|---|
+| username, active, SSO provider | edit | |
+| groups (`auth_user_group`, an N:M relation) | edit, from either side | |
+| the **first** password | set on create (blank = none) | |
+| a later password | | reset (signs the account out) |
+| password set when, change required | shown, read-only | |
+| TOTP | | disable (re-authenticated) |
+| passkeys | listed, read-only | remove (re-authenticated) |
+| API keys | disable, re-date, delete | |
+| lockouts | delete = unlock | |
+| `totp_*`, `passkey_handle`, password hash | hidden | |
+
+What `user::meta_model` does, and why:
+
+1. **The groups relation** — `auth_user_group` is an N:M junction and is never registered as a model
+   of its own. Without the relation the panel could create an account and not put it in a group,
+   and since the gate checks *group membership*, that is a screen that can make users who can do
+   nothing.
+2. **The first password only** (`MetaField::create_only`): write-only, argon2-hashed, screened by the
+   policy `Auth` was given (§5g). The edit form has no password field, and an update carrying one is
+   refused: a later password is the credentials page's, which also signs the account out (§5f).
+3. **The TOTP columns and `passkey_handle` hidden.** They are credentials, the replay guard and the
+   key every passkey hangs on ([why](AUTH-SECURITY.md#accounts)). **Never register
+   `auth::recovery::entity`** at all — every row of it is a credential hash.
+4. **`must_change_password` and the timestamps read-only** (§5m). The hook sets the flag when the
+   panel sets someone's first password; an editable checkbox would post `false` and keep it from ever
+   being set ([why](AUTH-SECURITY.md#the-sign-in-policy-and-password-change)).
+
+The gate is **`GroupReadWrite`, not `UserReadGroupWrite`** — reads included, so a non-admin can't list
+the accounts: `render_for` answers `403` ([why](AUTH-SECURITY.md#accounts)).
+
+What neither page can do: **enrol someone's 2FA or passkey** (only the owner can, on `/profile`), and
+**reset an SSO account's password** (there is none to reset — §5b).
 
 ## 5k. API keys
 
@@ -984,10 +989,10 @@ second factor), and the passkey is reclassified `synced`. It refuses it in the u
 before checking the signature, so that sign-in fails like an unknown passkey. The user signs in
 another way, removes the passkey and adds it again.
 
-**In the accounts panel**, register `auth::passkey::meta_model()`: the credential hidden, the owner
-and everything the ceremonies maintain read-only, the label editable, deleting allowed. Turn creation
-off (`Table::create(false)`): only an authenticator can make a passkey. Hide `auth_user.passkey_handle`
-with the TOTP columns.
+**In the accounts panel**, register `auth::passkey::meta_model()` and show it read-only
+(`Table::read_only(true)`): an inventory of who holds which kind of passkey and when it was last
+used, the credential hidden. Removing someone's passkey is the manager's, on `/profile/{id}`, under
+re-authentication; only an authenticator makes one.
 
 ```rust
 crud.register(auth::passkey::meta_model(), Arc::new(GroupReadWrite::new(&auth, [ADMIN_GROUP])));
@@ -1057,13 +1062,14 @@ was last set) and `must_change_password` (someone other than the owner set it).
 
 - **The row hook flags it.** Any write that sets `password_hash` stamps `password_changed_at` and sets
   `must_change_password`, unless the writer set that column itself. So a password an administrator
-  types in the accounts panel, an app's own form, or a manager's reset at `/profile/{id}` asks its
+  sets in the accounts panel (an account's first), an app's own form, or a manager's reset at
+  `/profile/{id}` asks its
   owner to choose their own. The owner's change on `/profile` clears it, and so do the programmatic
   helpers (`create_user`, `set_password`, `make_admin`, `reset_admin_access`): those are the
   owner's or a seeder's.
-- **In an accounts panel, keep `must_change_password` read-only** (shown, not edited), or the flag
-  would never be set ([why](AUTH-SECURITY.md#the-sign-in-policy-and-password-change)).
-  `password_changed_at` is the library's to stamp; show it read-only too.
+- **The accounts panel shows both read-only** (`user::meta_model`): an editable flag would never be
+  set ([why](AUTH-SECURITY.md#the-sign-in-policy-and-password-change)), and `password_changed_at` is
+  the library's to stamp.
 - **`Auth::password_max_age_days(n)`**, default `0` (no limit), makes a password older than `n` days
   due. Set it only where a rotation is required
   ([why](AUTH-SECURITY.md#the-sign-in-policy-and-password-change)). A row from before the column

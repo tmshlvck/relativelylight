@@ -43,3 +43,28 @@ impl ActiveModelBehavior for ActiveModel {
         Ok(self)
     }
 }
+
+/// The table for an accounts panel (feature `crud`): the name checked with
+/// [`valid_group_name`](super::valid_group_name), the timestamps read-only, and the members edited
+/// through the N:M relation `auth_user`. Registered next to
+/// [`user::meta_model`](super::user::meta_model).
+#[cfg(feature = "crud")]
+pub fn meta_model() -> crate::crud::seaorm::MetaModel<Entity> {
+    use sea_orm::IdenStatic;
+    use Column as C;
+    let mut m = crate::crud::seaorm::MetaModel::new(Entity);
+    m.label_column(C::Name.as_str());
+    let f = m.field(C::Name.as_str());
+    f.label = Some("Group".into());
+    f.validate_str(super::valid_group_name);
+    for (c, label) in [(C::CreatedAt, "Created"), (C::UpdatedAt, "Updated")] {
+        let f = m.field(c.as_str());
+        f.label = Some(label.into());
+        f.read_only = true;
+        f.datetime();
+    }
+    // The relation needs only the other side's identity, not its configuration.
+    m.relate(&crate::crud::seaorm::MetaModel::new(super::user::Entity));
+    m.relation("auth_user").label = Some("Members".into());
+    m
+}

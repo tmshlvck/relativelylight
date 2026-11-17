@@ -236,6 +236,9 @@ pub enum Column {
         logical_type: LogicalType,
         read_only: bool,
         write_only: bool,
+        /// Written when the row is created and never after: the edit form leaves it out and an update
+        /// carrying it is refused. See [`MetaField::create_only`](crate::crud::seaorm::MetaField::create_only).
+        create_only: bool,
         /// Whether the column accepts SQL NULL. Drives the UI's "empty means nothing here" handling
         /// (an empty input on a nullable column is sent as `null`, not `""`) and the schema's type
         /// union.

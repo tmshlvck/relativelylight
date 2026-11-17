@@ -4255,39 +4255,120 @@ async fn a_maximum_age_makes_an_old_password_due() {
     assert_eq!(fx.identify_token(&token).await.unwrap().password_change, None);
 }
 
-/// The accounts panel's password field flags the account through the row hook — when the flag is
-/// read-only in the panel. An editable flag is posted with every save, and an explicit `false` is the
-/// writer's choice: the guide says so, and this pins both halves.
+/// The accounts panel's model (`user::meta_model`): the first password is set on create, screened by
+/// `Auth`'s policy and flagged for change by the row hook; no update can set one (that is the
+/// credentials page's, which also signs the account out); the secrets never leave in a read.
 #[cfg(feature = "crud")]
 #[tokio::test]
-async fn a_password_set_in_the_accounts_panel_flags_the_account_when_the_flag_is_read_only() {
-    use crate::crud::seaorm::{Crud, MetaModel};
+async fn the_accounts_panel_sets_a_first_password_and_no_later_one() {
+    use crate::crud::seaorm::Crud;
+    use crate::crud::Error;
+    use serde_json::json;
     let fx = Fx::new().await;
-    let alice = fx.user("alice").await;
-    let engine = |read_only: bool| {
-        let mut m = MetaModel::new(user::Entity);
-        m.field("password_hash").password();
-        m.field("must_change_password").read_only = read_only;
-        let mut crud = Crud::new(fx.db.clone());
-        crud.register(m, crate::authz::Open);
-        crud.into_engine()
-    };
+    let mut crud = Crud::new(fx.db.clone());
+    crud.register(user::meta_model(&fx.auth), crate::authz::Open);
+    crud.register(group::meta_model(), crate::authz::Open);
+    let e = crud.into_engine();
 
-    let e = engine(true);
-    e.update("auth_user", &alice.to_string(), &serde_json::json!({ "password_hash": OTHER_PW }))
+    // The positive control: a create with a strong password signs in with it, and asks for a change.
+    let row = e
+        .create(
+            "auth_user",
+            &json!({ "username": "carol", "password_hash": OTHER_PW, "is_active": true }),
+        )
         .await
-        .expect("update");
-    let row = fx.row("alice").await;
-    assert!(row.must_change_password, "a password an administrator typed is theirs, not alice's");
-    assert!(verify_password(&row.password_hash, OTHER_PW));
-    // An edit that leaves the password alone flags nothing.
-    fx.update_user("alice", |am| am.must_change_password = Set(false)).await;
-    e.update("auth_user", &alice.to_string(), &serde_json::json!({ "is_active": true })).await.unwrap();
-    assert!(!fx.row("alice").await.must_change_password);
+        .unwrap();
+    let carol = row["id"].to_string();
+    let stored = fx.row("carol").await;
+    assert!(verify_password(&stored.password_hash, OTHER_PW));
+    assert!(
+        stored.must_change_password,
+        "a password an administrator typed is theirs, not carol's"
+    );
 
-    // Editable, the posted value wins — which is why the panel keeps it read-only.
-    let e = engine(false);
-    let body = serde_json::json!({ "password_hash": PW, "must_change_password": false });
-    e.update("auth_user", &alice.to_string(), &body).await.unwrap();
-    assert!(!fx.row("alice").await.must_change_password);
+    // Read: the hash, the TOTP columns and the passkey handle never leave.
+    let read = e.get("auth_user", &carol).await.unwrap();
+    for hidden in [
+        "password_hash",
+        "totp_secret",
+        "totp_pending",
+        "totp_last_step",
+        "passkey_handle",
+    ] {
+        assert!(read.get(hidden).is_none(), "{hidden} in a read: {read}");
+    }
+    assert_eq!(
+        read["must_change_password"],
+        json!(true),
+        "the flag is shown"
+    );
+
+    // The policy `Auth` was given screens the first password too.
+    let weak = e
+        .create(
+            "auth_user",
+            &json!({ "username": "dave", "password_hash": "short", "is_active": true }),
+        )
+        .await;
+    assert!(
+        matches!(weak, Err(Error::Validation(ref v)) if v.fields.contains_key("password_hash")),
+        "{weak:?}"
+    );
+    let blank = e
+        .create(
+            "auth_user",
+            &json!({ "username": "erin", "password_hash": "", "is_active": true }),
+        )
+        .await;
+    assert!(
+        blank.is_ok(),
+        "blank = an account with no password (SSO or passkey only): {blank:?}"
+    );
+    // The form sends nothing for a blank password field: no password too, and nothing flagged.
+    let absent = e.create("auth_user", &json!({ "username": "frank", "is_active": true })).await;
+    assert!(absent.is_ok(), "{absent:?}");
+    let frank = fx.row("frank").await;
+    assert!(frank.password_hash.is_empty(), "no password");
+    assert!(!frank.must_change_password && frank.password_changed_at.is_none(), "none was written");
+    let spaced = e
+        .create(
+            "auth_user",
+            &json!({ "username": "f g", "is_active": true }),
+        )
+        .await;
+    assert!(
+        matches!(spaced, Err(Error::Validation(_))),
+        "the username rule holds: {spaced:?}"
+    );
+
+    // No update sets a password, not even with the flag left alone; the row is untouched.
+    let later = e
+        .update("auth_user", &carol, &json!({ "password_hash": PW }))
+        .await;
+    assert!(
+        matches!(later, Err(Error::Validation(ref v)) if v.fields.contains_key("password_hash")),
+        "{later:?}"
+    );
+    assert!(verify_password(
+        &fx.row("carol").await.password_hash,
+        OTHER_PW
+    ));
+    // Nor the flag: it is read-only, so a posted `false` can't clear it.
+    let flag = e
+        .update(
+            "auth_user",
+            &carol,
+            &json!({ "must_change_password": false }),
+        )
+        .await;
+    assert!(
+        flag.is_ok(),
+        "a read-only field in a body is ignored: {flag:?}"
+    );
+    assert!(fx.row("carol").await.must_change_password);
+    // An ordinary edit goes through.
+    e.update("auth_user", &carol, &json!({ "is_active": false }))
+        .await
+        .unwrap();
+    assert!(!fx.row("carol").await.is_active);
 }

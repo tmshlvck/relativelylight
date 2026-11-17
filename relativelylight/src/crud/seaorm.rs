@@ -95,6 +95,12 @@ pub struct MetaField {
     // Visibility — you may change these:
     pub read_only: bool,
     pub write_only: bool,
+    /// Written when the row is created, never by an update: the edit form leaves the field out, and
+    /// an update that carries it (an API call, a CSV import, a forged form) is refused with `422`.
+    /// For a value whose later changes belong to a page of their own: `auth::user::meta_model` sets
+    /// the first password this way, and every later one goes through the manager's reset, which
+    /// also signs the account out.
+    pub create_only: bool,
     pub hidden: bool,
     // Presentation — optional:
     pub label: Option<String>,       // display label (defaults to the field name in the UI)
@@ -723,6 +729,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                     blank_is_null: true,
                     read_only: is_pk,
                     write_only: false,
+                    create_only: false,
                     hidden: is_fk,
                     is_pk,
                     is_fk,
@@ -904,6 +911,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                     logical_type: f.logical_type,
                     read_only: f.read_only,
                     write_only: f.write_only,
+                    create_only: f.create_only,
                     nullable: f.nullable,
                     // The schema facts, narrowed by the app's config: a field it has made unwritable
                     // can't be required of a caller. Kept here rather than in `MetaField::required` so
@@ -969,6 +977,10 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                 }
                 continue;
             };
+            if f.create_only && !is_create {
+                errs.field(&f.name, "set only when the record is created");
+                continue;
+            }
             match coerce(f.logical_type, raw).map(|v| f.normalize_blank(v)) {
                 Err(e) => errs.field(&f.name, e),
                 Ok(norm) => {
@@ -2469,6 +2481,7 @@ mod tests {
             blank_is_null: true,
             read_only: false,
             write_only: false,
+            create_only: false,
             hidden: false,
             label: None,
             description: None,

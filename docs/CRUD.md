@@ -207,6 +207,7 @@ pub struct MetaField {
     // visibility (change freely):
     pub read_only: bool,   // in reads, ignored on write        default: true if is_pk
     pub write_only: bool,  // in writes, omitted from reads      default: false (e.g. password)
+    pub create_only: bool, // written on create, never by update default: false (e.g. a first password)
     pub hidden: bool,      // in neither reads/writes/metadata   default: true if is_fk
     // presentation (optional; surfaced in metadata for the UI):
     pub label: Option<String>,
@@ -230,6 +231,13 @@ relation). The three visibility flags cover both directions — a write-only sec
 `write_only = true` + `on_write = hash`. `on_read`/`on_write` are a **storage codec**, an inverse pair,
 not a display hook: the edit form is filled from `on_read`, so a value masked there is saved back
 masked. See [A column's way in and out](#a-columns-way-in-and-out).
+
+A write-only column has no cell in the table or the View dialog (only blank could be shown), nor a
+CSV column. **`create_only`** narrows writing to the create: the edit form leaves the field out, a
+posted form drops it, and an update through the engine (CSV import, your own call) that carries it
+is refused with `422`. It is for a value whose later changes belong to a page of their own:
+`auth::user::meta_model` sets an account's first password this way, and the manager's reset at
+`/profile/{id}` owns every later one.
 
 **Password helper (feature `auth`).** For the common password case, `MetaField::password()` does that
 whole write-only-secret setup in one call — write-only, labelled `"Password"`, argon2id-hashed on
@@ -696,7 +704,7 @@ thing to read if you are writing your own screens or your own API.
 pub enum Column {
     Field {
         name: String, logical_type: LogicalType, read_only: bool, write_only: bool,
-        nullable: bool, required: bool, options: Vec<String>,
+        create_only: bool, nullable: bool, required: bool, options: Vec<String>,
         label: Option<String>, description: Option<String>, default: Option<Value>,
         display: Option<FieldDisplay>, sortable: bool,
     },
