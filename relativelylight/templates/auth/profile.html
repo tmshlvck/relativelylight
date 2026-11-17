@@ -7,7 +7,7 @@
 {%- if let Some(n) = notices.policy %}<div class="alert alert-warning" role="alert">{{ n }}</div>{% endif %}
 {%- if let Some(n) = notices.password %}<div class="alert alert-warning" role="alert">{{ n }}</div>{% endif %}
 {{ m::alert(error, success) }}
-<div class="row row-cols-1 row-cols-lg-2 g-3 align-items-start">
+{%- call m::cards_start() %}{% endcall %}
 {%- if let Some(provider) = sso %}
 {%- call m::card_start("Sign-in") %}{% endcall %}
 <p class="small mb-0">This account signs in through <strong>{{ provider }}</strong> (single sign-on).
@@ -91,4 +91,4 @@ out everywhere except here.</p>
 </form>
 {%- call m::card_end() %}{% endcall %}
 {{ more|safe }}
-</div>
+{%- call m::cards_end() %}{% endcall %}

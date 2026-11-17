@@ -5,7 +5,7 @@
 <p class="text-muted small mb-3">Each change here asks you to confirm it's you: it acts on someone else's
 account.</p>
 {{ m::alert(error, success) }}
-<div class="row row-cols-1 row-cols-lg-2 g-3 align-items-start">
+{%- call m::cards_start() %}{% endcall %}
 {%- if let Some(provider) = sso %}
 {%- call m::card_start("Sign-in") %}{% endcall %}
 <p class="small mb-0">This account signs in through <strong>{{ provider }}</strong> (single sign-on).
@@ -55,4 +55,4 @@ choose their own at their next sign-in.
 </form>
 {%- call m::card_end() %}{% endcall %}
 {%- endif %}
-</div>
+{%- call m::cards_end() %}{% endcall %}

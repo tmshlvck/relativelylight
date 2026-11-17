@@ -150,9 +150,10 @@
 
   // Why a ceremony didn't finish, for the note under the button.
   function failed(err) {
-    return err && err.name === "NotAllowedError"
-      ? "The passkey prompt was closed or timed out. Try again."
-      : "The passkey didn't work here: " + (err && err.message ? err.message : err);
+    if (err && err.name === "NotAllowedError") return "The passkey prompt was closed or timed out. Try again.";
+    // Adding a passkey on a device that already holds one for this account (it was excluded).
+    if (err && err.name === "InvalidStateError") return "This device already has a passkey for this account.";
+    return "The passkey didn't work here: " + (err && err.message ? err.message : err);
   }
 
   // A "Confirm with your passkey" button (`data-rl-passkey="get"`): answer the form's challenge and

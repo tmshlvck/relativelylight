@@ -199,6 +199,9 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 - **The profile is a grid of cards, not tabs.** Each concern (password, passkeys, 2FA, sessions,
   API keys, the app's own) is a card, two columns on a wide screen. An app extends it by adding a
   card (`auth::profile_card`).
+  - **Columns, not rows.** The cards flow down the first column, then the second (CSS columns), so a
+    card that grows (a passkey added) pushes only the cards under it. A row grid left a gap beside
+    every tall card.
   - **Why not tabs:** they would need a `?tab=` on every form's answer, or a script, and a message
     could land on a tab nobody is looking at. A grid needs neither.
   - **One message, at the top,** answers whatever was just done, so no card carries its own.
