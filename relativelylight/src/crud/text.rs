@@ -126,10 +126,10 @@ pub(crate) fn apply_pins(body: &mut Value, cols: &[Column], pins: &[(String, Str
 /// out of the body.
 ///
 /// - **A write-only column left blank keeps its stored value** — "leave blank to keep the password".
-/// - **Blank on a text-ish column** (`Text`, `Uuid`, `Date`, `DateTime`) is `""`, and the engine
-///   turns that into `NULL` on a nullable column unless `blank_is_null` is off: one rule, kept where
-///   every surface meets it.
-/// - **Blank on anything else** — a number, a bool, an enum, JSON, an integer `datetime` — is `NULL`
+/// - **Blank on a text-ish column** (`Text`, `Uuid`) is `""`, and the engine turns that into `NULL`
+///   on a nullable column unless `blank_is_null` is off: one rule, kept where every surface meets it.
+/// - **Blank on anything else** — a number, a bool, an enum, JSON, a date, an integer `datetime` — is
+///   `NULL`
 ///   when the column is nullable, else omitted, so the column's own default applies on create rather
 ///   than an invented `0`, and an update leaves it alone.
 /// - A `datetime` column is wall-clock time in `tz`.
@@ -147,10 +147,7 @@ pub(crate) fn field_value(col: &Column, raw: &str, tz: &Tz) -> Option<Value> {
         if *write_only {
             return None;
         }
-        let textish = matches!(
-            logical_type,
-            LogicalType::Text | LogicalType::Uuid | LogicalType::Date | LogicalType::DateTime
-        );
+        let textish = matches!(logical_type, LogicalType::Text | LogicalType::Uuid);
         return match (textish && !datetime, nullable) {
             (true, _) => Some(json!("")),
             (false, true) => Some(Value::Null),

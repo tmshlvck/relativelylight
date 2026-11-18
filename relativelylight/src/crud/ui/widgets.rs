@@ -260,6 +260,9 @@ async fn widget(
                 (_, LogicalType::Bool) => Widget::Switch { on: value == "true" },
                 (_, LogicalType::Int) => Widget::Number { value, step: "1" },
                 (_, LogicalType::Float) => Widget::Number { value, step: "any" },
+                // A calendar date: the browser's date picker, which posts `YYYY-MM-DD` — the one
+                // form the engine accepts. No zone: a date is the same day for every viewer.
+                (_, LogicalType::Date) => Widget::Text { value, kind: "date", placeholder: String::new() },
                 // A write-only column (a password) is never rendered with a value — there is nothing
                 // to show, and on edit an empty input means "keep the current one".
                 _ if *write_only => Widget::Text {

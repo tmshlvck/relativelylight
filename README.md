@@ -54,7 +54,8 @@ URL, verified (and re-authenticated) before it's on.</sub></td>
   sign-in policy as one minimum assurance level, "password change required", and a per-model gate.
 - **Files** (`files`): a streaming upload reader (several files, or a phone's camera), safe download
   responses, and upload-form, preview and thumbnail components. Storage, naming and listing stay yours.
-- **Timezones** (`tz`): integer-UTC storage, rendered server-side in the operator's zone, and
+- **Timezones** (`tz`): instants stored as integer UTC seconds (dates as a native `DATE`,
+  [TIME.md](docs/TIME.md#1-storage-model)), rendered server-side in the operator's zone, and
   `TzPicker`, a navbar or profile-page zone selector (a cookie; UTC until one is chosen).
 
 ## Quick start

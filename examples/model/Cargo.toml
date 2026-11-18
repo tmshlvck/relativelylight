@@ -5,5 +5,6 @@ edition = "2021"
 publish = false
 
 [dependencies]
-sea-orm = { workspace = true, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+# `with-chrono` + `serde`: an instant field is `ChronoUnixTimestamp`, a calendar date `Date` (docs/TIME.md §1).
+sea-orm = { workspace = true, features = ["sqlx-sqlite", "runtime-tokio-rustls", "with-chrono", "serde"] }
 serde = { workspace = true }

@@ -333,3 +333,184 @@ async fn an_enum_column_round_trips_on_sqlite() {
     let page = e.list("ticket", &q, false).await.unwrap();
     assert_eq!(page.data.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), vec![json!(2)]);
 }
+
+/// A calendar date, an instant as integer seconds, and a native timestamp — the three ways a model
+/// holds time (`docs/TIME.md` §1).
+mod dated {
+    use sea_orm::entity::prelude::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "dated")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i32,
+        pub issued_on: Date,
+        pub due_on: Option<Date>,
+        pub sent_at: Option<ChronoUnixTimestamp>,
+        pub logged: Option<DateTime>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+#[tokio::test]
+async fn dates_are_written_in_one_form_and_instants_as_seconds() {
+    use crate::crud::engine::{Column, ListQuery};
+
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    for stmt in [
+        "CREATE TABLE dated (id INTEGER PRIMARY KEY, issued_on date_text NOT NULL, due_on date_text, \
+         sent_at INTEGER, logged datetime_text)",
+        "INSERT INTO dated (id, issued_on, due_on, sent_at, logged) \
+         VALUES (1, '2026-11-05', NULL, 1793795400, '2026-11-05 12:30:00')",
+    ] {
+        db.execute_unprepared(stmt).await.unwrap();
+    }
+    let mut m = MetaModel::new(dated::Entity);
+    m.field("sent_at").datetime();
+    let mut crud = Crud::new(db.clone());
+    crud.register(m, Open);
+    let e = crud.into_engine();
+    let stored = |id: i32| {
+        let db = db.clone();
+        async move {
+            let row = db
+                .query_one_raw(sea_orm::Statement::from_string(
+                    db.get_database_backend(),
+                    format!("SELECT issued_on, due_on, sent_at, logged FROM dated WHERE id = {id}"),
+                ))
+                .await
+                .unwrap()
+                .map(|r| {
+                    json!([
+                        r.try_get::<String>("", "issued_on").unwrap(),
+                        r.try_get::<Option<String>>("", "due_on").unwrap(),
+                        r.try_get::<Option<i64>>("", "sent_at").unwrap(),
+                        r.try_get::<Option<String>>("", "logged").unwrap(),
+                    ])
+                });
+            row.unwrap_or(Value::Null)
+        }
+    };
+    let submit = |body: String| {
+        let e = &e;
+        async move {
+            let form = match body.contains("_op=update&_id=1") {
+                true => Form::new(e, "dated").edit("1"),
+                false => Form::new(e, "dated"),
+            };
+            form.submit(&HeaderMap::new(), IP, body.as_bytes(), &ViewState::default()).await
+        }
+    };
+
+    // The native timestamp is introspected read-only; the date and the instant are inputs.
+    let read_only: Vec<String> = e
+        .columns("dated")
+        .unwrap()
+        .into_iter()
+        .filter_map(|c| match c {
+            Column::Field { name, read_only: true, .. } => Some(name),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(read_only, vec!["id".to_string(), "logged".into()]);
+    let html = Form::new(&e, "dated").edit("1").render_for(&HeaderMap::new(), &ViewState::default()).await.unwrap();
+    assert!(html.contains(r#"type="date" name="issued_on" value="2026-11-05""#), "{html}");
+    assert!(html.contains(r#"type="datetime-local""#), "{html}");
+    assert!(!html.contains(r#"name="logged""#), "{html}");
+
+    // A date in the one canonical form is stored as exactly that text; an instant as its seconds
+    // (the form's wall clock read in the viewer's zone — UTC here); a blank nullable date is NULL.
+    let ok = submit("_op=create&issued_on=2026-02-28&due_on=&sent_at=2026-11-05T12%3A30".into()).await;
+    assert!(matches!(ok, Ok(Outcome::Done(_))), "{ok:?}");
+    assert_eq!(stored(2).await, json!(["2026-02-28", null, 1793881800, null])); // 2026-11-05 12:30 UTC
+
+    // Anything else is a field error, and nothing is written: SQLite would have stored any of these
+    // as text, and sorted and range-filtered them wrongly ever after.
+    for bad in ["5.11.2026", "2026-1-5", "2026-02-30", "2026-11-05T00:00", "26-11-05"] {
+        match submit(format!("_op=create&issued_on={bad}")).await {
+            Ok(Outcome::Invalid(s)) => {
+                assert_eq!(s.field_error("issued_on"), Some("expected a date, YYYY-MM-DD"), "{bad}")
+            }
+            other => panic!("{bad}: expected a field error, got {other:?}"),
+        }
+    }
+    // A blank required date is "required", as any other required field.
+    match submit("_op=create&issued_on=".into()).await {
+        Ok(Outcome::Invalid(s)) => assert_eq!(s.field_error("issued_on"), Some("required")),
+        other => panic!("expected a field error, got {other:?}"),
+    }
+    assert_eq!(stored(3).await, Value::Null);
+
+    // An update clears the nullable date and keeps the native timestamp it can't write.
+    assert!(matches!(
+        submit("_op=update&_id=1&issued_on=2026-11-06&due_on=&sent_at=".into()).await,
+        Ok(Outcome::Done(_))
+    ));
+    assert_eq!(stored(1).await, json!(["2026-11-06", null, null, "2026-11-05 12:30:00"]));
+    // The engine refuses a native date-time a caller marked writable, saying why.
+    let mut m = MetaModel::new(dated::Entity);
+    m.field("logged").read_only = false;
+    let mut crud = Crud::new(db.clone());
+    crud.register(m, Open);
+    let e2 = crud.into_engine();
+    match Form::new(&e2, "dated")
+        .submit(&HeaderMap::new(), IP, b"_op=create&issued_on=2026-01-01&logged=2026-01-01T10%3A00", &ViewState::default())
+        .await
+    {
+        Ok(Outcome::Invalid(s)) => assert!(s.field_error("logged").unwrap().contains("Unix seconds")),
+        other => panic!("expected a field error, got {other:?}"),
+    }
+
+    // Filters and ranges compare dates as dates, and sort in calendar order.
+    let ids = |q: ListQuery| {
+        let e = &e;
+        async move {
+            let page = e.list("dated", &ListQuery { per_page: 10, ..q }, false).await.unwrap();
+            page.data.iter().map(|r| r.id.clone()).collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(ids(ListQuery { eq: vec![("issued_on".into(), "2026-02-28".into())], ..Default::default() }).await, vec![json!(2)]);
+    assert_eq!(ids(ListQuery { eq: vec![("issued_on".into(), "garbage".into())], ..Default::default() }).await, Vec::<Value>::new());
+    // Both rows have no `due_on` now: a malformed date must not match them as "no date" would.
+    let due = |v: &str| ListQuery { eq: vec![("due_on".into(), v.into())], ..Default::default() };
+    assert_eq!(ids(due("garbage")).await, Vec::<Value>::new(), "a malformed date matches nothing");
+    assert_eq!(ids(due("")).await, vec![json!(1), json!(2)], "control: the empty filter finds them");
+    let range = |from: &str, to: &str| ListQuery {
+        range: vec![("issued_on".into(), Some(from.into()), Some(to.into()))],
+        ..Default::default()
+    };
+    assert_eq!(ids(range("2026-11-01", "2026-11-30")).await, vec![json!(1)]);
+    assert_eq!(ids(range("2026-01-01", "2026-12-31")).await.len(), 2);
+    let sorted = ListQuery { sort: vec![("issued_on".into(), false)], ..Default::default() };
+    assert_eq!(ids(sorted).await, vec![json!(2), json!(1)]);
+    // A native date-time sorts, but has no range control: an instant is ranged as integer seconds.
+    let ranged = |col: &'static str| crate::crud::ui::Table::new(&e, "dated").range_filter(col);
+    let err = ranged("logged").render_for(&HeaderMap::new(), &ViewState::default()).await.unwrap_err();
+    assert!(matches!(&err, crate::crud::Error::BadRequest(m) if m.contains("'logged'")), "{err}");
+    ranged("issued_on").render_for(&HeaderMap::new(), &ViewState::default()).await.expect("control: a date ranges");
+
+    // CSV: a date leaves as the text it is and comes back as the same date. The file carries the
+    // read-only native timestamp too, which the import leaves alone; a malformed date in a cell is
+    // that row's error, as on the form.
+    #[cfg(feature = "csv")]
+    {
+        use crate::crud::csv_io;
+        use crate::time::Tz;
+        let cols = e.columns("dated").unwrap();
+        let file = csv_io::export(&e, "dated", &cols, &ListQuery::default(), &Tz::UTC).await.unwrap();
+        assert!(file.contains("2026-11-06") && file.contains("2026-02-28"), "{file}");
+        let before = (stored(1).await, stored(2).await);
+        let report = csv_io::import(&e, "dated", &cols, &file, &Tz::UTC).await.unwrap();
+        assert_eq!((report.updated, report.failed), (2, 0), "{:?}", report.errors);
+        assert_eq!((stored(1).await, stored(2).await), before, "the round trip changes nothing");
+        let bad = "id,issued_on\n1,5.11.2026\n";
+        let report = csv_io::import(&e, "dated", &cols, bad, &Tz::UTC).await.unwrap();
+        assert_eq!(report.failed, 1, "{:?}", report.errors);
+        assert!(report.errors[0].message.contains("YYYY-MM-DD"), "{:?}", report.errors);
+        assert_eq!(stored(1).await, before.0, "and nothing was written");
+    }
+}

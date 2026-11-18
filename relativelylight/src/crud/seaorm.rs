@@ -531,10 +531,14 @@ fn json_to_db(ct: &ColumnType, v: &Value) -> DbValue {
             LogicalType::Int => int_null(ct),
             LogicalType::Float => DbValue::Double(None),
             LogicalType::Bool => DbValue::Bool(None),
+            LogicalType::Date => DbValue::ChronoDate(None),
             _ => DbValue::String(None),
         };
     }
     match logical_type(ct) {
+        // A date is bound as a date, never as text: PostgreSQL refuses text for a `date` column, and
+        // SQLite would store whatever text it was given. `coerce` has already refused a malformed one.
+        LogicalType::Date => DbValue::ChronoDate(v.as_str().and_then(super::engine::parse_date)),
         LogicalType::Int => v.as_i64().map(|n| int_to_db(ct, n)).unwrap_or_else(|| int_null(ct)),
         LogicalType::Float => v.as_f64().map(DbValue::from).unwrap_or(DbValue::Double(None)),
         LogicalType::Bool => DbValue::from(v.as_bool().unwrap_or(false)),
@@ -556,6 +560,9 @@ fn str_to_db(ct: &ColumnType, s: &str) -> DbValue {
             .parse::<sea_orm::prelude::Uuid>()
             .map(DbValue::from)
             .unwrap_or_else(|_| DbValue::from(s.to_string())),
+        // A date as a date (PostgreSQL won't compare `date` with text). One that doesn't parse is a
+        // typed NULL, which `=` and `>=` match nothing against — the safe direction, as for a UUID.
+        LogicalType::Date => DbValue::ChronoDate(super::engine::parse_date(s)),
         _ => DbValue::from(s.to_string()),
     }
 }
@@ -727,7 +734,10 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                     required: !def.is_null() && def.get_column_default().is_none() && !is_pk,
                     nullable: def.is_null(),
                     blank_is_null: true,
-                    read_only: is_pk,
+                    // A native date-time or time column can't be written through the engine (an
+                    // instant is integer seconds, `.datetime()`; TIME.md §1), so it starts read-only:
+                    // shown, sorted and range-filtered, never offered as an input.
+                    read_only: is_pk || logical_type(def.get_column_type()) == LogicalType::DateTime,
                     write_only: false,
                     create_only: false,
                     hidden: is_fk,
@@ -1235,7 +1245,13 @@ where
             cond = cond.add(if val.is_empty() {
                 c.is_null()
             } else {
-                c.eq(str_to_db(c.def().get_column_type(), val))
+                match str_to_db(c.def().get_column_type(), val) {
+                    // A value the column can't hold (a malformed date) is a typed NULL, and the query
+                    // builder writes `= NULL` as `IS NULL`, which would match the rows with no date.
+                    // It matches nothing, said outright.
+                    DbValue::ChronoDate(None) => Expr::cust("1 = 0"),
+                    v => c.eq(v),
+                }
             });
         }
         for (name, from, to) in &q.range {

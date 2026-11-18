@@ -130,7 +130,7 @@ pub struct MetaField {
     pub is_pk: bool,
     pub is_fk: bool,
     // visibility (change freely):
-    pub read_only: bool,   // in reads, ignored on write        default: true if is_pk
+    pub read_only: bool,   // in reads, ignored on write        default: true if is_pk or a native date-time
     pub write_only: bool,  // in writes, omitted from reads      default: false (e.g. password)
     pub create_only: bool, // written on create, never by update default: false (e.g. a first password)
     pub hidden: bool,      // in neither reads/writes/metadata   default: true if is_fk
@@ -181,24 +181,32 @@ In the admin form it renders as a **masked input**; a blank value on *edit* keep
 which [`auth::verify_password`] can never match — so that account simply has no password login (e.g. an
 SSO / PassKey user).
 
-**Datetime helper.** An integer column holding **Unix seconds (UTC)** is stored/validated as an
-`Int`, so by default the UI renders it as a plain number. `MetaField::datetime()` flags it as a
-datetime *for presentation only*: the table cell shows a readable UTC timestamp
-(`YYYY-MM-DD HH:MM:SS UTC`) and the create/edit form uses a `datetime-local` picker (edited in UTC,
-stored back as integer seconds). Storage and validation are unchanged — only the input and the cell.
+**Datetime helper.** An instant is an integer column of **Unix seconds, UTC**
+([TIME.md §1](TIME.md#1-storage-model) says which column a time value takes and why), with the
+model's field typed `ChronoUnixTimestamp` (or a plain `i64`). It is stored and validated as an
+`Int`, so by default the UI shows a number. `MetaField::datetime()` flags it as a datetime *for
+presentation*: the cell, the CSV cell and a `datetime-local` form input all read in the caller's
+zone, and what is typed is read back in that zone into integer seconds
+([TIME.md](TIME.md#4-what-follows-the-zone)). Storage and validation are unchanged.
 
 ```rust
 zone.field("created_at").datetime();   // read-only stamp → formatted cell (no input)
 key.field("expires_at").datetime();    // editable timestamp → datetime picker (blank = null)
 ```
 
-For a read-only column this affects only the cell (read-only fields have no form input). Cells and
-the form picker render in UTC by default, or follow a timezone selection when you include the
-timezone JS/picker — see **[docs/TIME.md](TIME.md)**.
+For a read-only column this affects only the cell (read-only fields have no form input).
+
+**Dates and native date-times.** A calendar date is a native `Date` column (`NaiveDate`): its input
+is `<input type="date">`, and it is accepted on every surface (form, CSV, `Engine`, filters) only as
+exactly `YYYY-MM-DD`, a real day; anything else is the field's error `expected a date, YYYY-MM-DD`.
+A native `DateTime` / `Timestamp` / `TimestampWithTimeZone` / `Time` column starts **read-only**: it
+is shown as stored and sorted, has no range control, and the engine refuses a write to it even if you
+mark it writable ([TIME.md §1](TIME.md#1-storage-model)).
 
 ### Widget overrides — picking the form input per field
 
-`display` is the general form of the datetime helper: the input a field gets is derived from its type,
+`display` is the general form of the datetime helper: the input a field gets is derived from its type
+(a number input for a number, a switch for a bool, a date input for a `Date`, a text input otherwise),
 and these override that where the type alone can't know better. **Only the form input changes** —
 `datetime` aside, cells keep rendering the plain value, because a table row is no place for a slider.
 
@@ -430,7 +438,7 @@ A value passes through up to three layers, and only the outer two take your code
   the column's logical type — a codec can't turn an integer column into text.
 - **The form and CSV read typed text the same way**, so a blank input and a blank cell mean the same
   thing: on a text column `""` (stored as `NULL` on a nullable one unless `blank_is_null` is off), on
-  anything else `NULL` when nullable and otherwise "not sent" (the default on create, unchanged on
+  anything else (a number, a bool, a date, a `.datetime()`) `NULL` when nullable and otherwise "not sent" (the default on create, unchanged on
   update); a write-only column left blank keeps its value. The input itself is chosen by `display`
   and the type, and it round-trips with the reading — which is why there is no per-form transform
   hook: a pair of app closures that weren't exact inverses would corrupt the row on every save.
@@ -969,15 +977,16 @@ both ends.
 |---|---|---|
 | integer with `.datetime()` | dates, **in the viewer's zone** | Unix seconds: "from" is the first second of that day there, "to" the **last** — the day is inclusive |
 | `Int` / `Float` | numbers | numbers |
-| `Date` | dates | stored dates |
+| `Date` | dates | dates, bound as dates (a bound that is no date matches nothing) |
 | `Text` | text | the database's collation |
 
 So from 2026-11-01 to 2026-11-30, read by someone whose `rl_tz` is Europe/Prague, is every second
 of November in Prague: a row stamped 23:30 on the 30th is in, one at 00:30 on 1 December is not.
 The same URL in UTC is a different hour of the same days. A DST day is as long as it really is.
-Any other column (a relation, a boolean, JSON, a native `DateTime`) is a render-time error naming
-it. A bound the column can't read (`from=lots` on a number) applies nothing, and gets no chip, rather
-than being compared as something else. A range only applies on a table that declared it: the same
+Any other column (a relation, a boolean, JSON, a native date-time) is a render-time error naming
+it; an instant to range by is a `.datetime()` column ([TIME.md §1](TIME.md#1-storage-model)). A
+bound the column can't read (`from=lots` on a number) applies nothing, and gets no chip, rather than
+being compared as something else. A range only applies on a table that declared it: the same
 parameters in another table's URL are ignored, and an `Admin` doesn't carry them between entities.
 
 **The read-only row.** Every table offers a **View** action per row, opening `?show=<pk>` — a dialog

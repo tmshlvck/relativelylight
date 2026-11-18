@@ -17,7 +17,13 @@ use sea_orm::{
     ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbErr,
     EntityTrait, Schema, Set,
 };
+use sea_orm::prelude::{ChronoDateTimeUtc, ChronoUnixTimestamp, Date};
 use std::time::Duration;
+
+/// An instant from Unix seconds, as an instant field holds it.
+fn at(secs: i64) -> ChronoUnixTimestamp {
+    ChronoUnixTimestamp::from(ChronoDateTimeUtc::from_timestamp(secs, 0).expect("a valid timestamp"))
+}
 
 /// Connect to an in-memory SQLite DB, create the schema from the entities, and seed data.
 ///
@@ -137,7 +143,7 @@ async fn seed(db: &DatabaseConnection) -> Result<(), DbErr> {
             published: Set(i % 4 != 0), // a mix of published / draft for the Yes/No badge
             // Spread publish times across ~45 hours from a fixed base (2023-11-14T22:13:20Z), and
             // leave drafts unpublished (None) — so the datetime column shows both values and blanks.
-            published_at: Set((i % 4 != 0).then(|| 1_700_000_000i64 + i as i64 * 3600)),
+            published_at: Set((i % 4 != 0).then(|| at(1_700_000_000i64 + i as i64 * 3600))),
             // Cycle through the variants, leaving every 7th row blank so the dropdown's "—" choice has
             // something to show (the column is nullable).
             status: Set(match i % 7 {
@@ -188,20 +194,24 @@ async fn seed(db: &DatabaseConnection) -> Result<(), DbErr> {
     // Timezone demo rows (registered by `crud-example`). They **straddle both 2026 DST transitions**
     // on purpose: in `Europe/Prague` the January rows read GMT+1 and the June ones GMT+2, from the
     // same integers. The EU switches on the last Sunday of March and October at 01:00 UTC.
-    let events: &[(&str, Option<i64>)] = &[
-        ("New Year's fireworks", Some(1767268800)), // 2026-01-01 12:00 UTC → 13:00 GMT+1
-        ("Winter standup", Some(1768212000)),       // 2026-01-12 10:00 UTC → 11:00 GMT+1
-        ("Spring forward (01:00Z)", Some(1774746000)), // 2026-03-29 01:00 UTC → 03:00 GMT+2 (02:00 skipped)
-        ("Midsummer picnic", Some(1780315200)),     // 2026-06-01 12:00 UTC → 14:00 GMT+2
-        ("Summer release", Some(1783238400)),       // 2026-07-05 08:00 UTC → 10:00 GMT+2
-        ("Fall back (01:00Z)", Some(1792890000)),   // 2026-10-25 01:00 UTC → 02:00 GMT+1 (02:00 repeats)
-        ("Someday (no date yet)", None),            // a nullable timestamp, cleared
+    // `rsvp_by` is a calendar date beside them: it reads the same in every zone.
+    // (name, happens_at as Unix seconds, rsvp_by as (year, month, day))
+    type Seed = (&'static str, Option<i64>, Option<(i32, u32, u32)>);
+    let events: &[Seed] = &[
+        ("New Year's fireworks", Some(1767268800), Some((2025, 12, 20))), // 2026-01-01 12:00 UTC → 13:00 GMT+1
+        ("Winter standup", Some(1768212000), None),       // 2026-01-12 10:00 UTC → 11:00 GMT+1
+        ("Spring forward (01:00Z)", Some(1774746000), None), // 2026-03-29 01:00 UTC → 03:00 GMT+2 (02:00 skipped)
+        ("Midsummer picnic", Some(1780315200), Some((2026, 5, 15))), // 2026-06-01 12:00 UTC → 14:00 GMT+2
+        ("Summer release", Some(1783238400), None),       // 2026-07-05 08:00 UTC → 10:00 GMT+2
+        ("Fall back (01:00Z)", Some(1792890000), None),   // 2026-10-25 01:00 UTC → 02:00 GMT+1 (02:00 repeats)
+        ("Someday (no date yet)", None, None),            // a nullable timestamp, cleared
     ];
-    for (i, (name, happens_at)) in events.iter().enumerate() {
+    for (i, (name, happens_at, rsvp_by)) in events.iter().enumerate() {
         event::ActiveModel {
             id: Set(i as i32 + 1),
             name: Set((*name).into()),
-            happens_at: Set(*happens_at),
+            happens_at: Set(happens_at.map(at)),
+            rsvp_by: Set(rsvp_by.and_then(|(y, m, d)| Date::from_ymd_opt(y, m, d))),
         }
         .insert(db)
         .await?;

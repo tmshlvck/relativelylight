@@ -1,6 +1,7 @@
 //! `relativelylight::time` — timezone-aware **presentation** of timestamps (feature `tz`).
 //!
-//! The contract across relativelylight is: the database speaks **integer Unix seconds, UTC**.
+//! The contract across relativelylight is: an **instant** is stored as **integer Unix seconds, UTC**
+//! (a calendar date is a native `DATE`, which has no zone; `docs/TIME.md` §1).
 //! Timezones exist only for display — but the *formatting happens on the server*, which is what lets a
 //! CSV export match what is on screen and a `<datetime-local>` input round-trip through the zone the
 //! operator is actually working in.

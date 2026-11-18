@@ -181,6 +181,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_mm.field(event::Column::HappensAt.as_str()).description =
         Some("Type a wall-clock time in the selected zone; it is stored as integer UTC seconds.".into());
     event_mm.field(event::Column::HappensAt.as_str()).datetime();
+    // A calendar date beside it: a native `DATE`, a date input, and the same day in every zone.
+    event_mm.field(event::Column::RsvpBy.as_str()).label = Some("RSVP by".into());
+    event_mm.field(event::Column::RsvpBy.as_str()).description =
+        Some("A calendar date: it reads the same whichever zone is selected.".into());
 
     // Ungated demo: every model takes the `Open` gate (no auth). See `adminpanel` for a gated app.
     let mut crud = Crud::new(db);
@@ -271,7 +275,8 @@ fn table<'a>(engine: &'a Engine, slug: &str) -> Table<'a> {
         "event" => t
             .delete(false)
             .sort(event::Column::HappensAt.as_str())
-            .range_filter(event::Column::HappensAt.as_str()),
+            .range_filter(event::Column::HappensAt.as_str())
+            .range_filter(event::Column::RsvpBy.as_str()),
         // A profile comes with its user: edited here, never added. Six rows: no search, and no
         // page-size control beside the pager.
         "profile" => t.create(false).search(false).per_page_choices([]),

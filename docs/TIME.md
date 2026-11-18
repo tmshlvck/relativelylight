@@ -17,19 +17,80 @@ timezone database.
 
 ## 1. Storage model
 
-**The database column is an integer: Unix seconds, UTC.** Nothing else in the crate stores a local
-time, an offset, or a zone name beside a timestamp. A timezone is a *presentation* choice, and it is
-made per request.
+**Pick a column's type by what the value means.** There is one way for each kind:
 
-Declare such a column with [`MetaField::datetime`](CRUD.md#widget-overrides--picking-the-form-input-per-field):
+| The value is | Column | Model field | Zone |
+|---|---|---|---|
+| **an instant**: something happened, or will, at a moment (`created_at`, `expires_at`) | an integer, **Unix seconds, UTC** (`BIGINT`), marked `.datetime()` | `ChronoUnixTimestamp` (or `i64`) | shown, typed and exported in the viewer's zone |
+| **a calendar date**: a day with no time (a date of supply, a `valid_until`) | a native `DATE` | `Date` (`chrono::NaiveDate`) | none: the same day for every viewer |
+| a time of day | not supported for writing; nothing has needed one yet | — | — |
+| a native `DateTime` / `Timestamp` / `TimestampWithTimeZone` / `Time` | **read-only**: shown as stored and sorted, never written | — | none |
+
+Nothing in the crate stores a local time, an offset or a zone name beside a value. A timezone is a
+*presentation* choice, made per request (§2).
+
+### Instants: integer seconds
+
+An instant is an integer because an integer is the same thing on SQLite and PostgreSQL: it compares,
+sorts and does arithmetic (`expires_at <= now`, `+ 86_400`) as an integer, in the same SQL, on an
+ordinary index. Storing no offset means a zone whose rules change reinterprets the stored integers
+correctly on the next render (§5). Declare the column with
+[`MetaField::datetime`](CRUD.md#widget-overrides--picking-the-form-input-per-field):
 
 ```rust
-post_mm.field("published_at").datetime();   // an i64 column holding Unix seconds
+#[sea_orm(table_name = "post")]
+pub struct Model {
+    // …
+    pub published_at: Option<ChronoUnixTimestamp>,   // BIGINT in the database
+}
+
+post_mm.field("published_at").datetime();
 ```
 
 That is the whole model-side configuration. The column then renders as a readable datetime in a table
 cell, as a `<input type="datetime-local">` in a form, and as a readable datetime in a CSV export — all
 three in the caller's zone, all three on the server.
+
+`ChronoUnixTimestamp` (SeaORM's `sea_orm::prelude`) is a `DateTime<Utc>` in Rust and a `BIGINT` of
+seconds in the database: date arithmetic in Rust without hand-rolled `i64` maths, and nothing changes
+in the schema or for the crate, which reads it as the integer it is. It serializes as that integer
+through SeaORM's `serde` feature, which the `crud` feature turns on. Use seconds, not
+`ChronoUnixTimestampMillis`: `.datetime()` reads seconds. A plain `i64` field works the same.
+
+### Calendar dates: a native `DATE`
+
+A date is a native `DATE` column, a `Date` (`chrono::NaiveDate`) field: `YYYY-MM-DD` text on SQLite,
+`date` on PostgreSQL. Its input is `<input type="date">`, and it reads the same for every viewer, in
+every zone.
+
+**Never store a date as midnight-UTC seconds.** Rendered in the viewer's zone, an instant at 00:00 UTC
+is the previous day anywhere west of UTC, so a date of supply would show a day early in New York.
+
+The crate accepts a date on every surface (the form, CSV, `Engine`, filters and ranges) only as
+exactly `YYYY-MM-DD`, a real day: `2026-1-5`, `5.11.2026`, `2026-02-30` and a date with a time are
+the field's error `expected a date, YYYY-MM-DD`. It binds a date as a date, so PostgreSQL compares
+`date` with `date`, and a filter value that is no date matches no rows.
+
+### Native date-times: read-only
+
+A native `DateTime`, `Timestamp`, `TimestampWithTimeZone` or `Time` column is introspected
+**read-only**. The crate shows it as stored and sorts it; it has no range control, and the engine
+refuses a write to it, even if you mark the field writable, with a message pointing here. Writing one would mean deciding what a `datetime-local` value
+means for a zoned column; store an instant as integer seconds instead, or fill the column in a hook.
+Not recommended for new columns.
+
+### Naming, and the raw database
+
+- **Name an instant `…_at`** (`created_at`, `sent_at`), not `…_ts`: the suffix says what the value
+  means. A `DATE` column describes itself in `\d`.
+- **Comment an integer instant** for whoever reads the raw database, in the migration:
+  `COMMENT ON COLUMN invoice.sent_at IS 'Unix seconds, UTC';` (PostgreSQL; SQLite has no column
+  comments). SeaORM's `#[sea_orm(comment = "…")]` does not reach `COMMENT ON COLUMN` when the
+  table is created from the entity, so write it yourself.
+- **Anyone writing outside the models** (raw SQL, an import script, another app) keeps the same
+  contract: a date is exactly `YYYY-MM-DD`, an instant is integer seconds. PostgreSQL refuses
+  anything else in a `date` column; **SQLite doesn't**, and a row holding `5.11.2026` then sorts and
+  range-filters wrong, with no error anywhere.
 
 ## 2. The zone for one request: `Tz`
 

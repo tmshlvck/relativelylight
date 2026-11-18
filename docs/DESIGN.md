@@ -15,7 +15,7 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 | `auth` | users/groups, sessions, login, TOTP 2FA, OIDC SSO, API keys, gate presets | [AUTH.md](AUTH.md); the reasoning in [AUTH-SECURITY.md](AUTH-SECURITY.md) |
 | `middleware` | `resolve_real_ip` — required; the caller's address, resolved once | [AUTH.md §4](AUTH.md#4-middleware-the-module-provides) |
 | `observe` | the write observer for audit logging, and the error observer for failures a response hides | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
-| `time` | integer-UTC timestamps rendered in the request's zone | [TIME.md](TIME.md) |
+| `time` | instants as integer UTC seconds, rendered in the request's zone; dates as native `DATE` | [TIME.md](TIME.md) |
 | `validate` | typed field validators and normalizers | [DATAINPUT.md](DATAINPUT.md) |
 | `files` | a streaming upload reader, safe download responses, upload/preview/thumbnail components | [FILES.md](FILES.md) |
 
@@ -77,6 +77,16 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
   rather than reloading, since a reload would lose a form being filled in underneath.
 - **Display and storage are separate.** `format_cell`/`format_view` are display only; `on_read` /
   `on_write` are an inverse codec on the column's own type.
+- **One column type per kind of time value** ([TIME.md §1](TIME.md#1-storage-model)). An instant is
+  integer Unix seconds: it compares, sorts and adds as an integer, in the same SQL and on an ordinary
+  index on SQLite and PostgreSQL alike, where native timestamps are text in several shapes on SQLite
+  and a real type on PostgreSQL, two code paths to keep right. A calendar date is a native `DATE`,
+  because a date isn't an instant: as midnight-UTC seconds it would show the previous day west of
+  UTC. Its fixed-width `YYYY-MM-DD` sorts as text on SQLite, so the crate accepts exactly that form,
+  since SQLite refuses nothing. Native date-time columns stay read-only rather than become a second
+  way to store an instant. A recurring time ("every day at 10:00 in Prague") is a rule, a wall-clock
+  time plus a zone name, and its occurrences are instants; no storage type answers it, so none is
+  bent to.
 
 ## auth
 

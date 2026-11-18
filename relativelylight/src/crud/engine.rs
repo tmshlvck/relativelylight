@@ -361,10 +361,37 @@ impl Page {
 
 // ===================== Shared helpers =====================
 
+/// A calendar date as written in storage and on the wire: exactly `YYYY-MM-DD`, a real day.
+///
+/// Strict on purpose. SQLite keeps a date as text and accepts anything, and its sorting and ranges
+/// compare that text, so one row stored as `5.11.2026` or `2026-1-5` sorts and filters wrong with no
+/// error anywhere (`docs/TIME.md` §1). Only the one canonical form gets
+/// past this — the form PostgreSQL's `date` and `<input type="date">` use too.
+pub fn parse_date(s: &str) -> Option<sea_orm::prelude::ChronoDate> {
+    let d = sea_orm::prelude::ChronoDate::parse_from_str(s, "%Y-%m-%d").ok()?;
+    (d.format("%Y-%m-%d").to_string() == s).then_some(d)
+}
+
 /// Type-check a JSON value against a logical type; returns normalized JSON or an error string.
 pub fn coerce(lt: LogicalType, v: &Value) -> std::result::Result<Value, String> {
     if v.is_null() {
         return Ok(Value::Null);
+    }
+    match (lt, v.as_str()) {
+        // An empty date is no date; `required` then decides whether that is allowed.
+        (LogicalType::Date | LogicalType::DateTime, Some("")) => return Ok(Value::Null),
+        (LogicalType::Date, Some(s)) => {
+            return match parse_date(s) {
+                Some(_) => Ok(v.clone()),
+                None => Err("expected a date, YYYY-MM-DD".into()),
+            }
+        }
+        (LogicalType::DateTime, _) => {
+            return Err("a native date-time column can't be written: store an instant as integer \
+                        Unix seconds with .datetime()"
+                .into())
+        }
+        _ => {}
     }
     let ok = match lt {
         LogicalType::Int => v.is_i64() || v.is_u64(),

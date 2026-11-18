@@ -9,9 +9,11 @@ pub struct Model {
     pub body: String,
     pub views: i32,
     pub published: bool,
-    /// Optional publish time — Unix seconds, UTC. Demonstrates an *editable* datetime column
-    /// (`.datetime()` in the admin config → a timezone-aware datetime picker in the form).
-    pub published_at: Option<i64>,
+    /// Optional publish time: an instant, stored as a `BIGINT` of Unix seconds, UTC
+    /// (`ChronoUnixTimestamp` is a `DateTime<Utc>` here and an integer in the database). Demonstrates
+    /// an *editable* datetime column (`.datetime()` in the admin config → a timezone-aware datetime
+    /// picker in the form).
+    pub published_at: Option<ChronoUnixTimestamp>,
     /// A closed set of values — see [`Status`]. Nothing in the examples declares the allowed values: the
     /// admin introspects them from the column type.
     pub status: Option<Status>,

@@ -195,3 +195,38 @@ form.submit(&headers, ip, &body, &state).await
 ```
 
 See [CRUD.md → `Form`](CRUD.md#form--a-standalone-createedit-form).
+
+## 11. Time values: one column type per kind
+
+0.5 settles which column a time value takes ([TIME.md §1](TIME.md#1-storage-model)): an **instant**
+is integer Unix seconds with `.datetime()`, a **calendar date** a native `DATE`. Go through your
+columns by what each value means.
+
+- **Instants already in integer columns: nothing to do.** Optionally change the field type from `i64`
+  to `ChronoUnixTimestamp` to get a `DateTime<Utc>` in Rust. The column, the stored values and the
+  `.datetime()` configuration stay as they are:
+
+  ```rust
+  pub sent_at: Option<ChronoUnixTimestamp>,   // was Option<i64>
+  ```
+
+  Your own code then builds the value with `ChronoUnixTimestamp::from(dt)` and reads `.0`. The
+  `crud` feature turns on SeaORM's `serde`, which the wrapper needs to serialize as its integer.
+- **A date stored as midnight seconds** (a `valid_until`, a date of supply) moves to a `DATE` column
+  and a `Date` field. Shown in a viewer's zone, midnight UTC is the previous day west of UTC. This is
+  a schema change with a data conversion, e.g. on PostgreSQL:
+
+  ```sql
+  ALTER TABLE license ALTER COLUMN valid_until TYPE date
+    USING (to_timestamp(valid_until) AT TIME ZONE 'UTC')::date;
+  ```
+
+  On SQLite, rebuild the table, or add the new column and fill it with
+  `date(valid_until, 'unixepoch')`. Any code that wrote the seconds now writes a `Date`.
+- **A native timestamp column you edited through the CRUD** is now read-only. Such a write never
+  saved, so nothing that worked breaks, but its input is gone. Move the value to integer seconds
+  (an instant) or `DATE` (a day), or fill the column in a hook.
+- **A blank date input is now `NULL`** (or not sent, on a non-nullable column) rather than `""`.
+- **Anything that writes the database without the models** (raw SQL, import scripts) writes a date
+  as exactly `YYYY-MM-DD` and an instant as integer seconds. SQLite stores anything you give it,
+  and a row in another format sorts and filters wrong without an error.

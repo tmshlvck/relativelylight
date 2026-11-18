@@ -10,8 +10,6 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
   app search relation labels (a record by its zone's origin) and supply its own search (full-text,
   a `tsvector`, an external index) per entity. Asked for by CLIMB; bigger than a builder flag, since
   it reaches the `Accessor` seam.
-- [ ] **Range filter on a native `DateTime` column.** `Table::range_filter` reads integer
-  `.datetime()`, number, `Date` and text columns; a naive `DateTime` has no zone to read the day in.
 - [ ] **More filter operators** (`filter[ttl][gt]=300`, `[is_null]`). `[from]`/`[to]` ranges and the
   `fixed_in` set pin have shipped; the URL grammar nests for the rest. Wait for a real need.
 - [ ] **Ask each gate once per request.** A built-in gate resolves the caller (session, user,
@@ -26,6 +24,10 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
 - **No timezone abbreviations per cell.** The zone is named once per page.
 - **No type-changing codec until needed.** Cents shown as `12.34` is a formatter plus a validated
   input.
+- **Native date-time columns stay read-only** (TIME.md §1): an instant is integer seconds. Making
+  them writable means first deciding what a `datetime-local` value means for a zoned column; revisit
+  only for a real need.
+- **No time-of-day input** until a case needs one; a native `Time` column is read-only meanwhile.
 - **No charts.** Tooltips need a client runtime and SVG can't measure text; use Chart.js on a page of
   your own.
 

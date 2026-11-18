@@ -58,7 +58,10 @@ chrono = "0.4"
 
 [features]
 default = ["crud", "axum"]
-crud = ["dep:sea-orm"]        # the CRUD engine + SeaORM backend (the `crud` module)
+# the CRUD engine + SeaORM backend (the `crud` module). `with-chrono` binds a `Date` as a date;
+# `serde` makes SeaORM's `ChronoUnixTimestamp` (an instant as Unix seconds) serialize as an `i64`,
+# which the engine reads every model through (docs/TIME.md §1).
+crud = ["dep:sea-orm", "sea-orm/with-chrono", "sea-orm/serde"]
 axum = ["dep:axum"]           # the HTTP router/handlers
 # `ui` needs the **`axum` feature**, not merely askama: it parses a request's query string into a
 # `ViewState`, decodes posted form bodies, and answers with `axum::Response`. Depending on askama alone

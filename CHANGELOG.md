@@ -13,6 +13,20 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
+- **One column type per kind of time value** ([TIME.md §1](docs/TIME.md#1-storage-model)): an instant
+  is integer Unix seconds with `.datetime()`, a calendar date a native `DATE`. Three changes follow:
+  - **Native date-time columns are read-only.** A `DateTime`, `Timestamp`, `TimestampWithTimeZone`
+    or `Time` column is introspected `read_only`, and the engine refuses a write to it even when the
+    field is made writable. Such writes never worked (SeaORM refused the text they were bound as),
+    so the change is that the form no longer offers an input that couldn't save.
+  - **A blank date is `NULL`** (or not sent, on a non-nullable column), as a blank number is, rather
+    than `""`.
+  - **The `crud` feature turns on SeaORM's `with-chrono` and `serde`**, so a date binds as a date
+    and `ChronoUnixTimestamp` serializes as its integer.
+
+  **Upgrade:** move a date stored as midnight seconds to a `DATE` column, and a native timestamp the
+  app edited through the CRUD to integer seconds or a hook
+  ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#11-time-values-one-column-type-per-kind)).
 - **A standalone `Form` writes only what it is.** `Form::new(..).submit` only creates and
   `Form::new(..).edit(id).submit` only updates row `id`. Before, the posted body chose: an edit page's
   form could create a row or update another `_id` the caller's gate allowed. Now the other operation
@@ -80,6 +94,15 @@ is easy to miss in a diff.
 
 ### Added
 
+- **Calendar dates can be written** ([TIME.md §1](docs/TIME.md#calendar-dates-a-native-date)). A
+  native `Date` column (`NaiveDate`) gets `<input type="date">`, and the form, CSV, `Engine` and
+  filters accept it only as exactly `YYYY-MM-DD`, a real day (`expected a date, YYYY-MM-DD`
+  otherwise). It binds as a date, so PostgreSQL compares `date` with `date`, and a filter value that
+  is no date matches nothing. Before, every write to a `Date` failed.
+- **`ChronoUnixTimestamp` is the recommended field type for an instant** (TIME.md §1): a
+  `DateTime<Utc>` in Rust, the same `BIGINT` of seconds in the database, read by the crate as the
+  integer it is. The examples' `published_at` and `happens_at` use it, and `examples/crud`'s events
+  gain an `RSVP by` date that stays the same day whichever zone is picked.
 - **Pages cross-fade.** `crud::ui::CSS` turns on cross-document view transitions, so opening a
   dialog, saving or paging fades from one page to the next in a browser that supports them, instead
   of flashing white. Off under `prefers-reduced-motion`; opt out with
