@@ -41,6 +41,15 @@ client → resolve_real_ip → [your request log] → [CORS] → router
   credential this crate knows nothing about.
 - **CSRF** is built into `auth`'s routes and the `crud` UI, and is a layer for your own routes (§7).
 
+<a id="the-paths-auth-claims"></a>**The paths `auth` claims.** Fixed, but for the `/sso` prefix; everything
+else is the app's ([APP.md → Your URL namespace](APP.md#your-url-namespace)):
+
+| Mounted by | Paths |
+|---|---|
+| `Auth::routes()` | `/login`, `/login/totp`, `/logout`; `/profile`, `/profile/totp`, `/profile/totp/disable`, `/profile/totp/recovery`, `/profile/sessions/revoke`, `/profile/api-keys…` (with `Auth::api_keys`); `/profile/{id}`, `/profile/{id}/totp/disable`, `/profile/{id}/passkeys/remove` |
+| `Auth::routes()`, feature `passkeys` | `/login/passkey`, `/login/passkey/finish`, `/login/totp/passkey`, `/profile/passkeys…`, `/profile/password/remove`, `/auth/passkey.js` |
+| `Sso::routes()` | `/sso/{key}/login`, `/sso/{key}/callback`, `/sso/{key}/reauth`; the prefix is `Sso::base_path` |
+
 ## 2. Features
 
 | Feature | Adds | Pulls |

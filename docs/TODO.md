@@ -51,6 +51,9 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
   self-registration (today's decision is no sign-up page, §5j: both need a verified e-mail or
   similar). It resets passkeys too, but not TOTP: the user needs recovery codes or an administrator
   for that.
+- **`auth`'s paths are fixed** (AUTH.md §1 lists them); an app keeps its own pages off them. If an
+  app ever needs `/profile` for something else, a `profile_path` builder is the way: its 15 routes
+  and some 20 links in the templates would read it.
 - **The profile stays one page of cards.** If the cards ever outgrow it, server-rendered tabs (a
   `?tab=` on every form's answer) are the next step; not before.
 - **No scopes on API keys.** A key is its owner (AUTH.md §5k); narrower access is an account of its

@@ -94,6 +94,22 @@ Three things are load-bearing:
 3. **One `Arc<App>`** holding the engine, the `Auth` handle and your database — every handler below
    takes it as `State`.
 
+### Your URL namespace
+
+The crate claims few paths, and owns none of the rest; decide yours before they collide with them.
+
+- **Claimed:** `auth`'s `/login…`, `/logout`, `/profile…` and `/auth/passkey.js`, which are fixed,
+  and `Sso`'s `/sso/…`, whose prefix moves ([the list](AUTH.md#the-paths-auth-claims)).
+- **Yours:** everything else, including what the examples use. `/admin`, `/post`, `/pick` and `/tz`
+  there are the examples' choices, not the crate's: an `Admin`, a `Table`, a `Form`, the picker and
+  the timezone picker are fragments and form targets served from whatever route you give them.
+  Within that route the admin keeps its state in the query (`/admin/post?edit=7&page=2`), never in
+  path segments ([CRUD.md → The URL is the view](CRUD.md#the-url-is-the-view)).
+- **How a clash shows:** a route of yours at a path `auth` already serves (`/profile`) panics at
+  startup ("Overlapping method route"). A fixed path of yours under a parameter of `auth`'s
+  (`/profile/settings` beside `/profile/{id}`) is quieter: yours wins, and that path is no longer a
+  manager page. Keep your own pages off `/login…` and `/profile…`, under prefixes of your own.
+
 ## 2. The page shell and the nav bar
 
 One askama template, one function, every page. The library never emits `<html>`.
