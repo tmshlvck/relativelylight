@@ -727,9 +727,8 @@ async fn the_username_claim_is_matched_case_insensitively() {
 
 #[tokio::test]
 async fn provider_discovery_is_fetched_once_and_then_reused() {
-    // Discovery used to run on every request — twice per sign-in — which cost two round-trips, made
-    // sign-in fail whenever the provider's endpoint was briefly slow, and let an unauthenticated caller
-    // aim a flood of outbound requests at the provider by looping on /login.
+    // Discovery is cached: fetched per request, an unauthenticated loop on /login would aim a flood of
+    // requests at the provider (`Discovery` in sso.rs).
     let fx = Fx::new(true).await;
     assert_eq!(fx.idp.discovery_hits.load(Ordering::SeqCst), 0, "nothing fetched yet");
 

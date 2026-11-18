@@ -459,7 +459,7 @@ async fn using_a_session_pushes_the_idle_clock_forward() {
 
 #[tokio::test]
 async fn the_idle_clock_is_off_when_it_is_configured_off() {
-    // `session_idle_secs(0)` must be exactly the old behaviour: only the absolute deadline applies.
+    // `session_idle_secs(0)`: only the absolute deadline applies.
     let fx = Fx::with(|a| a.session_idle_secs(0)).await;
     let id = fx.user("alice").await;
     let ancient = create_session_row_seen(&fx.db, id, now_secs() + 3600, 0, false).await;
@@ -835,10 +835,9 @@ async fn totp_step_completes_the_session_on_the_right_code() {
 
 #[tokio::test]
 async fn completing_the_second_factor_rotates_the_session_id() {
-    // Session fixation at the 2FA step. Password login can't be fixated (it always mints a fresh row),
-    // but confirming the second factor used to elevate the *same* id — so an attacker who knew the
-    // password could take a half-authenticated token, plant its cookie in the victim's browser, send
-    // them to /login/totp, and inherit a full session the moment the victim typed their own code.
+    // Session fixation at the 2FA step: elevating the *same* id would let an attacker who knows the
+    // password plant a half-authenticated cookie in the victim's browser and inherit the full session
+    // when the victim types their code. Confirming the second factor mints a new id.
     let fx = Fx::new().await;
     fx.user("alice").await;
     let secret = fx.enable_totp("alice").await;
@@ -1788,9 +1787,9 @@ async fn confirm_at_provider(fx: &Fx, token: &str) {
 
 #[tokio::test]
 async fn an_sso_account_confirms_at_its_provider_before_a_sensitive_change() {
-    // An SSO account has neither password nor local 2FA. It used to pass re-authentication for want of
-    // anything to ask, which let a stolen session of an SSO manager reset anyone's password. Now it
-    // confirms at its provider first; here no provider is mounted, so it can't, and is refused.
+    // An SSO account confirms at its provider (§5h); passing it for want of a local factor would let a
+    // stolen session of an SSO manager reset anyone's password. No provider is mounted here, so it is
+    // refused.
     let fx = Fx::with(|a| a.admin_group("admin")).await;
     fx.user_in("boss", "admin").await;
     fx.make_sso("boss", "okta").await;
@@ -3481,8 +3480,8 @@ fn a_hash_stored_by_an_older_argon2_still_verifies() {
 
 #[tokio::test]
 async fn the_profile_extra_section_survives_disabling_2fa() {
-    // Every self-service page is the profile page with a message; disabling 2FA used to render the
-    // password form alone, dropping the app's `profile_extra` section and the sessions block.
+    // Every self-service answer is the whole profile page with a message, the app's `profile_extra`
+    // section and the sessions block included.
     let fx = Fx::with(|a| a.profile_extra(|_| async { "<section id=\"app-extra\"></section>".to_string() })).await;
     fx.user("alice").await;
     fx.enable_totp("alice").await;

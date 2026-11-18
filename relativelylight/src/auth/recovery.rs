@@ -21,7 +21,6 @@
 use sea_orm::sea_query::OnConflict;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait, QueryFilter};
-use sha2::{Digest, Sha256};
 
 /// How many codes a set contains. Ten is the near-universal choice: enough that losing a couple to
 /// paper accidents doesn't matter, few enough to print on one line each.
@@ -75,11 +74,7 @@ pub mod entity {
 
 /// Hash a code for storage/lookup, domain-separated by the account it belongs to.
 fn hash(user_id: i32, code: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(user_id.to_string().as_bytes());
-    h.update(b":");
-    h.update(normalize(code).as_bytes());
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    super::sha256_hex(&format!("{user_id}:{}", normalize(code)))
 }
 
 /// Fold a submitted code to its canonical form: lowercase, and with the grouping hyphens, spaces and

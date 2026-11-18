@@ -317,8 +317,8 @@ async fn an_unknown_filter_name_is_refused() {
 
 #[tokio::test]
 async fn a_substring_search_on_a_non_text_column_is_refused() {
-    // This used to be `ttl LIKE '%300%'`: wrong on SQLite (3000 would match) and a type error on
-    // PostgreSQL. Neither is an answer, so it is refused, naming the column. Reached here through
+    // A substring match on a number (`ttl LIKE '%300%'`) is wrong on SQLite (3000 would match) and a
+    // type error on PostgreSQL, so it is refused, naming the column. Reached here through
     // `ListQuery` directly, since the UI's toolbar only ever offers the all-text-columns search.
     let e = engine_with(Label::Declared).await;
     let mut q = ListQuery::default();

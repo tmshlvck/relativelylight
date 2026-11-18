@@ -125,7 +125,7 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
   account is and sets only its first password; `/profile/{id}` changes credentials, under
   re-authentication, signing the account out where that applies
   ([AUTH.md → The accounts panel](AUTH.md#the-accounts-panel)). **Why:** a password set in the
-  panel used to skip the reset's sign-out, and a passkey deleted there skipped re-authentication.
+  panel would skip the reset's sign-out, and a passkey deleted there re-authentication.
 - **WebAuthn posts a form, with one JSON answer.** The page embeds the challenge, the script runs the
   browser's prompt and submits; the challenge is a single-use row, created on demand so anonymous
   page views write nothing. **The exception** is "Sign in with a passkey": a page between the click

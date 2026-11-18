@@ -307,7 +307,7 @@ fn post_table(t: Table<'_>) -> Table<'_> {
         .range_filter(post::Column::Views.as_str())
         .sort(post::Column::Title.as_str())
         // View opens this app's own page for the row (`post_page` below, its own template)
-        // rather than the built-in dialog — and `?show=` no longer opens that dialog here.
+        // rather than the built-in dialog, which `?show=` then doesn't open here either.
         .detail_href("/post/{id}")
 }
 

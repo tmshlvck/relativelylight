@@ -136,8 +136,7 @@ async fn a_blank_input_honours_blank_is_null_both_ways() {
     save(&e, "name=Ada&nickname=&rank=3&phone=420123456789").await;
     assert_eq!(stored(&db).await["nickname"], Value::Null);
 
-    // Switched off, it is the empty string. The form used to send `null` for any blank nullable
-    // input, so this setting did nothing through a form — only the engine's own callers saw it.
+    // Switched off, it is the empty string, through the form as through the engine.
     let db = self::db().await;
     let e = engine(&db, |m| m.field("nickname").blank_is_null = false);
     save(&e, "name=Ada&nickname=&rank=3&phone=420123456789").await;
@@ -213,7 +212,7 @@ async fn a_blank_required_relation_is_a_field_error_not_a_panic() {
         }
     };
 
-    // SeaORM 2.0's `ActiveModel::set` panics on a null for an `i32` column; these used to reach it.
+    // SeaORM 2.0's `ActiveModel::set` panics on a null for an `i32` column: these must not reach it.
     for body in ["_op=create&text=t&contact=", "_op=create&text=t", "_op=update&_id=1&text=t&contact="] {
         match submit(body).await {
             Ok(Outcome::Invalid(s)) => assert_eq!(s.field_error("contact"), Some("required"), "{body}"),

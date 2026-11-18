@@ -113,9 +113,5 @@ with `RESET=1`).
   you browse, `http://localhost:3000` by default.
 - **"SSO provider unavailable".** The app couldn't fetch `SSO_OIDC_ISSUER`'s discovery document. The
   issuer must be reachable at the same URL from the app and from the browser, and Keycloak must be up.
-- **Back on the login page after signing in at Keycloak.** A relativelylight from before 0.5
-  redirected from the provider's callback, and the browser didn't send the new `SameSite=Strict`
-  session cookie on that cross-site redirect; reloading signed you in. The callback now answers with
-  a page that moves on by itself.
 - **Keycloak asks to update the account** on first sign-in: the user lacks an e-mail or a name,
   which Keycloak's user profile wants. The script sets them; a user added by hand needs them too.

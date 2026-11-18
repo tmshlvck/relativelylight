@@ -10,8 +10,8 @@
 //!   filter on a column that doesn't exist, a widget that can't render its column;
 //! - that each `Column` shape renders the right cell and the right form input, in the caller's
 //!   timezone where that applies;
-//! - **escaping**, on every path where a value reaches the page — the thing server-rendering makes
-//!   this crate's problem, where `x-text` used to make it the browser's;
+//! - **escaping**, on every path where a value reaches the page (server rendering makes it this
+//!   crate's problem);
 //! - the URL as state: `?edit=7` renders the dialog, `?entity=` picks one panel, headers link to the
 //!   next sort, the pager carries the view;
 //! - form decoding, including the cases a browser makes unavoidable (empty vs null, an unchecked
@@ -746,9 +746,9 @@ async fn choosing_all_clears_the_filter_rather_than_asking_for_the_orphans() {
 
 #[tokio::test]
 async fn a_filter_is_a_menu_of_every_value_however_large_its_target() {
-    // It used to become a typed-id box past `picker_threshold`, which — empty, in the same GET form
-    // as the search — posted `filter[author]=` ("rows with no author") with every search. A declared
-    // filter is the app's choice, so it lists everything; one too long to use is the app's to fix.
+    // Never a typed-id box past `picker_threshold`: empty, in the same GET form as the search, it
+    // would post `filter[author]=` ("rows with no author") with every search. A declared filter is
+    // the app's choice, so it lists everything; one too long to use is the app's to fix.
     let rows: Vec<Value> = (1..=50).map(|i| json!({"id": i, "name": format!("author {i}")})).collect();
     let mut e = Engine::new();
     e.add(Arc::new(Mock::new("post", post_columns()).rows(post_rows())), Arc::new(Open));
@@ -990,8 +990,7 @@ async fn a_dialog_switched_off_is_not_opened_by_typing_its_url() {
 
 #[tokio::test]
 async fn each_control_follows_its_own_operations_permission() {
-    // A gate that allows editing but neither creating nor deleting: only Edit is drawn. Before,
-    // every write control followed Create alone.
+    // A gate that allows editing but neither creating nor deleting: only Edit is drawn.
     struct UpdateOnly;
     #[async_trait]
     impl Authz for UpdateOnly {

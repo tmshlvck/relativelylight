@@ -13,36 +13,24 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
-- **SSO accounts re-authenticate through their provider** ([AUTH.md §5h](docs/AUTH.md#5h-re-authentication-before-sensitive-changes)).
-  An account with no local factor used to pass re-authentication unchallenged, so a stolen session
-  of an SSO administrator could reset anyone's password. Now its confirm block links to
-  `GET {base}/{key}/reauth`: a round trip to the provider and back as the same account leaves a
-  one-use confirmation on the session, good for five minutes, which the next sensitive action
-  spends. `SsoProvider::reauth_max_age(secs)` makes a provider strict: the confirmation must carry
-  an `auth_time` that recent (not for Google, which never re-prompts). `can_reauthenticate` is now
-  `true` for SSO accounts. **Upgrade:** add `auth_session.reauth_until` with the rest of 0.5's
-  columns ([MIGRATION-0.5.md §3](docs/MIGRATION-0.5.md#3-new-auth-columns-and-tables)); no code
-  changes.
+- **SSO accounts re-authenticate through their provider**
+  ([AUTH.md §5h](docs/AUTH.md#5h-re-authentication-before-sensitive-changes)) instead of passing
+  unchallenged: a round trip to `GET {base}/{key}/reauth` leaves a one-use confirmation on the
+  session. `SsoProvider::reauth_max_age(secs)` also requires a recent sign-in. `can_reauthenticate`
+  is `true` for SSO accounts. **Upgrade:** add `auth_session.reauth_until`
+  ([MIGRATION-0.5.md §3](docs/MIGRATION-0.5.md#3-new-auth-columns-and-tables)).
 - **One column type per kind of time value** ([TIME.md §1](docs/TIME.md#1-storage-model)): an instant
-  is integer Unix seconds with `.datetime()`, a calendar date a native `DATE`. Three changes follow:
-  - **Native date-time columns are read-only.** A `DateTime`, `Timestamp`, `TimestampWithTimeZone`
-    or `Time` column is introspected `read_only`, and the engine refuses a write to it even when the
-    field is made writable. Such writes never worked (SeaORM refused the text they were bound as),
-    so the change is that the form no longer offers an input that couldn't save.
-  - **A blank date is `NULL`** (or not sent, on a non-nullable column), as a blank number is, rather
-    than `""`.
-  - **The `crud` feature turns on SeaORM's `with-chrono` and `serde`**, so a date binds as a date
-    and `ChronoUnixTimestamp` serializes as its integer.
+  is integer Unix seconds with `.datetime()`, a calendar date a native `DATE`.
+  - Native date-time columns are read-only, and the engine refuses writes to them (which never
+    saved anyway).
+  - A blank date is `NULL` (or not sent), not `""`.
+  - The `crud` feature turns on SeaORM's `with-chrono` and `serde`.
 
-  **Upgrade:** move a date stored as midnight seconds to a `DATE` column, and a native timestamp the
-  app edited through the CRUD to integer seconds or a hook
-  ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#11-time-values-one-column-type-per-kind)).
-- **A standalone `Form` writes only what it is.** `Form::new(..).submit` only creates and
-  `Form::new(..).edit(id).submit` only updates row `id`. Before, the posted body chose: an edit page's
-  form could create a row or update another `_id` the caller's gate allowed. Now the other operation
-  is `403` and another row `400` ([CRUD.md](docs/CRUD.md#form--a-standalone-createedit-form)).
-  **Upgrade:** submit with the same `Form` you rendered, `.edit(id)` included
-  ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#10-a-standalone-form-writes-only-what-it-is)).
+  **Upgrade:** [MIGRATION-0.5.md §11](docs/MIGRATION-0.5.md#11-time-values-one-column-type-per-kind).
+- **A standalone `Form` writes only what it is** ([CRUD.md](docs/CRUD.md#form--a-standalone-createedit-form)):
+  `Form::new` only creates and `.edit(id)` only updates row `id`, where the posted body used to
+  choose. **Upgrade:** submit with the same `Form` you rendered
+  ([MIGRATION-0.5.md §10](docs/MIGRATION-0.5.md#10-a-standalone-form-writes-only-what-it-is)).
 
 - **`Auth::reauthenticate(&who, password, code)` is removed**, in favour of
   `Auth::reauthenticate_with(&who, &ReauthInput)`. That one takes every factor, a passkey included,
@@ -104,32 +92,21 @@ is easy to miss in a diff.
 
 ### Added
 
-- **Calendar dates can be written** ([TIME.md §1](docs/TIME.md#calendar-dates-a-native-date)). A
-  native `Date` column (`NaiveDate`) gets `<input type="date">`, and the form, CSV, `Engine` and
-  filters accept it only as exactly `YYYY-MM-DD`, a real day (`expected a date, YYYY-MM-DD`
-  otherwise). It binds as a date, so PostgreSQL compares `date` with `date`, and a filter value that
-  is no date matches nothing. Before, every write to a `Date` failed.
-- **`examples/auth` signs in with any OpenID Connect provider** (`SSO_OIDC_ISSUER`, `…_CLIENT_ID`,
-  `…_CLIENT_SECRET`; optionally an admin group from the `groups` claim and strict re-authentication)
-  beside Google, and **[docs/SSO_TESTING_KEYCLOAK.md](docs/SSO_TESTING_KEYCLOAK.md)** tries it with
-  Keycloak in a container: `examples/auth/keycloak-setup.sh` creates the realm, client and test
-  users. The example's `SSO_BASE_URL` now defaults to `http://localhost:3000`, the address it tells
-  you to browse (cookies and passkeys are per host).
+- **Calendar dates can be written** ([TIME.md §1](docs/TIME.md#calendar-dates-a-native-date)): a
+  `Date` column gets a date input and is accepted everywhere only as exactly `YYYY-MM-DD`, bound as a
+  date. Every write to one used to fail.
+- **`examples/auth` signs in with any OpenID Connect provider** (`SSO_OIDC_*`) beside Google, and
+  **[docs/SSO_TESTING_KEYCLOAK.md](docs/SSO_TESTING_KEYCLOAK.md)** tries it with Keycloak in a
+  container. Its `SSO_BASE_URL` defaults to `http://localhost:3000`.
 - **`ChronoUnixTimestamp` is the recommended field type for an instant** (TIME.md §1): a
-  `DateTime<Utc>` in Rust, the same `BIGINT` of seconds in the database, read by the crate as the
-  integer it is. The examples' `published_at` and `happens_at` use it, and `examples/crud`'s events
-  gain an `RSVP by` date that stays the same day whichever zone is picked.
-- **Pages cross-fade.** `crud::ui::CSS` turns on cross-document view transitions, so opening a
-  dialog, saving or paging fades from one page to the next in a browser that supports them, instead
-  of flashing white. Off under `prefers-reduced-motion`; opt out with
-  `@view-transition { navigation: none; }` after the stylesheet
-  ([CRUD.md](docs/CRUD.md#web-ui-ui)).
-- **Sign-ins and 2FA changes are audited.** The `Auth::on_write` observer now gets an `Update` of
-  `auth_user` for every completed sign-in (`source` `"auth-login"`, `after` `{"signed_in": <method>}`,
-  password, TOTP step, passkey or SSO alike) and for turning 2FA on or off (`{"totp_enabled": …}`,
-  `"auth-profile"`, or `"auth-admin"` for a manager) ([AUTH.md §5d](docs/AUTH.md#5d-write-observer--audit-hook)).
-  The SSO callback now reads `RealIp` like the other login routes; an app with
-  `resolve_real_ip` as its outermost layer, as required, needs no change.
+  `DateTime<Utc>` in Rust, a `BIGINT` of seconds in the database. The examples use it, and
+  `examples/crud`'s events gain an `RSVP by` date.
+- **Pages cross-fade**: `crud::ui::CSS` turns on cross-document view transitions, off under
+  `prefers-reduced-motion` ([CRUD.md](docs/CRUD.md#web-ui-ui)).
+- **Sign-ins and 2FA changes are audited**: `Auth::on_write` gets every completed sign-in
+  (`{"signed_in": <method>}`) and 2FA turned on or off
+  ([AUTH.md §5d](docs/AUTH.md#5d-write-observer--audit-hook)). The SSO callback reads `RealIp` like
+  the other login routes.
 - **The accounts panel from the library** ([AUTH.md §5j](docs/AUTH.md#the-accounts-panel)).
   `auth::user::meta_model(&auth)`, `auth::group::meta_model()` and
   `auth::lockout::{username_meta_model, ip_meta_model}()` configure `auth`'s tables for a CRUD panel,
@@ -281,12 +258,9 @@ is easy to miss in a diff.
 
 ### Fixed
 
-- **An SSO sign-in lands signed in.** The provider's callback redirected to the app, and under the
-  default `SameSite=Strict` the browser didn't send the session cookie it had just been given on
-  that redirect (the navigation began at the provider, so it counted as cross-site): the user met
-  the login page and had to reload. The callback now answers with a page that moves on by itself,
-  a same-site navigation ([AUTH.md §5b](docs/AUTH.md#5b-sso--openid-connect-feature-sso)). Found
-  against a real Keycloak.
+- **An SSO sign-in lands signed in.** The callback's redirect was cross-site, so the browser didn't
+  send the new `SameSite=Strict` session cookie and showed the login page. The callback now leaves by
+  a page that navigates itself ([AUTH.md §5b](docs/AUTH.md#5b-sso--openid-connect-feature-sso)).
 - **An accounts panel can create an account without a password**, as its help text always said
   (blank = none, for an SSO or passkey-only account). A blank write-only field is never sent, and
   `auth_user.password_hash` is NOT NULL, so the create was refused as "required". The `auth_user`

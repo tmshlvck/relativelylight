@@ -64,15 +64,10 @@ pub struct WriteEvent<'a> {
     /// Every row a **delete** removed, finished as a listing would render them: one element for a
     /// single-row delete, `N` for a bulk one, and empty for anything that is not a delete.
     ///
-    /// This exists because a bulk delete is a set-based `DELETE … WHERE`. It fires no per-row hook,
-    /// and by the time an observer runs, the rows it would need to look at are gone — so an app with
-    /// derived state (a search index to evict, a cache to invalidate, a *parent* record to
-    /// re-render) had no way to learn what changed, and the only workaround was to read the rows
-    /// itself before handing the body to the UI, duplicating this crate's query construction outside
-    /// the transaction that does the delete. Now the engine reads them, once, in the right place.
-    ///
-    /// Prefer this over [`before`](WriteEvent::before) for deletes: it has one shape for all three
-    /// of them.
+    /// A bulk delete is a set-based `DELETE … WHERE` that fires no per-row hook, so this is how an app
+    /// with derived state (a search index, a cache, a parent record) learns what went: the engine reads
+    /// the rows inside the deleting transaction. Prefer it over [`before`](WriteEvent::before) for
+    /// deletes: one shape for all three.
     pub before_rows: &'a [Value],
     /// New row state where known (create/update); `None` on delete.
     pub after: Option<Value>,

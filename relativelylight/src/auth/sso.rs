@@ -141,16 +141,10 @@ impl SsoProvider {
         self
     }
 
-    /// Make re-authentication (`docs/AUTH.md` §5h) **strict** for this provider: the confirmation must
-    /// carry an `auth_time` at most `secs` old, or it is refused. The request then asks for one with
-    /// `max_age` and the `claims` parameter, so a provider that honours them signs the user in again
-    /// when their last sign-in is older.
-    ///
-    /// Off by default: the round trip back as the **same account** is the confirmation, which stops a
-    /// stolen session cookie (its holder can't sign in at the provider) but proves no fresh sign-in.
-    /// Use it with a provider that re-prompts (Okta, Entra ID, Keycloak). Google doesn't: it returns
-    /// `auth_time` only to a verified app with "Session age claims" on, and never asks again, so strict
-    /// mode there refuses everyone who hasn't signed in to Google within `secs`.
+    /// Make re-authentication **strict** for this provider: the confirmation must carry an `auth_time`
+    /// at most `secs` old (requested with `max_age` and the `claims` parameter). Off by default, where
+    /// the round trip back as the same account is the confirmation. For providers that re-prompt, not
+    /// Google (`docs/AUTH.md` §5b, §5h).
     pub fn reauth_max_age(mut self, secs: u64) -> Self {
         self.reauth_max_age = Some(secs);
         self
@@ -174,11 +168,9 @@ pub struct Sso {
 
 /// The per-provider discovery cache and the HTTP client used to populate it.
 ///
-/// Both exist to stop `login` and `callback` re-fetching `/.well-known/openid-configuration` on **every
-/// request**, which cost two extra round-trips per sign-in, made sign-in fail whenever the provider's
-/// discovery endpoint was briefly slow, and — since `/sso/{key}/login` needs no authentication — let
-/// anyone turn a loop of requests into a flood of outbound traffic aimed at the provider, with your own
-/// rate limit as the casualty.
+/// So `login` and `callback` don't fetch `/.well-known/openid-configuration` per request: that costs two
+/// round-trips per sign-in, fails sign-in while the provider is slow, and (`/sso/{key}/login` needs no
+/// authentication) lets anyone aim a flood of requests at the provider.
 #[derive(Default)]
 struct Discovery {
     /// Built once and reused, so TLS setup and the connection pool aren't thrown away per request.
@@ -238,8 +230,8 @@ impl Sso {
     /// provider), `GET {base_path}/{key}/callback` (exchange the code, map the user, sign in) and
     /// `GET {base_path}/{key}/reauth` (an SSO account confirming it's you, `docs/AUTH.md` §5h).
     ///
-    /// It also tells the `Auth` this `Sso` was built from where each provider's confirmation lives, so
-    /// its confirm-it's-you blocks can offer it. The first call does; a later one describes the same.
+    /// It also tells the `Auth` this `Sso` was built from where each provider's confirmation lives, for
+    /// its confirm-it's-you blocks.
     pub fn routes(&self) -> Router {
         let base = self.base_path.trim_end_matches('/').to_string();
         let confirm = self
@@ -328,10 +320,9 @@ struct Txn {
     reauth: Option<ReauthTxn>,
 }
 
-/// What a confirmation needs on the way back. The session is named by its **hash**: the callback is a
-/// cross-site arrival, which a `SameSite=Strict` session cookie doesn't come with, so the transaction
-/// says which session asked; and the session id is a credential, which this unsigned cookie must not
-/// carry.
+/// What a confirmation needs on the way back. The session that asked is named by its **hash**: the
+/// cross-site callback arrives without the `Strict` session cookie, and this unsigned cookie must not
+/// carry a credential.
 #[derive(Serialize, Deserialize)]
 struct ReauthTxn {
     session: String,
@@ -401,13 +392,9 @@ async fn login(State(sso): State<Arc<Sso>>, Path(provider): Path<String>, jar: C
     authorize(&sso, p, jar, None).await
 }
 
-/// `GET {base}/{provider}/reauth` — an SSO account **confirming it's you** (`docs/AUTH.md` §5h): the
-/// signed-in caller goes to their provider and back to the page they came from, whose next
-/// re-authenticated action the confirmation then allows, once.
-///
-/// It needs the session (a restricted one too: adding a first factor on `/profile` is re-authenticated),
-/// and the session cookie is `SameSite`, so a page elsewhere can't start a confirmation for a
-/// signed-in user. The page to return to is the `Referer`'s path, when it is one of this site's.
+/// `GET {base}/{provider}/reauth` — an SSO account **confirming it's you** (`docs/AUTH.md` §5h): to the
+/// provider and back to the `Referer`'s page. It needs the session, a restricted one too (adding a
+/// first factor is re-authenticated), whose `SameSite` cookie keeps other sites from starting one.
 async fn reauth(
     State(sso): State<Arc<Sso>>,
     Path(provider): Path<String>,
@@ -434,7 +421,7 @@ async fn reauth(
         .and_then(|u| u.path_and_query().map(|pq| pq.as_str().to_string()))
         .filter(|b| crate::is_local_path(b))
         .unwrap_or_else(|| inner.profile_path.clone());
-    let txn = ReauthTxn { session: super::api_key::hash(token), back };
+    let txn = ReauthTxn { session: super::sha256_hex(token), back };
     authorize(&sso, p, jar, Some(txn)).await
 }
 
@@ -460,10 +447,8 @@ async fn authorize(sso: &Sso, p: &SsoProvider, jar: CookieJar, reauth: Option<Re
     for s in &p.scopes {
         req = req.add_scope(Scope::new(s.clone()));
     }
-    // A strict confirmation asks for a recent sign-in in the two standard ways: `max_age` (a provider
-    // that honours it signs an older session in again) and the `claims` parameter for `auth_time`
-    // (Google's way to ask for it). Nothing else is sent: Google refuses `prompt` values it doesn't
-    // support, and a confirmation must work wherever a sign-in does.
+    // Strict: ask for a recent sign-in the two standard ways. No `prompt`: Google refuses values it
+    // doesn't support, and a confirmation must work wherever a sign-in does.
     if let (Some(_), Some(max)) = (&reauth, p.reauth_max_age) {
         req = req
             .set_max_age(Duration::from_secs(max))
@@ -560,8 +545,7 @@ async fn callback(
         )
             .into_response();
     };
-    // A confirmation (§5h) ends here, before anything that could register an account, change its groups
-    // or open a session: it only marks the session that asked.
+    // A confirmation (§5h) ends here, before anything that registers, regroups or signs in.
     if let Some(rt) = txn.reauth {
         return confirm(&sso, p, username, &payload, rt, clear).await;
     }
@@ -597,13 +581,9 @@ async fn callback(
     continue_to(jar, &to, "Signed in.")
 }
 
-/// Leave the callback for `to`, a path of this site, by a page that navigates itself rather than a
-/// redirect.
-///
-/// The provider sent the browser here, so a redirect from this response would still be a cross-site
-/// navigation, and a `SameSite=Strict` session cookie (the one just set by a sign-in, or the one that
-/// asked for a confirmation) isn't sent on it: the browser would land signed out. A navigation this
-/// page starts is same-site. With `Auth::same_site_lax` a redirect would do; the page works either way.
+/// Leave the callback for `to`, a path of this site, by a page that navigates itself: the provider sent
+/// the browser here, so a redirect would still be cross-site and arrive without the `SameSite=Strict`
+/// session cookie. A navigation this page starts is same-site.
 fn continue_to(jar: CookieJar, to: &str, message: &str) -> Response {
     let to = crate::html::esc(to);
     let message = crate::html::esc(message);
@@ -614,10 +594,9 @@ fn continue_to(jar: CookieJar, to: &str, message: &str) -> Response {
     (jar, axum::response::Html(page)).into_response()
 }
 
-/// The end of a confirmation (§5h). The provider's account must be the local account of the session that
-/// asked (found among that account's sessions by the hash the transaction carries) and, for a strict
-/// provider ([`SsoProvider::reauth_max_age`]), its sign-in recent. Then that session holds a one-use
-/// confirmation, and the browser returns to the page it came from.
+/// The end of a confirmation (§5h): the provider's account must own the session that asked (found by the
+/// transaction's hash) and, if strict, have signed in recently. That session then holds a one-use
+/// confirmation.
 async fn confirm(
     sso: &Sso,
     p: &SsoProvider,
@@ -639,7 +618,7 @@ async fn confirm(
         .await
         .unwrap_or_default();
     let asked = sessions.into_iter().find(|s| {
-        super::api_key::hash(&s.id) == rt.session && inner.session_live(s) && !s.awaiting_totp
+        super::sha256_hex(&s.id) == rt.session && inner.session_live(s) && !s.awaiting_totp
     });
     let Some(asked) = asked else {
         return refuse(

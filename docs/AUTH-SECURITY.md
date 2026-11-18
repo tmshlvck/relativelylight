@@ -197,39 +197,27 @@ passkey): each only removes access, and a user racing to evict an intruder shoul
 been filled in by the browser for whoever is sitting there. A code accepted here is **spent**
 ([TOTP](#totp)), so one captured code can't wave through both a sensitive action and a login.
 
-**An SSO account confirms at its provider.** It has no password, and it used to pass for want of
-anything to ask, which made a stolen session of an SSO administrator worth every account it could
-reset. The provider is where it proves itself, so it goes there:
+**An SSO account confirms at its provider.** Passing it for want of a password would make a stolen
+session of an SSO administrator worth every account it could reset.
 
-- **Confirm first, then act.** A password travels inside the sensitive form; a provider needs a
-  redirect there and back, and parking an arbitrary pending `POST` across that (to replay it on
-  return) would mean storing form bodies and a replay path through every handler, the app's own
-  included. Instead the round trip leaves a **one-use** confirmation on the session, and the next
-  re-authenticated action spends it. One confirmation, one action, so it is still per request, not
-  a window; it expires after five minutes unspent, so it belongs to this sitting.
-- **What it proves.** By default, that the browser can sign in at the provider **as the session's
-  account**: the account must be the one the session belongs to, so confirming as someone else, or
-  as an account the site doesn't have, confirms nothing (and never registers one). That is what a
-  stolen session cookie can't do, which is the threat. It doesn't prove a fresh sign-in: a provider
-  that keeps its own session returns without asking. Asking it to ask is the provider's call, and
-  Google doesn't support it (it refuses `prompt` values it doesn't know, and documents no
-  `prompt=login`), so the default asks for nothing a plain sign-in doesn't. For providers that do
-  re-prompt, `reauth_max_age` makes it strict: the request carries `max_age` and asks for
-  `auth_time`, and a confirmation without a recent enough one is refused.
-- **Bound to the session that asked.** The provider's redirect back is a cross-site navigation,
-  which a `SameSite=Strict` session cookie isn't sent on, so the callback can't see the session. The
-  transaction cookie (`Lax`, as for sign-in) carries the session's **SHA-256** instead, never the id,
-  which is a credential, and the callback finds that session among the confirmed account's own.
-  Starting one needs the session itself (`GET …/reauth` reads the `Strict` cookie), so a page
-  elsewhere can't start a confirmation for a signed-in user. The callback returns to the page with a
-  page that navigates on its own rather than a redirect, which would still be cross-site and arrive
-  without the session. A sign-in's callback leaves the same way, for the same reason: redirected,
-  the browser arrived without the session cookie it had just been given, and met the login page.
-- **Fail closed.** An SSO account on a site with no provider routes mounted is refused, not waved
-  through.
+- **Confirm first, then act.** A provider needs a redirect there and back. Replaying a parked `POST`
+  on return would need form bodies stored and a replay path through every handler, so instead the
+  round trip leaves a **one-use** confirmation on the session, spent by the next sensitive action and
+  expiring after five minutes: still per request, not a window.
+- **What it proves:** that the browser signs in at the provider **as the session's account**, which
+  a stolen session cookie can't. Another account, or one the site doesn't have, confirms nothing
+  (and registers nothing). It proves no fresh sign-in, since a provider with its own session returns
+  without asking; Google can't be asked to ask (it refuses unknown `prompt` values), so the default
+  request is a plain sign-in. `reauth_max_age` makes a provider that re-prompts strict: `max_age`
+  and a request for `auth_time`, refused without a recent one.
+- **Bound to the session that asked.** The provider's redirect back is cross-site, so the `Strict`
+  session cookie doesn't come with it. The `Lax` transaction cookie carries the session's **SHA-256**
+  (the id is a credential), found among the confirmed account's sessions. Starting one reads the
+  `Strict` cookie, so another site can't start it. The callback, for a sign-in too, leaves by a page
+  that navigates itself: a redirect would still be cross-site and arrive without the session.
+- **Fail closed:** with no provider routes mounted, an SSO account is refused.
 
-A local account with no password, no TOTP and no passkey still passes: it has nothing to be asked
-for, and can't sign in to hold a session anyway.
+A local account with no factor at all passes: there is nothing to ask, and it can't sign in anyway.
 
 **Not lockout-limited**, for the [lockout](#lockout) reason: the caller is authenticated, so counting
 failures here would let a stolen session lock the real user out of logging in. Nor is it needed —

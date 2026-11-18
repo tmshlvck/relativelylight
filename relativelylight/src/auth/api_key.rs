@@ -26,7 +26,6 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait, QueryFilter,
     QueryOrder, Schema,
 };
-use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -180,10 +179,7 @@ impl std::error::Error for KeyError {}
 
 /// SHA-256 of a raw key, lowercase hex: what `hashed_key` stores and the lookup matches.
 pub fn hash(raw: &str) -> String {
-    Sha256::digest(raw.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    super::sha256_hex(raw)
 }
 
 /// A fresh raw key: `prefix` and [`BODY_LEN`] OS-random alphanumerics.

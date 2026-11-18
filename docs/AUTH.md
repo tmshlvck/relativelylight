@@ -358,12 +358,11 @@ issuer, client id/secret, redirect URL, scopes, `username_claim` (default `prefe
 Google → `email`), optional `groups_claim`, the claim table, `auto_register`, and
 `reauth_max_age(secs)` to make §5h's confirmation strict.
 
-**Google and strict confirmation.** Google doesn't support re-authentication requests: it never
-asks a signed-in user for their password again, and sends `auth_time` only to a verified,
-published app with **Session age claims** switched on (Google Auth Platform → Settings → Advanced
-settings). Leave a Google provider at the default, where the confirmation is the round trip back as
-the same account. With `reauth_max_age`, a Google user would be refused unless they had happened to
-sign in to Google within that many seconds.
+**Google and strict confirmation.** Google never asks a signed-in user for their password again, and
+sends `auth_time` only to a verified, published app with **Session age claims** on (Google Auth
+Platform → Settings → Advanced settings), so under `reauth_max_age` a Google user is refused unless
+they happened to sign in within the window. Leave Google at the default; Okta, Entra ID and Keycloak
+re-prompt.
 
 ```rust
 use relativelylight::auth::sso::{Sso, SsoProvider};
@@ -673,18 +672,12 @@ the account has 2FA, and a code accepted here is **spent** (§5a). Enrolment is 
 case: a *first* enrolment has no active secret to check a code against, so the password is the
 factor; a re-enrolment can use either.
 
-**An SSO account confirms at its provider** ([why](AUTH-SECURITY.md#re-authentication)). It has
-no password, so its confirm block offers a **Confirm with Google** link (and its local TOTP or
-passkey, if it has added one). The link goes to the provider and back to the page, which then says
-the session holds a confirmation; the user fills the form in and submits, and that one action
-spends it. A confirmation lasts five minutes, unspent. It needs `Sso::routes()` mounted, at
-`GET {base}/{key}/reauth` (§5b); an SSO account on a site with no provider routes is refused.
-
-By default the round trip back **as the same account** is the confirmation: it works with every
-provider, Google included, and the holder of a stolen session cookie can't make it. A provider that
-really asks for the password again (Okta, Entra ID, Keycloak) can be made **strict** with
-`SsoProvider::reauth_max_age(secs)`: the confirmation must then come with a sign-in at most `secs`
-old. Google doesn't re-prompt, so leave it at the default there (§5b).
+**An SSO account confirms at its provider** ([why](AUTH-SECURITY.md#re-authentication)). Its
+confirm block offers **Confirm with Google** (beside a TOTP or passkey it has added): a round trip to
+the provider and back to the page, after which one action in the next five minutes passes. It needs
+`Sso::routes()` mounted (`GET {base}/{key}/reauth`, §5b), or the account is refused. The round trip
+back as the same account is the confirmation; `SsoProvider::reauth_max_age(secs)` also requires a
+sign-in at most `secs` old, for providers that re-prompt (§5b).
 
 A local account with no password, no TOTP and no passkey passes, having nothing to be asked for (it
 can't sign in either). An account with a passkey and no password **does** have a factor, and must
@@ -1020,8 +1013,8 @@ factor counts against the account and the address, like a TOTP code
 ([why](AUTH-SECURITY.md#passkeys)). An expired or unknown challenge checks nothing and counts nothing.
 
 **Re-authentication** (§5h) accepts the passkey, and an account with a passkey and no password
-**must** use one of its factors: it no longer passes with nothing. An SSO account confirms at its
-provider, or with a passkey it has added.
+**must** use one of its factors. An SSO account confirms at its provider, or with a passkey it has
+added.
 
 **What a session records.** `auth_session.method` is `passkey`, `passkey+totp`, `passkey+recovery`
 or `password+passkey`, and `passkey_class` the class of the passkey used.

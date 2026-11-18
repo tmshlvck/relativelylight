@@ -1120,8 +1120,7 @@ impl Inner {
     }
 
     /// Push a live session's idle clock forward — but only once the stamp is [`IDLE_REFRESH_GRACE`]
-    /// stale, so the common case stays a read. A no-op when the idle clock is off, which is what keeps
-    /// `idle_secs = 0` exactly as cheap as before this existed.
+    /// stale, so the common case stays a read. A no-op when the idle clock is off.
     async fn touch_session(&self, session: &session::Model) {
         let now = now_secs();
         if self.idle_secs == 0 || now - session.last_seen_at < IDLE_REFRESH_GRACE {
@@ -1307,6 +1306,13 @@ struct Event<'a> {
     after: Option<serde_json::Value>,
     headers: &'a HeaderMap,
     client_ip: std::net::IpAddr,
+}
+
+/// SHA-256 of `s`, lowercase hex: what the crate stores in place of a secret (an API key, a recovery
+/// code) and how it names one it must not carry (a session, in the SSO transaction cookie).
+pub(crate) fn sha256_hex(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A sign-in is complete: stamp it ([`stamp_login`]) and report it to the audit observer as an
@@ -2021,13 +2027,11 @@ async fn resession(inner: &Inner, user_id: i32, method: session::Method) -> Opti
 /// Replace a session with a fresh id, carrying its user across and clearing `awaiting_totp` — the
 /// **privilege-change rotation**. Returns the new token.
 ///
-/// Rotating here is what stops a **planted half-authenticated cookie** from being elevated. Password
-/// login can't be fixated (it always mints a new row), but confirming the second factor used to flip
-/// `awaiting_totp` on the *same* id: an attacker who knew the password could take a pending session,
-/// write its cookie into the victim's browser (cookie-tossing from a sibling host, or an XSS — neither
-/// `Secure` nor `SameSite` prevents that), point them at `/login/totp`, and inherit a fully
-/// authenticated session the moment the victim typed their own code. A new id leaves the attacker
-/// holding a token that was deleted.
+/// Rotating here is what stops a **planted half-authenticated cookie** from being elevated. Flipping
+/// `awaiting_totp` on the *same* id would let an attacker who knows the password write a pending
+/// session's cookie into the victim's browser (cookie-tossing from a sibling host, or an XSS: neither
+/// `Secure` nor `SameSite` prevents that), point them at `/login/totp`, and inherit the full session
+/// when the victim types their code. A new id leaves the attacker holding a deleted token.
 ///
 /// `method` is how the session is authenticated now that the second factor is in, and `class` the
 /// class of the passkey involved, if any.

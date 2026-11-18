@@ -1009,7 +1009,7 @@ async fn a_passwordless_account_keeps_a_way_in_and_must_confirm_with_its_passkey
     assert_eq!(res.status, StatusCode::CONFLICT);
     assert_eq!(fx.keys().await.len(), 1);
 
-    // Re-authentication no longer passes with nothing (it did, for an account with no password).
+    // An account with a passkey and no password must still confirm with a factor.
     let res = fx
         .post("/profile/sessions/revoke", &[], Some(&cookie))
         .await;

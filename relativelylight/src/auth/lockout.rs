@@ -43,8 +43,8 @@ use std::sync::Arc;
 /// deliberately far looser: a locked address turns away *valid* callers too, which matters when your
 /// users share one (CGNAT, an office NAT, a reverse proxy).
 ///
-/// The *address* half needs to know who the client is, and no longer decides that for itself: the address
-/// arrives as [`RealIp`](crate::middleware::RealIp), resolved once at the edge by
+/// The *address* half takes the client's address as [`RealIp`](crate::middleware::RealIp), resolved once
+/// at the edge by
 /// [`resolve_real_ip`](crate::middleware::resolve_real_ip), which every consumer in this crate shares. An
 /// app's own surfaces pass an address to [`IpLockout`] themselves.
 /// **`#[non_exhaustive]`**: start from [`Lockout::default`] and set what you want, either by assignment

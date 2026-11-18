@@ -13,10 +13,7 @@ pub(super) const PASSKEY_JS: &str = include_str!("../../assets/rl-passkey.js");
 /// A short hash of [`PASSKEY_JS`]: its `ETag`, and the version in its URL.
 pub(super) fn passkey_js_version() -> &'static str {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| {
-        use sha2::{Digest, Sha256};
-        Sha256::digest(PASSKEY_JS.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect()
-    })
+    V.get_or_init(|| super::sha256_hex(PASSKEY_JS)[..16].to_string())
 }
 
 /// The script's URL as the pages link it: versioned by its content, so a page always loads the script
