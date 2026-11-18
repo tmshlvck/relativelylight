@@ -389,8 +389,7 @@ impl TzPicker {
     pub fn submitted(tz: Option<impl AsRef<str>>, back: Option<impl AsRef<str>>) -> (String, String) {
         let tz = Tz::named(tz.as_ref().map(AsRef::as_ref).unwrap_or("UTC"));
         let back = back.as_ref().map(AsRef::as_ref).unwrap_or("/");
-        let local = back.starts_with('/') && !back.starts_with("//") && !back.starts_with("/\\");
-        (tz.cookie(), if local { back } else { "/" }.to_string())
+        (tz.cookie(), if crate::is_local_path(back) { back } else { "/" }.to_string())
     }
 
     /// Render the picker with `current` preselected, returning to `back` (the page the user is on)

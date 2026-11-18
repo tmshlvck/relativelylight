@@ -16,8 +16,9 @@
     input ids unique when two render on one page. The passkey button sits next to the form's own
     submit button, the same size. -#}
 {%- macro reauth(prefix, r, hint) %}
-  {%- if r.has_password || r.totp_on || r.passkey.is_some() %}
+  {%- if r.has_password || r.totp_on || r.passkey.is_some() || r.sso.is_some() %}
   <p class="text-muted small mb-2">{{ hint }}</p>
+  {%- call sso_confirm(r) %}{% endcall %}
   {%- call typed(prefix, r) %}{% endcall %}
   {%- if let Some(p) = r.passkey %}
   {%- call passkey_data(p) %}{% endcall %}
@@ -30,10 +31,25 @@
     passkey's challenge is carried, but the script answers it on that button's click, and only when
     nothing was typed. -#}
 {%- macro reauth_quiet(prefix, r, hint) %}
-  {%- if r.has_password || r.totp_on || r.passkey.is_some() %}
+  {%- if r.has_password || r.totp_on || r.passkey.is_some() || r.sso.is_some() %}
   <p class="text-muted small mb-2">{{ hint }}{% if r.passkey.is_some() %} Leave it empty to confirm with your passkey.{% endif %}</p>
+  {%- call sso_confirm(r) %}{% endcall %}
   {%- call typed(prefix, r) %}{% endcall %}
   {%- if let Some(p) = r.passkey %}{% call passkey_data(p) %}{% endcall %}{% endif %}
+  {%- endif %}
+{%- endmacro -%}
+
+{#- An SSO account's confirmation at its provider (§5h): a link there and back to this page, which
+    leaves a one-use confirmation on the session, or the word that it has one. A link, not a button:
+    it leaves the page, so it comes before anything is filled in. -#}
+{%- macro sso_confirm(r) %}
+  {%- if let Some(s) = r.sso %}
+  {%- if s.confirmed %}
+  <p class="small text-success mb-2" data-rl-sso-confirmed>Confirmed with {{ s.label }}: good for one change in the next five minutes.</p>
+  {%- else %}
+  <p class="mb-2"><a class="btn btn-outline-primary btn-sm me-2" href="{{ s.url }}">Confirm with {{ s.label }}</a>
+    <span class="text-muted small">You'll come back to this page, so do it before filling anything in.</span></p>
+  {%- endif %}
   {%- endif %}
 {%- endmacro -%}
 

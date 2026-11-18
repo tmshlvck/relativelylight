@@ -39,13 +39,23 @@ pub(super) struct ReauthView {
     pub has_password: bool,
     pub totp_on: bool,
     pub passkey: Option<PasskeyAsk>,
+    /// An SSO account's confirmation at its provider (§5h).
+    pub sso: Option<SsoConfirmView>,
 }
 
 impl ReauthView {
-    /// No factor at all — the SSO case, and the safe stand-in when a page has no account to ask about.
+    /// No factor at all: the safe stand-in when a page has no account to ask about.
     pub fn none() -> Self {
-        Self { has_password: false, totp_on: false, passkey: None }
+        Self { has_password: false, totp_on: false, passkey: None, sso: None }
     }
+}
+
+/// The provider an SSO account confirms with: its name, the route that starts the confirmation, and
+/// whether this session already holds one, unspent.
+pub(super) struct SsoConfirmView {
+    pub label: String,
+    pub url: String,
+    pub confirmed: bool,
 }
 
 /// A passkey ceremony a page asks for: the challenge row's id and the options for the browser, as JSON

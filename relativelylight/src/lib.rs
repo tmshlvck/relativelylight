@@ -54,6 +54,13 @@ mod urlform;
 #[cfg(any(feature = "csrf", feature = "tz", feature = "files"))]
 mod html;
 
+/// Whether `path` is a path on this site (`/…`), safe to redirect to: not `//host` or `/\host`, which a
+/// browser reads as another origin. The timezone picker's and the SSO confirmation's `back`.
+#[cfg(any(feature = "tz", feature = "sso"))]
+pub(crate) fn is_local_path(path: &str) -> bool {
+    path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\")
+}
+
 /// A strict reader for a buffered `multipart/form-data` body (the CSV import; the token in [`csrf`]).
 #[cfg(any(feature = "ui", feature = "csrf"))]
 mod multipart;

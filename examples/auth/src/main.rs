@@ -436,9 +436,8 @@ struct RotateForm {
 ///
 /// Why bother when the caller already has a session? Because a session proves someone logged in once,
 /// not that the account's owner is the one asking now. The idle timeout bounds how long a stolen cookie
-/// lives; this bounds what it can *do* while it lives. An account with no local factor (an SSO login)
-/// passes step 2 — there is nothing to ask it for — which `Auth::can_reauthenticate` reports if you want
-/// to say so in your own UI.
+/// lives; this bounds what it can *do* while it lives. An SSO account has no password: its confirm block
+/// links to its provider, and step 2 passes once after the round trip (`docs/AUTH.md` §5h).
 async fn rotate_webhook_secret(
     State(app): State<AppState>,
     req: Parts,

@@ -1,6 +1,6 @@
 //! **Upgrading an existing database to 0.5's `auth` schema** — see `docs/MIGRATION-0.5.md` §3.
 //!
-//! A database created before 0.5 lacks two tables and five columns. [`migrate`](super::migrate)
+//! A database created before 0.5 lacks two tables and six columns. [`migrate`](super::migrate)
 //! creates missing tables but never alters one, so the columns need a migration step of the app's own,
 //! and they are needed **before** the upgraded crate runs, whatever features it uses: every read of an
 //! account selects the new `auth_user` columns, and every login writes `auth_session.method`.
@@ -28,11 +28,12 @@ pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> 
     ]
 }
 
-/// The `ALTER TABLE` statements adding 0.5's five columns:
+/// The `ALTER TABLE` statements adding 0.5's six columns:
 ///
 /// - `auth_user.passkey_handle` — the WebAuthn user handle;
 /// - `auth_user.password_changed_at`, `auth_user.must_change_password` — "password change required";
-/// - `auth_session.method`, `auth_session.passkey_class` — how a session was authenticated.
+/// - `auth_session.method`, `auth_session.passkey_class` — how a session was authenticated;
+/// - `auth_session.reauth_until` — an SSO account's confirmation at its provider.
 ///
 /// Pair them with [`index_create_statements`]: SQLite can't add a `UNIQUE` column, so the handle's
 /// uniqueness is an index of its own. One statement per column, because SQLite takes one column per
@@ -72,6 +73,10 @@ pub fn table_alter_statements() -> Vec<TableAlterStatement> {
         add(
             "auth_session",
             ColumnDef::new(Alias::new("passkey_class")).string().null(),
+        ),
+        add(
+            "auth_session",
+            ColumnDef::new(Alias::new("reauth_until")).big_integer().null(),
         ),
     ]
 }

@@ -108,6 +108,20 @@ pub struct Identity {
     /// Whether, and why, the account should choose a new password (§5m) — for a notice in the app's
     /// shell. `None` for an account with no password.
     pub password_change: Option<user::PasswordChange>,
+    /// The session this identity was resolved from, where an SSO confirmation is kept (§5h). `None` for
+    /// an identity built with [`Identity::new`] or from an API key.
+    pub(crate) session: Option<SessionRef>,
+}
+
+/// A session id held by an [`Identity`]. It is the session cookie's value, a credential, so its `Debug`
+/// says only that there is one: an app logging `{who:?}` must not write a usable cookie to its logs.
+#[derive(Clone)]
+pub(crate) struct SessionRef(pub(crate) String);
+
+impl std::fmt::Debug for SessionRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionRef(..)")
+    }
 }
 
 impl Identity {
@@ -120,6 +134,7 @@ impl Identity {
             groups,
             level: Level::Simple,
             password_change: None,
+            session: None,
         }
     }
 
@@ -758,9 +773,67 @@ struct Inner {
     sso_level: Level,
     /// The password's maximum age in days, `0` = none (see [`Auth::password_max_age_days`]).
     password_max_age_days: u32,
+    /// Where an SSO account confirms it's you (§5h): each provider's confirm route, recorded once by
+    /// `Sso::routes` (which runs after `Sso` cloned this `Auth`, hence set-once). Unset on a site with
+    /// no SSO routes, which then has nowhere to send an SSO account to confirm.
+    sso_confirm: std::sync::OnceLock<Vec<SsoConfirmRoute>>,
 }
 
+/// One provider's confirm-it's-you route (§5h), as `Sso::routes` records it.
+pub(crate) struct SsoConfirmRoute {
+    pub(crate) key: String,
+    pub(crate) label: String,
+    pub(crate) url: String,
+}
+
+/// How long an SSO account's confirmation at its provider stays good for, unspent (§5h): long enough to
+/// fill a form in after coming back, short enough that it is about this sitting.
+#[cfg(feature = "sso")]
+pub(crate) const SSO_CONFIRM_SECS: i64 = 300;
+
 impl Inner {
+    /// The confirm route of `user`'s provider, when the account signs in through one mounted here.
+    fn sso_confirm_route(&self, user: &user::Model) -> Option<&SsoConfirmRoute> {
+        let key = user.sso_key()?;
+        self.sso_confirm.get()?.iter().find(|r| r.key == key)
+    }
+
+    /// Record a confirmation at the provider on the session `token`, good for [`SSO_CONFIRM_SECS`].
+    #[cfg(feature = "sso")]
+    pub(crate) async fn record_sso_confirmation(&self, token: &str) -> Result<(), DbErr> {
+        session::Entity::update_many()
+            .col_expr(session::Column::ReauthUntil, sea_orm::sea_query::Expr::value(now_secs() + SSO_CONFIRM_SECS))
+            .filter(session::Column::Id.eq(token))
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
+    /// Whether `who`'s session holds an unspent, unexpired confirmation (to say so on the page).
+    async fn sso_confirmed(&self, who: &Identity) -> bool {
+        let Some(SessionRef(token)) = &who.session else { return false };
+        session::Entity::find_by_id(token.clone())
+            .one(&self.db)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.reauth_until)
+            .is_some_and(|until| until >= now_secs())
+    }
+
+    /// Spend `who`'s confirmation: `true` if the session held one still good. One statement that
+    /// clears it only where it is unexpired, so two requests racing for it can't both win.
+    async fn spend_sso_confirmation(&self, who: &Identity) -> bool {
+        let Some(SessionRef(token)) = &who.session else { return false };
+        session::Entity::update_many()
+            .col_expr(session::Column::ReauthUntil, sea_orm::sea_query::Expr::value(Option::<i64>::None))
+            .filter(session::Column::Id.eq(token.as_str()))
+            .filter(session::Column::ReauthUntil.gte(now_secs()))
+            .exec(&self.db)
+            .await
+            .is_ok_and(|r| r.rows_affected == 1)
+    }
+
     /// Whether this account — or this source address — is locked out of credential checks:
     /// `Some(retry_after_secs)` if so. Checked *before* the secret is looked at, and only on the
     /// unauthenticated routes (`/login`, `/login/totp`). The address comes from
@@ -795,12 +868,16 @@ impl Inner {
     /// A passkey counts as a factor, so an account without a password but with a passkey **must**
     /// present one of its factors. A code accepted here is **spent** (the §5a replay guard), and so is a
     /// passkey challenge.
-    async fn reauth(&self, user: &user::Model, proof: &ReauthInput) -> Result<(), String> {
+    ///
+    /// `who` is whoever is confirming (the manager, on a manager's page): an SSO account's confirmation
+    /// at its provider is kept on their session, and spent here.
+    async fn reauth(&self, user: &user::Model, who: &Identity, proof: &ReauthInput) -> Result<(), String> {
         // An SSO account's password, if a row has one left over, signs nobody in: it isn't a factor.
         let has_password = !user.password_hash.is_empty() && !user.is_sso();
         let has_passkey = passkey::count(&self.db, user.id).await > 0;
-        if !has_password && !user.has_totp() && !has_passkey {
-            return Ok(()); // nothing to prove with — see the doc comment on `Auth::reauthenticate`
+        if !has_password && !user.has_totp() && !has_passkey && !user.is_sso() {
+            // A local account with no factor at all, which can't sign in to have a session.
+            return Ok(());
         }
         // A passkey first: it proves presence and possession in one step, and the script only fills
         // the answer in when the user chose it.
@@ -832,6 +909,28 @@ impl Inner {
             } else {
                 Err("That password is incorrect.".into())
             };
+        }
+        // Nothing typed: an SSO account may have confirmed at its provider before submitting (§5h).
+        if user.is_sso() {
+            if self.spend_sso_confirmation(who).await {
+                return Ok(());
+            }
+            let Some(route) = self.sso_confirm_route(user) else {
+                return Err("This account signs in through a provider this site can't reach to confirm \
+                            it's you."
+                    .into());
+            };
+            let label = &route.label;
+            return Err(match (user.has_totp(), has_passkey) {
+                (false, false) => format!("Confirm with {label} first, then submit again."),
+                (true, false) => {
+                    format!("Confirm with {label} first, or enter a code from your authenticator app.")
+                }
+                (false, true) => format!("Confirm with {label} first, or with your passkey."),
+                (true, true) => format!(
+                    "Confirm with {label} first, or with your passkey or a code from your authenticator app."
+                ),
+            });
         }
         Err(match (has_password, user.has_totp(), has_passkey) {
             (true, false, false) => "Confirm with your current password.".into(),
@@ -867,13 +966,23 @@ impl Inner {
         Err("Passkeys are not enabled on this site.".into())
     }
 
-    /// What `user`'s confirm-it's-you blocks can offer, on a page about to be rendered: their factors,
-    /// and a fresh passkey challenge when they have a passkey and passkeys are on.
-    async fn reauth_view(&self, user: &user::Model) -> ReauthView {
+    /// What `user`'s confirm-it's-you blocks can offer, on a page about to be rendered for `who` (the
+    /// confirming caller): their factors, a fresh passkey challenge when they have a passkey and
+    /// passkeys are on, and for an SSO account its provider's confirmation.
+    async fn reauth_view(&self, user: &user::Model, who: &Identity) -> ReauthView {
+        let sso = match self.sso_confirm_route(user) {
+            Some(r) => Some(pages::SsoConfirmView {
+                label: r.label.clone(),
+                url: r.url.clone(),
+                confirmed: self.sso_confirmed(who).await,
+            }),
+            None => None,
+        };
         ReauthView {
             has_password: !user.password_hash.is_empty() && !user.is_sso(),
             totp_on: user.has_totp(),
             passkey: self.passkey_ask(user).await,
+            sso,
         }
     }
 
@@ -1282,6 +1391,7 @@ impl Auth {
                 min_level: Level::Simple,
                 sso_level: Level::Mfa,
                 password_max_age_days: 0,
+                sso_confirm: std::sync::OnceLock::new(),
             }),
         }
     }
@@ -1588,13 +1698,15 @@ impl Auth {
         self.inner.can_manage_others(who)
     }
 
-    /// Whether [`reauthenticate_with`](Auth::reauthenticate_with) can actually challenge this account: it has
-    /// a local password, 2FA or a passkey. `false` for an SSO account (nothing to ask for, so re-auth
-    /// passes), which is what to key a "you'll be asked to confirm" hint off in your own UI.
+    /// Whether [`reauthenticate_with`](Auth::reauthenticate_with) challenges this account: it has a local
+    /// password, 2FA or a passkey, or it is an SSO account, which confirms at its provider (§5h). `false`
+    /// only for a local account with no factor at all, which passes — what to key a "you'll be asked to
+    /// confirm" hint off in your own UI.
     pub async fn can_reauthenticate(&self, who: &Identity) -> bool {
         match target_user(&self.inner, &who.id).await {
             Some(u) => {
-                !u.password_hash.is_empty()
+                (!u.password_hash.is_empty() && !u.is_sso())
+                    || u.is_sso()
                     || u.has_totp()
                     || passkey::count(&self.inner.db, u.id).await > 0
             }
@@ -1647,25 +1759,28 @@ impl Auth {
     ///
     /// Without a form (a CLI, a test), build the input: `ReauthInput::password_or_code(pw, code)`.
     ///
-    /// A TOTP code or passkey challenge accepted here is **spent** (§5a). An account with no local factor
-    /// (SSO, or no password, no TOTP and no passkey) passes: there is nothing to ask it for, and re-auth
-    /// through the IdP isn't built (AUTH.md §5h). Not lockout-limited — the caller is authenticated, and
-    /// counting would let a stolen session lock the real user out (§5e).
+    /// A TOTP code or passkey challenge accepted here is **spent** (§5a). An **SSO account** confirms at its
+    /// provider before submitting: the confirm-it's-you block links there and back, and the one-use
+    /// confirmation it leaves on the session is spent here (AUTH.md §5h). A local account with no
+    /// factor at all passes, having nothing to ask for. Not lockout-limited — the caller is
+    /// authenticated, and counting would let a stolen session lock the real user out (§5e).
     pub async fn reauthenticate_with(&self, who: &Identity, proof: &ReauthInput) -> Result<(), String> {
         let Some(user) = target_user(&self.inner, &who.id).await else {
             return Err("Your session is no longer valid — sign in again.".into());
         };
-        self.inner.reauth(&user, proof).await
+        self.inner.reauth(&user, who, proof).await
     }
 
     /// The confirm-it's-you inputs for one of **your** forms, as an HTML fragment: a password field, a
     /// code field when the account has 2FA, and a "Confirm with your passkey" button when it has a
     /// passkey (with a fresh challenge, and the script that runs it). Only the factors the account has
     /// are offered; `hint` is the sentence above them. Put it inside the `<form>` whose handler calls
-    /// [`reauthenticate_with`](Auth::reauthenticate_with). Empty for an account with no factor (SSO).
+    /// [`reauthenticate_with`](Auth::reauthenticate_with). For an SSO account it is a link to confirm at
+    /// the provider, which returns to this page (by its `Referer`), or the word that the session holds a
+    /// confirmation. Empty for an account with no factor at all.
     pub async fn reauth_fields(&self, who: &Identity, hint: &str) -> String {
         let reauth = match target_user(&self.inner, &who.id).await {
-            Some(user) => self.inner.reauth_view(&user).await,
+            Some(user) => self.inner.reauth_view(&user, who).await,
             None => ReauthView::none(),
         };
         reauth_fields_html(&reauth, hint)
@@ -1813,6 +1928,7 @@ async fn resolve(inner: &Inner, token: &str) -> Option<(Identity, user::Model, b
         groups,
         level,
         password_change: user.password_change(inner.password_max_age_days, now_secs()),
+        session: Some(SessionRef(token.to_string())),
     };
     Some((who, user, level < inner.min_level))
 }
@@ -1865,6 +1981,7 @@ async fn create_session_class(
         awaiting_totp: Set(awaiting_totp),
         method: Set(method.as_str().to_string()),
         passkey_class: Set(class.map(|c| c.as_str().to_string())),
+        reauth_until: Set(None),
     }
     .insert(&inner.db)
     .await?;
@@ -2333,7 +2450,7 @@ async fn profile_submit(
             true => Ok(()),
             false => Err("Current password is incorrect.".to_string()),
         },
-        false => inner.reauth(&user, &form.reauth).await,
+        false => inner.reauth(&user, &who, &form.reauth).await,
     };
     let error: Option<String> = if let Err(msg) = proved {
         Some(msg)
@@ -2431,7 +2548,7 @@ async fn manager_page(
         has_password: !target.password_hash.is_empty(),
         passkeys: passkey::count(&inner.db, target.id).await,
     };
-    let reauth = inner.reauth_view(manager).await;
+    let reauth = inner.reauth_view(manager, who).await;
     inner.page(who, &reset_form_html(&t, &reauth, error, success, csrf), req)
 }
 
@@ -2470,7 +2587,7 @@ async fn manage_submit(
                 .await
         }
     };
-    if let Err(msg) = inner.reauth(&manager, &form.reauth).await {
+    if let Err(msg) = inner.reauth(&manager, &who, &form.reauth).await {
         return (StatusCode::FORBIDDEN, page(Some(msg), None).await).into_response();
     }
 
@@ -2582,7 +2699,7 @@ async fn totp_setup_submit(
     // The password or a passkey is the factor here: the account's *active* secret is what a code would
     // be checked against, and for a first enrolment there isn't one. An already-enrolled user
     // re-enrolling can use a code too.
-    if let Err(msg) = inner.reauth(&user, &form.reauth).await {
+    if let Err(msg) = inner.reauth(&user, &who, &form.reauth).await {
         return render_totp_setup(&inner, &who, &user, &pending, Some(&msg), &csrf, &req).await;
     }
     // Not lockout-limited: enrolling is authenticated, and the code being guessed is the caller's own
@@ -2706,7 +2823,7 @@ async fn recovery_regenerate(
         // Codes exist to recover a second factor; without one there is nothing to recover.
         return Redirect::to(&inner.profile_path).into_response();
     }
-    if let Err(msg) = inner.reauth(&user, &form.reauth).await {
+    if let Err(msg) = inner.reauth(&user, &who, &form.reauth).await {
         return profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::FORBIDDEN, Err(&msg)).await;
     }
     match recovery::issue(&inner.db, user.id).await {
@@ -2786,7 +2903,7 @@ async fn totp_self_disable(
         Ok(v) => v,
         Err(res) => return res,
     };
-    if let Err(msg) = inner.reauth(&user, &form.reauth).await {
+    if let Err(msg) = inner.reauth(&user, &who, &form.reauth).await {
         return profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::FORBIDDEN, Err(&msg)).await;
     }
     let user = clear_totp(&inner, user).await;
@@ -2820,7 +2937,7 @@ async fn totp_manage_disable(
     let Some(manager) = target_user(&inner, &who.id).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
-    if let Err(msg) = inner.reauth(&manager, &form.reauth).await {
+    if let Err(msg) = inner.reauth(&manager, &who, &form.reauth).await {
         let page = manager_page(&inner, &who, &manager, &target, Some(&msg), None, &csrf, &req).await;
         return (StatusCode::FORBIDDEN, page).into_response();
     }
@@ -2854,7 +2971,7 @@ async fn passkeys_manage_remove(
     let Some(manager) = target_user(&inner, &who.id).await else {
         return Redirect::to(&inner.login_path).into_response();
     };
-    if let Err(msg) = inner.reauth(&manager, &form.reauth).await {
+    if let Err(msg) = inner.reauth(&manager, &who, &form.reauth).await {
         let page = manager_page(&inner, &who, &manager, &target, Some(&msg), None, &csrf, &req).await;
         return (StatusCode::FORBIDDEN, page).into_response();
     }
@@ -2902,7 +3019,7 @@ async fn profile_fragment(
 ) -> String {
     let totp_on = user.has_totp();
     // One view per render: every confirm-it's-you block on the page shares its passkey challenge.
-    let reauth = inner.reauth_view(user).await;
+    let reauth = inner.reauth_view(user, who).await;
     let left = match totp_on {
         true => Some(recovery::remaining(&inner.db, user.id).await),
         false => None,
@@ -3009,7 +3126,7 @@ async fn render_totp_setup(
     let Some(prov) = totp::provisioning(&inner.totp_issuer, &who.username, secret) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not build QR code").into_response();
     };
-    let reauth = inner.reauth_view(user).await;
+    let reauth = inner.reauth_view(user, who).await;
     let frag = totp_setup_html(&prov, &reauth, error, csrf);
     inner.page(who, &frag, req).into_response()
 }

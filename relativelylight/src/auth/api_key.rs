@@ -545,7 +545,7 @@ pub(super) async fn mint_submit(
         )
         .await;
     }
-    if let Err(msg) = inner.reauth(&user, &form.reauth).await {
+    if let Err(msg) = inner.reauth(&user, &who, &form.reauth).await {
         return super::profile_reply(
             &inner,
             (&who, &user, &csrf, &req),

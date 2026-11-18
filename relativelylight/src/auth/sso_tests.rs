@@ -109,6 +109,8 @@ struct Recipe {
     groups: Option<Vec<String>>,
     /// Answer the token endpoint without an `id_token` at all.
     omit_id_token: bool,
+    /// An `auth_time` this many seconds ago. `None` → omit it, as Google does unless asked and enabled.
+    auth_time_ago: Option<i64>,
 }
 
 impl Recipe {
@@ -123,6 +125,7 @@ impl Recipe {
             username: Some(("preferred_username".into(), username.into())),
             groups: None,
             omit_id_token: false,
+            auth_time_ago: None,
         }
     }
 }
@@ -207,7 +210,8 @@ async fn idp_token(State(idp): State<IdpState>) -> impl IntoResponse {
         StandardClaims::new(SubjectIdentifier::new("test-subject".into())),
         Extra(extra),
     )
-    .set_nonce(recipe.nonce.clone().map(openidconnect::Nonce::new));
+    .set_nonce(recipe.nonce.clone().map(openidconnect::Nonce::new))
+    .set_auth_time(recipe.auth_time_ago.map(|ago| Utc::now() - ChronoDuration::seconds(ago)));
 
     let pem = if recipe.wrong_key { &keys().1 } else { &keys().0 };
     let id_token = TestIdToken::new(
@@ -788,4 +792,208 @@ async fn sso_counts_as_two_factors_unless_the_site_says_otherwise() {
     let mut h = HeaderMap::new();
     h.insert(header::COOKIE, cookie.parse().unwrap());
     assert_eq!(fx.auth.identify(&h).await.map(|w| w.level), Some(Level::Mfa));
+}
+
+// ===================== Re-authentication through the provider (AUTH.md §5h) =====================
+
+impl Fx {
+    fn cookie(&self, token: &str) -> String {
+        format!("{}={token}", self.auth.session_cookie_name())
+    }
+
+    /// Sign `username` in through the fake IdP and return the session token.
+    async fn sso_session(&self, username: &str) -> String {
+        let res = self.login_with(Recipe::valid(username)).await;
+        res.session_token(self.auth.session_cookie_name()).expect("signed in")
+    }
+
+    /// The identity a request with this session resolves to (the session it names included).
+    async fn identity(&self, token: &str) -> crate::auth::Identity {
+        let mut h = HeaderMap::new();
+        h.insert(header::COOKIE, self.cookie(token).parse().unwrap());
+        self.auth.identify(&h).await.expect("a live session")
+    }
+
+    /// `GET /sso/{p}/reauth` from the page `referer`, on the session `token`.
+    async fn begin_reauth(&self, token: Option<&str>, referer: Option<&str>) -> Resp {
+        let mut req = Request::builder().method("GET").uri(format!("/sso/{PROVIDER}/reauth"));
+        if let Some(t) = token {
+            req = req.header(header::COOKIE, self.cookie(t));
+        }
+        if let Some(r) = referer {
+            req = req.header(header::REFERER, r);
+        }
+        self.send(req.body(Body::empty()).unwrap()).await
+    }
+
+    /// The provider's answer to a begun confirmation, minted from `recipe`. The callback carries the
+    /// transaction cookie **only**: the provider's redirect is a cross-site navigation, which a
+    /// `SameSite=Strict` session cookie isn't sent on.
+    async fn finish_reauth(&self, begun: &Resp, mut recipe: Recipe) -> Resp {
+        assert_eq!(begun.status, StatusCode::SEE_OTHER, "reauth goes to the provider: {}", begun.body);
+        let txn = begun.txn().expect("a transaction");
+        recipe.nonce = Some(txn["nonce"].as_str().unwrap().to_string());
+        *self.idp.recipe.lock().unwrap() = recipe;
+        let state = txn["csrf"].as_str().unwrap();
+        self.callback(&format!("code=test-code&state={state}"), begun.txn_cookie().as_deref()).await
+    }
+
+    async fn reauth_until(&self, token: &str) -> Option<i64> {
+        session::Entity::find_by_id(token.to_string()).one(&self.db).await.unwrap().unwrap().reauth_until
+    }
+}
+
+fn nothing() -> crate::auth::ReauthInput {
+    crate::auth::ReauthInput::default()
+}
+
+#[tokio::test]
+async fn an_sso_account_confirms_at_its_provider_once_per_action() {
+    let fx = Fx::new(true).await;
+    let token = fx.sso_session("staff-alice").await;
+    let who = fx.identity(&token).await;
+
+    // Unconfirmed: refused, and the confirm block links to the provider.
+    let err = fx.auth.reauthenticate_with(&who, &nothing()).await.unwrap_err();
+    assert!(err.contains("Confirm with Test IdP first"), "{err}");
+    assert!(fx.auth.can_reauthenticate(&who).await, "an SSO account can be challenged now");
+    let block = fx.auth.reauth_fields(&who, "Confirm it's you.").await;
+    assert!(block.contains(&format!(r#"href="/sso/{PROVIDER}/reauth""#)), "{block}");
+    assert!(!block.contains("data-rl-sso-confirmed"), "{block}");
+
+    // The round trip: to the provider (a plain sign-in request, nothing Google would refuse) …
+    let begun = fx.begin_reauth(Some(&token), Some("http://localhost/settings?tab=keys")).await;
+    let to = begun.headers[header::LOCATION].to_str().unwrap().to_string();
+    assert!(!to.contains("max_age") && !to.contains("claims") && !to.contains("prompt"), "{to}");
+    let txn = begun.txn().unwrap();
+    assert!(!txn.to_string().contains(&token), "the transaction names the session by its hash only");
+    // … and back, as the same account, arriving without the session cookie.
+    let back = fx.finish_reauth(&begun, Recipe::valid("staff-alice")).await;
+    assert_eq!(back.status, StatusCode::OK, "{}", back.body);
+    assert!(back.body.contains(r#"content="0;url=/settings?tab=keys""#), "back to the page: {}", back.body);
+    assert!(back.clears_txn());
+    assert!(back.session_token(fx.auth.session_cookie_name()).is_none(), "it signs nobody in");
+    assert_eq!(fx.session_count().await, 1, "and opens no session");
+
+    // Confirmed: the block says so, and one action passes …
+    let block = fx.auth.reauth_fields(&who, "Confirm it's you.").await;
+    assert!(block.contains("data-rl-sso-confirmed"), "{block}");
+    fx.auth.reauthenticate_with(&who, &nothing()).await.expect("the confirmation is accepted");
+    // … and only one: it was spent.
+    let err = fx.auth.reauthenticate_with(&who, &nothing()).await.unwrap_err();
+    assert!(err.contains("Confirm with Test IdP first"), "{err}");
+    assert_eq!(fx.reauth_until(&token).await, None);
+}
+
+#[tokio::test]
+async fn a_confirmation_must_come_back_as_the_session_s_own_account() {
+    let fx = Fx::new(true).await;
+    let alice = fx.sso_session("staff-alice").await;
+    fx.sso_session("staff-bob").await;
+    let sessions = fx.session_count().await;
+
+    // Back as another of this site's SSO accounts: refused, and alice's session holds nothing.
+    let begun = fx.begin_reauth(Some(&alice), None).await;
+    let res = fx.finish_reauth(&begun, Recipe::valid("staff-bob")).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "{}", res.body);
+    assert!(res.body.contains("Nothing was confirmed"), "{}", res.body);
+    assert_eq!(fx.reauth_until(&alice).await, None);
+
+    // Back as an account this site doesn't have, with auto-registration on: refused, and not created.
+    let begun = fx.begin_reauth(Some(&alice), None).await;
+    let res = fx.finish_reauth(&begun, Recipe::valid("staff-carol")).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "{}", res.body);
+    assert!(fx.row("staff-carol").await.is_none(), "a confirmation never registers an account");
+    assert_eq!(fx.session_count().await, sessions, "nor signs anyone in");
+
+    // The session ended while the user was away: nothing to confirm.
+    let begun = fx.begin_reauth(Some(&alice), None).await;
+    session::Entity::delete_by_id(alice.clone()).exec(&fx.db).await.unwrap();
+    let res = fx.finish_reauth(&begun, Recipe::valid("staff-alice")).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "{}", res.body);
+
+    // Positive control: a fresh session, back as itself.
+    let alice = fx.sso_session("staff-alice").await;
+    let begun = fx.begin_reauth(Some(&alice), None).await;
+    let res = fx.finish_reauth(&begun, Recipe::valid("staff-alice")).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert!(fx.reauth_until(&alice).await.is_some());
+
+    // Starting one needs a session of an account of this provider.
+    let anon = fx.begin_reauth(None, None).await;
+    assert_eq!(anon.headers[header::LOCATION], "/login", "anonymous: to the login page");
+    assert!(anon.txn_cookie().is_none());
+    let local = fx.user("dave", None, true).await;
+    let dave = "local-session-dave".to_string();
+    session::ActiveModel {
+        id: Set(dave.clone()),
+        user_id: Set(local),
+        expires_at: Set(crate::auth::now_secs() + 600),
+        last_seen_at: Set(crate::auth::now_secs()),
+        awaiting_totp: Set(false),
+        method: Set(session::Method::Password.as_str().into()),
+        passkey_class: Set(None),
+        reauth_until: Set(None),
+    }
+    .insert(&fx.db)
+    .await
+    .unwrap();
+    let res = fx.begin_reauth(Some(&dave), None).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "a local account confirms with its own factors");
+}
+
+#[tokio::test]
+async fn a_strict_provider_needs_a_recent_sign_in() {
+    let fx = Fx::with(true, |p| p.reauth_max_age(300)).await;
+    let token = fx.sso_session("staff-alice").await;
+
+    // The request asks for a recent sign-in, in the two standard ways.
+    let begun = fx.begin_reauth(Some(&token), None).await;
+    let to = begun.headers[header::LOCATION].to_str().unwrap().to_string();
+    assert!(to.contains("max_age=300") && to.contains("auth_time"), "{to}");
+
+    for (ago, what) in [(None, "no auth_time"), (Some(3600), "an hour-old sign-in")] {
+        let begun = fx.begin_reauth(Some(&token), None).await;
+        let res = fx.finish_reauth(&begun, Recipe { auth_time_ago: ago, ..Recipe::valid("staff-alice") }).await;
+        assert_eq!(res.status, StatusCode::FORBIDDEN, "{what}: {}", res.body);
+        assert_eq!(fx.reauth_until(&token).await, None, "{what}: nothing confirmed");
+    }
+    // Positive control: signed in ten seconds ago.
+    let res = fx.finish_reauth(&begun, Recipe { auth_time_ago: Some(10), ..Recipe::valid("staff-alice") }).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert!(fx.reauth_until(&token).await.is_some());
+}
+
+#[tokio::test]
+async fn a_confirmation_expires_and_a_restricted_session_can_make_one() {
+    let fx = Fx::with_auth(true, |p| p, |a| a.sso_level(crate::auth::Level::Simple).min_level(crate::auth::Level::Mfa)).await;
+    let token = fx.sso_session("staff-alice").await;
+    let mut h = HeaderMap::new();
+    h.insert(header::COOKIE, fx.cookie(&token).parse().unwrap());
+    assert!(fx.auth.identify(&h).await.is_none(), "the session is restricted");
+
+    // Restricted, it can still confirm: adding its first factor on /profile needs it. With no
+    // `Referer` it returns to the profile.
+    let begun = fx.begin_reauth(Some(&token), None).await;
+    let res = fx.finish_reauth(&begun, Recipe::valid("staff-alice")).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert!(res.body.contains(r#"content="0;url=/profile""#), "{}", res.body);
+    let until = fx.reauth_until(&token).await.expect("confirmed");
+    assert!(until > crate::auth::now_secs(), "good for a while");
+
+    // A `Referer` that names no page of this site's shape falls back to the profile too.
+    let begun = fx.begin_reauth(Some(&token), Some("not a url")).await;
+    assert_eq!(begun.txn().unwrap()["reauth"]["back"], "/profile");
+
+    // Expired, a confirmation is no confirmation. (Checked on an unrestricted session.)
+    let fx = Fx::new(true).await;
+    let token = fx.sso_session("staff-alice").await;
+    let who = fx.identity(&token).await;
+    let begun = fx.begin_reauth(Some(&token), None).await;
+    fx.finish_reauth(&begun, Recipe::valid("staff-alice")).await;
+    let mut am: session::ActiveModel =
+        session::Entity::find_by_id(token.clone()).one(&fx.db).await.unwrap().unwrap().into();
+    am.reauth_until = Set(Some(crate::auth::now_secs() - 1));
+    am.update(&fx.db).await.unwrap();
+    assert!(fx.auth.reauthenticate_with(&who, &nothing()).await.is_err(), "expired");
 }

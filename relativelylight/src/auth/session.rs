@@ -16,7 +16,8 @@
 //!
 //! `method` records **how** the session was authenticated ([`Method`]), and `passkey_class` the class
 //! of the passkey when one was used, so a policy made stricter can refuse sessions a weaker passkey
-//! opened.
+//! opened. `reauth_until` holds an SSO account's confirmation at its provider until one action spends
+//! it.
 
 use sea_orm::entity::prelude::*;
 
@@ -38,6 +39,10 @@ pub struct Model {
     pub method: String,
     /// The [`Class`](super::passkey::Class) of the passkey that opened the session, when one did.
     pub passkey_class: Option<String>,
+    /// An SSO account's **unspent confirmation** at its identity provider (`docs/AUTH.md` §5h): Unix
+    /// seconds until which the next re-authenticated action on this session is accepted without a
+    /// local factor. Set by the provider's callback, cleared by the action that spends it.
+    pub reauth_until: Option<i64>,
 }
 
 /// How a session was authenticated. `#[non_exhaustive]`: a method added later isn't a break.

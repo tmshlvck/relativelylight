@@ -33,13 +33,13 @@ use openidconnect::{
 };
 use regex::Regex;
 use sea_orm::sea_query::{Expr, ExprTrait, Func};
-use sea_orm::{ActiveModelTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::auth::{session_cookie, user, Auth};
+use crate::auth::{session, session_cookie, user, Auth};
 
 const TXN_COOKIE: &str = "rl_sso_txn"; // short-lived cookie carrying the in-flight login transaction
 
@@ -67,6 +67,9 @@ pub struct SsoProvider {
     pub(crate) claim_rules: HashMap<String, Vec<String>>,
     /// Create unknown users on first login (typical for a corporate IdP). Off → admin must pre-create.
     pub(crate) auto_register: bool,
+    /// Re-authentication must be a sign-in at most this many seconds old (`auth_time`); `None` takes
+    /// the round trip as the same account as enough. See [`SsoProvider::reauth_max_age`].
+    pub(crate) reauth_max_age: Option<u64>,
 }
 
 impl SsoProvider {
@@ -94,6 +97,7 @@ impl SsoProvider {
             groups_claim: None,
             claim_rules: HashMap::new(),
             auto_register: false,
+            reauth_max_age: None,
         }
     }
 
@@ -134,6 +138,21 @@ impl SsoProvider {
     /// set its `sso_provider` to this key before they can sign in.
     pub fn auto_register(mut self, on: bool) -> Self {
         self.auto_register = on;
+        self
+    }
+
+    /// Make re-authentication (`docs/AUTH.md` §5h) **strict** for this provider: the confirmation must
+    /// carry an `auth_time` at most `secs` old, or it is refused. The request then asks for one with
+    /// `max_age` and the `claims` parameter, so a provider that honours them signs the user in again
+    /// when their last sign-in is older.
+    ///
+    /// Off by default: the round trip back as the **same account** is the confirmation, which stops a
+    /// stolen session cookie (its holder can't sign in at the provider) but proves no fresh sign-in.
+    /// Use it with a provider that re-prompts (Okta, Entra ID, Keycloak). Google doesn't: it returns
+    /// `auth_time` only to a verified app with "Session age claims" on, and never asks again, so strict
+    /// mode there refuses everyone who hasn't signed in to Google within `secs`.
+    pub fn reauth_max_age(mut self, secs: u64) -> Self {
+        self.reauth_max_age = Some(secs);
         self
     }
 }
@@ -216,12 +235,27 @@ impl Sso {
     }
 
     /// The SSO routes to merge into your router: `GET {base_path}/{key}/login` (redirect to the
-    /// provider) and `GET {base_path}/{key}/callback` (exchange the code, map the user, sign in).
+    /// provider), `GET {base_path}/{key}/callback` (exchange the code, map the user, sign in) and
+    /// `GET {base_path}/{key}/reauth` (an SSO account confirming it's you, `docs/AUTH.md` §5h).
+    ///
+    /// It also tells the `Auth` this `Sso` was built from where each provider's confirmation lives, so
+    /// its confirm-it's-you blocks can offer it. The first call does; a later one describes the same.
     pub fn routes(&self) -> Router {
         let base = self.base_path.trim_end_matches('/').to_string();
+        let confirm = self
+            .providers
+            .iter()
+            .map(|p| super::SsoConfirmRoute {
+                key: p.key.clone(),
+                label: p.label.clone(),
+                url: format!("{base}/{}/reauth", p.key),
+            })
+            .collect();
+        let _ = self.auth.inner.sso_confirm.set(confirm);
         Router::new()
             .route(&format!("{base}/{{provider}}/login"), get(login))
             .route(&format!("{base}/{{provider}}/callback"), get(callback))
+            .route(&format!("{base}/{{provider}}/reauth"), get(reauth))
             .with_state(Arc::new(self.clone()))
     }
 
@@ -289,6 +323,19 @@ struct Txn {
     csrf: String,  // expected `state` on return
     nonce: String, // bound into the ID token
     pkce: String,  // PKCE code verifier
+    /// Set when this is a confirmation (§5h), not a sign-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reauth: Option<ReauthTxn>,
+}
+
+/// What a confirmation needs on the way back. The session is named by its **hash**: the callback is a
+/// cross-site arrival, which a `SameSite=Strict` session cookie doesn't come with, so the transaction
+/// says which session asked; and the session id is a credential, which this unsigned cookie must not
+/// carry.
+#[derive(Serialize, Deserialize)]
+struct ReauthTxn {
+    session: String,
+    back: String,
 }
 
 #[derive(Deserialize)]
@@ -351,7 +398,50 @@ async fn login(State(sso): State<Arc<Sso>>, Path(provider): Path<String>, jar: C
     let Some(p) = sso.find_provider(&provider) else {
         return (StatusCode::NOT_FOUND, "unknown SSO provider").into_response();
     };
-    let (meta, redirect, _http) = match discover(&sso, p).await {
+    authorize(&sso, p, jar, None).await
+}
+
+/// `GET {base}/{provider}/reauth` — an SSO account **confirming it's you** (`docs/AUTH.md` §5h): the
+/// signed-in caller goes to their provider and back to the page they came from, whose next
+/// re-authenticated action the confirmation then allows, once.
+///
+/// It needs the session (a restricted one too: adding a first factor on `/profile` is re-authenticated),
+/// and the session cookie is `SameSite`, so a page elsewhere can't start a confirmation for a
+/// signed-in user. The page to return to is the `Referer`'s path, when it is one of this site's.
+async fn reauth(
+    State(sso): State<Arc<Sso>>,
+    Path(provider): Path<String>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Response {
+    let inner = &sso.auth.inner;
+    let Some((who, user)) = super::signed_in(inner, &headers).await else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let Some(p) = sso.find_provider(&provider) else {
+        return (StatusCode::NOT_FOUND, "unknown SSO provider").into_response();
+    };
+    if user.sso_key() != Some(p.key.as_str()) {
+        return (StatusCode::FORBIDDEN, "this account doesn't sign in through that provider").into_response();
+    }
+    let Some(super::SessionRef(token)) = &who.session else {
+        return Redirect::to(&inner.login_path).into_response();
+    };
+    let back = headers
+        .get(axum::http::header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|r| r.parse::<axum::http::Uri>().ok())
+        .and_then(|u| u.path_and_query().map(|pq| pq.as_str().to_string()))
+        .filter(|b| crate::is_local_path(b))
+        .unwrap_or_else(|| inner.profile_path.clone());
+    let txn = ReauthTxn { session: super::api_key::hash(token), back };
+    authorize(&sso, p, jar, Some(txn)).await
+}
+
+/// Redirect to `p`'s authorization endpoint (PKCE + nonce + CSRF state), the transaction stashed in a
+/// short-lived cookie: a sign-in, or with `reauth` a confirmation.
+async fn authorize(sso: &Sso, p: &SsoProvider, jar: CookieJar, reauth: Option<ReauthTxn>) -> Response {
+    let (meta, redirect, _http) = match discover(sso, p).await {
         Ok(x) => x,
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("SSO provider unavailable: {e}")).into_response(),
     };
@@ -370,6 +460,15 @@ async fn login(State(sso): State<Arc<Sso>>, Path(provider): Path<String>, jar: C
     for s in &p.scopes {
         req = req.add_scope(Scope::new(s.clone()));
     }
+    // A strict confirmation asks for a recent sign-in in the two standard ways: `max_age` (a provider
+    // that honours it signs an older session in again) and the `claims` parameter for `auth_time`
+    // (Google's way to ask for it). Nothing else is sent: Google refuses `prompt` values it doesn't
+    // support, and a confirmation must work wherever a sign-in does.
+    if let (Some(_), Some(max)) = (&reauth, p.reauth_max_age) {
+        req = req
+            .set_max_age(Duration::from_secs(max))
+            .add_extra_param("claims", r#"{"id_token":{"auth_time":{"essential":true}}}"#);
+    }
     let (auth_url, csrf, nonce) = req.set_pkce_challenge(challenge).url();
 
     let txn = Txn {
@@ -377,8 +476,9 @@ async fn login(State(sso): State<Arc<Sso>>, Path(provider): Path<String>, jar: C
         csrf: csrf.secret().clone(),
         nonce: nonce.secret().clone(),
         pkce: verifier.secret().clone(),
+        reauth,
     };
-    let jar = jar.add(txn_cookie(&sso, &txn));
+    let jar = jar.add(txn_cookie(sso, &txn));
     (jar, Redirect::to(auth_url.as_str())).into_response()
 }
 
@@ -460,6 +560,11 @@ async fn callback(
         )
             .into_response();
     };
+    // A confirmation (§5h) ends here, before anything that could register an account, change its groups
+    // or open a session: it only marks the session that asked.
+    if let Some(rt) = txn.reauth {
+        return confirm(&sso, p, username, &payload, rt, clear).await;
+    }
     let claim_values = p
         .groups_claim
         .as_ref()
@@ -490,6 +595,72 @@ async fn callback(
     super::complete_login(inner, &user, method, None, &headers, client_ip).await;
     let to = inner.landing(&user, method, None).to_string();
     (jar, Redirect::to(&to)).into_response()
+}
+
+/// The end of a confirmation (§5h). The provider's account must be the local account of the session that
+/// asked (found among that account's sessions by the hash the transaction carries) and, for a strict
+/// provider ([`SsoProvider::reauth_max_age`]), its sign-in recent. Then that session holds a one-use
+/// confirmation, and the browser returns to the page it came from.
+async fn confirm(
+    sso: &Sso,
+    p: &SsoProvider,
+    username: &str,
+    payload: &serde_json::Value,
+    rt: ReauthTxn,
+    clear: CookieJar,
+) -> Response {
+    let inner = &sso.auth.inner;
+    let refuse = |msg: String| (StatusCode::FORBIDDEN, clear.clone(), msg).into_response();
+    let account = match find_user_ci(&inner.db, username).await {
+        Ok(Some(u)) if u.is_active && u.sso_key() == Some(p.key.as_str()) => u,
+        Ok(_) => return refuse("That sign-in isn't an account of this site. Nothing was confirmed.".into()),
+        Err((code, msg)) => return (code, clear, msg).into_response(),
+    };
+    let sessions = session::Entity::find()
+        .filter(session::Column::UserId.eq(account.id))
+        .all(&inner.db)
+        .await
+        .unwrap_or_default();
+    let asked = sessions.into_iter().find(|s| {
+        super::api_key::hash(&s.id) == rt.session && inner.session_live(s) && !s.awaiting_totp
+    });
+    let Some(asked) = asked else {
+        return refuse(
+            "That sign-in isn't the account signed in here, or your session has ended. Nothing was \
+             confirmed."
+                .into(),
+        );
+    };
+    if let Some(max) = p.reauth_max_age {
+        // A minute either way for the two clocks; a provider that sent no `auth_time` proves nothing.
+        let now = super::now_secs();
+        let max = i64::try_from(max).unwrap_or(i64::MAX);
+        let fresh = payload
+            .get("auth_time")
+            .and_then(|v| v.as_f64())
+            .map(|t| t as i64)
+            .is_some_and(|t| t <= now + 60 && now.saturating_sub(t) <= max.saturating_add(60));
+        if !fresh {
+            return refuse(format!(
+                "{} didn't confirm a recent sign-in, so nothing was confirmed. Sign in to {} again, then retry.",
+                p.label, p.label
+            ));
+        }
+    }
+    if inner.record_sso_confirmation(&asked.id).await.is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, clear, "could not record the confirmation").into_response();
+    }
+    // Back by a page that moves on itself, not a redirect: the provider sent the browser here, so a
+    // redirect would still be a cross-site navigation, which a `SameSite=Strict` session cookie isn't
+    // sent on. A navigation this page starts is same-site.
+    let back = if crate::is_local_path(&rt.back) { rt.back } else { inner.profile_path.clone() };
+    let back = crate::html::esc(&back);
+    let page = format!(
+        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0;url={back}\">\
+         <title>Confirmed</title><p>Confirmed with {label}. <a href=\"{back}\">Continue</a></p>",
+        label = crate::html::esc(&p.label),
+    );
+    (clear, axum::response::Html(page)).into_response()
 }
 
 /// Find the SSO user for `username`, honoring the provider binding and auto-registration policy.

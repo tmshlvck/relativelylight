@@ -33,16 +33,8 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
 
 ## auth
 
-- [ ] **Re-authenticate SSO accounts through the IdP** (`prompt=login`), which needs somewhere to park
-  the pending action across the redirect. Until then an account with no local factor passes
-  re-authentication (AUTH.md §5h).
-- [ ] **Breached-password screening** (HIBP range API or a local corpus). Possible today through
-  `Auth::password_check`; the question is whether a helper earns a feature flag.
 - [ ] **SSO leftovers:** refresh tokens, `userinfo`, RP-initiated logout, a real-IdP smoke test at
   release.
-- [ ] **Passkeys: before release.** A check with real devices: a security key, a phone (hybrid / QR
-  sign-in), a platform authenticator (Touch ID, Windows Hello), Safari and Firefox. The tests cover
-  the server with a software authenticator and the script in Chromium's virtual one.
 - [ ] **Passkeys: later.**
   - browser autofill of passkeys on the login page;
   - a username-first sign-in, for security keys with no free slot for a discoverable credential;

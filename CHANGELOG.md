@@ -13,6 +13,16 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
+- **SSO accounts re-authenticate through their provider** ([AUTH.md §5h](docs/AUTH.md#5h-re-authentication-before-sensitive-changes)).
+  An account with no local factor used to pass re-authentication unchallenged, so a stolen session
+  of an SSO administrator could reset anyone's password. Now its confirm block links to
+  `GET {base}/{key}/reauth`: a round trip to the provider and back as the same account leaves a
+  one-use confirmation on the session, good for five minutes, which the next sensitive action
+  spends. `SsoProvider::reauth_max_age(secs)` makes a provider strict: the confirmation must carry
+  an `auth_time` that recent (not for Google, which never re-prompts). `can_reauthenticate` is now
+  `true` for SSO accounts. **Upgrade:** add `auth_session.reauth_until` with the rest of 0.5's
+  columns ([MIGRATION-0.5.md §3](docs/MIGRATION-0.5.md#3-new-auth-columns-and-tables)); no code
+  changes.
 - **One column type per kind of time value** ([TIME.md §1](docs/TIME.md#1-storage-model)): an instant
   is integer Unix seconds with `.datetime()`, a calendar date a native `DATE`. Three changes follow:
   - **Native date-time columns are read-only.** A `DateTime`, `Timestamp`, `TimestampWithTimeZone`

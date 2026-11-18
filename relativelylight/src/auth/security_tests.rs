@@ -325,6 +325,7 @@ async fn create_session_row_seen(
         awaiting_totp: Set(awaiting_totp),
         method: Set(session::Method::Password.as_str().into()),
         passkey_class: Set(None),
+        reauth_until: Set(None),
     }
     .insert(db)
     .await
@@ -1777,33 +1778,53 @@ async fn manager_actions_need_the_managers_own_re_authentication() {
     assert!(fx.password_works("victim", OTHER_PW).await);
 }
 
+/// What the SSO provider's callback leaves on a session that confirmed (§5h): `sso_tests.rs` drives the
+/// round trip itself; these tests start from its result.
+async fn confirm_at_provider(fx: &Fx, token: &str) {
+    let mut am: session::ActiveModel = fx.session_row(token).await.expect("session").into();
+    am.reauth_until = Set(Some(now_secs() + 300));
+    am.update(&fx.db).await.expect("confirm");
+}
+
 #[tokio::test]
-async fn an_account_with_no_local_factor_is_not_challenged() {
-    // An SSO account has neither password nor local 2FA, so there is nothing to ask it for. Refusing
-    // instead would lock every SSO administrator out of the manager pages permanently — a documented
-    // limit (§5h), not an oversight: re-auth through the identity provider is the real answer.
+async fn an_sso_account_confirms_at_its_provider_before_a_sensitive_change() {
+    // An SSO account has neither password nor local 2FA. It used to pass re-authentication for want of
+    // anything to ask, which let a stolen session of an SSO manager reset anyone's password. Now it
+    // confirms at its provider first; here no provider is mounted, so it can't, and is refused.
     let fx = Fx::with(|a| a.admin_group("admin")).await;
     fx.user_in("boss", "admin").await;
     fx.make_sso("boss", "okta").await;
     // An SSO account's password hash is what `create_user` left; blank it, as a real SSO account has.
     fx.update_user("boss", |am| am.password_hash = Set(String::new())).await;
     let victim = fx.user("victim").await;
-    let cookie = fx.cookie(&fx.session_for("boss").await);
+    let token = fx.session_for("boss").await;
+    let cookie = fx.cookie(&token);
+    let reset = form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]);
 
-    let res = fx
-        .post(
-            &format!("/profile/{victim}"),
-            &form(&[("new_password", OTHER_PW), ("confirm_password", OTHER_PW)]),
-            Some(&cookie),
-        )
-        .await;
-    assert_eq!(res.status, StatusCode::OK, "an SSO manager can still work: {}", res.body);
+    let res = fx.post(&format!("/profile/{victim}"), &reset, Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "unconfirmed: {}", res.body);
+    assert!(!fx.password_works("victim", OTHER_PW).await, "and nothing was written");
+
+    // Confirmed at the provider: one reset goes through, and the confirmation is spent by it.
+    confirm_at_provider(&fx, &token).await;
+    let res = fx.post(&format!("/profile/{victim}"), &reset, Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK, "confirmed: {}", res.body);
     assert!(fx.password_works("victim", OTHER_PW).await);
+    let again = form(&[("new_password", PW), ("confirm_password", PW)]);
+    let res = fx.post(&format!("/profile/{victim}"), &again, Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "a second change needs a second confirmation");
 
-    // And the public API says so, which is what an app should key its own UI hint off.
-    let who = fx.identify_token(&fx.session_for("boss").await).await.expect("identity");
-    assert!(!fx.auth.can_reauthenticate(&who).await, "nothing to challenge with");
-    assert!(fx.auth.reauthenticate_with(&who, &ReauthInput::password_or_code("", "")).await.is_ok(), "so re-auth passes");
+    // The public API agrees, which is what an app keys its own UI hint off.
+    let who = fx.identify_token(&token).await.expect("identity");
+    assert!(fx.auth.can_reauthenticate(&who).await, "an SSO account is challenged");
+    assert!(fx.auth.reauthenticate_with(&who, &ReauthInput::default()).await.is_err());
+
+    // A local account with no factor at all still passes: it has nothing to be asked for.
+    fx.user("bare").await;
+    fx.update_user("bare", |am| am.password_hash = Set(String::new())).await;
+    let who = fx.identify_token(&fx.session_for("bare").await).await.expect("identity");
+    assert!(!fx.auth.can_reauthenticate(&who).await);
+    assert!(fx.auth.reauthenticate_with(&who, &ReauthInput::default()).await.is_ok());
 }
 
 #[tokio::test]
@@ -2350,14 +2371,20 @@ async fn an_sso_account_cannot_set_a_local_password_but_may_enrol_totp() {
     assert!(fx.password_works("federated", PW).await, "the local hash must not be rewritten");
     assert!(!fx.password_works("federated", OTHER_PW).await);
 
-    // …but this site's TOTP may be added (§5m: a site that distrusts its IdP asks for its own). An SSO
-    // account has no local factor to confirm with, so it passes re-authentication, as before.
+    // …but this site's TOTP may be added (§5m: a site that distrusts its IdP asks for its own), once the
+    // account has confirmed at its provider (§5h). Each attempt spends a confirmation, as it would a code.
     assert_eq!(fx.get("/profile/totp", Some(&cookie)).await.status, StatusCode::OK);
     let pending = fx.row("federated").await.totp_pending.expect("enrolment started");
+    let code = totp::current_code(&pending);
+    let res = fx.post("/profile/totp", &form(&[("code", &code)]), Some(&cookie)).await;
+    assert!(res.body.contains("alert-danger") && !res.body.contains("didn&#39;t match"), "unconfirmed, refused before the code: {}", res.body);
+    assert!(fx.row("federated").await.totp_secret.is_none());
+    let token = cookie.split('=').nth(1).unwrap().to_string();
+    confirm_at_provider(&fx, &token).await;
     let res = fx.post("/profile/totp", &form(&[("code", "000000")]), Some(&cookie)).await;
     assert!(res.body.contains("didn&#39;t match"), "a wrong code is refused: {}", res.body);
     assert!(fx.row("federated").await.totp_secret.is_none());
-    let code = totp::current_code(&pending);
+    confirm_at_provider(&fx, &token).await;
     let res = fx.post("/profile/totp", &form(&[("code", &code)]), Some(&cookie)).await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.body);
     assert!(fx.row("federated").await.has_totp(), "control: the right code enrols it");
@@ -3363,7 +3390,8 @@ async fn downgrade_schema_to_pre_cascade(db: &DatabaseConnection) {
         // No FK at all — what these two looked like before.
         r#"CREATE TABLE "auth_session" ( "id" varchar NOT NULL PRIMARY KEY, "user_id" integer NOT NULL,
              "expires_at" bigint NOT NULL, "last_seen_at" bigint NOT NULL, "awaiting_totp" boolean NOT NULL,
-             "method" varchar NOT NULL DEFAULT '', "passkey_class" varchar NULL )"#,
+             "method" varchar NOT NULL DEFAULT '', "passkey_class" varchar NULL,
+             "reauth_until" bigint NULL )"#,
         r#"CREATE TABLE "auth_totp_recovery" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
              "user_id" integer NOT NULL, "code_hash" varchar NOT NULL, "created_at" bigint NOT NULL,
              "used_at" bigint NULL )"#,

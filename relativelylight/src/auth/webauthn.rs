@@ -1061,7 +1061,7 @@ pub(super) async fn add(
         let (inner, who, user, csrf, req) = (&inner, &who, &user, &csrf, &req);
         async move { super::profile_reply(inner, (who, user, csrf, req), status, Err(&msg)).await }
     };
-    if let Err(msg) = inner.reauth(&user, &form.reauth).await {
+    if let Err(msg) = inner.reauth(&user, &who, &form.reauth).await {
         return refuse(StatusCode::FORBIDDEN, msg).await;
     }
     if form.register_response.trim().is_empty() {
@@ -1208,7 +1208,7 @@ pub(super) async fn password_remove(
         )
         .await;
     }
-    if let Err(msg) = inner.reauth(&user, &form.reauth).await {
+    if let Err(msg) = inner.reauth(&user, &who, &form.reauth).await {
         return super::profile_reply(
             &inner,
             (&who, &user, &csrf, &req),

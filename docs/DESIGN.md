@@ -153,7 +153,9 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 - **Re-authentication is per request, not a window.** The proof travels with the sensitive form
   itself: a password, a TOTP code, or a passkey assertion over a challenge rendered into that form.
   Nothing records "re-authenticated at", so there is no grace period for a stolen session to ride
-  on (AUTH.md §5h).
+  on (AUTH.md §5h). An SSO account's proof can't travel in the form (it is a round trip to the
+  provider), so it is made first and kept on the session, **one-use**: spent by the next sensitive
+  action, it is per request still ([why](AUTH-SECURITY.md#re-authentication)).
 - **Not here, on purpose:** a registration page, request logging, scoped keys. Each is product
   policy; the gate receives the headers, so an app's own credential needs no change here.
 

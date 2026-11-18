@@ -51,7 +51,8 @@ keep working: the stored hash is the SHA-256 hex of the raw key, as before.
 **Required, whatever features you use, before the upgraded crate runs.**
 
 - `auth_user` gains `passkey_handle` (§5l), `password_changed_at` and `must_change_password` (§5m).
-- `auth_session` gains `method` and `passkey_class`.
+- `auth_session` gains `method`, `passkey_class` and `reauth_until` (an SSO account's confirmation,
+  §5h).
 - Two new tables: `auth_passkey` and `auth_webauthn_challenge`.
 
 Every read of an account selects the new columns, and every write of a password sets two of them,
@@ -84,12 +85,13 @@ ALTER TABLE auth_user ADD COLUMN password_changed_at bigint NULL;
 ALTER TABLE auth_user ADD COLUMN must_change_password boolean NOT NULL DEFAULT FALSE;
 ALTER TABLE auth_session ADD COLUMN method varchar NOT NULL DEFAULT '';
 ALTER TABLE auth_session ADD COLUMN passkey_class varchar NULL;
+ALTER TABLE auth_session ADD COLUMN reauth_until bigint NULL;
 -- and the two tables, from upgrade::table_create_statements
 ```
 
 **Code that builds the rows itself.** `auth::user::Model` gains `passkey_handle`,
-`password_changed_at` and `must_change_password`, and `auth::session::Model` gains `method` and
-`passkey_class`. A struct literal of either no longer compiles. Build an `ActiveModel` with
+`password_changed_at` and `must_change_password`, and `auth::session::Model` gains `method`,
+`passkey_class` and `reauth_until`. A struct literal of either no longer compiles. Build an `ActiveModel` with
 `..Default::default()` instead, as the crate's helpers do. A test that inserts a session row should
 set `method` (`session::Method::Password.as_str()`), or it reads as a pre-upgrade row.
 
@@ -141,6 +143,12 @@ Nothing to change in code for these, but they change what users see.
   - `create_user`, `set_password`, `make_admin` and `reset_admin_access` don't flag.
   - **If your app sets passwords for users itself and doesn't want this**, set
     `must_change_password` to `false` in the same write.
+- **SSO accounts confirm at their provider before a sensitive change** (AUTH.md §5h), where they
+  used to pass re-authentication unchallenged. That covers a manager's reset or 2FA removal, adding
+  a factor on `/profile`, and every route of yours behind `reauthenticate_with`. The confirm block
+  (`reauth_fields`, and the library's own pages) shows a **Confirm with …** link; after the round
+  trip the next action passes, once. Nothing changes in code, but `Sso::routes()` must be mounted
+  for it, as it already is for SSO sign-in.
 - **SSO accounts may enrol TOTP** on `/profile`. Once one has, the TOTP step follows the identity
   provider's callback. This is what `Auth::sso_level(Level::Simple)` relies on to require it (§5m).
   A site that never sets that still lets SSO users opt in.

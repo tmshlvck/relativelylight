@@ -351,10 +351,19 @@ stripped on next login.
 
 **Routes & config.** `Sso::new(&auth)` (after `auth` is fully configured — see the `Auth` note about
 cloning) holds the global rules + providers; `Sso::routes()` serves `GET {base}/{key}/login` (redirect
-to the provider) and `GET {base}/{key}/callback` (exchange, verify, map, sign in), default base
-`/sso`. `Sso::buttons()` gives `(label, url)` pairs for the login page. Per provider: issuer,
-client id/secret, redirect URL, scopes, `username_claim` (default `preferred_username`; Google →
-`email`), optional `groups_claim`, the claim table, and `auto_register`.
+to the provider), `GET {base}/{key}/callback` (exchange, verify, map, sign in) and
+`GET {base}/{key}/reauth` (an SSO account confirming it's you before a sensitive change, §5h),
+default base `/sso`. `Sso::buttons()` gives `(label, url)` pairs for the login page. Per provider:
+issuer, client id/secret, redirect URL, scopes, `username_claim` (default `preferred_username`;
+Google → `email`), optional `groups_claim`, the claim table, `auto_register`, and
+`reauth_max_age(secs)` to make §5h's confirmation strict.
+
+**Google and strict confirmation.** Google doesn't support re-authentication requests: it never
+asks a signed-in user for their password again, and sends `auth_time` only to a verified,
+published app with **Session age claims** switched on (Google Auth Platform → Settings → Advanced
+settings). Leave a Google provider at the default, where the confirmation is the round trip back as
+the same account. With `reauth_max_age`, a Google user would be refused unless they had happened to
+sign in to Google within that many seconds.
 
 ```rust
 use relativelylight::auth::sso::{Sso, SsoProvider};
@@ -656,12 +665,22 @@ the account has 2FA, and a code accepted here is **spent** (§5a). Enrolment is 
 case: a *first* enrolment has no active secret to check a code against, so the password is the
 factor; a re-enrolment can use either.
 
-**An account with no local factor passes** ([why](AUTH-SECURITY.md#re-authentication)). An SSO
-account has neither password nor local 2FA nor a passkey, so there is nothing to ask it for; its
-assurance is whatever the IdP gave it, and re-authenticating through the provider is
-[open work](TODO.md#auth). The same holds for a local account with no password, no TOTP and no
-passkey, which can't log in at all. An account with a passkey and no password **does** have a
-factor, and must present it.
+**An SSO account confirms at its provider** ([why](AUTH-SECURITY.md#re-authentication)). It has
+no password, so its confirm block offers a **Confirm with Google** link (and its local TOTP or
+passkey, if it has added one). The link goes to the provider and back to the page, which then says
+the session holds a confirmation; the user fills the form in and submits, and that one action
+spends it. A confirmation lasts five minutes, unspent. It needs `Sso::routes()` mounted, at
+`GET {base}/{key}/reauth` (§5b); an SSO account on a site with no provider routes is refused.
+
+By default the round trip back **as the same account** is the confirmation: it works with every
+provider, Google included, and the holder of a stolen session cookie can't make it. A provider that
+really asks for the password again (Okta, Entra ID, Keycloak) can be made **strict** with
+`SsoProvider::reauth_max_age(secs)`: the confirmation must then come with a sign-in at most `secs`
+old. Google doesn't re-prompt, so leave it at the default there (§5b).
+
+A local account with no password, no TOTP and no passkey passes, having nothing to be asked for (it
+can't sign in either). An account with a passkey and no password **does** have a factor, and must
+present it.
 
 **Not lockout-limited**: the caller is authenticated (§5e; [why](AUTH-SECURITY.md#re-authentication)).
 
@@ -683,8 +702,8 @@ delete_the_thing(&who).await;
 ```
 
 Without a form to flatten into (a CLI, a test), build the input with
-`ReauthInput::password_or_code(password, code)`. `Auth::can_reauthenticate(&who)` says whether the account *can* be challenged (false for SSO), for a UI
-hint. `examples/auth` gates a `POST /webhook-secret/rotate` on it — the pattern to copy, including returning
+`ReauthInput::password_or_code(password, code)`. `Auth::can_reauthenticate(&who)` says whether the
+account is challenged at all (`false` only for a local account with no factor), for a UI hint. `examples/auth` gates a `POST /webhook-secret/rotate` on it — the pattern to copy, including returning
 the refusal before anything is written.
 
 **Per request, not a window.** There is no "you confirmed five minutes ago" grace period
