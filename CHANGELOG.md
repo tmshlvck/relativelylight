@@ -13,6 +13,11 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
+- **`TzPicker` posts to `/_rl/tz` by default**, not `/tz`, and the examples serve the relation picker
+  at `/_rl/pick`: plumbing under one prefix, out of the way of an app's pages
+  ([APP.md → Your URL namespace](docs/APP.md#your-url-namespace)). **Upgrade:** mount your timezone
+  handler at `/_rl/tz`, or keep `/tz` with `TzPicker::new().action("/tz")`
+  ([MIGRATION-0.5.md §12](docs/MIGRATION-0.5.md#12-tzpicker-posts-to-_rltz)).
 - **SSO accounts re-authenticate through their provider**
   ([AUTH.md §5h](docs/AUTH.md#5h-re-authentication-before-sensitive-changes)) instead of passing
   unchallenged: a round trip to `GET {base}/{key}/reauth` leaves a one-use confirmation on the

@@ -238,3 +238,21 @@ columns by what each value means.
 - **Anything that writes the database without the models** (raw SQL, import scripts) writes a date
   as exactly `YYYY-MM-DD` and an instant as integer seconds. SQLite stores anything you give it,
   and a row in another format sorts and filters wrong without an error.
+
+## 12. `TzPicker` posts to `/_rl/tz`
+
+`TzPicker`'s form posts to **`/_rl/tz`** by default, where it posted to `/tz`. An app that mounts its
+timezone handler at `/tz` and doesn't call `.action(…)` would have the picker post to a path nothing
+serves. Do one of:
+
+```rust
+.route("/_rl/tz", post(set_tz))                      // move the handler to the new default
+TzPicker::new().action("/tz")                        // or keep `/tz`, said explicitly
+```
+
+An app that already calls `.action(…)` needs nothing. The handler itself is unchanged.
+
+Why: the timezone form's target and the relation picker's route are plumbing, not pages, so the
+examples keep them under one prefix, `/_rl/` (`Crud::picker_path("/_rl/pick")`), and the default
+follows. Your relation picker's route stays where you mounted it; the crate has no default for it
+([APP.md → Your URL namespace](APP.md#your-url-namespace)).

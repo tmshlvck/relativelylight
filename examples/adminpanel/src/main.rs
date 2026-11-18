@@ -51,7 +51,7 @@ struct Shell {
     body: String,
     css: &'static str, // the library's few CSS rules (crud::ui::CSS)
     js: &'static str,  // crud::ui::JS: modal dialogs with Esc, and the relation dialogs
-    tz_picker: String, // the navbar timezone form (time::TzPicker), posting to /tz
+    tz_picker: String, // the navbar timezone form (time::TzPicker), posting to /_rl/tz
 }
 
 /// The page inside the relation picker's dialog: no navbar, the same stylesheet and colour mode.
@@ -347,7 +347,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.csrf(auth.csrf());
     // A post's author and tags outnumber `picker_threshold` (50), so the form edits them in a dialog
     // over this route. Its rows are the target's own table, so they answer to the target's gate.
-    crud.picker_path("/pick");
+    crud.picker_path("/_rl/pick");
     // "+ New" for a relation whose target doesn't have the row yet: a new author made in a dialog
     // over the half-filled post, and chosen in it. The target's gate decides, so the editor
     // (read-only) never sees the button. `user` is shown read-only in the panel (see `build_admin`),
@@ -373,8 +373,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // (see `home`). `/` sends you to the first panel.
         .route("/", get(|| async { Redirect::to("/admin/post") }))
         .route("/admin/{entity}", get(home).post(save))
-        .route("/pick", get(pick).post(pick_write))
-        .route("/tz", post(set_tz))
+        .route("/_rl/pick", get(pick).post(pick_write))
+        .route("/_rl/tz", post(set_tz))
         .with_state(app);
 
     // Merge our pages and the login routes. No middleware: each handler/gate does its own on-demand

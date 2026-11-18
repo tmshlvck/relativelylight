@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/admin", get(|| async { Redirect::to("/admin/post") }))  // the panel's first table
         .route("/admin/{entity}", get(admin_show).post(admin_save))   // §4
         .route("/tickets/new", get(ticket_new).post(ticket_create))  // §5
-        .route("/tz", post(set_tz))                      // §2
+        .route("/_rl/tz", post(set_tz))                      // §2
         .with_state(app)
         .merge(auth.routes())                            // /login, /logout, /profile, 2FA
         // REQUIRED, and outermost.
@@ -100,11 +100,16 @@ The crate claims few paths, and owns none of the rest; decide yours before they 
 
 - **Claimed:** `auth`'s `/login…`, `/logout`, `/profile…` and `/auth/passkey.js`, which are fixed,
   and `Sso`'s `/sso/…`, whose prefix moves ([the list](AUTH.md#the-paths-auth-claims)).
-- **Yours:** everything else, including what the examples use. `/admin`, `/post`, `/pick` and `/tz`
-  there are the examples' choices, not the crate's: an `Admin`, a `Table`, a `Form`, the picker and
-  the timezone picker are fragments and form targets served from whatever route you give them.
-  Within that route the admin keeps its state in the query (`/admin/post?edit=7&page=2`), never in
-  path segments ([CRUD.md → The URL is the view](CRUD.md#the-url-is-the-view)).
+- **Yours:** everything else. An `Admin`, a `Table`, a `Form`, the relation picker and the timezone
+  picker are fragments and form targets served from whatever route you give them. Within that route
+  the admin keeps its state in the query (`/admin/post?edit=7&page=2`), never in path segments
+  ([CRUD.md → The URL is the view](CRUD.md#the-url-is-the-view)).
+- **Name pages by purpose, and keep plumbing under one prefix.** Pages people navigate to (`/admin`,
+  a dashboard, a workflow page with pickers in it) are named for what they are; users see and
+  bookmark them. Plumbing nobody navigates to (the picker's route, the timezone form's target) goes
+  under one prefix you reserve once, out of the way of your pages. The examples use **`/_rl/`**
+  (`/_rl/pick`, `/_rl/tz`), the underscore marking infrastructure as `/_next/` does in Next.js, and
+  `TzPicker` posts to `/_rl/tz` by default.
 - **How a clash shows:** a route of yours at a path `auth` already serves (`/profile`) panics at
   startup ("Overlapping method route"). A fixed path of yours under a parameter of `auth`'s
   (`/profile/settings` beside `/profile/{id}`) is quieter: yours wins, and that path is no longer a
@@ -554,7 +559,7 @@ Before a deployment goes out:
 - [ ] A `WriteObserver` is registered if you need an audit trail, and its rows are retained somewhere
       you can read them.
 - [ ] Your shell loads Bootstrap 5's stylesheet, `crud::ui::CSS` and `crud::ui::JS`
-      ([CRUD.md → What to put in your shell](CRUD.md#web-ui-ui)), and a `/pick` route with
+      ([CRUD.md → What to put in your shell](CRUD.md#web-ui-ui)), and a `/_rl/pick` route with
       `Crud::picker_path` if any relation outgrows `picker_threshold`.
 
 ## See also

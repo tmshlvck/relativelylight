@@ -196,7 +196,8 @@ from this site. Reload the page and try again.</div>
     let mut app = Router::new()
         .route("/", get(dashboard)) // signed in only; a card per thing this user may open
         .route("/secret", get(secret)) // gated on demand (see `secret`)
-        .route("/tz", post(set_tz)) // the timezone preference, from the profile's Preferences card
+        // The timezone preference, from the profile's Preferences card.
+        .route("/_rl/tz", post(set_tz))
         .route("/api/whoami", get(whoami)) // the app's own credential check (see `whoami`)
         // The accounts panel: two handlers on one path, the model named by the path segment. Its
         // gate is `GroupReadWrite`, so a logged-in non-admin gets 403 rather than a list of accounts.
@@ -442,7 +443,7 @@ live session alone shouldn't be enough for, so the handler asks for a factor aga
     preferences + &webhook
 }
 
-/// `POST /tz` — the Preferences card's picker: set the zone cookie and return to the profile
+/// `POST /_rl/tz` — the Preferences card's picker: set the zone cookie and return to the profile
 /// (`TzPicker::submitted` keeps only a local `back`, so this can't redirect elsewhere). A display
 /// preference, like a theme: no session needed.
 async fn set_tz(Form(form): Form<std::collections::HashMap<String, String>>) -> Response {

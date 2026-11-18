@@ -1189,9 +1189,9 @@ The crate adds no route, so you serve the picker's page yourself: one `GET` hand
 declare once.
 
 ```rust
-crud.picker_path("/pick");               // where Table, Form and Admin point the dialog
+crud.picker_path("/_rl/pick");               // where Table, Form and Admin point the dialog
 // …
-.route("/pick", get(pick))
+.route("/_rl/pick", get(pick))
 
 async fn pick(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
     let state = ViewState::from_uri(&uri);
@@ -1203,7 +1203,7 @@ async fn pick(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Resp
 ```
 
 The bare shell is your page shell without the navigation: Bootstrap and `crud::ui::CSS`, no script.
-The URL names the **relation** (`/pick?pick=post.tag`), never the target, so only a real relation can
+The URL names the **relation** (`/_rl/pick?pick=post.tag`), never the target, so only a real relation can
 be browsed. The rows are a `Table` render of the target, refused (`401`/`403`) when the caller may not
 list it. A picker leaves out the target's to-many columns: a stack of badges per row says nothing
 about which row to choose. `Picker::per_page(n)` sets the dialog's page size (default 10). Both
@@ -1226,10 +1226,10 @@ Where the button is depends on the field:
   field; the row itself stays).
 
 ```rust
-crud.picker_path("/pick");
+crud.picker_path("/_rl/pick");
 crud.picker_create(true);                // "+ New" for relation fields; off by default
 // …
-.route("/pick", get(pick).post(pick_write))
+.route("/_rl/pick", get(pick).post(pick_write))
 
 async fn pick_write(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri,
                     RealIp(ip): RealIp, body: Bytes) -> Response {
@@ -1246,13 +1246,13 @@ async fn pick_write(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri,
 }
 ```
 
-How it works, on the same `/pick` route as the picker:
+How it works, on the same `/_rl/pick` route as the picker:
 
-1. "+ New" opens `/pick?pick=workorder.airline&new=1` in a dialog: the target's create form, which
+1. "+ New" opens `/_rl/pick?pick=workorder.airline&new=1` in a dialog: the target's create form, which
    posts back to that URL.
 2. `Picker::submit` creates the row. A refused save comes back as `Invalid`: render it, and the
    form reappears in the dialog with its messages and the typed input.
-3. A saved row redirects to `/pick?pick=workorder.airline&created=<id>`, with the id the database
+3. A saved row redirects to `/_rl/pick?pick=workorder.airline&created=<id>`, with the id the database
    gave it. That page carries the row's id and label, which `crud::ui::JS` reads to choose the row
    as above, and then it closes the dialog.
 
@@ -1309,16 +1309,16 @@ author on the page shows the new name. Close, and you are where you were: same p
 nothing reloaded.
 
 ```rust
-crud.picker_path("/pick");
+crud.picker_path("/_rl/pick");
 crud.picker_view(true);                              // relation labels link to their rows
 crud.view_path("author", "/admin/author?show={id}"); // optional: the link's href without the script
 // …
-.route("/pick", get(pick).post(pick_write))          // the same two handlers as "+ New"
+.route("/_rl/pick", get(pick).post(pick_write))          // the same two handlers as "+ New"
 ```
 
 How it works, on the picker route again:
 
-1. The link opens `/pick?pick=post.author&show=3` in a dialog: author 3, read-only, the same
+1. The link opens `/_rl/pick?pick=post.author&show=3` in a dialog: author 3, read-only, the same
    fields the target's View dialog shows. Its own relations are links too, so you can go on from
    the author to one of their posts. Like "+ New", dialogs stop at **four** deep; past that a link
    is plain text.
@@ -1378,7 +1378,7 @@ relation, its picker URLs answer `400`, as when the app has it off.
 is hand-written, and `RelationField` puts one relation input into it: **the same input** `Form`,
 `Table` and `Admin` render for that relation, from the same function and the same template. So it is
 a `<select>` (a multi-select for a to-many) up to `picker_threshold` target rows (default 50), and the
-picker past it; the picker needs exactly what it needs for a `Form` — `picker_path`, the `/pick`
+picker past it; the picker needs exactly what it needs for a `Form` — `picker_path`, the `/_rl/pick`
 route, `crud::ui::JS` in the shell.
 
 It is named by a **relation** of a registered entity, because that is what the picker browses — the
@@ -1387,7 +1387,7 @@ handlers:
 
 ```rust
 fn tags(engine: &Engine) -> RelationField<'_> {
-    RelationField::new(engine, "post", "tag")   // offers `tag` rows, browses /pick?pick=post.tag
+    RelationField::new(engine, "post", "tag")   // offers `tag` rows, browses /_rl/pick?pick=post.tag
         .name("tags")                            // the input's name; default: the relation's
         .label("Tags")                           // default: the relation's label (and help)
 }

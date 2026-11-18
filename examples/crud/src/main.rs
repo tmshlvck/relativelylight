@@ -6,8 +6,8 @@
 //! and a create/edit `<dialog>` that opens from the URL. No JavaScript framework, no JSON API: the
 //! only script is `crud::ui::JS`, the relation picker's — a post's `author` and `tag` have more rows
 //! than `picker_threshold` (50), so the form shows the selection and edits it in a dialog served by
-//! `/pick`. Delete six authors and `author` is a plain `<select>` again. Beside each relation is a
-//! "+": the author you need doesn't exist yet, so create it in a dialog over the half-filled post
+//! `/_rl/pick`. Delete six authors and `author` is a plain `<select>` again. Beside each relation is
+//! a "+": the author you need doesn't exist yet, so create it in a dialog over the half-filled post
 //! and come back with it chosen.
 //!
 //! The shape to copy is the **two handlers per surface** at the bottom of this file: a `get` that
@@ -51,7 +51,7 @@ struct Shell {
     /// `crud::ui::JS` on every page: the dialogs become real modals (Esc closes) and the relation
     /// dialogs (picker, "+ New", linked rows) work.
     js: &'static str,
-    /// The navbar timezone form (`time::TzPicker`), posting to our own `/tz`.
+    /// The navbar timezone form (`time::TzPicker`), posting to our own `/_rl/tz`.
     tz_picker: String,
     /// Wrap the body in a card. The table pages want it; a `Form` renders its own card, and two
     /// nested ones look like a mistake.
@@ -194,13 +194,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.register(profile_mm, Open);
     crud.register(tag_mm, Open);
     crud.register(event_mm, Open);
-    // Where the relation picker is served (the `/pick` route below). Without it a relation past
+    // Where the relation picker is served (the `/_rl/pick` route below). Without it a relation past
     // `picker_threshold` stays a `<select>` of every row.
-    crud.picker_path("/pick");
+    crud.picker_path("/_rl/pick");
     // And "+ New" for every relation field the operator may create the target of: a new author or
     // tag made in a dialog over the half-filled post form, and chosen in it when saved. Below a
-    // `<select>`, or in the picker's dialog for a large relation. The `/pick` route answers `POST`
-    // for it (`pick_write` below).
+    // `<select>`, or in the picker's dialog for a large relation. The `/_rl/pick` route answers
+    // `POST` for it (`pick_write` below).
     crud.picker_create(true);
     // And each relation's label is a link: a post's author opens that author in a dialog over the
     // table, with Edit, and closing it is back where you were. Without the script (or in a new
@@ -221,7 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/dashboard", get(dashboard))
         // Two handlers per surface: render on GET, hand the body to the library on POST.
         // The collection is the entity's own path: /post, /tag, /author. The app's other pages
-        // (/dashboard, /post/new, /tz) are static and win over the parameter, so they still route.
+        // (/dashboard, /post/new) are static and win over the parameter, so they still route.
         .route("/{slug}", get(entity_page).post(entity_write))
         .route("/post/new", get(new_post).post(save_new_post))
         .route("/post/{id}", get(post_page))
@@ -229,11 +229,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/author/{id}/posts", get(author_posts).post(author_posts_write))
         .route("/queue", get(queue).post(queue_write))
         // The relation picker's page, which the form's dialog loads in an iframe — and, for "+",
-        // the target's create form, which posts back here. Static, so it wins over `/{slug}`.
-        .route("/pick", get(pick).post(pick_write))
+        // the target's create form, which posts back here. Plumbing, not a page: under `/_rl/`,
+        // the prefix this app keeps it in (docs/APP.md → Your URL namespace).
+        .route("/_rl/pick", get(pick).post(pick_write))
         // The timezone picker's handler — four lines, and the whole of this app's side of the
         // feature. Everything the library renders then follows the cookie.
-        .route("/tz", post(set_tz))
+        .route("/_rl/tz", post(set_tz))
         .with_state(app)
         // One resolution of the caller's address for the whole app (see relativelylight::middleware).
         // Mandatory: the write handlers read `RealIp` for the audit trail.

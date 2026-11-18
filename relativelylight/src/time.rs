@@ -327,11 +327,12 @@ impl TzPicker {
             zones: zones_default(),
             unknown: Vec::new(),
             label: "Timezone".into(),
-            action: "/tz".into(),
+            action: "/_rl/tz".into(),
         }
     }
 
-    /// Where the picker posts. Default `/tz`.
+    /// Where the picker posts. Default `/_rl/tz`, under the prefix the examples keep plumbing in
+    /// (`docs/APP.md` → Your URL namespace).
     pub fn action(mut self, path: impl Into<String>) -> Self {
         self.action = path.into();
         self
@@ -578,10 +579,12 @@ mod tests {
 
     #[test]
     fn the_picker_marks_the_current_zone_and_carries_the_page_back() {
-        let html = TzPicker::new().action("/tz").render(&Tz::named("Asia/Tokyo"), "/admin?entity=post");
+        let html = TzPicker::new().render(&Tz::named("Asia/Tokyo"), "/admin?entity=post");
         assert!(html.contains(r#"<option value="Asia/Tokyo" selected>"#), "{html}");
         assert!(html.contains(r#"value="/admin?entity=post""#));
-        assert!(html.contains(r#"action="/tz""#));
+        assert!(html.contains(r#"action="/_rl/tz""#), "the default target");
+        let moved = TzPicker::new().action("/settings/tz").render(&Tz::UTC, "/");
+        assert!(moved.contains(r#"action="/settings/tz""#), "and where the app says");
     }
 
     /// The case the `time` example exists to show, now checkable without a browser: the same wall

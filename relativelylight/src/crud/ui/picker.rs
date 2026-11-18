@@ -26,7 +26,7 @@ struct CreatedTmpl {
 /// The page that opened the dialog reads its inputs directly, so this page needs no script.
 ///
 /// ```ignore
-/// // .route("/pick", get(pick))
+/// // .route("/_rl/pick", get(pick))
 /// async fn pick(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
 ///     let state = ViewState::from_uri(&uri);
 ///     match Picker::new(&app.engine).render_for(&headers, &state).await {

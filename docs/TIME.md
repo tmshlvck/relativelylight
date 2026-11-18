@@ -132,7 +132,7 @@ async fn set_tz(Form(fields): Form<HashMap<String, String>>) -> Response {
 ```
 
 `back` is the page the user was on, so setting a zone doesn't lose the table they were looking at (only a local path is followed — anything else returns to `/`), and
-`action(path)` changes where the form posts (default `/tz`).
+`action(path)` changes where the form posts (default `/_rl/tz`).
 
 **Where you put it is entirely yours**, because it is a fragment and nothing about it is positional:
 
@@ -174,7 +174,7 @@ async fn set_tz(Form(fields): Form<HashMap<String, String>>) -> Response {
   });
   ```
 
-  The `/tz` route is unchanged. The choice is still a cookie, so it applies **per browser**, not per
+  The `/_rl/tz` route is unchanged. The choice is still a cookie, so it applies **per browser**, not per
   account. For a zone that follows the user to other devices, see *Store it per user* in
   [§6](#6-choosing-a-policy).
 - **Both**, or neither: nothing in the library reads the picker. It only reads the **cookie**, via
