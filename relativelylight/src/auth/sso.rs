@@ -662,12 +662,8 @@ async fn resolve_user(
         return Err((StatusCode::BAD_GATEWAY, format!("ID token username claim is invalid: {e}")));
     }
     if let Some(u) = find_user_ci(db, username).await? {
-        // `is_active` first, and before anything is written. The password path refuses a disabled
-        // account in `verify_credentials`; refusing it here too is what makes "disable this account"
-        // mean the same thing on both doors. Without it an SSO login for a disabled user went on to
-        // reconcile their groups, stamp `last_login_at`, and mint a session row — none of which
-        // authenticated anything (`identify` re-checks `is_active`), but all of which wrote a login that
-        // never happened into the account and the audit trail.
+        // A disabled account is refused before anything is written (groups, `last_login_at`, a
+        // session), as the password path refuses it in `verify_credentials`.
         if !u.is_active {
             return Err((StatusCode::FORBIDDEN, "account is disabled".into()));
         }

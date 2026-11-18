@@ -1249,17 +1249,8 @@ pub(super) async fn password_remove(
         }
         None => (jar, csrf),
     };
-    inner
-        .notify(
-            "auth-profile",
-            &who.username,
-            "auth_user",
-            Some(who.id.clone()),
-            serde_json::json!({ "password_removed": true, "sessions_revoked": true }),
-            &req.headers,
-            client_ip,
-        )
-        .await;
+    let event = serde_json::json!({ "password_removed": true, "sessions_revoked": true });
+    inner.notify_own(&who, event, &req.headers, client_ip).await;
     let msg = "Your password is removed: you sign in with a passkey. Other sessions have been signed out.";
     (
         jar,

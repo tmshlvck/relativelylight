@@ -1243,18 +1243,15 @@ impl Inner {
         .await;
     }
 
-    /// Audit 2FA turned on or off for the account `user_id` (§5d): `{"totp_enabled": on}`.
-    async fn notify_totp(
+    /// Audit a change the caller made to their own account (`auth-profile` on their `auth_user` row).
+    async fn notify_own(
         &self,
-        source: &'static str,
-        actor: &str,
-        user_id: i32,
-        on: bool,
+        who: &Identity,
+        after: serde_json::Value,
         headers: &HeaderMap,
         client_ip: std::net::IpAddr,
     ) {
-        let after = serde_json::json!({ "totp_enabled": on });
-        self.notify(source, actor, "auth_user", Some(user_id.to_string()), after, headers, client_ip).await;
+        self.notify("auth-profile", &who.username, "auth_user", Some(who.id.clone()), after, headers, client_ip).await;
     }
 
     /// Fire the audit observer with any operation — a create, an update or a single-row delete, whose
@@ -2399,6 +2396,26 @@ async fn self_post(
     Ok((who, user, csrf))
 }
 
+/// What every manager `POST` (`/profile/{id}…`) starts with, as [`self_post`] for the caller's own
+/// page: the CSRF check, then [`managed_target`], then the manager's own row (whose factor
+/// re-authenticates the change), and the CSRF token to render back.
+#[allow(clippy::result_large_err)] // the `Err` is the handler's response, returned straight away
+async fn manager_post(
+    inner: &Inner,
+    req: &Parts,
+    form_csrf: Option<&str>,
+    id: &str,
+) -> std::result::Result<(Identity, user::Model, user::Model, String), Response> {
+    if !inner.csrf().verify(&req.headers, form_csrf) {
+        return Err(csrf_rejected(inner, req));
+    }
+    let csrf = inner.csrf().token(&req.headers).unwrap_or_default();
+    let (who, target) = managed_target(inner, &req.headers, id).await?;
+    let manager =
+        target_user(inner, &who.id).await.ok_or_else(|| Redirect::to(&inner.login_path).into_response())?;
+    Ok((who, manager, target, csrf))
+}
+
 /// What every manager route (`/profile/{id}…`) starts with: the caller, who must be a manager acting on
 /// *someone else*, and the target's row. `Err` is the response to send instead: the login page, the
 /// caller's own profile (their own id), `403` or `404`.
@@ -2508,17 +2525,8 @@ async fn profile_submit(
         // rotated. Their old cookie still works, which is no worse than before.
         None => ("Your password has been changed.", jar, csrf),
     };
-    inner
-        .notify(
-            "auth-profile",
-            &who.username,
-            "auth_user",
-            Some(who.id.clone()),
-            serde_json::json!({ "password_changed": true, "sessions_revoked": true }),
-            headers,
-            client_ip,
-        )
-        .await;
+    let event = serde_json::json!({ "password_changed": true, "sessions_revoked": true });
+    inner.notify_own(&who, event, headers, client_ip).await;
     (jar, profile_page(&inner, &who, &user, None, Some(msg), &csrf, &req).await).into_response()
 }
 
@@ -2578,21 +2586,13 @@ async fn manage_submit(
     Path(id): Path<String>,
     Form(form): Form<ResetForm>,
 ) -> Response {
-    let headers = &req.headers;
-    if !inner.csrf().verify(headers, form.csrf.as_deref()) {
-        return csrf_rejected(&inner, &req);
-    }
-    let csrf = inner.csrf().token(headers).unwrap_or_default();
-    let (who, target) = match managed_target(&inner, headers, &id).await {
+    let (who, manager, target, csrf) = match manager_post(&inner, &req, form.csrf.as_deref(), &id).await {
         Ok(v) => v,
         Err(res) => return res,
     };
-    // Re-authenticate the **manager** (§5h) with their own factor. This route sets a password without
-    // knowing the old one — which is the point of it, and also what makes it the most valuable thing a
-    // stolen manager session can reach: every account it can reset is an account it can then log in as.
-    let Some(manager) = target_user(&inner, &who.id).await else {
-        return Redirect::to(&inner.login_path).into_response();
-    };
+    let headers = &req.headers;
+    // The manager re-authenticates with their own factor (§5h): a reset is the most valuable thing a
+    // stolen manager session can reach.
     // The reset form again, with a message, re-read so it shows the account as it now stands.
     let page = |error: Option<String>, success: Option<String>| {
         let (inner, who, manager, csrf, req) = (&inner, &who, &manager, &csrf, &req);
@@ -2709,14 +2709,8 @@ async fn totp_setup_submit(
     let Some(pending) = user.pending_totp_key().map(str::to_string) else {
         return Redirect::to(&inner.profile_path).into_response(); // nothing in progress
     };
-    // Re-authenticated (§5h): the pending code proves possession of *a* device, but not that the device
-    // belongs to the account holder. Without this, an intruder with a stolen session could enrol their
-    // own authenticator — which doesn't just persist their access, it locks the real user out, since
-    // login would then demand a code only the intruder can produce.
-    //
-    // The password or a passkey is the factor here: the account's *active* secret is what a code would
-    // be checked against, and for a first enrolment there isn't one. An already-enrolled user
-    // re-enrolling can use a code too.
+    // Re-authenticated (§5h): an intruder's own authenticator would lock the real user out. A first
+    // enrolment has no active secret to check a code against, so its factor is the password or a passkey.
     if let Err(msg) = inner.reauth(&user, &who, &form.reauth).await {
         return render_totp_setup(&inner, &who, &user, &pending, Some(&msg), &csrf, &req).await;
     }
@@ -2735,7 +2729,7 @@ async fn totp_setup_submit(
     let Ok(user) = am.update(&inner.db).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not enable 2FA").into_response();
     };
-    inner.notify_totp("auth-profile", &who.username, user.id, true, &req.headers, client_ip).await;
+    inner.notify_own(&who, serde_json::json!({ "totp_enabled": true }), &req.headers, client_ip).await;
     // Issue recovery codes **with** the enrolment and show them once (§5i). Issuing them here rather
     // than leaving it to the user is the difference between a lost phone being an inconvenience and
     // being an account only an administrator can reopen.
@@ -2844,17 +2838,8 @@ async fn recovery_regenerate(
     }
     match recovery::issue(&inner.db, user.id).await {
         Ok(codes) => {
-            inner
-                .notify(
-                    "auth-profile",
-                    &who.username,
-                    "auth_user",
-                    Some(who.id.clone()),
-                    serde_json::json!({ "recovery_codes_reissued": codes.len() }),
-                    headers,
-                    client_ip,
-                )
-                .await;
+            let event = serde_json::json!({ "recovery_codes_reissued": codes.len() });
+            inner.notify_own(&who, event, headers, client_ip).await;
             let frag = recovery_codes_html(
                 &codes,
                 "Here is your new set. The previous codes no longer work.",
@@ -2888,17 +2873,8 @@ async fn sessions_revoke(
         .map(|c| c.value().to_string())
         .unwrap_or_default();
     let revoked = inner.revoke_sessions(user.id, Some(&current)).await;
-    inner
-        .notify(
-            "auth-profile",
-            &who.username,
-            "auth_user",
-            Some(who.id.clone()),
-            serde_json::json!({ "sessions_revoked": revoked }),
-            headers,
-            client_ip,
-        )
-        .await;
+    let event = serde_json::json!({ "sessions_revoked": revoked });
+    inner.notify_own(&who, event, headers, client_ip).await;
     let msg = match revoked {
         0 => "This is your only session — nothing else to sign out.".to_string(),
         1 => "1 other session signed out.".to_string(),
@@ -2923,7 +2899,7 @@ async fn totp_self_disable(
         return profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::FORBIDDEN, Err(&msg)).await;
     }
     let user = clear_totp(&inner, user).await;
-    inner.notify_totp("auth-profile", &who.username, user.id, false, &req.headers, client_ip).await;
+    inner.notify_own(&who, serde_json::json!({ "totp_enabled": false }), &req.headers, client_ip).await;
     let msg = "Two-factor authentication disabled.";
     profile_page(&inner, &who, &user, None, Some(msg), &csrf, &req).await.into_response()
 }
@@ -2937,26 +2913,18 @@ async fn totp_manage_disable(
     Path(id): Path<String>,
     Form(form): Form<ReauthForm>,
 ) -> Response {
-    let headers = &req.headers;
-    if !inner.csrf().verify(headers, form.csrf.as_deref()) {
-        return csrf_rejected(&inner, &req);
-    }
-    let csrf = inner.csrf().token(headers).unwrap_or_default();
-    let (who, target) = match managed_target(&inner, headers, &id).await {
+    let (who, manager, target, csrf) = match manager_post(&inner, &req, form.csrf.as_deref(), &id).await {
         Ok(v) => v,
         Err(res) => return res,
     };
-    // Re-authenticate the **manager**, with their own factor — stripping a victim's second factor is
-    // most of what a stolen manager session is worth.
-    let Some(manager) = target_user(&inner, &who.id).await else {
-        return Redirect::to(&inner.login_path).into_response();
-    };
+    let headers = &req.headers;
     if let Err(msg) = inner.reauth(&manager, &who, &form.reauth).await {
         let page = manager_page(&inner, &who, &manager, &target, Some(&msg), None, &csrf, &req).await;
         return (StatusCode::FORBIDDEN, page).into_response();
     }
     let target = clear_totp(&inner, target).await;
-    inner.notify_totp("auth-admin", &who.username, target.id, false, headers, client_ip).await;
+    let off = serde_json::json!({ "totp_enabled": false });
+    inner.notify("auth-admin", &who.username, "auth_user", Some(target.id.to_string()), off, headers, client_ip).await;
     let msg = format!("Two-factor authentication disabled for {}.", target.username);
     manager_page(&inner, &who, &manager, &target, None, Some(&msg), &csrf, &req).await.into_response()
 }
@@ -2971,18 +2939,11 @@ async fn passkeys_manage_remove(
     Path(id): Path<String>,
     Form(form): Form<ReauthForm>,
 ) -> Response {
-    let headers = &req.headers;
-    if !inner.csrf().verify(headers, form.csrf.as_deref()) {
-        return csrf_rejected(&inner, &req);
-    }
-    let csrf = inner.csrf().token(headers).unwrap_or_default();
-    let (who, target) = match managed_target(&inner, headers, &id).await {
+    let (who, manager, target, csrf) = match manager_post(&inner, &req, form.csrf.as_deref(), &id).await {
         Ok(v) => v,
         Err(res) => return res,
     };
-    let Some(manager) = target_user(&inner, &who.id).await else {
-        return Redirect::to(&inner.login_path).into_response();
-    };
+    let headers = &req.headers;
     if let Err(msg) = inner.reauth(&manager, &who, &form.reauth).await {
         let page = manager_page(&inner, &who, &manager, &target, Some(&msg), None, &csrf, &req).await;
         return (StatusCode::FORBIDDEN, page).into_response();

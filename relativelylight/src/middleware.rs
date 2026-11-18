@@ -286,13 +286,8 @@ mod tests {
             call(app(true), req(&[("x-forwarded-for", "9.9.9.9, ::ffff:203.0.113.7")], None)).await;
         assert_eq!(body, "203.0.113.7");
 
-        // Deliberately *not* folded: the deprecated IPv4-**compatible** form (`::a.b.c.d`, no `ffff`).
-        // `to_ipv4_mapped` matches only the mapped form, and that's the right call — nothing in use emits
-        // the compatible form, and quietly treating `::203.0.113.7` as an IPv4 client would invent an
-        // equivalence the address's own semantics don't have. It stays IPv6, which `IpAddr`'s own
-        // `Display` writes in hex (`::cb00:7107`) rather than the dotted form it was typed in — so this
-        // is also a reminder that the *canonical* text of an address is whatever `IpAddr` says, which is
-        // what the lockout keys on.
+        // The deprecated IPv4-*compatible* form (`::a.b.c.d`) is not folded: it stays IPv6, written as
+        // `IpAddr` writes it, which is the text the lockout keys on.
         let (_, body) = call(app(false), req(&[], Some("::203.0.113.7"))).await;
         assert_eq!(body, "::cb00:7107", "the compatible form stays IPv6, rendered canonically");
     }

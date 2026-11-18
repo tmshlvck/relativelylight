@@ -243,35 +243,23 @@ impl UsernameLockout {
         }
         let (key, now) = (normalize_username(username), crate::auth::now_secs());
         let existing = username_entity::Entity::find_by_id(key.clone()).one(&self.db).await.ok().flatten();
-        let failures = match existing {
-            // At or over the limit: leave the row alone. A locked key records nothing, so continued
-            // attempts can't push the expiry out.
-            Some(row) if row.failures as u32 >= self.after => return false,
-            // An expired row starts over rather than resuming an old count.
+        let at = existing.as_ref().map(|r| (r.failures, r.last_failure_at));
+        let Some(n) = next_count(at, self.after, self.duration, now) else { return false };
+        match existing {
             Some(row) => {
-                let n = if row.last_failure_at + self.duration <= now { 1 } else { row.failures + 1 };
                 let mut am = row.into_active_model();
                 am.failures = Set(n);
                 am.last_failure_at = Set(now);
                 let _ = am.update(&self.db).await;
-                n
             }
             None => {
-                let am = username_entity::ActiveModel {
-                    username: Set(key),
-                    failures: Set(1),
-                    last_failure_at: Set(now),
-                };
-                // A concurrent first failure may have inserted it already; both then agree on 1, which
-                // under-counts by one at most — the safe direction.
-                let _ = username_entity::Entity::insert(am)
-                    .on_conflict_do_nothing()
-                    .exec(&self.db)
-                    .await;
-                1
+                let am = username_entity::ActiveModel { username: Set(key), failures: Set(1), last_failure_at: Set(now) };
+                // A concurrent first failure may have inserted it already: under-counting by one at
+                // most, the safe direction.
+                let _ = username_entity::Entity::insert(am).on_conflict_do_nothing().exec(&self.db).await;
             }
-        };
-        failures as u32 >= self.after
+        }
+        n as u32 >= self.after
     }
 
     /// Forget this account's failures — a successful check, or an operator unlock.
@@ -345,30 +333,21 @@ impl IpLockout {
         }
         let (key, now) = (canonical_key(ip), crate::auth::now_secs());
         let existing = ip_entity::Entity::find_by_id(key.clone()).one(&self.db).await.ok().flatten();
-        let failures = match existing {
-            Some(row) if row.failures as u32 >= self.after => return false, // locked: record nothing
+        let at = existing.as_ref().map(|r| (r.failures, r.last_failure_at));
+        let Some(n) = next_count(at, self.after, self.duration, now) else { return false };
+        match existing {
             Some(row) => {
-                let n = if row.last_failure_at + self.duration <= now { 1 } else { row.failures + 1 };
                 let mut am = row.into_active_model();
                 am.failures = Set(n);
                 am.last_failure_at = Set(now);
                 let _ = am.update(&self.db).await;
-                n
             }
             None => {
-                let am = ip_entity::ActiveModel {
-                    ip: Set(key),
-                    failures: Set(1),
-                    last_failure_at: Set(now),
-                };
-                let _ = ip_entity::Entity::insert(am)
-                    .on_conflict_do_nothing()
-                    .exec(&self.db)
-                    .await;
-                1
+                let am = ip_entity::ActiveModel { ip: Set(key), failures: Set(1), last_failure_at: Set(now) };
+                let _ = ip_entity::Entity::insert(am).on_conflict_do_nothing().exec(&self.db).await;
             }
-        };
-        failures as u32 >= self.after
+        }
+        n as u32 >= self.after
     }
 
     /// Forget this address's failures. **Not** called on a successful check: one valid credential
@@ -394,6 +373,17 @@ impl IpLockout {
 }
 
 // ===================== Shared arithmetic (the only thing the two share) =====================
+
+/// The count after one more failure on a key holding `(failures, last_failure_at)`, or `None` to record
+/// nothing: a key locked now is left alone, so continued attempts can't push its expiry out. An expired
+/// count, a lock that ran out included, starts over.
+fn next_count(row: Option<(i32, i64)>, after: u32, duration: i64, now: i64) -> Option<i32> {
+    match row {
+        Some((n, last)) if last + duration > now && n as u32 >= after => None,
+        Some((n, last)) if last + duration > now => Some(n + 1),
+        _ => Some(1),
+    }
+}
 
 /// Seconds left on the lockout, or `None` when the key is free: under the limit, or the last failure
 /// has aged out (an expired row counts as no row — the pruner will collect it).

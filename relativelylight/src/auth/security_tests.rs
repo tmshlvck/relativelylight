@@ -2588,6 +2588,42 @@ async fn login_locks_the_account_after_the_configured_failures() {
 }
 
 #[tokio::test]
+async fn a_locked_key_ignores_further_failures_and_an_expired_one_starts_over() {
+    // A locked key records nothing more: counting on would push its expiry out with every attempt,
+    // so an attacker could keep an account locked for ever. An expired count starts over.
+    use lockout::{ip_entity, username_entity, IpLockout, UsernameLockout};
+    let fx = Fx::new().await;
+    let (users, ips) = (UsernameLockout::new(fx.db.clone(), 2, 900), IpLockout::new(fx.db.clone(), 2, 900, vec![]));
+    let ip: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+    assert!(!users.record_failure("alice").await && users.record_failure("alice").await, "locks on the 2nd");
+    assert!(!ips.record_failure(Some(ip)).await && ips.record_failure(Some(ip)).await, "locks on the 2nd");
+    // The lock is 100 seconds old; another failure must leave it as it is.
+    let earlier = now_secs() - 100;
+    let db = &fx.db;
+    let set = |at: i64| async move {
+        username_entity::Entity::update_many()
+            .col_expr(username_entity::Column::LastFailureAt, sea_orm::sea_query::Expr::value(at))
+            .exec(db).await.unwrap();
+        ip_entity::Entity::update_many()
+            .col_expr(ip_entity::Column::LastFailureAt, sea_orm::sea_query::Expr::value(at))
+            .exec(db).await.unwrap();
+    };
+    let rows = || async {
+        let u = username_entity::Entity::find().one(db).await.unwrap().unwrap();
+        let i = ip_entity::Entity::find().one(db).await.unwrap().unwrap();
+        ((u.failures, u.last_failure_at), (i.failures, i.last_failure_at))
+    };
+    set(earlier).await;
+    assert!(!users.record_failure("alice").await && !ips.record_failure(Some(ip)).await);
+    assert_eq!(rows().await, ((2, earlier), (2, earlier)), "locked: nothing recorded, expiry unmoved");
+    // Control: expired (last failure past the duration), the next failure counts from one.
+    set(now_secs() - 1000).await;
+    assert!(!users.record_failure("alice").await && !ips.record_failure(Some(ip)).await);
+    let ((u, _), (i, _)) = rows().await;
+    assert_eq!((u, i), (1, 1), "an expired count starts over");
+}
+
+#[tokio::test]
 async fn an_unknown_username_locks_the_same_way() {
     // Otherwise the lockout itself would reveal which accounts exist.
     let fx = Fx::with_lockout(by_account(2, 900)).await;

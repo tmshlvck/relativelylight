@@ -258,6 +258,10 @@ is easy to miss in a diff.
 
 ### Fixed
 
+- **A lockout that ran out counts again.** A key that had been locked once recorded no further
+  failures after its lock expired, until `prune` deleted the row or a successful sign-in cleared it,
+  so between prunes an account or address that had been locked once had no limit. An expired count
+  now starts over ([AUTH.md §5e](docs/AUTH.md#5e-lockout-the-brute-force-brake)).
 - **An SSO sign-in lands signed in.** The callback's redirect was cross-site, so the browser didn't
   send the new `SameSite=Strict` session cookie and showed the login page. The callback now leaves by
   a page that navigates itself ([AUTH.md §5b](docs/AUTH.md#5b-sso--openid-connect-feature-sso)).

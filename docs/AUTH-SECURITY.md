@@ -388,7 +388,8 @@ in-memory SQLite:
 - **`auth/security_tests.rs`** — sessions (expired, idle, half-authenticated, deactivated, forged and
   bearer-presented tokens all resolve to anonymous), login, TOTP and its replay guard, recovery codes,
   the profile and manager pages, re-authentication, the password policy, lockout (including the proxy
-  flag and the whitelist), session rotation and revocation, CSRF on every unsafe route, the gate
+  flag, the whitelist, a locked key ignoring further failures and a lock that ran out counting
+  again), session rotation and revocation, CSRF on every unsafe route, the gate
   presets as a matrix of caller × operation, and API keys (unknown, expired, disabled, inactive owner,
   locked address, a key never opening the UI, minting without re-authentication, revoking someone
   else's key).
