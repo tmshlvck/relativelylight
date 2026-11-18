@@ -1,6 +1,6 @@
 //! **Upgrading an existing database to 0.5's `auth` schema** — see `docs/MIGRATION-0.5.md` §3.
 //!
-//! A database created before 0.5 lacks two tables and six columns. [`migrate`](super::migrate)
+//! A database created before 0.5 lacks two tables and six columns. [`migrate`](crate::auth::migrate)
 //! creates missing tables but never alters one, so the columns need a migration step of the app's own,
 //! and they are needed **before** the upgraded crate runs, whatever features it uses: every read of an
 //! account selects the new `auth_user` columns, and every login writes `auth_session.method`.

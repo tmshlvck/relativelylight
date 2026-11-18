@@ -1,13 +1,13 @@
 //! **API keys**: bearer keys for an app's machine endpoints. See `docs/AUTH.md` §5k.
 //!
 //! **A key is its owner, and nothing else.** It stores no scope, level or group:
-//! [`Auth::identify_key`](super::Auth::identify_key) returns the owner's [`Identity`] with the groups
+//! [`Auth::identify_key`](crate::auth::Auth::identify_key) returns the owner's [`Identity`] with the groups
 //! read on that request, so removing a membership or deactivating the account disarms every key that
 //! user holds at once. Narrower access for a device means an account of its own in a narrower group.
 //!
-//! **A key never opens the UI.** [`Auth::identify`](super::Auth::identify) reads only the session
+//! **A key never opens the UI.** [`Auth::identify`](crate::auth::Auth::identify) reads only the session
 //! cookie; a key is checked only where the app calls `identify_key`, with a token it read from the
-//! request itself ([`bearer_token`](super::bearer_token), or a header of its own).
+//! request itself ([`bearer_token`](crate::auth::bearer_token), or a header of its own).
 //!
 //! **Hashed with SHA-256, not argon2**, for the reason `recovery` gives, made stronger: a
 //! machine-generated ≈238-bit secret can't be enumerated however cheap the hash, and a deterministic
@@ -699,7 +699,7 @@ impl Auth {
     /// which key it was. `ip` is the caller's address
     /// ([`RealIp`](crate::middleware::RealIp)), the only thing a failure can be counted against.
     ///
-    /// The app reads the token from the request — [`bearer_token`](super::bearer_token) for
+    /// The app reads the token from the request — [`bearer_token`] for
     /// `Authorization: Bearer`, or a header of its own — and this verifies it:
     ///
     /// ```ignore

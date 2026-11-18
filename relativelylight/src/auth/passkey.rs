@@ -4,12 +4,12 @@
 //! serialises to, and a ceremony's state likewise. So they are compiled with `auth` alone, and an
 //! app's schema is the same whether or not it turns the `passkeys` feature on.
 //!
-//! - [`entity`] — `auth_passkey`, one row per registered credential.
-//! - [`challenge`] — `auth_webauthn_challenge`, one row per ceremony in flight: single-use, short-lived,
-//!   pruned by [`Auth::prune`](super::Auth::prune).
+//! - [`entity`](crate::auth::passkey::entity) — `auth_passkey`, one row per registered credential.
+//! - [`challenge`](crate::auth::passkey::challenge) — `auth_webauthn_challenge`, one row per ceremony in flight: single-use, short-lived,
+//!   pruned by [`Auth::prune`](crate::auth::Auth::prune).
 //! - `auth_user.passkey_handle` — the WebAuthn user handle, set at the account's first enrolment.
 //!
-//! Upgrading a database from before these: [`upgrade`](super::upgrade).
+//! Upgrading a database from before these: [`upgrade`](crate::auth::upgrade).
 //! - `auth_session.method` / `passkey_class` — how a session was authenticated.
 
 #[cfg(feature = "passkeys")]
