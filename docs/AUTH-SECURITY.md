@@ -223,7 +223,8 @@ reset. The provider is where it proves itself, so it goes there:
   Starting one needs the session itself (`GET …/reauth` reads the `Strict` cookie), so a page
   elsewhere can't start a confirmation for a signed-in user. The callback returns to the page with a
   page that navigates on its own rather than a redirect, which would still be cross-site and arrive
-  without the session.
+  without the session. A sign-in's callback leaves the same way, for the same reason: redirected,
+  the browser arrived without the session cookie it had just been given, and met the login page.
 - **Fail closed.** An SSO account on a site with no provider routes mounted is refused, not waved
   through.
 

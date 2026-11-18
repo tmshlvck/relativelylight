@@ -590,11 +590,28 @@ async fn callback(
     };
     let jar = clear.add(session_cookie(inner, token));
     if needs_totp {
-        return (jar, Redirect::to("/login/totp")).into_response();
+        return continue_to(jar, "/login/totp", "Signed in. One more step.");
     }
     super::complete_login(inner, &user, method, None, &headers, client_ip).await;
     let to = inner.landing(&user, method, None).to_string();
-    (jar, Redirect::to(&to)).into_response()
+    continue_to(jar, &to, "Signed in.")
+}
+
+/// Leave the callback for `to`, a path of this site, by a page that navigates itself rather than a
+/// redirect.
+///
+/// The provider sent the browser here, so a redirect from this response would still be a cross-site
+/// navigation, and a `SameSite=Strict` session cookie (the one just set by a sign-in, or the one that
+/// asked for a confirmation) isn't sent on it: the browser would land signed out. A navigation this
+/// page starts is same-site. With `Auth::same_site_lax` a redirect would do; the page works either way.
+fn continue_to(jar: CookieJar, to: &str, message: &str) -> Response {
+    let to = crate::html::esc(to);
+    let message = crate::html::esc(message);
+    let page = format!(
+        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0;url={to}\">\
+         <title>{message}</title><p>{message} <a href=\"{to}\">Continue</a></p>"
+    );
+    (jar, axum::response::Html(page)).into_response()
 }
 
 /// The end of a confirmation (§5h). The provider's account must be the local account of the session that
@@ -650,17 +667,8 @@ async fn confirm(
     if inner.record_sso_confirmation(&asked.id).await.is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, clear, "could not record the confirmation").into_response();
     }
-    // Back by a page that moves on itself, not a redirect: the provider sent the browser here, so a
-    // redirect would still be a cross-site navigation, which a `SameSite=Strict` session cookie isn't
-    // sent on. A navigation this page starts is same-site.
     let back = if crate::is_local_path(&rt.back) { rt.back } else { inner.profile_path.clone() };
-    let back = crate::html::esc(&back);
-    let page = format!(
-        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0;url={back}\">\
-         <title>Confirmed</title><p>Confirmed with {label}. <a href=\"{back}\">Continue</a></p>",
-        label = crate::html::esc(&p.label),
-    );
-    (clear, axum::response::Html(page)).into_response()
+    continue_to(clear, &back, &format!("Confirmed with {}.", p.label))
 }
 
 /// Find the SSO user for `username`, honoring the provider binding and auto-registration policy.

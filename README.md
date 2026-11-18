@@ -160,6 +160,7 @@ cargo run -p files-example           # files in a directory: upload, preview, do
 - **[docs/CRUD.md](docs/CRUD.md)** — the `crud` engine and the web UI.
 - **[docs/AUTH.md](docs/AUTH.md)** — sessions, login, 2FA, passkeys, SSO, API keys, gates, CSRF.
 - **[docs/AUTH-SECURITY.md](docs/AUTH-SECURITY.md)** — the security reasoning behind `auth`: what each rule defends against, and why.
+- **[docs/SSO_TESTING_KEYCLOAK.md](docs/SSO_TESTING_KEYCLOAK.md)** — trying SSO by hand: Keycloak in a container and `examples/auth`.
 - **[docs/TIME.md](docs/TIME.md)** — timestamps and timezones, and the `TzPicker` zone selector.
 - **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module.
 - **[docs/FILES.md](docs/FILES.md)** — uploads, downloads and the file components.

@@ -406,6 +406,17 @@ impl Resp {
         serde_json::from_slice(&bytes).ok()
     }
 
+    /// Where a callback's answer sends the browser: it is a page that navigates itself (a redirect after
+    /// the provider's would be cross-site, and lose a `SameSite=Strict` session), so the target is in
+    /// its `<meta http-equiv="refresh">`, not a `Location`.
+    fn continues_to(&self) -> Option<String> {
+        if self.status != StatusCode::OK || self.headers.get(header::LOCATION).is_some() {
+            return None;
+        }
+        let at = self.body.find(r#"http-equiv="refresh" content="0;url="#)? + r#"http-equiv="refresh" content="0;url="#.len();
+        Some(self.body[at..].split('"').next()?.replace("&amp;", "&"))
+    }
+
     /// Whether the response *clears* the transaction cookie — a removal renders as an empty value
     /// (`rl_sso_txn=;` …), which is what distinguishes it from the cookie `login` sets.
     fn clears_txn(&self) -> bool {
@@ -425,7 +436,7 @@ async fn a_full_sso_login_signs_in_maps_groups_and_marks_the_account_external() 
     recipe.groups = Some(vec!["eng".into(), "unmapped".into()]);
     let res = fx.login_with(recipe).await;
 
-    assert_eq!(res.status, StatusCode::SEE_OTHER, "expected a redirect: {}", res.body);
+    assert!(res.continues_to().is_some(), "expected the way on: {}", res.body);
     let token = res.session_token(fx.auth.session_cookie_name()).expect("a session cookie is set");
     assert_eq!(fx.session_count().await, 1);
     let session = crate::auth::session::Entity::find_by_id(token).one(&fx.db).await.unwrap().unwrap();
@@ -468,7 +479,7 @@ async fn an_sso_login_is_audited_and_a_refused_callback_is_not() {
     assert!(seen.0.lock().unwrap().is_empty(), "a refused callback is no event");
 
     let res = fx.login_with(Recipe::valid("staff-alice")).await;
-    assert_eq!(res.status, StatusCode::SEE_OTHER, "{}", res.body);
+    assert!(res.continues_to().is_some(), "{}", res.body);
     let events = seen.0.lock().unwrap().clone();
     let sso = r#"{"signed_in":"sso"}"#.to_string();
     assert_eq!(events, vec![("auth-login", "staff-alice".to_string(), sso)]);
@@ -645,7 +656,7 @@ async fn a_disabled_sso_account_cannot_log_in() {
     am.is_active = Set(true);
     am.update(&fx.db).await.expect("reactivate");
     let res = fx.login_with(Recipe::valid("dormant")).await;
-    assert_eq!(res.status, StatusCode::SEE_OTHER, "{}", res.body);
+    assert!(res.continues_to().is_some(), "{}", res.body);
     assert!(res.session_token(fx.auth.session_cookie_name()).is_some());
 }
 
@@ -686,7 +697,7 @@ async fn auto_registration_off_refuses_an_unknown_account() {
     // Control: with it on, the same login creates the account.
     let fx = Fx::new(true).await;
     let res = fx.login_with(Recipe::valid("stranger")).await;
-    assert_eq!(res.status, StatusCode::SEE_OTHER, "{}", res.body);
+    assert!(res.continues_to().is_some(), "{}", res.body);
     assert!(fx.row("stranger").await.is_some());
 }
 
@@ -698,7 +709,7 @@ async fn the_username_claim_is_matched_case_insensitively() {
     fx.user("Alice@Corp.example", Some(PROVIDER), true).await;
 
     let res = fx.login_with(Recipe::valid("alice@corp.example")).await;
-    assert_eq!(res.status, StatusCode::SEE_OTHER, "the existing account is found: {}", res.body);
+    assert!(res.continues_to().is_some(), "the existing account is found: {}", res.body);
     assert!(fx.row("alice@corp.example").await.is_none(), "no lower-cased duplicate is created");
     assert!(fx.row("Alice@Corp.example").await.unwrap().last_login_at.is_some(), "the original logged in");
     assert_eq!(user::Entity::find().all(&fx.db).await.unwrap().len(), 1, "still exactly one account");
@@ -723,7 +734,7 @@ async fn provider_discovery_is_fetched_once_and_then_reused() {
     assert_eq!(fx.idp.discovery_hits.load(Ordering::SeqCst), 0, "nothing fetched yet");
 
     let res = fx.login_with(Recipe::valid("alice")).await;
-    assert_eq!(res.status, StatusCode::SEE_OTHER, "{}", res.body);
+    assert!(res.continues_to().is_some(), "{}", res.body);
     let after_first = fx.idp.discovery_hits.load(Ordering::SeqCst);
     assert_eq!(after_first, 1, "one sign-in (login + callback) fetches the document once");
 
@@ -752,7 +763,7 @@ async fn sso_counts_as_two_factors_unless_the_site_says_otherwise() {
     // Default: the IdP is trusted, so SSO meets a `Mfa` minimum and lands in the app.
     let fx = Fx::with_auth(true, |p| p, |a| a.min_level(Level::Mfa)).await;
     let res = fx.login_with(Recipe::valid("staff-alice")).await;
-    assert_eq!(res.headers.get(header::LOCATION).unwrap(), "/", "{}", res.body);
+    assert_eq!(res.continues_to().as_deref(), Some("/"), "{}", res.body);
     let cookie = session_cookie_of(&fx, &res);
     let mut h = HeaderMap::new();
     h.insert(header::COOKIE, cookie.parse().unwrap());
@@ -762,7 +773,7 @@ async fn sso_counts_as_two_factors_unless_the_site_says_otherwise() {
     let fx =
         Fx::with_auth(true, |p| p, |a| a.min_level(Level::Mfa).sso_level(Level::Simple)).await;
     let res = fx.login_with(Recipe::valid("staff-alice")).await;
-    assert_eq!(res.headers.get(header::LOCATION).unwrap(), "/profile");
+    assert_eq!(res.continues_to().as_deref(), Some("/profile"), "{}", res.body);
     let cookie = session_cookie_of(&fx, &res);
     let mut h = HeaderMap::new();
     h.insert(header::COOKIE, cookie.parse().unwrap());
@@ -777,7 +788,7 @@ async fn sso_counts_as_two_factors_unless_the_site_says_otherwise() {
     am.totp_secret = Set(Some(secret.clone()));
     am.update(&fx.db).await.unwrap();
     let res = fx.login_with(Recipe::valid("staff-alice")).await;
-    assert_eq!(res.headers.get(header::LOCATION).unwrap(), "/login/totp");
+    assert_eq!(res.continues_to().as_deref(), Some("/login/totp"), "{}", res.body);
     let pending = session_cookie_of(&fx, &res);
     let csrf = "c".repeat(64);
     let body = format!("code={}&_csrf={csrf}", crate::auth::totp::current_code(&secret));
@@ -870,7 +881,7 @@ async fn an_sso_account_confirms_at_its_provider_once_per_action() {
     // … and back, as the same account, arriving without the session cookie.
     let back = fx.finish_reauth(&begun, Recipe::valid("staff-alice")).await;
     assert_eq!(back.status, StatusCode::OK, "{}", back.body);
-    assert!(back.body.contains(r#"content="0;url=/settings?tab=keys""#), "back to the page: {}", back.body);
+    assert_eq!(back.continues_to().as_deref(), Some("/settings?tab=keys"), "back to the page: {}", back.body);
     assert!(back.clears_txn());
     assert!(back.session_token(fx.auth.session_cookie_name()).is_none(), "it signs nobody in");
     assert_eq!(fx.session_count().await, 1, "and opens no session");
@@ -977,7 +988,7 @@ async fn a_confirmation_expires_and_a_restricted_session_can_make_one() {
     let begun = fx.begin_reauth(Some(&token), None).await;
     let res = fx.finish_reauth(&begun, Recipe::valid("staff-alice")).await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.body);
-    assert!(res.body.contains(r#"content="0;url=/profile""#), "{}", res.body);
+    assert_eq!(res.continues_to().as_deref(), Some("/profile"), "{}", res.body);
     let until = fx.reauth_until(&token).await.expect("confirmed");
     assert!(until > crate::auth::now_secs(), "good for a while");
 

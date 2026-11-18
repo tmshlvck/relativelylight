@@ -26,3 +26,6 @@
 
 # Local tool settings
 .claude/settings.local.json
+
+# Generated SSO test settings (examples/auth/keycloak-setup.sh): a client secret and passwords
+*.local.env

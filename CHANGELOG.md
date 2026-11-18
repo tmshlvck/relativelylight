@@ -109,6 +109,12 @@ is easy to miss in a diff.
   filters accept it only as exactly `YYYY-MM-DD`, a real day (`expected a date, YYYY-MM-DD`
   otherwise). It binds as a date, so PostgreSQL compares `date` with `date`, and a filter value that
   is no date matches nothing. Before, every write to a `Date` failed.
+- **`examples/auth` signs in with any OpenID Connect provider** (`SSO_OIDC_ISSUER`, `…_CLIENT_ID`,
+  `…_CLIENT_SECRET`; optionally an admin group from the `groups` claim and strict re-authentication)
+  beside Google, and **[docs/SSO_TESTING_KEYCLOAK.md](docs/SSO_TESTING_KEYCLOAK.md)** tries it with
+  Keycloak in a container: `examples/auth/keycloak-setup.sh` creates the realm, client and test
+  users. The example's `SSO_BASE_URL` now defaults to `http://localhost:3000`, the address it tells
+  you to browse (cookies and passkeys are per host).
 - **`ChronoUnixTimestamp` is the recommended field type for an instant** (TIME.md §1): a
   `DateTime<Utc>` in Rust, the same `BIGINT` of seconds in the database, read by the crate as the
   integer it is. The examples' `published_at` and `happens_at` use it, and `examples/crud`'s events
@@ -275,6 +281,12 @@ is easy to miss in a diff.
 
 ### Fixed
 
+- **An SSO sign-in lands signed in.** The provider's callback redirected to the app, and under the
+  default `SameSite=Strict` the browser didn't send the session cookie it had just been given on
+  that redirect (the navigation began at the provider, so it counted as cross-site): the user met
+  the login page and had to reload. The callback now answers with a page that moves on by itself,
+  a same-site navigation ([AUTH.md §5b](docs/AUTH.md#5b-sso--openid-connect-feature-sso)). Found
+  against a real Keycloak.
 - **An accounts panel can create an account without a password**, as its help text always said
   (blank = none, for an SSO or passkey-only account). A blank write-only field is never sent, and
   `auth_user.password_hash` is NOT NULL, so the create was refused as "required". The `auth_user`

@@ -108,14 +108,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Optional SSO from env (no hard-coded secrets). Decide whether it's configured *before* building
     // `auth`, because the login page shows the SSO buttons — and `auth` must be fully configured
     // before it's cloned (`Sso::new` clones it; a builder call after that would panic).
-    let google = std::env::var("SSO_GOOGLE_CLIENT_ID")
-        .ok()
-        .zip(std::env::var("SSO_GOOGLE_CLIENT_SECRET").ok());
-    let sso_buttons = if google.is_some() {
-        sso_buttons_html(&[SsoButton { label: "Google".into(), url: "/sso/google/login".into() }])
-    } else {
-        String::new()
-    };
+    let providers = sso_providers_from_env();
+    let sso_buttons = sso_buttons_html(
+        &providers
+            .iter()
+            .map(|(p, _)| SsoButton { label: p.label.clone(), url: format!("/sso/{}/login", p.key) })
+            .collect::<Vec<_>>(),
+    );
 
     // The brute-force brake is mandatory — `Auth::new` takes its configuration. Here: 5 failed logins
     // per account and 15 per source address, both for 5 minutes (the library defaults are 10 / 100 per
@@ -170,7 +169,7 @@ from this site. Reload the page and try again.</div>
         .profile_extra(|s| async move { app_cards(&s) });
 
     // auth is now fully configured — safe to clone it into the Sso.
-    let sso = google.map(|(id, secret)| build_sso(&auth, id, secret));
+    let sso = (!providers.is_empty()).then(|| build_sso(&auth, providers));
 
     // The accounts panel's engine: `auth`'s own tables, registered like anybody else's models.
     let engine = accounts_engine(crud_db, &auth);
@@ -243,8 +242,10 @@ from this site. Reload the page and try again.</div>
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     println!("auth playground on http://localhost:3000/   (log in as admin / password; use localhost for passkeys)");
     println!("accounts panel   http://localhost:3000/admin  (admin only; alice / password is refused)");
-    if sso.is_some() {
-        println!("SSO enabled: 'Sign in with Google' button on the login page");
+    if let Some(sso) = &sso {
+        for b in sso.buttons() {
+            println!("SSO enabled: 'Sign in with {}' on the login page", b.label);
+        }
     }
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
@@ -257,28 +258,69 @@ fn trust_proxy_from_env() -> bool {
     matches!(std::env::var("TRUST_PROXY").as_deref(), Ok("1") | Ok("true"))
 }
 
-/// Build SSO config from env, so the demo needs no hard-coded secrets. Set `SSO_GOOGLE_CLIENT_ID` +
-/// `SSO_GOOGLE_CLIENT_SECRET` (and optionally `SSO_BASE_URL`, default `http://127.0.0.1:3000`) to
-/// enable a "Sign in with Google" button; unset → SSO disabled. The redirect URL registered with the
-/// provider must be `{SSO_BASE_URL}/sso/google/callback`.
-fn build_sso(auth: &Auth, client_id: String, client_secret: String) -> Sso {
-    let base = std::env::var("SSO_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".into());
-    Sso::new(auth)
-        // Google carries no usable group claim → map local groups by username. Here: anyone whose
-        // email ends in @example.com becomes "staff" (add your own rules / an admin regex).
-        .username_group_rule(r"@example\.com$", ["staff"])
-        .provider(
-            SsoProvider::new(
-                "google",
-                "Google",
-                "https://accounts.google.com",
-                client_id,
-                client_secret,
-                format!("{base}/sso/google/callback"),
-            )
-            .username_claim("email") // Google's stable human identifier
-            .auto_register(true), // create unknown users on first login (demo convenience)
+/// The key and label of an SSO provider the environment configures, for its login button.
+struct EnvProvider {
+    key: String,
+    label: String,
+}
+
+/// The SSO providers the environment configures, so the demo needs no hard-coded secrets; none → SSO
+/// disabled. Each provider's redirect URL registered at the provider must be
+/// `{SSO_BASE_URL}/sso/{key}/callback` (`SSO_BASE_URL` defaults to `http://localhost:3000`).
+///
+/// - **Google**: `SSO_GOOGLE_CLIENT_ID` + `SSO_GOOGLE_CLIENT_SECRET`. Key `google`, username = email.
+/// - **Any OpenID Connect provider** (Keycloak, Okta, Entra ID, …): `SSO_OIDC_ISSUER`,
+///   `SSO_OIDC_CLIENT_ID`, `SSO_OIDC_CLIENT_SECRET`; optionally `SSO_OIDC_KEY` (default `keycloak`),
+///   `SSO_OIDC_LABEL` (default `Keycloak`), `SSO_OIDC_ADMIN_GROUP` (a value of the token's `groups`
+///   claim that makes the user a local admin) and `SSO_OIDC_REAUTH_MAX_AGE` (seconds: strict
+///   re-authentication, docs/AUTH.md §5h). Username = `preferred_username`.
+///   `docs/SSO_TESTING_KEYCLOAK.md` sets one up against a Keycloak container.
+fn sso_providers_from_env() -> Vec<(EnvProvider, SsoProvider)> {
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let base = var("SSO_BASE_URL").unwrap_or_else(|| "http://localhost:3000".into());
+    let mut out = Vec::new();
+    if let (Some(id), Some(secret)) = (var("SSO_GOOGLE_CLIENT_ID"), var("SSO_GOOGLE_CLIENT_SECRET")) {
+        let p = SsoProvider::new(
+            "google",
+            "Google",
+            "https://accounts.google.com",
+            id,
+            secret,
+            format!("{base}/sso/google/callback"),
         )
+        .username_claim("email") // Google's stable human identifier
+        .auto_register(true); // create unknown users on first login (demo convenience)
+        out.push((EnvProvider { key: "google".into(), label: "Google".into() }, p));
+    }
+    if let (Some(issuer), Some(id), Some(secret)) =
+        (var("SSO_OIDC_ISSUER"), var("SSO_OIDC_CLIENT_ID"), var("SSO_OIDC_CLIENT_SECRET"))
+    {
+        let key = var("SSO_OIDC_KEY").unwrap_or_else(|| "keycloak".into());
+        let label = var("SSO_OIDC_LABEL").unwrap_or_else(|| "Keycloak".into());
+        let mut p = SsoProvider::new(&key, &label, issuer, id, secret, format!("{base}/sso/{key}/callback"))
+            .auto_register(true);
+        // A corporate IdP carries group membership: one of its groups makes the user a local admin, so
+        // the manager pages (and their re-authentication) can be tried as an SSO account.
+        if let Some(admins) = var("SSO_OIDC_ADMIN_GROUP") {
+            p = p.groups_claim("groups").claim_group_rule(admins, [ADMIN_GROUP]);
+        }
+        if let Some(secs) = var("SSO_OIDC_REAUTH_MAX_AGE").and_then(|v| v.parse().ok()) {
+            p = p.reauth_max_age(secs);
+        }
+        out.push((EnvProvider { key, label }, p));
+    }
+    out
+}
+
+/// The `Sso` for the configured providers. `auth` must be fully configured: `Sso::new` clones it.
+fn build_sso(auth: &Auth, providers: Vec<(EnvProvider, SsoProvider)>) -> Sso {
+    // Google carries no usable group claim → map local groups by username. Here: anyone whose email
+    // ends in @example.com becomes "staff" (add your own rules / an admin regex).
+    let mut sso = Sso::new(auth).username_group_rule(r"@example\.com$", ["staff"]);
+    for (_, p) in providers {
+        sso = sso.provider(p);
+    }
+    sso
 }
 
 /// Render the SSO login buttons, appended under the login form. With passkeys on, the library's

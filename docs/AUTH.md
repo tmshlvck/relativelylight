@@ -383,6 +383,14 @@ let sso = Sso::new(&auth)                                   // build auth fully 
 let app = app.merge(sso.routes());
 ```
 
+**The callback leaves by a page, not a redirect.** It answers with a page that moves on to the app
+(or back to the confirming page) by itself: the provider sent the browser there, so a redirect
+would still be a cross-site navigation, on which a `SameSite=Strict` session cookie isn't sent, and
+the browser would land signed out ([why](AUTH-SECURITY.md#re-authentication)).
+
+**Trying it by hand:** [SSO_TESTING_KEYCLOAK.md](SSO_TESTING_KEYCLOAK.md) runs Keycloak in a
+container and points `examples/auth` at it.
+
 **Account resolution.** The username claim is matched **case-insensitively**
 ([why](AUTH-SECURITY.md#sso)). A pre-created account keeps its own spelling; ties (rows differing
 only in case, which nothing here creates) go to the lowest id. Local password login still matches
@@ -1284,7 +1292,10 @@ port-scoped), exactly as with the session cookie.
   `POST /webhook-secret/rotate` — an app's own sensitive action behind `csrf::enforce` and
   `Auth::reauthenticate_with` (§5h, §7), reached from a `profile_extra` card, confirmable with
   a passkey, and answered with `Auth::profile_reply`. SSO is wired in when
-  `SSO_GOOGLE_CLIENT_ID` / `SSO_GOOGLE_CLIENT_SECRET` are set. `--set-admin-pw` is the break-glass path.
+  `SSO_GOOGLE_CLIENT_ID` / `SSO_GOOGLE_CLIENT_SECRET` are set, or any OpenID Connect provider's
+  `SSO_OIDC_ISSUER` / `SSO_OIDC_CLIENT_ID` / `SSO_OIDC_CLIENT_SECRET`
+  ([SSO_TESTING_KEYCLOAK.md](SSO_TESTING_KEYCLOAK.md) sets up Keycloak for it).
+  `--set-admin-pw` is the break-glass path.
 - **[`examples/adminpanel`](../examples/adminpanel/src/main.rs)** — a login-gated `crud::ui::Admin`
   with CSRF on, content models behind `UserReadGroupWrite` (everyone reads, `admin` writes), the
   account tables (the library's `meta_model()`s) behind `GroupReadWrite` and shown only to managers,
