@@ -54,7 +54,15 @@ in the docs: before adding a second way, or a second explanation, find the first
 - **`must_change_password` is set by the `auth_user` row hook** whenever a write sets `password_hash`
   without setting it; a new helper that writes the owner's own password sets it to `false`
   explicitly ([AUTH.md §5m](docs/AUTH.md#5m-the-sign-in-policy-and-password-change-required)).
-- **Configure `Auth` fully before `Sso::new(&auth)`** clones it.
+- **Configure `Auth` fully before `Sso::new(&auth)`** clones it, and mount `Sso::routes()`: an SSO
+  account re-authenticates through its provider (a one-use confirmation on the session), and without
+  the routes it is refused. **The SSO callback never answers with a redirect**: the provider sent the
+  browser there, so a redirect is still cross-site and arrives without the `SameSite=Strict` session
+  cookie; it leaves by a page that navigates itself ([AUTH.md §5b](docs/AUTH.md#5b-sso--openid-connect-feature-sso)).
+- **One column type per kind of time value** ([TIME.md §1](docs/TIME.md#1-storage-model)): an instant
+  is integer Unix seconds marked `.datetime()`, a calendar date a native `DATE` accepted only as
+  `YYYY-MM-DD`. Native date-time columns are read-only, with no range filter; don't make them a second
+  way to store an instant.
 - Entities need a single-column primary key and single-column to-one FKs; N:M junction tables are
   never registered (`post.relate(&tag)` declares N:M).
 

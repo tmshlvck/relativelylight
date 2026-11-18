@@ -861,9 +861,9 @@ impl Inner {
     }
 
     /// Re-authenticate the holder of `user` with any factor the account has: its password, a fresh TOTP
-    /// code, or its passkey. `Ok(())` on success **or** when the account has no local factor at all (an
-    /// SSO account). See [`Auth::reauthenticate_with`] for what this is protecting against and why the
-    /// no-factor case passes.
+    /// code, its passkey, or for an SSO account a confirmation at its provider (§5h). `Ok(())` on success
+    /// **or** when a local account has no factor at all, having nothing to be asked for. See
+    /// [`Auth::reauthenticate_with`] for what this is protecting against.
     ///
     /// A passkey counts as a factor, so an account without a password but with a passkey **must**
     /// present one of its factors. A code accepted here is **spent** (the §5a replay guard), and so is a
@@ -1242,6 +1242,20 @@ impl Inner {
             client_ip,
         })
         .await;
+    }
+
+    /// Audit 2FA turned on or off for the account `user_id` (§5d): `{"totp_enabled": on}`.
+    async fn notify_totp(
+        &self,
+        source: &'static str,
+        actor: &str,
+        user_id: i32,
+        on: bool,
+        headers: &HeaderMap,
+        client_ip: std::net::IpAddr,
+    ) {
+        let after = serde_json::json!({ "totp_enabled": on });
+        self.notify(source, actor, "auth_user", Some(user_id.to_string()), after, headers, client_ip).await;
     }
 
     /// Fire the audit observer with any operation — a create, an update or a single-row delete, whose
@@ -1705,7 +1719,7 @@ impl Auth {
     pub async fn can_reauthenticate(&self, who: &Identity) -> bool {
         match target_user(&self.inner, &who.id).await {
             Some(u) => {
-                (!u.password_hash.is_empty() && !u.is_sso())
+                !u.password_hash.is_empty()
                     || u.is_sso()
                     || u.has_totp()
                     || passkey::count(&self.inner.db, u.id).await > 0
@@ -2717,9 +2731,7 @@ async fn totp_setup_submit(
     let Ok(user) = am.update(&inner.db).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not enable 2FA").into_response();
     };
-    let totp_on = serde_json::json!({ "totp_enabled": true });
-    let key = Some(user.id.to_string());
-    inner.notify("auth-profile", &who.username, "auth_user", key, totp_on, &req.headers, client_ip).await;
+    inner.notify_totp("auth-profile", &who.username, user.id, true, &req.headers, client_ip).await;
     // Issue recovery codes **with** the enrolment and show them once (§5i). Issuing them here rather
     // than leaving it to the user is the difference between a lost phone being an inconvenience and
     // being an account only an administrator can reopen.
@@ -2907,9 +2919,7 @@ async fn totp_self_disable(
         return profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::FORBIDDEN, Err(&msg)).await;
     }
     let user = clear_totp(&inner, user).await;
-    let totp_off = serde_json::json!({ "totp_enabled": false });
-    let key = Some(user.id.to_string());
-    inner.notify("auth-profile", &who.username, "auth_user", key, totp_off, &req.headers, client_ip).await;
+    inner.notify_totp("auth-profile", &who.username, user.id, false, &req.headers, client_ip).await;
     let msg = "Two-factor authentication disabled.";
     profile_page(&inner, &who, &user, None, Some(msg), &csrf, &req).await.into_response()
 }
@@ -2942,9 +2952,7 @@ async fn totp_manage_disable(
         return (StatusCode::FORBIDDEN, page).into_response();
     }
     let target = clear_totp(&inner, target).await;
-    let totp_off = serde_json::json!({ "totp_enabled": false });
-    let key = Some(target.id.to_string());
-    inner.notify("auth-admin", &who.username, "auth_user", key, totp_off, headers, client_ip).await;
+    inner.notify_totp("auth-admin", &who.username, target.id, false, headers, client_ip).await;
     let msg = format!("Two-factor authentication disabled for {}.", target.username);
     manager_page(&inner, &who, &manager, &target, None, Some(&msg), &csrf, &req).await.into_response()
 }

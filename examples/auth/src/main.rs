@@ -109,12 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `auth`, because the login page shows the SSO buttons — and `auth` must be fully configured
     // before it's cloned (`Sso::new` clones it; a builder call after that would panic).
     let providers = sso_providers_from_env();
-    let sso_buttons = sso_buttons_html(
-        &providers
-            .iter()
-            .map(|(p, _)| SsoButton { label: p.label.clone(), url: format!("/sso/{}/login", p.key) })
-            .collect::<Vec<_>>(),
-    );
+    let sso_buttons = sso_buttons_html(providers.iter().map(|(button, _)| button));
 
     // The brute-force brake is mandatory — `Auth::new` takes its configuration. Here: 5 failed logins
     // per account and 15 per source address, both for 5 minutes (the library defaults are 10 / 100 per
@@ -258,14 +253,9 @@ fn trust_proxy_from_env() -> bool {
     matches!(std::env::var("TRUST_PROXY").as_deref(), Ok("1") | Ok("true"))
 }
 
-/// The key and label of an SSO provider the environment configures, for its login button.
-struct EnvProvider {
-    key: String,
-    label: String,
-}
-
-/// The SSO providers the environment configures, so the demo needs no hard-coded secrets; none → SSO
-/// disabled. Each provider's redirect URL registered at the provider must be
+/// The SSO providers the environment configures, each with its login button, so the demo needs no
+/// hard-coded secrets; none → SSO disabled. (The buttons are built here, not by `Sso::buttons`: the
+/// login page, which shows them, is configured on `Auth` before `Sso` exists.) Each provider's redirect URL registered at the provider must be
 /// `{SSO_BASE_URL}/sso/{key}/callback` (`SSO_BASE_URL` defaults to `http://localhost:3000`).
 ///
 /// - **Google**: `SSO_GOOGLE_CLIENT_ID` + `SSO_GOOGLE_CLIENT_SECRET`. Key `google`, username = email.
@@ -275,7 +265,7 @@ struct EnvProvider {
 ///   claim that makes the user a local admin) and `SSO_OIDC_REAUTH_MAX_AGE` (seconds: strict
 ///   re-authentication, docs/AUTH.md §5h). Username = `preferred_username`.
 ///   `docs/SSO_TESTING_KEYCLOAK.md` sets one up against a Keycloak container.
-fn sso_providers_from_env() -> Vec<(EnvProvider, SsoProvider)> {
+fn sso_providers_from_env() -> Vec<(SsoButton, SsoProvider)> {
     let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     let base = var("SSO_BASE_URL").unwrap_or_else(|| "http://localhost:3000".into());
     let mut out = Vec::new();
@@ -290,7 +280,7 @@ fn sso_providers_from_env() -> Vec<(EnvProvider, SsoProvider)> {
         )
         .username_claim("email") // Google's stable human identifier
         .auto_register(true); // create unknown users on first login (demo convenience)
-        out.push((EnvProvider { key: "google".into(), label: "Google".into() }, p));
+        out.push((SsoButton { label: "Google".into(), url: "/sso/google/login".into() }, p));
     }
     if let (Some(issuer), Some(id), Some(secret)) =
         (var("SSO_OIDC_ISSUER"), var("SSO_OIDC_CLIENT_ID"), var("SSO_OIDC_CLIENT_SECRET"))
@@ -307,13 +297,13 @@ fn sso_providers_from_env() -> Vec<(EnvProvider, SsoProvider)> {
         if let Some(secs) = var("SSO_OIDC_REAUTH_MAX_AGE").and_then(|v| v.parse().ok()) {
             p = p.reauth_max_age(secs);
         }
-        out.push((EnvProvider { key, label }, p));
+        out.push((SsoButton { url: format!("/sso/{key}/login"), label }, p));
     }
     out
 }
 
 /// The `Sso` for the configured providers. `auth` must be fully configured: `Sso::new` clones it.
-fn build_sso(auth: &Auth, providers: Vec<(EnvProvider, SsoProvider)>) -> Sso {
+fn build_sso(auth: &Auth, providers: Vec<(SsoButton, SsoProvider)>) -> Sso {
     // Google carries no usable group claim → map local groups by username. Here: anyone whose email
     // ends in @example.com becomes "staff" (add your own rules / an admin regex).
     let mut sso = Sso::new(auth).username_group_rule(r"@example\.com$", ["staff"]);
@@ -326,9 +316,8 @@ fn build_sso(auth: &Auth, providers: Vec<(EnvProvider, SsoProvider)>) -> Sso {
 /// Render the SSO login buttons, appended under the login form. With passkeys on, the library's
 /// fragment already ends in an "or" and the passkey button, so these join that list of alternatives
 /// (an app without passkeys would draw its own divider here).
-fn sso_buttons_html(buttons: &[SsoButton]) -> String {
+fn sso_buttons_html<'a>(buttons: impl Iterator<Item = &'a SsoButton>) -> String {
     buttons
-        .iter()
         .map(|b| {
             format!(
                 r#"<a class="btn btn-outline-secondary w-100 mt-2" href="{}">Sign in with {}</a>"#,

@@ -365,8 +365,8 @@ impl Page {
 ///
 /// Strict on purpose. SQLite keeps a date as text and accepts anything, and its sorting and ranges
 /// compare that text, so one row stored as `5.11.2026` or `2026-1-5` sorts and filters wrong with no
-/// error anywhere (`docs/TIME.md` §1). Only the one canonical form gets
-/// past this — the form PostgreSQL's `date` and `<input type="date">` use too.
+/// error anywhere (`docs/TIME.md` §1). Only the one canonical form gets past this, the form
+/// PostgreSQL's `date` and `<input type="date">` use too.
 pub fn parse_date(s: &str) -> Option<sea_orm::prelude::ChronoDate> {
     let d = sea_orm::prelude::ChronoDate::parse_from_str(s, "%Y-%m-%d").ok()?;
     (d.format("%Y-%m-%d").to_string() == s).then_some(d)

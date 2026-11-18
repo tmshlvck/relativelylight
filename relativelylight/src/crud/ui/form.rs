@@ -73,11 +73,8 @@ pub struct Form<'a> {
 }
 
 impl<'a> Form<'a> {
-    /// A form that **creates** a row of `slug`. Add [`edit`](Form::edit) to update one.
-    ///
-    /// **A form writes only what it is**: [`submit`](Form::submit) on this one creates and nothing
-    /// else, and on `.edit(id)` updates row `id` and nothing else, whatever the posted body asks.
-    /// Build the same `Form` for the `POST` as for the `GET`.
+    /// A form that **creates** a row of `slug`. Add [`edit`](Form::edit) to update one. It writes only
+    /// that, so build the same `Form` for the `POST` as for the `GET` ([`submit`](Form::submit)).
     pub fn new(engine: &'a Engine, slug: impl Into<String>) -> Self {
         Self {
             engine,

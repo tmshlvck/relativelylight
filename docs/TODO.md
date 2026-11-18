@@ -33,8 +33,9 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
 
 ## auth
 
-- [ ] **SSO leftovers:** refresh tokens, `userinfo`, RP-initiated logout, a real-IdP smoke test at
-  release.
+- [ ] **SSO leftovers:** refresh tokens, `userinfo`, RP-initiated logout. At each release, a
+  real-IdP smoke test: [SSO_TESTING_KEYCLOAK.md](SSO_TESTING_KEYCLOAK.md)'s checklist, and Google by
+  hand (it re-prompts differently, AUTH.md §5b).
 - [ ] **Passkeys: later.**
   - browser autofill of passkeys on the login page;
   - a username-first sign-in, for security keys with no free slot for a discoverable credential;

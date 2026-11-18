@@ -1020,8 +1020,8 @@ factor counts against the account and the address, like a TOTP code
 ([why](AUTH-SECURITY.md#passkeys)). An expired or unknown challenge checks nothing and counts nothing.
 
 **Re-authentication** (§5h) accepts the passkey, and an account with a passkey and no password
-**must** use one of its factors: it no longer passes with nothing. Only an account with no local
-factor at all (SSO) still passes.
+**must** use one of its factors: it no longer passes with nothing. An SSO account confirms at its
+provider, or with a passkey it has added.
 
 **What a session records.** `auth_session.method` is `passkey`, `passkey+totp`, `passkey+recovery`
 or `password+passkey`, and `passkey_class` the class of the passkey used.

@@ -736,7 +736,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                     blank_is_null: true,
                     // A native date-time or time column can't be written through the engine (an
                     // instant is integer seconds, `.datetime()`; TIME.md §1), so it starts read-only:
-                    // shown, sorted and range-filtered, never offered as an input.
+                    // shown and sorted, never offered as an input.
                     read_only: is_pk || logical_type(def.get_column_type()) == LogicalType::DateTime,
                     write_only: false,
                     create_only: false,
