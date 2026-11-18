@@ -174,3 +174,24 @@ the password's blank cell no longer needs to (§7).
 Only for an app with its **own `Accessor`** (or code that builds a `Column::Field` literal or
 matches one without `..`): add `create_only: false`, or `true` for a column a create sets and an
 update must not (`MetaField::create_only`, [CRUD.md](CRUD.md#metafield)).
+
+## 10. A standalone `Form` writes only what it is
+
+`Form::submit` used to take the operation and the row from the posted body, so a `Form::new` accepted
+an update and an `.edit(id)` form a create, or an update of another `_id`. Now `Form::new` only
+creates and `.edit(id)` only updates `id`: anything else is `403` (the other operation) or `400`
+(another row).
+
+A handler that submits with the same builder it rendered with needs no change. One that renders
+`.edit(id)` but submits through a plain `Form::new` (one `POST` handler shared by create and edit,
+say) now gets `403` for every save. Build the form for the `POST` as for the `GET`:
+
+```rust
+// before: one handler for both, the body chose
+Form::new(&engine, "post").submit(&headers, ip, &body, &state).await
+// after: the route says which
+let form = match id { Some(id) => Form::new(&engine, "post").edit(id), None => Form::new(&engine, "post") };
+form.submit(&headers, ip, &body, &state).await
+```
+
+See [CRUD.md → `Form`](CRUD.md#form--a-standalone-createedit-form).

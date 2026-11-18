@@ -960,7 +960,7 @@ pub(super) async fn login_finish(
     if needs_totp {
         return (jar, Redirect::to("/login/totp")).into_response();
     }
-    super::stamp_login(&inner.db, account.id, None).await;
+    super::complete_login(&inner, &account, session::Method::Passkey, None, &req.headers, client_ip).await;
     let to = inner
         .landing(&account, session::Method::Passkey, Some(row.class()))
         .to_string();
@@ -1027,7 +1027,7 @@ pub(super) async fn second_factor_finish(
     else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
     };
-    super::stamp_login(&inner.db, account.id, None).await;
+    super::complete_login(&inner, &account, method, None, headers, client_ip).await;
     inner.usernames.clear(&account.username).await;
     let (_, csrf_cookie) = inner.csrf().issue();
     let jar = jar

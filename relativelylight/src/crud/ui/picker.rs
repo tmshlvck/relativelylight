@@ -1,7 +1,6 @@
 //! [`Picker`] — the page inside the dialog that edits a relation too large for a `<select>`, and
 //! (with `Crud::picker_create`) the form that creates the row a relation field is missing.
 
-use super::decode::Posted;
 use super::state::{Mode, ViewState};
 use super::{authorize, render, render_err, Form, Outcome, Table};
 use crate::authz::Operation;
@@ -181,10 +180,7 @@ impl<'a> Picker<'a> {
             }
             Mode::Edit(id) => {
                 self.open(&p, p.view, Operation::Read, headers).await?;
-                // The form posts the row's id as `_id`; one naming another row is not this page's.
-                if Posted::read(headers, body)?.one("_id") != Some(id) {
-                    return Err(Error::BadRequest("crud::ui::Picker: the posted row is not the URL's".into()));
-                }
+                // `.edit(id)` pins the write to the URL's row: a posted `_id` naming another is refused.
                 let form = Form::new(self.engine, &p.target).edit(id.clone()).embedded().redirect("{id}");
                 match form.submit(headers, client_ip, body, state).await? {
                     Outcome::Done(_) => Ok(Outcome::Done(format!("{}&saved=1", p.href("show", id)))),

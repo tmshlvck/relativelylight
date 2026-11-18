@@ -20,12 +20,6 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
   relation dialogs; not across the table, its links and its dialog). A per-request memo keyed by
   `(slug, op)`, or resolving the identity once and handing it to `Authz`, would make it one. Cheap on
   SQLite; it adds up on a busy list page with a remote database.
-- [ ] **A standalone `Form` writes only what it is.** `Form::new` still accepts a posted update and
-  `Form::edit(id)` a create, or an update of another `_id`; the picker's forms are already strict
-  (`Form::embedded`). Making every `Form` strict closes it for app pages too, but breaks an app that
-  renders `.edit(id)` and submits with a plain `Form::new`: a minor bump with a migration step.
-- [ ] **Cross-document view transitions** for POST → 303 → GET. Cheap to try, easy to get wrong (a 422
-  re-render animated as a navigation).
 - **`Table` stays one type** — no split into `List`/`Search`/… pieces; the per-action switches
   cover turning a control off.
 - **No browser tests in CI**; `ui_tests.rs` covers the server half of the picker.
@@ -40,9 +34,6 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
 - [ ] **Re-authenticate SSO accounts through the IdP** (`prompt=login`), which needs somewhere to park
   the pending action across the redirect. Until then an account with no local factor passes
   re-authentication (AUTH.md §5h).
-- [ ] **Audit logins and 2FA enable/disable.** Password changes, resets, recovery-code reissue,
-  session revocation and API-key mint/revoke fire `WriteEvent`s; these don't yet (`last_login_at`
-  records logins).
 - [ ] **Breached-password screening** (HIBP range API or a local corpus). Possible today through
   `Auth::password_check`; the question is whether a helper earns a feature flag.
 - [ ] **SSO leftovers:** refresh tokens, `userinfo`, RP-initiated logout, a real-IdP smoke test at

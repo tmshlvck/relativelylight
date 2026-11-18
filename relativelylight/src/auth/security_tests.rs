@@ -3880,6 +3880,106 @@ async fn minting_and_revoking_are_audited_without_the_key() {
     }
 }
 
+/// What the audit observer saw: `(source, actor, key, after)`.
+#[derive(Default)]
+struct AuthEvents(std::sync::Mutex<Vec<(&'static str, String, String, String)>>);
+
+#[async_trait::async_trait]
+impl crate::observe::WriteObserver for AuthEvents {
+    async fn on_write(&self, ev: &crate::observe::WriteEvent<'_>) {
+        assert_eq!((ev.op, ev.entity), (Operation::Update, "auth_user"));
+        let after = ev.after.as_ref().map(|v| v.to_string()).unwrap_or_default();
+        let row = (ev.source, ev.actor.unwrap_or("").into(), ev.key.clone().unwrap_or_default(), after);
+        self.0.lock().unwrap().push(row);
+    }
+}
+
+impl AuthEvents {
+    fn take(&self) -> Vec<(&'static str, String, String, String)> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+#[tokio::test]
+async fn a_login_is_audited_once_when_it_completes_and_a_failed_one_never() {
+    let events = Arc::new(AuthEvents::default());
+    let fx = Fx::with(|a| a.on_write(events.clone())).await;
+    let alice = fx.user("alice").await;
+    let bob = fx.user("bob").await;
+    let secret = fx.enable_totp("bob").await;
+    let login = |u: &str, p: &str| form(&[("username", u), ("password", p)]);
+
+    // Refused credentials: nothing to audit (the lockout counters and the error observer have it).
+    fx.post("/login", &login("alice", OTHER_PW), None).await;
+    fx.post("/login", &login("nobody", PW), None).await;
+    assert_eq!(events.take(), vec![], "a refused login is no event");
+
+    // Positive control: a password login is one event, naming the account and the way in.
+    fx.post("/login", &login("alice", PW), None).await.assert_redirect("/");
+    let seen = events.take();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!((seen[0].0, seen[0].1.as_str()), ("auth-login", "alice"));
+    assert_eq!((seen[0].2.as_str(), seen[0].3.as_str()), (alice.to_string().as_str(), r#"{"signed_in":"password"}"#));
+
+    // A 2FA account: the password step is not a login yet; a wrong code isn't either.
+    let res = fx.post("/login", &login("bob", PW), None).await;
+    res.assert_redirect("/login/totp");
+    let pending = fx.cookie(&res.session_token(fx.auth.session_cookie_name()).unwrap());
+    fx.post("/login/totp", &form(&[("code", "000000")]), Some(&pending)).await;
+    assert_eq!(events.take(), vec![], "half a login is no event");
+    let code = totp::current_code(&secret);
+    fx.post("/login/totp", &form(&[("code", &code)]), Some(&pending)).await.assert_redirect("/");
+    let seen = events.take();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!((seen[0].1.as_str(), seen[0].2.as_str()), ("bob", bob.to_string().as_str()));
+    assert_eq!(seen[0].3, r#"{"signed_in":"password+totp"}"#);
+}
+
+#[tokio::test]
+async fn enabling_and_disabling_2fa_is_audited_and_a_refused_attempt_is_not() {
+    let events = Arc::new(AuthEvents::default());
+    let fx = Fx::with(|a| a.on_write(events.clone())).await;
+    let alice = fx.user("alice").await;
+    fx.user_in("admin", "admin").await;
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    let on = r#"{"totp_enabled":true}"#;
+    let off = r#"{"totp_enabled":false}"#;
+
+    // Enrolment: a wrong code or a missing confirmation enables nothing and reports nothing.
+    fx.get("/profile/totp", Some(&cookie)).await;
+    let pending = fx.row("alice").await.totp_pending.unwrap();
+    let code = totp::current_code(&pending);
+    fx.post("/profile/totp", &reauth_form(&[("code", "000000")]), Some(&cookie)).await;
+    fx.post("/profile/totp", &form(&[("code", &code)]), Some(&cookie)).await;
+    assert!(fx.row("alice").await.totp_secret.is_none());
+    assert_eq!(events.take(), vec![], "a refused enrolment is no event");
+    // Positive control.
+    fx.post("/profile/totp", &reauth_form(&[("code", &code)]), Some(&cookie)).await;
+    assert!(fx.row("alice").await.totp_secret.is_some());
+    let id = alice.to_string();
+    assert_eq!(events.take(), vec![("auth-profile", "alice".into(), id.clone(), on.into())]);
+
+    // The owner turns it off: refused without re-authentication, audited with it.
+    let cookie = fx.cookie(&fx.session_for("alice").await);
+    let res = fx.post("/profile/totp/disable", &form(&[]), Some(&cookie)).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    assert_eq!(events.take(), vec![], "a refused disable is no event");
+    fx.post("/profile/totp/disable", &reauth_form(&[]), Some(&cookie)).await;
+    assert!(fx.row("alice").await.totp_secret.is_none());
+    assert_eq!(events.take(), vec![("auth-profile", "alice".into(), id.clone(), off.into())]);
+
+    // A manager turns it off for her: the manager is the actor, alice the row.
+    fx.enable_totp("alice").await;
+    let admin = fx.cookie(&fx.session_for("admin").await);
+    let path = format!("/profile/{alice}/totp/disable");
+    let res = fx.post(&path, &form(&[]), Some(&admin)).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    assert_eq!(events.take(), vec![], "a refused disable is no event");
+    fx.post(&path, &reauth_form(&[]), Some(&admin)).await;
+    assert!(fx.row("alice").await.totp_secret.is_none());
+    assert_eq!(events.take(), vec![("auth-admin", "admin".into(), id, off.into())]);
+}
+
 // ===================== Passkeys: the schema (phase 1) =====================
 
 /// A passkey row for `user_id`, straight into the table (enrolment arrives with the feature).

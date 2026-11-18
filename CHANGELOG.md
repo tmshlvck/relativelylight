@@ -13,6 +13,13 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
+- **A standalone `Form` writes only what it is.** `Form::new(..).submit` only creates and
+  `Form::new(..).edit(id).submit` only updates row `id`. Before, the posted body chose: an edit page's
+  form could create a row or update another `_id` the caller's gate allowed. Now the other operation
+  is `403` and another row `400` ([CRUD.md](docs/CRUD.md#form--a-standalone-createedit-form)).
+  **Upgrade:** submit with the same `Form` you rendered, `.edit(id)` included
+  ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#10-a-standalone-form-writes-only-what-it-is)).
+
 - **`Auth::reauthenticate(&who, password, code)` is removed**, in favour of
   `Auth::reauthenticate_with(&who, &ReauthInput)`. That one takes every factor, a passkey included,
   where the old one could not confirm an account with a passkey and no password. **Upgrade:** flatten
@@ -73,6 +80,17 @@ is easy to miss in a diff.
 
 ### Added
 
+- **Pages cross-fade.** `crud::ui::CSS` turns on cross-document view transitions, so opening a
+  dialog, saving or paging fades from one page to the next in a browser that supports them, instead
+  of flashing white. Off under `prefers-reduced-motion`; opt out with
+  `@view-transition { navigation: none; }` after the stylesheet
+  ([CRUD.md](docs/CRUD.md#web-ui-ui)).
+- **Sign-ins and 2FA changes are audited.** The `Auth::on_write` observer now gets an `Update` of
+  `auth_user` for every completed sign-in (`source` `"auth-login"`, `after` `{"signed_in": <method>}`,
+  password, TOTP step, passkey or SSO alike) and for turning 2FA on or off (`{"totp_enabled": …}`,
+  `"auth-profile"`, or `"auth-admin"` for a manager) ([AUTH.md §5d](docs/AUTH.md#5d-write-observer--audit-hook)).
+  The SSO callback now reads `RealIp` like the other login routes; an app with
+  `resolve_real_ip` as its outermost layer, as required, needs no change.
 - **The accounts panel from the library** ([AUTH.md §5j](docs/AUTH.md#the-accounts-panel)).
   `auth::user::meta_model(&auth)`, `auth::group::meta_model()` and
   `auth::lockout::{username_meta_model, ip_meta_model}()` configure `auth`'s tables for a CRUD panel,

@@ -1186,6 +1186,31 @@ struct Event<'a> {
     client_ip: std::net::IpAddr,
 }
 
+/// A sign-in is complete: stamp it ([`stamp_login`]) and report it to the audit observer as an
+/// `Update` of `auth_user` from `"auth-login"`, `after` naming the way in (`{"signed_in":
+/// "password+totp"}`). Every login path ends here, so none is left out of the audit trail.
+async fn complete_login(
+    inner: &Inner,
+    user: &user::Model,
+    method: session::Method,
+    totp_step: Option<i64>,
+    headers: &HeaderMap,
+    client_ip: std::net::IpAddr,
+) {
+    stamp_login(&inner.db, user.id, totp_step).await;
+    inner
+        .notify(
+            "auth-login",
+            &user.username,
+            "auth_user",
+            Some(user.id.to_string()),
+            serde_json::json!({ "signed_in": method.as_str() }),
+            headers,
+            client_ip,
+        )
+        .await;
+}
+
 /// Stamp a user's `last_login_at` (UTC Unix seconds). Uses a set-based update so it doesn't bump
 /// `updated_at` (a login isn't a content change) or re-run the row hook.
 /// Stamp `last_login_at`, and — when the login went through the second factor — the TOTP step it spent,
@@ -1968,7 +1993,7 @@ async fn login_submit(
     } else {
         // Login is complete (no 2FA) — stamp last_login now (the TOTP path stamps on confirm, with the
         // step it spent).
-        stamp_login(&inner.db, user.id, None).await;
+        complete_login(&inner, &user, session::Method::Password, None, headers, client_ip).await;
         inner.landing(&user, session::Method::Password, None)
     };
     (jar, Redirect::to(dest)).into_response()
@@ -2139,7 +2164,7 @@ async fn login_totp_submit(
     let Some(token) = rotate_session(&inner, session.clone(), method, class).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
     };
-    stamp_login(&inner.db, user.id, step).await;
+    complete_login(&inner, &user, method, step, headers, client_ip).await;
     inner.usernames.clear(&user.username).await;
     let (_, csrf_cookie) = inner.csrf().issue();
     let jar = jar.add(session_cookie(&inner, token)).add(csrf_cookie);
@@ -2538,6 +2563,7 @@ async fn totp_setup_form(
 async fn totp_setup_submit(
     State(inner): State<Arc<Inner>>,
     req: Parts,
+    RealIp(client_ip): RealIp, // for the audit record
     jar: CookieJar,
     Form(form): Form<TotpForm>,
 ) -> Response {
@@ -2574,6 +2600,9 @@ async fn totp_setup_submit(
     let Ok(user) = am.update(&inner.db).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not enable 2FA").into_response();
     };
+    let totp_on = serde_json::json!({ "totp_enabled": true });
+    let key = Some(user.id.to_string());
+    inner.notify("auth-profile", &who.username, "auth_user", key, totp_on, &req.headers, client_ip).await;
     // Issue recovery codes **with** the enrolment and show them once (§5i). Issuing them here rather
     // than leaving it to the user is the difference between a lost phone being an inconvenience and
     // being an account only an administrator can reopen.
@@ -2750,6 +2779,7 @@ async fn sessions_revoke(
 async fn totp_self_disable(
     State(inner): State<Arc<Inner>>,
     req: Parts,
+    RealIp(client_ip): RealIp, // for the audit record
     Form(form): Form<ReauthForm>,
 ) -> Response {
     let (who, user, csrf) = match self_post(&inner, &req, form.csrf.as_deref()).await {
@@ -2760,6 +2790,9 @@ async fn totp_self_disable(
         return profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::FORBIDDEN, Err(&msg)).await;
     }
     let user = clear_totp(&inner, user).await;
+    let totp_off = serde_json::json!({ "totp_enabled": false });
+    let key = Some(user.id.to_string());
+    inner.notify("auth-profile", &who.username, "auth_user", key, totp_off, &req.headers, client_ip).await;
     let msg = "Two-factor authentication disabled.";
     profile_page(&inner, &who, &user, None, Some(msg), &csrf, &req).await.into_response()
 }
@@ -2769,6 +2802,7 @@ async fn totp_self_disable(
 async fn totp_manage_disable(
     State(inner): State<Arc<Inner>>,
     req: Parts,
+    RealIp(client_ip): RealIp, // for the audit record
     Path(id): Path<String>,
     Form(form): Form<ReauthForm>,
 ) -> Response {
@@ -2791,6 +2825,9 @@ async fn totp_manage_disable(
         return (StatusCode::FORBIDDEN, page).into_response();
     }
     let target = clear_totp(&inner, target).await;
+    let totp_off = serde_json::json!({ "totp_enabled": false });
+    let key = Some(target.id.to_string());
+    inner.notify("auth-admin", &who.username, "auth_user", key, totp_off, headers, client_ip).await;
     let msg = format!("Two-factor authentication disabled for {}.", target.username);
     manager_page(&inner, &who, &manager, &target, None, Some(&msg), &csrf, &req).await.into_response()
 }

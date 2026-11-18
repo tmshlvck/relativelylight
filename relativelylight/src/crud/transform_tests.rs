@@ -204,7 +204,12 @@ async fn a_blank_required_relation_is_a_field_error_not_a_panic() {
     let submit = |body: &'static str| {
         let e = &e;
         async move {
-            Form::new(e, "note").submit(&HeaderMap::new(), IP, body.as_bytes(), &ViewState::default()).await
+            // The form a page would build for this post: `.edit` for an update.
+            let form = match body.contains("_op=update&_id=1") {
+                true => Form::new(e, "note").edit("1"),
+                false => Form::new(e, "note"),
+            };
+            form.submit(&HeaderMap::new(), IP, body.as_bytes(), &ViewState::default()).await
         }
     };
 
@@ -301,7 +306,12 @@ async fn an_enum_column_round_trips_on_sqlite() {
     let submit = |body: &'static str| {
         let e = &e;
         async move {
-            Form::new(e, "ticket").submit(&HeaderMap::new(), IP, body.as_bytes(), &ViewState::default()).await
+            // The form a page would build for this post: `.edit` for an update.
+            let form = match body.contains("_op=update&_id=1") {
+                true => Form::new(e, "ticket").edit("1"),
+                false => Form::new(e, "ticket"),
+            };
+            form.submit(&HeaderMap::new(), IP, body.as_bytes(), &ViewState::default()).await
         }
     };
     // Writes store the string value, and a nullable enum clears to NULL.

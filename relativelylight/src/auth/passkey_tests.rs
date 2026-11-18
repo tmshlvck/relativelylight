@@ -674,6 +674,37 @@ async fn fx_with_key_elsewhere(key: &mut SoftPasskey) -> Vec<String> {
         .collect()
 }
 
+/// A passkey sign-in is audited once it completes; a replayed answer is not.
+#[tokio::test]
+async fn a_passkey_sign_in_is_audited_and_a_replay_is_not() {
+    let seen = Arc::new(Seen::default());
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    migrate(&db).await.unwrap();
+    let auth = Auth::new(db.clone(), Lockout::default())
+        .secure_cookies(false)
+        .on_write(seen.clone())
+        .passkeys(Passkeys::new("localhost", ORIGIN));
+    let app = auth.routes().layer(axum::middleware::from_fn_with_state(
+        crate::middleware::TrustProxy(false),
+        crate::middleware::resolve_real_ip,
+    ));
+    let fx = Fx { db, auth, app };
+    let (mut key, cred) = alice_with_key(&fx).await;
+    seen.0.lock().unwrap().clear(); // the enrolment's own event
+    let page = fx.post("/login/passkey", &[], None).await;
+    let (challenge, answer) = fx.answer(&page, &mut key, &cred);
+    let fields = [
+        ("passkey_challenge", challenge.as_str()),
+        ("passkey_response", answer.as_str()),
+    ];
+    assert_eq!(fx.post("/login/passkey/finish", &fields, None).await.location(), Some("/"));
+    fx.post("/login/passkey/finish", &fields, None).await; // the replay, refused
+    let lines = seen.0.lock().unwrap().clone();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("Update auth_user"), "{lines:?}");
+    assert!(lines[0].contains(r#""signed_in": String("passkey")"#), "{lines:?}");
+}
+
 #[tokio::test]
 async fn a_sign_in_answer_works_once() {
     let fx = Fx::new().await;

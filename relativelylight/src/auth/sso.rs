@@ -19,10 +19,11 @@
 //! the login is refused. See `docs/AUTH.md`.
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
+use crate::middleware::RealIp;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
@@ -386,6 +387,8 @@ async fn login(State(sso): State<Arc<Sso>>, Path(provider): Path<String>, jar: C
 async fn callback(
     State(sso): State<Arc<Sso>>,
     Path(provider): Path<String>,
+    RealIp(client_ip): RealIp,
+    headers: HeaderMap,
     jar: CookieJar,
     Query(q): Query<CallbackQuery>,
 ) -> Response {
@@ -484,7 +487,7 @@ async fn callback(
     if needs_totp {
         return (jar, Redirect::to("/login/totp")).into_response();
     }
-    super::stamp_login(db, user.id, None).await;
+    super::complete_login(inner, &user, method, None, &headers, client_ip).await;
     let to = inner.landing(&user, method, None).to_string();
     (jar, Redirect::to(&to)).into_response()
 }

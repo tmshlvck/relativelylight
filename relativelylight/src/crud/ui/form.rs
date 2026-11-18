@@ -1,6 +1,7 @@
 //! [`Form`] — the same create/edit form [`Table`](super::Table) shows in its dialog, standalone,
 //! for an app's own pages.
 
+use super::decode::Posted;
 use super::state::ViewState;
 use super::widgets::{self, FieldV, Widget};
 use super::{
@@ -67,14 +68,16 @@ pub struct Form<'a> {
     redirect: Option<String>,
     picker_threshold: u64,
     initial: Vec<(String, Value)>,
-    /// Inside a [`Picker`](super::Picker)'s dialog: no card (the dialog is one), and it writes only
-    /// what it is — a create form only creates, an edit form only updates. Its page is reachable by
-    /// anyone the target's gate lets in, so neither may become a way to do the other.
+    /// Inside a [`Picker`](super::Picker)'s dialog: no card (the dialog is one).
     embedded: bool,
 }
 
 impl<'a> Form<'a> {
     /// A form that **creates** a row of `slug`. Add [`edit`](Form::edit) to update one.
+    ///
+    /// **A form writes only what it is**: [`submit`](Form::submit) on this one creates and nothing
+    /// else, and on `.edit(id)` updates row `id` and nothing else, whatever the posted body asks.
+    /// Build the same `Form` for the `POST` as for the `GET`.
     pub fn new(engine: &'a Engine, slug: impl Into<String>) -> Self {
         Self {
             engine,
@@ -256,6 +259,11 @@ impl<'a> Form<'a> {
 
     /// Apply this form's posted body. On success the target is [`redirect`](Form::redirect) with
     /// `{id}` filled in, else `?saved=1` on the current URL.
+    ///
+    /// It writes only what the form is: a create form refuses a posted update, and an edit form a
+    /// posted create (`Err(Error::Forbidden)`, `403`) or an update naming another row's `_id`
+    /// (`Err(Error::BadRequest)`, `400`). The page that rendered `.edit(id)` decided which row its
+    /// caller may change; the body can't widen that.
     pub async fn submit(
         &self,
         headers: &HeaderMap,
@@ -263,6 +271,14 @@ impl<'a> Form<'a> {
         body: &[u8],
         state: &ViewState,
     ) -> Result<Outcome> {
+        if let Some(id) = &self.edit_id {
+            if Posted::read(headers, body)?.one("_id") != Some(id.as_str()) {
+                return Err(Error::BadRequest(format!(
+                    "crud::ui::Form({}): the posted row is not the one this form edits",
+                    self.slug
+                )));
+            }
+        }
         let cols = self.engine.columns(&self.slug)?;
         let shown = |name: &str| renders(&self.fields, &self.omit, name);
         let surface = Surface {
@@ -271,11 +287,11 @@ impl<'a> Form<'a> {
             renders: &shown,
             query: ListQuery::default(),
             pins: Default::default(),
-            // A form saves one row. Its query is the whole table, so a posted delete-all or import
-            // must not get this far.
+            // A form saves one row, the way it was built to. Its query is the whole table, so a posted
+            // delete-all or import must not get this far either.
             writes: Writes {
-                create: !self.embedded || self.edit_id.is_none(),
-                update: !self.embedded || self.edit_id.is_some(),
+                create: self.edit_id.is_none(),
+                update: self.edit_id.is_some(),
                 delete: false,
                 bulk_delete: false,
                 import: false,

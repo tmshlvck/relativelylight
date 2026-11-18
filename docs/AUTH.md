@@ -423,12 +423,16 @@ engine:
 | minting or revoking one of your API keys (§5k): `Create` / `Delete` on `auth_api_key` | `auth-profile` |
 | adding or removing one of your passkeys (§5l): `Create` / `Delete` on `auth_passkey`; removing your password | `auth-profile` |
 | a manager's reset (`POST /profile/{id}`), a manager removing someone's passkeys | `auth-admin` |
+| turning your 2FA on or off: `{"totp_enabled": true}` / `false` on `auth_user` | `auth-profile` |
+| a manager turning someone's 2FA off | `auth-admin` |
+| a completed sign-in, by any way in: `{"signed_in": "password+totp"}` on `auth_user`, the session's method (§5m) | `auth-login` |
 
 Each event carries the headers, the resolved `client_ip`, **`actor`** (the username who acted — read
 it rather than calling `identify`, since a password change has already rotated the caller's session),
 and an `after` (and, for a delete, a `before`) describing what changed with no secret in it
-(`{"password_changed": true}`). Logins and 2FA changes don't fire yet ([TODO.md](TODO.md#auth));
-`last_login_at` records logins. Share one `Arc` with `Crud::on_write` so a single sink covers both:
+(`{"password_changed": true}`). A sign-in fires once, when it completes: the password step of a 2FA
+account is not one yet, and a refused attempt fires nothing (the lockout counters and the error
+observer hold those). Share one `Arc` with `Crud::on_write` so a single sink covers both:
 
 ```rust
 let audit = Arc::new(MyAuditSink::new(db.clone()));

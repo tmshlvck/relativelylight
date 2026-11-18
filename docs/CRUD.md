@@ -737,7 +737,13 @@ let html = Table::new(&engine, "post")
 ```
 
 **What to put in your shell:** Bootstrap 5's CSS, and `crud::ui::CSS` — a few dozen lines Bootstrap
-doesn't cover (mostly the `<dialog>`, whose own `.modal` assumes Bootstrap's JavaScript). And, on
+doesn't cover (mostly the `<dialog>`, whose own `.modal` assumes Bootstrap's JavaScript). It also
+turns on **cross-document view transitions**: since every control is a link and every write a
+`POST` → `303` → `GET`, each is a new page, and a browser that supports them cross-fades from one to
+the next instead of flashing white (a rejected save too: what didn't change fades into itself, the
+messages fade in). It applies to every same-origin page carrying the stylesheet, is off under
+`prefers-reduced-motion`, and an app opts out with `@view-transition { navigation: none; }` after
+it. And, on
 every page with a table or a form, `crud::ui::JS`: it makes the dialogs real modals (see
 [Dialogs and Esc](#dialogs-and-esc)) and drives the [picker](#picker--choosing-from-a-large-relation).
 Everything works without it, only plainer:
@@ -1056,7 +1062,11 @@ let html = Form::new(&engine, "ticket")
     .render_for(&headers, &state).await?;
 ```
 
-`edit(id)` turns it into an update form. Without `redirect`, `submit` returns `?saved=1` and the form
+`edit(id)` turns it into an update form. **A form writes only what it is**: `submit` on a
+`Form::new` only creates, and on `.edit(id)` only updates row `id`. A posted body asking for the other
+operation is refused with `403`, and one naming another row's `_id` with `400`, so the row a page chose
+is the row its caller can change. Build the same `Form` for the `POST` as for the `GET`, as
+`examples/crud` does with one function per form. Without `redirect`, `submit` returns `?saved=1` and the form
 renders `saved_message` when it sees that. `heading(bool)` forces the card header on or off (the
 default is on if there is a title or description), and `dom_id` namespaces it.
 

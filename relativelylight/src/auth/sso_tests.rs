@@ -442,6 +442,34 @@ async fn a_full_sso_login_signs_in_maps_groups_and_marks_the_account_external() 
     assert!(res.clears_txn(), "the transaction cookie must be cleared: {:?}", res.set_cookies());
 }
 
+/// The audit observer's view of a login: `(source, actor, after)`.
+#[derive(Default)]
+struct Logins(Mutex<Vec<(&'static str, String, String)>>);
+
+#[async_trait::async_trait]
+impl crate::observe::WriteObserver for Logins {
+    async fn on_write(&self, ev: &crate::observe::WriteEvent<'_>) {
+        let after = ev.after.as_ref().map(|v| v.to_string()).unwrap_or_default();
+        self.0.lock().unwrap().push((ev.source, ev.actor.unwrap_or("").into(), after));
+    }
+}
+
+#[tokio::test]
+async fn an_sso_login_is_audited_and_a_refused_callback_is_not() {
+    let seen = Arc::new(Logins::default());
+    let fx = Fx::with_auth(true, |p| p, |a| a.on_write(seen.clone())).await;
+    let (cookie, state, _nonce) = fx.begin_login().await;
+    let forged = format!("code=test-code&state={}", "b".repeat(state.len()));
+    fx.callback(&forged, Some(&cookie)).await;
+    assert!(seen.0.lock().unwrap().is_empty(), "a refused callback is no event");
+
+    let res = fx.login_with(Recipe::valid("staff-alice")).await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER, "{}", res.body);
+    let events = seen.0.lock().unwrap().clone();
+    let sso = r#"{"signed_in":"sso"}"#.to_string();
+    assert_eq!(events, vec![("auth-login", "staff-alice".to_string(), sso)]);
+}
+
 // ===================== Transaction / CSRF =====================
 
 #[tokio::test]
@@ -495,11 +523,15 @@ async fn a_transaction_for_one_provider_cannot_be_completed_at_another() {
         .auto_register(true)
     };
     let sso = Sso::new(&auth).provider(mk("first")).provider(mk("second"));
-    let app = auth.routes().merge(sso.routes());
+    let app = auth.routes().merge(sso.routes()).layer(axum::middleware::from_fn_with_state(
+        crate::middleware::TrustProxy(false),
+        crate::middleware::resolve_real_ip,
+    ));
+    let peer = axum::extract::ConnectInfo("127.0.0.1:9999".parse::<SocketAddr>().unwrap());
 
     let res = app
         .clone()
-        .oneshot(Request::builder().uri("/sso/first/login").body(Body::empty()).unwrap())
+        .oneshot(Request::builder().uri("/sso/first/login").extension(peer).body(Body::empty()).unwrap())
         .await
         .unwrap();
     let cookie = res
@@ -522,6 +554,7 @@ async fn a_transaction_for_one_provider_cannot_be_completed_at_another() {
             Request::builder()
                 .uri(format!("/sso/second/callback?code=test-code&state={state}"))
                 .header(header::COOKIE, &cookie)
+                .extension(peer)
                 .body(Body::empty())
                 .unwrap(),
         )

@@ -270,19 +270,30 @@ async fn each_switch_refuses_exactly_its_own_writes() {
 }
 
 #[tokio::test]
-async fn a_form_saves_one_row_and_refuses_the_tables_other_writes() {
+async fn a_form_writes_only_what_it_is() {
     // A form's query is the whole table: a delete-all posted to it would have nothing to narrow it.
+    // And it saves one row the way it was built: the page that rendered `.edit(1)` decided the caller
+    // changes row 1, so the body can't make it a create, or an update of row 2.
     let (engine, calls) = engine_with(Fixed::new(Decision::Allow), None);
-    let form = Form::new(&engine, "thing");
-    for (what, body, _) in writes() {
-        let result = form.submit(&no_headers(), IP, body.as_bytes(), &ViewState::default()).await;
-        if what == "create" || what == "update" {
-            result.unwrap_or_else(|e| panic!("a form saves its row ({what}): {e}"));
-        } else {
-            assert!(matches!(result, Err(Error::Forbidden)), "a form must refuse {what}");
+    let state = ViewState::default();
+    for (form, saves) in [(Form::new(&engine, "thing"), "create"), (Form::new(&engine, "thing").edit("1"), "update")] {
+        for (what, body, _) in writes() {
+            let result = form.submit(&no_headers(), IP, body.as_bytes(), &state).await;
+            if what == saves {
+                // The positive control: the write the form is.
+                result.unwrap_or_else(|e| panic!("a form saves its row ({what}): {e}"));
+            } else if saves == "update" && what != "update" {
+                // An edit form names its row; a body without that `_id` is not its post.
+                assert!(matches!(result, Err(Error::BadRequest(_))), "an edit form must refuse {what}: {result:?}");
+            } else {
+                assert!(matches!(result, Err(Error::Forbidden)), "a {saves} form must refuse {what}: {result:?}");
+            }
         }
     }
-    assert_eq!(calls.snapshot().1, 2, "only the create and the update landed");
+    let other = Form::new(&engine, "thing").edit("2");
+    let result = other.submit(&no_headers(), IP, b"_op=update&_id=1&name=x", &state).await;
+    assert!(matches!(result, Err(Error::BadRequest(_))), "another row's _id is refused: {result:?}");
+    assert_eq!(calls.snapshot().1, 2, "only the create and the update of row 1 landed");
 }
 
 #[cfg(feature = "csv")]
