@@ -33,7 +33,7 @@ use relativelylight::crud::engine::{Engine, Error, Result as CrudResult};
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::crud::ui::{esc, truncate, Form, Outcome, Picker, Table, ViewState, CSS, JS};
 use relativelylight::middleware::RealIp;
-use relativelylight::time::{Tz, TzPicker};
+use relativelylight::time::{picker, Tz};
 use relativelylight::validate;
 use sea_orm::IdenStatic; // `post::Column::Title.as_str()` — a column name the compiler checks
 use std::net::SocketAddr;
@@ -50,7 +50,7 @@ struct Shell {
     /// `crud::ui::JS` on every page: the dialogs become real modals (Esc closes) and the relation
     /// dialogs (picker, "+ New", linked rows) work.
     js: &'static str,
-    /// The navbar timezone picker (`time::TzPicker`), and `time::JS`, which sets the zone cookie from
+    /// The navbar timezone picker (`time::picker`), and `time::JS`, which sets the zone cookie from
     /// it (and from the browser's own zone on a first visit).
     tz_picker: String,
     tz_js: &'static str,
@@ -745,7 +745,7 @@ fn render(app: &App, current: &str, headers: &HeaderMap, fragment: CrudResult<St
                 body,
                 css: CSS,
                 js: JS,
-                tz_picker: TzPicker::new().render(&Tz::from_headers(headers)),
+                tz_picker: picker(&Tz::from_headers(headers)),
                 tz_js: relativelylight::time::JS,
                 boxed,
             }

@@ -10,7 +10,7 @@
 //!
 //! - [`Tz`](crate::time::Tz) — the zone for one request, read from the caller's headers ([`Tz::from_headers`](crate::time::Tz::from_headers)), used to
 //!   [`format`](crate::time::Tz::format) an epoch for a cell and to [`parse`](crate::time::Tz::parse) a form input back.
-//! - [`TzPicker`](crate::time::TzPicker) — a type-to-search list of zones; [`JS`](crate::time::JS), inlined
+//! - [`picker`](crate::time::picker) — a type-to-search list of zones; [`JS`](crate::time::JS), inlined
 //!   in every page, sets the cookie from it, and from the browser's own zone on a first visit.
 //!
 //! An unknown or unset zone is **UTC**, and so is a zone the host's tz database doesn't have: a
@@ -18,7 +18,7 @@
 //!
 //! ```ignore
 //! let tz = relativelylight::time::Tz::from_headers(&headers);   // in a page handler
-//! let picker = relativelylight::time::TzPicker::new().render(&tz);  // drop into your navbar
+//! let picker = relativelylight::time::picker(&tz);  // drop into your navbar
 //! ```
 //!
 //! Full guide: [`docs/TIME.md`](https://github.com/tmshlvck/relativelylight/blob/main/docs/TIME.md).
@@ -156,71 +156,47 @@ impl Tz {
 /// shell**, as `crud::ui::JS`, or the picker does nothing (`docs/TIME.md`).
 ///
 /// With no [`COOKIE`] yet, it sets the browser's own zone and reloads once, so a first visit renders
-/// in local time from the second page on. A [`TzPicker`] then sets the cookie from what is chosen and
+/// in local time from the second page on. A [`picker`] then sets the cookie from what is chosen and
 /// reloads: no route, no handler.
 pub const JS: &str = include_str!("../assets/rl-tz.js");
 
 /// The picker's entry that means "the browser's own zone".
 const BROWSER: &str = "Browser timezone";
 
-/// Every zone name the host's database knows, sorted, behind `UTC` and the browser's own zone: the
-/// picker's list. Old and new names both, as the database has them (`Europe/Kiev` beside
-/// `Europe/Kyiv`); either renders right.
-fn zone_names() -> &'static [String] {
-    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    NAMES.get_or_init(|| {
-        let mut names: Vec<String> = jiff::tz::db().available().map(|n| n.to_string()).collect();
+/// The picker's list, built once: `UTC`, "Browser timezone", then every zone name the host's database
+/// knows, sorted (old and new names both, as it has them: `Europe/Kiev` beside `Europe/Kyiv`).
+fn options() -> &'static str {
+    static OPTIONS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    OPTIONS.get_or_init(|| {
+        let mut names: Vec<String> =
+            jiff::tz::db().available().map(|n| n.to_string()).filter(|n| n != "UTC").collect();
         names.sort();
-        names.dedup();
-        names
+        ["UTC", BROWSER]
+            .into_iter()
+            .map(String::from)
+            .chain(names)
+            .map(|z| format!(r#"<option value="{}">"#, crate::html::esc(&z)))
+            .collect()
     })
 }
 
-/// The timezone picker: a text input over a list of every zone, which a browser searches as you type.
-/// `UTC` and "Browser timezone" lead the list. Choosing sets the [`COOKIE`] in the browser and reloads
-/// ([`JS`]); a name that isn't in the list means UTC. Put it where you like: a navbar, a profile card.
+/// The timezone picker showing `current`: a text input over the list of every zone, which a browser
+/// searches as you type, led by `UTC` and "Browser timezone". Choosing sets the [`COOKIE`] in the
+/// browser and reloads ([`JS`]); a name that isn't in the list means UTC. Put it where you like: a
+/// navbar, a profile card.
 ///
 /// ```ignore
-/// let picker = TzPicker::new().render(&Tz::from_headers(&headers));
+/// let html = relativelylight::time::picker(&Tz::from_headers(&headers));
 /// ```
-pub struct TzPicker {
-    label: String,
-}
-
-impl TzPicker {
-    pub fn new() -> Self {
-        Self { label: "Timezone".into() }
-    }
-
-    /// The control's accessible name and tooltip. Default `Timezone`.
-    pub fn label(mut self, label: impl Into<String>) -> Self {
-        self.label = label.into();
-        self
-    }
-
-    /// Render the picker showing `current`.
-    pub fn render(&self, current: &Tz) -> String {
-        // Two pickers on one page each need their own list.
-        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let id = format!("rl-tz-{}", N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-        let options: String = ["UTC", BROWSER]
-            .into_iter()
-            .chain(zone_names().iter().map(String::as_str).filter(|z| *z != "UTC"))
-            .map(|z| format!(r#"<option value="{}">"#, crate::html::esc(z)))
-            .collect();
-        format!(
-            r#"<span class="rl-tz" data-rl-tz data-rl-tz-browser="{browser}"><input class="form-control form-control-sm" style="width:14rem" list="{id}" value="{current}" aria-label="{label}" title="{label}" autocomplete="off" spellcheck="false"><datalist id="{id}">{options}</datalist></span>"#,
-            browser = BROWSER,
-            current = crate::html::esc(current.name()),
-            label = crate::html::esc(&self.label),
-        )
-    }
-}
-
-impl Default for TzPicker {
-    fn default() -> Self {
-        Self::new()
-    }
+pub fn picker(current: &Tz) -> String {
+    // Two pickers on one page each need their own list.
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = format!("rl-tz-{}", N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    format!(
+        r#"<span class="rl-tz" data-rl-tz data-rl-tz-browser="{BROWSER}"><input class="form-control form-control-sm" style="width:14rem" list="{id}" value="{current}" aria-label="Timezone" title="Timezone" autocomplete="off" spellcheck="false"><datalist id="{id}">{options}</datalist></span>"#,
+        current = crate::html::esc(current.name()),
+        options = options(),
+    )
 }
 
 #[cfg(test)]
@@ -246,7 +222,7 @@ mod tests {
     fn with_no_cookie_the_picker_shows_utc() {
         let tz = Tz::from_headers(&http::HeaderMap::new());
         assert_eq!(tz, Tz::UTC, "no cookie is UTC");
-        let html = TzPicker::new().render(&tz);
+        let html = picker(&tz);
         assert!(html.contains(r#"value="UTC" aria-label="Timezone""#), "{html}");
     }
 
@@ -294,8 +270,8 @@ mod tests {
 
     #[test]
     fn the_picker_offers_utc_the_browser_and_every_zone_the_host_knows() {
-        let html = TzPicker::new().label("Zone").render(&Tz::named("Asia/Tokyo"));
-        assert!(html.contains(r#"value="Asia/Tokyo" aria-label="Zone""#), "shows the current zone: {html}");
+        let html = picker(&Tz::named("Asia/Tokyo"));
+        assert!(html.contains(r#"value="Asia/Tokyo" aria-label="Timezone""#), "shows the current zone: {html}");
         assert!(html.contains(&format!(r#"data-rl-tz-browser="{BROWSER}""#)), "tells the script its entry");
         assert!(JS.contains(&format!("'{COOKIE}'")), "the script sets the cookie the server reads");
         let first = html.find(r#"<option value="UTC">"#).unwrap();
@@ -305,13 +281,14 @@ mod tests {
         assert_eq!(html.matches(r#"<option value="UTC">"#).count(), 1, "UTC once");
         // The host's names, old and new both (Kyiv and its former name), sorted.
         assert!(html.contains(r#"<option value="Europe/Kyiv">"#) && html.contains(r#"<option value="Asia/Tokyo">"#));
-        assert!(zone_names().len() > 300, "the host's whole database, got {}", zone_names().len());
-        assert!(zone_names().windows(2).all(|w| w[0] < w[1]), "sorted, no duplicates");
+        let names: Vec<&str> = options().split(r#"<option value=""#).skip(3).map(|o| &o[..o.len() - 2]).collect();
+        assert!(names.len() > 300, "the host's whole database, got {}", names.len());
+        assert!(names.windows(2).all(|w| w[0] < w[1]), "sorted, no duplicates");
     }
 
     #[test]
     fn two_pickers_on_one_page_have_their_own_lists() {
-        let (a, b) = (TzPicker::new().render(&Tz::UTC), TzPicker::new().render(&Tz::UTC));
+        let (a, b) = (picker(&Tz::UTC), picker(&Tz::UTC));
         let id = |h: &str| h.split(r#"list=""#).nth(1).unwrap().split('"').next().unwrap().to_string();
         assert_ne!(id(&a), id(&b));
         assert!(a.contains(&format!(r#"<datalist id="{}">"#, id(&a))));

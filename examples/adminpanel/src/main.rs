@@ -28,7 +28,7 @@ use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
 use relativelylight::crud::ui::{esc, truncate, Admin, Outcome, Picker, ViewState, CSS, JS};
 use relativelylight::middleware::RealIp;
-use relativelylight::time::{Tz, TzPicker};
+use relativelylight::time::{picker, Tz};
 use relativelylight::validate;
 use sea_orm::IdenStatic; // `post::Column::Title.as_str()` — a column name the compiler checks
 use std::net::SocketAddr;
@@ -50,7 +50,7 @@ struct Shell {
     body: String,
     css: &'static str, // the library's few CSS rules (crud::ui::CSS)
     js: &'static str,  // crud::ui::JS: modal dialogs with Esc, and the relation dialogs
-    tz_picker: String, // the navbar timezone picker (time::TzPicker)
+    tz_picker: String, // the navbar timezone picker (time::picker)
     tz_js: &'static str, // time::JS: sets the zone cookie from the picker, and the browser's on a first visit
 }
 
@@ -80,7 +80,7 @@ impl Shell {
             body,
             css: CSS,
             js: JS,
-            tz_picker: TzPicker::new().render(&Tz::from_headers(headers)),
+            tz_picker: picker(&Tz::from_headers(headers)),
             tz_js: relativelylight::time::JS,
         }
     }

@@ -216,7 +216,7 @@ use relativelylight::auth::{self, ProfileSection};
 use relativelylight::csrf::Csrf;
 
 let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
-    let zone = TzPicker::new().render(&Tz::from_headers(&s.headers));   // a preference
+    let zone = time::picker(&Tz::from_headers(&s.headers));   // a preference
     let form = format!(r#"<form method="post" action="/webhook-secret/rotate">{}{}
         <button class="btn btn-sm btn-outline-danger">Rotate the secret</button></form>"#,
         Csrf::hidden_input(&s.csrf),   // `s.csrf` is *this request's* token

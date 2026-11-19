@@ -241,14 +241,15 @@ columns by what each value means.
 
 ## 12. The timezone picker is a script
 
-`TzPicker` no longer posts a form to a handler of yours: [`time::JS`](TIME.md#3-the-picker-and-the-first-visit)
+The timezone picker no longer posts a form to a handler of yours: [`time::JS`](TIME.md#3-the-picker-and-the-first-visit)
 sets the zone cookie in the browser and reloads. Its list is every zone the server's database knows,
 led by UTC and "Browser timezone", and a first visit takes the browser's own zone.
 
 1. **Inline `time::JS` in every page's shell**, once, as `crud::ui::JS`:
    `<script>{relativelylight::time::JS}</script>`. Without it the picker does nothing.
 2. **Remove your timezone route and handler** (`TzPicker::submitted` is gone).
-3. **Render without the return path:** `TzPicker::new().render(&tz)`; drop `.action(…)`.
+3. **Render it with the function:** `TzPicker` is gone, `time::picker(&tz)` replaces
+   `TzPicker::new().render(&tz, back)`, with no return path and no `.action(…)` or `.label(…)`.
 4. **Drop zone lists** (`.zones(…)`, `.all_zones()`, `unknown_zones()`, `zones_default()`,
    `zones_all()`, `Tz::known`) and the exclusions (`time::EXCLUDED`, `is_excluded`): the list is now always the
    full database. Nothing replaces a configured list.

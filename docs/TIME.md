@@ -124,13 +124,13 @@ already in the caller's zone. You need `Tz` directly only on your own pages.
 - **It drives the picker.** Choosing a zone sets the cookie in the browser and reloads: there is no
   route of yours behind it.
 
-[`TzPicker`] renders the picker: a text input over a list of every zone the server's timezone database
+[`time::picker`] renders the picker: a text input over a list of every zone the server's timezone database
 knows, which browsers search as you type. **UTC** and **Browser timezone** lead the list. A name that
 isn't in it means UTC.
 
 ```rust
 // in your shell: the picker wherever you want it, and the script at the end of <body>
-let picker = TzPicker::new().render(&Tz::from_headers(&headers));
+let picker = relativelylight::time::picker(&Tz::from_headers(&headers));
 // <script>{relativelylight::time::JS}</script>
 ```
 
@@ -149,7 +149,7 @@ accepts as it is.
 
   ```rust
   let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
-      auth::profile_card("Timezone", &TzPicker::new().render(&Tz::from_headers(&s.headers)))
+      auth::profile_card("Timezone", &time::picker(&Tz::from_headers(&s.headers)))
   });
   ```
 
@@ -235,5 +235,5 @@ screen says. `examples/adminpanel` wires the same picker into a login-gated app,
 puts it on the profile page and names the zone in its footer.
 
 [`time::COOKIE`]: https://docs.rs/relativelylight/latest/relativelylight/time/constant.COOKIE.html
-[`TzPicker`]: https://docs.rs/relativelylight/latest/relativelylight/time/struct.TzPicker.html
+[`time::picker`]: https://docs.rs/relativelylight/latest/relativelylight/time/fn.picker.html
 [`time::JS`]: https://docs.rs/relativelylight/latest/relativelylight/time/constant.JS.html

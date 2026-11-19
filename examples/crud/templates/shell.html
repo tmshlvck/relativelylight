@@ -26,7 +26,7 @@
         {% endfor %}
       </ul>
       <div class="d-flex align-items-center gap-2">
-        {# The timezone picker (time::TzPicker): type to search, and the zone cookie the server formats
+        {# The timezone picker (time::picker): type to search, and the zone cookie the server formats
            timestamps with is set in the browser. Try it on `event`: its rows straddle two DST changes. #}
         {{ tz_picker|safe }}
         <a class="btn btn-outline-light btn-sm" href="/post/new">New post (standalone form)</a>

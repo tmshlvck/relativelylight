@@ -71,7 +71,7 @@ mod multipart;
 pub mod csrf;
 
 /// Server-side rendering of integer-UTC timestamps in the request's zone: [`Tz`](time::Tz) (from a
-/// cookie) and [`TzPicker`](time::TzPicker). See `docs/TIME.md`.
+/// cookie), [`picker`](time::picker) and [`JS`](time::JS). See `docs/TIME.md`.
 #[cfg(feature = "tz")]
 pub mod time;
 

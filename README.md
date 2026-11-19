@@ -56,7 +56,7 @@ URL, verified (and re-authenticated) before it's on.</sub></td>
   responses, and upload-form, preview and thumbnail components. Storage, naming and listing stay yours.
 - **Timezones** (`tz`): instants stored as integer UTC seconds (dates as a native `DATE`,
   [TIME.md](docs/TIME.md#1-storage-model)), rendered server-side in the operator's zone, and
-  `TzPicker`, a type-to-search zone selector for a navbar or the profile page (a cookie, set from the
+  `time::picker`, a type-to-search zone selector for a navbar or the profile page (a cookie, set from the
   browser's own zone on a first visit; UTC without one).
 
 ## Quick start
@@ -162,7 +162,7 @@ cargo run -p files-example           # files in a directory: upload, preview, do
 - **[docs/AUTH.md](docs/AUTH.md)** — sessions, login, 2FA, passkeys, SSO, API keys, gates, CSRF.
 - **[docs/AUTH-SECURITY.md](docs/AUTH-SECURITY.md)** — the security reasoning behind `auth`: what each rule defends against, and why.
 - **[docs/SSO_TESTING_KEYCLOAK.md](docs/SSO_TESTING_KEYCLOAK.md)** — trying SSO by hand: Keycloak in a container and `examples/auth`.
-- **[docs/TIME.md](docs/TIME.md)** — timestamps and timezones, and the `TzPicker` zone selector.
+- **[docs/TIME.md](docs/TIME.md)** — timestamps and timezones, and the `time::picker` zone selector.
 - **[docs/DATAINPUT.md](docs/DATAINPUT.md)** — the `validate` module.
 - **[docs/FILES.md](docs/FILES.md)** — uploads, downloads and the file components.
 - **[docs/MIGRATION-0.5.md](docs/MIGRATION-0.5.md)** — upgrading to 0.5 (unreleased) from 0.4.

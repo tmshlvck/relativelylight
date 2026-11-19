@@ -689,8 +689,8 @@ pub struct ProfileSection {
     /// `csrf::Csrf::hidden_input(&s.csrf)` — or its POST is refused like any other.
     pub csrf: String,
     /// This request's headers — for whatever your section reads from the request itself, such as a
-    /// display-preference cookie: `time::Tz::from_headers(&s.headers)` preselects a
-    /// [`TzPicker`](crate::time::TzPicker) in the caller's current zone.
+    /// display-preference cookie: `time::Tz::from_headers(&s.headers)` gives a
+    /// [`time::picker`](crate::time::picker) the caller's current zone.
     pub headers: HeaderMap,
     /// The confirm-it's-you inputs for a sensitive form in your section, as an HTML fragment: the
     /// caller's password, code and passkey, whichever they have — the same block (and passkey

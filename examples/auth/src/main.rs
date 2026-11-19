@@ -414,14 +414,14 @@ async fn secret(State(app): State<AppState>, headers: HeaderMap) -> Response {
 /// request's headers (for a preference cookie), and the confirm-it's-you inputs for a sensitive form.
 fn app_cards(s: &relativelylight::auth::ProfileSection) -> String {
     let csrf = relativelylight::csrf::Csrf::hidden_input(&s.csrf);
-    // A preference: the display timezone, a cookie the app's tables format times in.
+    // The display timezone, a cookie the app's tables format times in.
     let zone = relativelylight::time::Tz::from_headers(&s.headers);
-    let preferences = auth::profile_card(
-        "Preferences",
+    let timezone = auth::profile_card(
+        "Timezone",
         &format!(
-            r#"<p id="preferences" class="text-muted small mb-2">Times on these pages are shown in this zone. Type
+            r#"<p id="timezone" class="text-muted small mb-2">Times on these pages are shown in this zone. Type
 to search; choosing one applies it.</p>{}"#,
-            relativelylight::time::TzPicker::new().render(&zone)
+            relativelylight::time::picker(&zone)
         ),
     );
     // A sensitive action of the app's own: re-authenticated in its handler.
@@ -440,7 +440,7 @@ live session alone shouldn't be enough for, so the handler asks for a factor aga
             reauth = s.reauth_fields,
         ),
     );
-    preferences + &webhook
+    timezone + &webhook
 }
 
 /// What an app's own sensitive route submits: the caller's re-authentication — any of their factors,
@@ -772,7 +772,7 @@ details.user-menu>summary::-webkit-details-marker{{display:none}}details.user-me
 <div class="d-flex align-items-center gap-3 ms-auto">{right}</div></nav>
 <main class="container-fluid py-3 flex-grow-1">{body}</main>
 <footer class="border-top py-2 text-center small text-muted">Times are shown in <b>{zone}</b>
-(<a href="/profile#preferences">change</a>) · demo accounts <code>admin</code> and <code>alice</code>,
+(<a href="/profile#timezone">change</a>) · demo accounts <code>admin</code> and <code>alice</code>,
 password <code>password</code></footer>
 <script>{tz_js}</script>
 </body></html>"#

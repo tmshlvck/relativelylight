@@ -181,7 +181,7 @@ impl Shell {
                 .map(|(label, href)| NavItem { label, href, active: here == href })
                 .into(),
             body,
-            tz_picker: TzPicker::new().render(&Tz::from_headers(headers)),
+            tz_picker: time::picker(&Tz::from_headers(headers)),
             css: CSS,
             tz_js: relativelylight::time::JS,
         }
