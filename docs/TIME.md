@@ -7,7 +7,7 @@ timezone database.
 
 - [1. Storage model](#1-storage-model)
 - [2. The zone for one request: `Tz`](#2-the-zone-for-one-request-tz)
-- [3. The picker and its handler](#3-the-picker-and-its-handler)
+- [3. The picker, and the first visit](#3-the-picker-and-the-first-visit)
 - [4. What follows the zone](#4-what-follows-the-zone)
 - [5. DST, and why the server does this](#5-dst-and-why-the-server-does-this)
 - [6. Choosing a policy](#6-choosing-a-policy)
@@ -114,129 +114,51 @@ labelled UTC**, so there is no guessing and no partial failure.
 The `crud::ui` components do this for you — `render_for` takes the headers, so cells and inputs are
 already in the caller's zone. You need `Tz` directly only on your own pages.
 
-## 3. The picker and its handler
+## 3. The picker, and the first visit
 
-[`TzPicker`] renders a `<select>` of zones in a plain form that posts `tz` and `back` to a route of
-yours. Setting a cookie needs a *response*, which a fragment renderer never gets to write — so this
-stays your route, like everything else in this crate:
+**[`time::JS`] goes in every page's shell**, once, like `crud::ui::JS`. It does two things:
+
+- **A first visit takes the browser's zone.** With no `rl_tz` cookie, it sets the browser's own zone
+  and reloads once, so from the second page on everything renders in local time. A zone chosen later
+  is never overwritten. Without JavaScript the cookie never appears, and pages render in UTC.
+- **It drives the picker.** Choosing a zone sets the cookie in the browser and reloads: there is no
+  route of yours behind it.
+
+[`TzPicker`] renders the picker: a text input over a list of every zone the server's timezone database
+knows, which browsers search as you type. **UTC** and **Browser timezone** lead the list. A name that
+isn't in it means UTC.
 
 ```rust
-// in your shell, e.g. the navbar:
-let picker = TzPicker::new().render(&Tz::from_headers(&headers), current_url);
-
-// the route it posts to:
-async fn set_tz(Form(fields): Form<HashMap<String, String>>) -> Response {
-    let (cookie, back) = TzPicker::submitted(fields.get("tz"), fields.get("back"));
-    ([(header::SET_COOKIE, cookie)], Redirect::to(&back)).into_response()
-}
+// in your shell: the picker wherever you want it, and the script at the end of <body>
+let picker = TzPicker::new().render(&Tz::from_headers(&headers));
+// <script>{relativelylight::time::JS}</script>
 ```
 
-`back` is the page the user was on, so setting a zone doesn't lose the table they were looking at (only a local path is followed — anything else returns to `/`), and
-`action(path)` changes where the form posts (default `/_rl/tz`).
+The list holds the database's names as they are, old and new side by side (`Europe/Kiev` and
+`Europe/Kyiv`); either renders right. Some browsers report a zone by its old name, which the server
+accepts as it is.
 
-**Where you put it is entirely yours**, because it is a fragment and nothing about it is positional:
+**Where you put the picker is yours**, because it is a fragment:
 
-- **In the navbar** (what the examples do) — one `TzPicker` rendered by the shell on every page, with
-  `back` set to the current URL, so a zone can be changed from wherever the operator noticed the
-  problem. This is the right default for a console whose whole job is reading timestamps.
-
-  The library's own pages carry it too. [`Auth::login_shell`](AUTH.md) and `Auth::profile_shell`
-  are handed the request's `http::request::Parts`, so the shell that wraps `/login`, `/profile`,
-  `/profile/totp` and a manager's `/profile/{id}` reads the cookie and renders the same picker,
-  with the zone the caller already chose selected:
-
-  ```rust
-  let auth = Auth::new(db, lockout)
-      .login_shell(|form, req| shell(req, None, form))
-      .profile_shell(|frag, who, req| shell(req, Some(who), frag));
-
-  fn shell(req: &Parts, who: Option<&Identity>, body: &str) -> String {
-      // A re-rendered form after a refused POST has no URL to return to; send `back` home instead.
-      let back = match req.method {
-          Method::GET => req.uri.path_and_query().map_or("/", |p| p.as_str()),
-          _ => "/profile",
-      };
-      let picker = TzPicker::new().render(&Tz::from_headers(&req.headers), back);
-      // … the navbar with `picker` in it, `who` as its user link, `body` below
-  }
-  ```
-
-  `examples/adminpanel` does this.
-- **On the profile page** — either in your own `/settings` page, or as a card on the library's
-  profile page with [`Auth::profile_extra`](AUTH.md). Better when the zone is a rarely changed
-  personal preference rather than a working control. The hook gets the request's headers, so the
-  picker shows the caller's current zone, and `back` returns to the profile page:
+- **In the navbar** — rendered by the shell on every page, so a zone can be changed from wherever the
+  operator noticed. Right for a console whose whole job is reading timestamps. `examples/crud` and
+  `examples/adminpanel` do this, and the library's own pages carry it too: [`Auth::login_shell`](AUTH.md)
+  and `Auth::profile_shell` are handed the request, so the shell reads the cookie as for any page.
+- **On the profile page** — a card of [`Auth::profile_extra`](AUTH.md), for a rarely changed personal
+  preference. `examples/auth` does this:
 
   ```rust
   let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
-      let picker = TzPicker::new().render(&Tz::from_headers(&s.headers), "/profile");
-      auth::profile_card("Timezone", &picker)
+      auth::profile_card("Timezone", &TzPicker::new().render(&Tz::from_headers(&s.headers)))
   });
   ```
 
-  The `/_rl/tz` route is unchanged. The choice is still a cookie, so it applies **per browser**, not per
-  account. For a zone that follows the user to other devices, see *Store it per user* in
-  [§6](#6-choosing-a-policy).
-- **Both**, or neither: nothing in the library reads the picker. It only reads the **cookie**, via
-  `Tz::from_headers` in your handler. A page with no picker anywhere still renders in whatever zone
-  the cookie says, and an app that gets the zone from somewhere else entirely — a column on its own
-  user table, a query parameter, an org-wide setting — just passes a different `Tz` and never calls
-  `TzPicker` at all.
+**Every page shows the zone its times are in.** A navbar picker does that by itself. With the picker
+elsewhere, say so on each page, as `examples/auth`'s footer does ("Times are shown in Europe/Prague").
+A form's help text names it too (§4).
 
-One thing to keep consistent: the cookie is set by *your* route, so if you render the picker in two
-places, point both at the same `action` — otherwise you maintain two handlers that must agree about
-the cookie's attributes.
-
-### Which zones are offered
-
-| | |
-|---|---|
-| `TzPicker::new()` | the default: **UTC, Europe, the United States** — [`zones_default`], 42 entries |
-| `.all_zones()` | **everything the host's database knows**, minus the exclusions below — [`zones_all`], ~450 entries |
-| `.zones(list)` | exactly what you pass, in your order — the usual case |
-
-The third is what a deployment normally does: read a list of IANA names from YAML, JSON or a settings
-table at startup and hand it over.
-
-```rust
-// cfg.timezones: Vec<String>
-let picker = TzPicker::new().zones(cfg.timezones);
-if !picker.unknown_zones().is_empty() {                       // check once, at boot
-    tracing::warn!(ignored = ?picker.unknown_zones(), "unknown timezone names in config");
-}
-```
-
-A name the host's database doesn't know is **dropped rather than offered**, and kept in
-`unknown_zones()` — an `<option>` that silently means UTC is exactly the kind of control that looks
-like it works, and a typo in configuration should be a line in your startup log, not a zone an
-operator can't find. Everything else is yours: the order is the order you gave, and no name you list
-is second-guessed.
-
-Two things the picker guarantees whatever you configure: **UTC is always reachable**, and **the
-caller's current zone is always in the menu** (prepended if your list omits it). Without that second
-one, a `<select>` with no selected option displays its first entry — and the next submit would move
-the user to it.
-
-### The exclusions
-
-The crate's own lists — [`zones_default`] and [`zones_all`] — leave out the **Russian Federation and
-Belarus**: the 28 zones the IANA database's own country table (`zone1970.tab`) assigns to `RU` or
-`BY`, `Europe/Simferopol` among them (that table lists it as `RU,UA`). They are available as
-[`time::EXCLUDED`], and `is_excluded(zone)` tests one name.
-
-This governs what the crate *ships*, not what your app may offer: `zones(…)` takes your list as
-given. Apply the same policy to a configured list with one line if you want it:
-
-```rust
-cfg.timezones.retain(|z| !relativelylight::time::is_excluded(z));
-```
-
-[`zones_default`]: https://docs.rs/relativelylight/latest/relativelylight/time/fn.zones_default.html
-[`zones_all`]: https://docs.rs/relativelylight/latest/relativelylight/time/fn.zones_all.html
-[`time::EXCLUDED`]: https://docs.rs/relativelylight/latest/relativelylight/time/constant.EXCLUDED.html
-
-`Tz::cookie()` is a `Set-Cookie` value: path `/`, a year, `SameSite=Lax`, and deliberately neither
-`HttpOnly` nor `Secure`-only — it is a display preference, not a credential.
+The zone is a cookie, so it belongs to the **browser**, not the account: two machines in two stations
+each keep their own. An app that wants a zone per user stores it itself (§6).
 
 ## 4. What follows the zone
 
@@ -275,30 +197,14 @@ the stored integers correctly on the next render. That is the whole reason the c
 
 The cookie is the mechanism; the policy is yours.
 
-- **Nothing at all.** Don't render a picker. Everything is UTC, labelled UTC. Correct, and right for an
-  operations console whose logs are UTC too.
-- **Let the user choose** (the usual). Render `TzPicker` and the three-line handler. The choice persists
-  for a year and costs no storage.
-- **Seed it from the browser once.** The server cannot know the browser's zone, so with no cookie
-  the default is UTC, not browser-local. For a browser-local first-visit default, put this in your
-  shell. It sets the cookie only when there is none, so a zone the user chose is never overwritten:
-
-  ```html
-  <script>
-  if (!document.cookie.split('; ').some(c => c.startsWith('rl_tz='))) {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    document.cookie = 'rl_tz=' + encodeURIComponent(tz) + '; Path=/; Max-Age=31536000; SameSite=Lax';
-    if (document.cookie.includes('rl_tz=')) location.reload();   // no loop if cookies are off
-  }
-  </script>
-  ```
-
-  The first page renders in UTC, then reloads once. A zone the host's tz database doesn't know still
-  renders as UTC. The crate doesn't ship this script on purpose: it is the app's policy, and every app
-  wants a slightly different trigger.
+- **Local time, chosen in the browser** (the usual): [`time::JS`] on every page and a picker somewhere.
+  A first visit gets the browser's zone; a choice lasts a year and costs no storage.
+- **UTC only.** Leave out both: every page renders UTC, labelled UTC. Right for an operations console
+  whose logs are UTC too.
 - **Store it per user.** Read your own `user.timezone` column in your page handler and pass
-  `Tz::named(&user.timezone)` where you would have passed `Tz::from_headers(&headers)`; set the cookie
-  at login so the library's components agree. The crate keeps no per-user state of its own.
+  `Tz::named(&user.timezone)` where you would have passed `Tz::from_headers(&headers)`, and set the
+  cookie at login with `Tz::cookie()` (a `Set-Cookie` value: path `/`, a year, `SameSite=Lax`) so the
+  library's components agree. The crate keeps no per-user state of its own.
 - **Follow the server's zone.** `Tz::named(&std::env::var("TZ")?)`, if matching syslog matters more than
   matching the operator.
 
@@ -320,11 +226,14 @@ The cookie is the mechanism; the policy is yours.
       └─ ui::decode  ──►  Tz::parse  ──►  1733050800  ──►  the same i64 column
 ```
 
-Runnable: `cargo run -p crud-example`, then open **`/event`** and pick a zone in the navbar. That
+Runnable: `cargo run -p crud-example`, then open **`/event`**: it renders in your browser's zone, and
+the navbar picks another. That
 table's rows sit either side of both 2026 DST transitions, so a zone that observes DST shows the
 January rows an hour off the June ones — from identical stored integers. Editing `Happens at` reads
 your typed wall-clock time back in that zone, and **Export CSV** produces a file that says what the
-screen says. `examples/adminpanel` wires the same picker into a login-gated app.
+screen says. `examples/adminpanel` wires the same picker into a login-gated app, and `examples/auth`
+puts it on the profile page and names the zone in its footer.
 
 [`time::COOKIE`]: https://docs.rs/relativelylight/latest/relativelylight/time/constant.COOKIE.html
 [`TzPicker`]: https://docs.rs/relativelylight/latest/relativelylight/time/struct.TzPicker.html
+[`time::JS`]: https://docs.rs/relativelylight/latest/relativelylight/time/constant.JS.html

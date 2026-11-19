@@ -13,11 +13,16 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
-- **`TzPicker` posts to `/_rl/tz` by default**, not `/tz`, and the examples serve the relation picker
-  at `/_rl/pick`: plumbing under one prefix, out of the way of an app's pages
-  ([APP.md → Your URL namespace](docs/APP.md#your-url-namespace)). **Upgrade:** mount your timezone
-  handler at `/_rl/tz`, or keep `/tz` with `TzPicker::new().action("/tz")`
-  ([MIGRATION-0.5.md §12](docs/MIGRATION-0.5.md#12-tzpicker-posts-to-_rltz)).
+- **The timezone picker sets the zone in the browser** ([TIME.md §3](docs/TIME.md#3-the-picker-and-the-first-visit)):
+  a type-to-search list of every zone the server knows, led by UTC and "Browser timezone", driven by
+  the new `time::JS`. A first visit takes the browser's own zone. There is no handler any more:
+  `TzPicker::submitted` and `.action()` are gone, and so are the curated lists (`zones_default`,
+  `zones_all`, `.zones()`, `.all_zones()`, `unknown_zones()`, `Tz::known`) and the exclusions
+  (`EXCLUDED`, `is_excluded`). `render` takes only the zone. **Upgrade:** inline `time::JS` in every page, drop
+  your timezone route, and render with `TzPicker::new().render(&tz)`
+  ([MIGRATION-0.5.md §12](docs/MIGRATION-0.5.md#12-the-timezone-picker-is-a-script)). The examples
+  serve the relation picker at `/_rl/pick`, plumbing under one prefix
+  ([APP.md → Your URL namespace](docs/APP.md#your-url-namespace)).
 - **SSO accounts re-authenticate through their provider**
   ([AUTH.md §5h](docs/AUTH.md#5h-re-authentication-before-sensitive-changes)) instead of passing
   unchallenged: a round trip to `GET {base}/{key}/reauth` leaves a one-use confirmation on the
@@ -93,7 +98,7 @@ is easy to miss in a diff.
   `|frag, who| …` → `|frag, who, req| …`, `|| …` → `|req| …`, and pass `&req` to `csrf.reject()`
   ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#1-auths-page-callbacks-get-the-request)).
   `examples/adminpanel` renders its timezone picker on the login and profile pages
-  ([TIME.md → The picker](docs/TIME.md#3-the-picker-and-its-handler)).
+  ([TIME.md → The picker](docs/TIME.md#3-the-picker-and-the-first-visit)).
 
 ### Added
 
@@ -289,7 +294,7 @@ is easy to miss in a diff.
 - **`ProfileSection::headers`**: the `Auth::profile_extra` hook now gets the request's headers, so a
   section can read a preference cookie. A `TzPicker` on the profile page can now show the caller's
   current zone instead of UTC
-  ([TIME.md → The picker](docs/TIME.md#3-the-picker-and-its-handler)).
+  ([TIME.md → The picker](docs/TIME.md#3-the-picker-and-the-first-visit)).
 
 ### Fixed
 

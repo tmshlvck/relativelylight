@@ -16,11 +16,11 @@
 
 use askama::Template;
 use axum::body::Bytes;
-use axum::extract::{Form, Path, State};
+use axum::extract::{Path, State};
 use axum::http::request::Parts;
-use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
+use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::Router;
 use model::{author, post, profile, tag, user};
 use relativelylight::auth::{self, Auth, GroupReadWrite, Identity, UserReadGroupWrite};
@@ -31,7 +31,6 @@ use relativelylight::middleware::RealIp;
 use relativelylight::time::{Tz, TzPicker};
 use relativelylight::validate;
 use sea_orm::IdenStatic; // `post::Column::Title.as_str()` — a column name the compiler checks
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -51,7 +50,8 @@ struct Shell {
     body: String,
     css: &'static str, // the library's few CSS rules (crud::ui::CSS)
     js: &'static str,  // crud::ui::JS: modal dialogs with Esc, and the relation dialogs
-    tz_picker: String, // the navbar timezone form (time::TzPicker), posting to /_rl/tz
+    tz_picker: String, // the navbar timezone picker (time::TzPicker)
+    tz_js: &'static str, // time::JS: sets the zone cookie from the picker, and the browser's on a first visit
 }
 
 /// The page inside the relation picker's dialog: no navbar, the same stylesheet and colour mode.
@@ -72,9 +72,7 @@ fn bare(status: StatusCode, page: relativelylight::crud::engine::Result<String>)
 }
 
 impl Shell {
-    /// `back` is where the timezone picker returns to — the page being rendered, so setting a zone
-    /// doesn't lose the table the operator was looking at.
-    fn page(title: impl Into<String>, user: impl Into<String>, body: String, headers: &HeaderMap, back: &str) -> Self {
+    fn page(title: impl Into<String>, user: impl Into<String>, body: String, headers: &HeaderMap) -> Self {
         Self {
             title: title.into(),
             user: user.into(),
@@ -82,31 +80,17 @@ impl Shell {
             body,
             css: CSS,
             js: JS,
-            tz_picker: timezones().render(&Tz::from_headers(headers), back),
+            tz_picker: TzPicker::new().render(&Tz::from_headers(headers)),
+            tz_js: relativelylight::time::JS,
         }
     }
 }
 
-/// The timezone picker this app offers, configured the way a real deployment configures it: a list
-/// of IANA names read at startup — here from `RL_TIMEZONES`, in an app from YAML/JSON or a settings
-/// table — falling back to the library's default (UTC + Europe + the United States).
-///
-/// `RL_TIMEZONES=all` offers every zone the host knows; `RL_TIMEZONES=UTC,Europe/Prague,Asia/Tokyo`
-/// offers exactly those three. Names the host's database doesn't know are dropped and reported by
-/// `check_timezones()` at boot, rather than appearing as options that quietly mean UTC.
 impl Shell {
     /// The shell for `who`: their name in the navbar, and the badge if a password change is due.
     fn for_user(mut self, who: &Identity) -> Self {
         self.password_due = who.password_change.is_some();
         self
-    }
-}
-
-fn timezones() -> TzPicker {
-    match std::env::var("RL_TIMEZONES").ok().as_deref() {
-        None | Some("") => TzPicker::new(),
-        Some("all") => TzPicker::new().all_zones(),
-        Some(list) => TzPicker::new().zones(list.split(',').map(str::trim).filter(|z| !z.is_empty())),
     }
 }
 
@@ -213,12 +197,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth::reset_admin_access(&db, ADMIN_GROUP, "admin", pw).await?;
         println!("admin password set, account enabled, 2FA cleared, added to '{ADMIN_GROUP}'");
         return Ok(());
-    }
-
-    // Configuration is checked at startup, not discovered by an operator whose zone is missing.
-    let picker = timezones();
-    if !picker.unknown_zones().is_empty() {
-        eprintln!("RL_TIMEZONES: ignoring unknown zone(s): {:?}", picker.unknown_zones());
     }
 
     auth::make_admin(&db, ADMIN_GROUP, "admin", "password").await?;
@@ -374,7 +352,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/", get(|| async { Redirect::to("/admin/post") }))
         .route("/admin/{entity}", get(home).post(save))
         .route("/_rl/pick", get(pick).post(pick_write))
-        .route("/_rl/tz", post(set_tz))
         .with_state(app);
 
     // Merge our pages and the login routes. No middleware: each handler/gate does its own on-demand
@@ -464,7 +441,7 @@ async fn home(
     }
 
     match panel.render_for(&headers, &state).await {
-        Ok(body) => page(body, &who, &headers, &uri),
+        Ok(body) => page(body, &who, &headers),
         // A gate refusing a read (an `editor` opening an accounts table, say) answers 401/403 here.
         Err(e) => e.into_response(),
     }
@@ -489,18 +466,11 @@ async fn save(
     match panel.submit(&headers, ip, &body, &state).await {
         Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
         Ok(Outcome::Invalid(state)) => match panel.render_for(&headers, &state).await {
-            Ok(body) => (StatusCode::UNPROCESSABLE_ENTITY, page(body, &who, &headers, &uri)).into_response(),
+            Ok(body) => (StatusCode::UNPROCESSABLE_ENTITY, page(body, &who, &headers)).into_response(),
             Err(e) => e.into_response(),
         },
         Err(e) => e.into_response(),
     }
-}
-
-/// The timezone picker's handler: set the cookie, come back to the page it was set from. Timestamps
-/// are then formatted server-side in that zone — cells, form inputs and CSV alike.
-async fn set_tz(Form(fields): Form<HashMap<String, String>>) -> Response {
-    let (cookie, back) = TzPicker::submitted(fields.get("tz"), fields.get("back"));
-    ([(header::SET_COOKIE, cookie)], Redirect::to(&back)).into_response()
 }
 
 /// The panel for this caller: the accounts section when the accounts gate admits them — the gate that
@@ -509,22 +479,12 @@ fn panel<'a>(app: &'a App, who: &Identity) -> Admin<'a> {
     build_admin(&app.engine, &app.auth, app.accounts.admits(who))
 }
 
-fn page(body: String, who: &Identity, headers: &HeaderMap, uri: &Uri) -> Response {
-    let back = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-    let html = Shell::page("relativelylight", who.username.clone(), body, headers, back)
+fn page(body: String, who: &Identity, headers: &HeaderMap) -> Response {
+    let html = Shell::page("relativelylight", who.username.clone(), body, headers)
         .for_user(who)
         .render()
         .unwrap_or_default();
     Html(html).into_response()
-}
-
-/// Where the navbar's timezone picker returns to on a page the library rendered: the page itself when
-/// it was a `GET`, else `fallback` — a re-rendered form after a refused `POST` has no URL to go back to.
-fn back_to<'a>(req: &'a Parts, fallback: &'a str) -> &'a str {
-    match req.method {
-        Method::GET => req.uri.path_and_query().map(|p| p.as_str()).unwrap_or(fallback),
-        _ => fallback,
-    }
 }
 
 // The app styles the library's login form: drop it into our shell as a centered card. Anonymous, so
@@ -537,7 +497,7 @@ fn login_shell(form: &str, req: &Parts) -> String {
 <p class="text-muted small mt-2 mb-0">Demo: <code>admin</code> / <code>password</code></p>
 </div></div>"#
     );
-    Shell::page("Log in", "", body, &req.headers, back_to(req, "/login")).render().unwrap_or_default()
+    Shell::page("Log in", "", body, &req.headers).render().unwrap_or_default()
 }
 
 // The app styles the library's profile/password page the same way. The library hands us the caller's
@@ -548,7 +508,7 @@ fn profile_shell(fragment: &str, who: &Identity, req: &Parts) -> String {
     let body = format!(
         r#"<div class="mx-auto" style="max-width:72rem">{fragment}</div>"#
     );
-    Shell::page("Profile", who.username.clone(), body, &req.headers, back_to(req, "/profile"))
+    Shell::page("Profile", who.username.clone(), body, &req.headers)
         .for_user(who)
         .render()
         .unwrap_or_default()

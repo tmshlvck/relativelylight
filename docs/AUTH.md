@@ -216,7 +216,7 @@ use relativelylight::auth::{self, ProfileSection};
 use relativelylight::csrf::Csrf;
 
 let auth = Auth::new(db, lockout).profile_extra(|s: ProfileSection| async move {
-    let zone = TzPicker::new().render(&Tz::from_headers(&s.headers), "/profile");   // a preference
+    let zone = TzPicker::new().render(&Tz::from_headers(&s.headers));   // a preference
     let form = format!(r#"<form method="post" action="/webhook-secret/rotate">{}{}
         <button class="btn btn-sm btn-outline-danger">Rotate the secret</button></form>"#,
         Csrf::hidden_input(&s.csrf),   // `s.csrf` is *this request's* token
@@ -229,7 +229,7 @@ What the hook is handed, in `ProfileSection`:
 - **`s.csrf`** is what makes a card able to hold a real form. The hook can't mint a token itself, and
   a form without one is refused like any other POST (§7).
 - **`s.headers`** are the request's headers, for a card that reads a preference cookie, such as a
-  [timezone picker](TIME.md#3-the-picker-and-its-handler) showing the caller's current zone.
+  [timezone picker](TIME.md#3-the-picker-and-the-first-visit) showing the caller's current zone.
 - **`s.reauth_fields`** are the caller's confirm-it's-you inputs (password, code, passkey), sharing
   the page's passkey challenge.
 

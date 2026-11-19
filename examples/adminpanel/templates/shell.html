@@ -56,6 +56,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>{{ js|safe }}</script>
+  <script>{{ tz_js|safe }}</script>
   <script>
     function ruTheme(){return document.documentElement.getAttribute('data-bs-theme')||'light';}
     function ruThemeIcon(){var b=document.getElementById('theme-toggle');if(b){var d=ruTheme()==='dark';b.textContent=d?'☀':'☾';b.title=d?'Switch to light mode':'Switch to dark mode';}}

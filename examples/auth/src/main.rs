@@ -130,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The CSRF refusal, in this app's own shell instead of the library's bare page. One closure
         // covers the library's forms *and* `csrf::enforce` on the routes above, because it travels on the
         // `auth.csrf()` handle. Same discipline as the default: no user named, no cookies set, still 403.
-        .csrf_rejection(|_req| {
+        .csrf_rejection(|req| {
             (
                 StatusCode::FORBIDDEN,
                 Html(page(
@@ -139,14 +139,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     r#"<div class="alert alert-danger">That form was stale, or the request didn't come
 from this site. Reload the page and try again.</div>
 <a class="btn btn-outline-secondary btn-sm" href="/">Start over</a>"#,
+                    &req.headers,
                 )),
             )
                 .into_response()
         })
         // The library's pages in the same shell as ours: the login form as a centered card, the
         // profile with the navbar of a signed-in user.
-        .login_shell(move |form, _req| login_page(form, &sso_buttons))
-        .profile_shell(|frag, who, _req| profile_page(frag, who))
+        .login_shell(move |form, req| login_page(form, &sso_buttons, &req.headers))
+        .profile_shell(|frag, who, req| profile_page(frag, who, &req.headers))
         // API keys: a card on /profile to mint (re-authenticated, shown once), list and revoke them.
         // `/api/whoami` accepts them; the accounts panel shows everyone's (docs/AUTH.md §5k).
         .api_keys(ApiKeys::new("demo_"))
@@ -196,8 +197,6 @@ from this site. Reload the page and try again.</div>
     let mut app = Router::new()
         .route("/", get(dashboard)) // signed in only; a card per thing this user may open
         .route("/secret", get(secret)) // gated on demand (see `secret`)
-        // The timezone preference, from the profile's Preferences card.
-        .route("/_rl/tz", post(set_tz))
         .route("/api/whoami", get(whoami)) // the app's own credential check (see `whoami`)
         // The accounts panel: two handlers on one path, the model named by the path segment. Its
         // gate is `GroupReadWrite`, so a logged-in non-admin gets 403 rather than a list of accounts.
@@ -363,7 +362,7 @@ async fn dashboard(State(app): State<AppState>, headers: HeaderMap) -> Response 
         "Create a key",
     );
     let body = format!(r#"<div class="row g-3">{cards}</div>"#);
-    Html(page("Dashboard", Some(&who), &body)).into_response()
+    Html(page("Dashboard", Some(&who), &body, &headers)).into_response()
 }
 
 /// One dashboard card.
@@ -403,7 +402,7 @@ async fn secret(State(app): State<AppState>, headers: HeaderMap) -> Response {
         name = who.username,
         level = who.level,
     );
-    Html(page("Secret page", Some(&who), &body)).into_response()
+    Html(page("Secret page", Some(&who), &body, &headers)).into_response()
 }
 
 /// **The app's own cards on the profile page** — `Auth::profile_extra`. The profile is a grid of cards;
@@ -420,8 +419,9 @@ fn app_cards(s: &relativelylight::auth::ProfileSection) -> String {
     let preferences = auth::profile_card(
         "Preferences",
         &format!(
-            r#"<p class="text-muted small mb-2">Times on these pages are shown in this zone.</p>{}"#,
-            relativelylight::time::TzPicker::new().render(&zone, "/profile")
+            r#"<p id="preferences" class="text-muted small mb-2">Times on these pages are shown in this zone. Type
+to search; choosing one applies it.</p>{}"#,
+            relativelylight::time::TzPicker::new().render(&zone)
         ),
     );
     // A sensitive action of the app's own: re-authenticated in its handler.
@@ -441,14 +441,6 @@ live session alone shouldn't be enough for, so the handler asks for a factor aga
         ),
     );
     preferences + &webhook
-}
-
-/// `POST /_rl/tz` — the Preferences card's picker: set the zone cookie and return to the profile
-/// (`TzPicker::submitted` keeps only a local `back`, so this can't redirect elsewhere). A display
-/// preference, like a theme: no session needed.
-async fn set_tz(Form(form): Form<std::collections::HashMap<String, String>>) -> Response {
-    let (cookie, back) = relativelylight::time::TzPicker::submitted(form.get("tz"), form.get("back"));
-    ([(axum::http::header::SET_COOKIE, cookie)], Redirect::to(&back)).into_response()
 }
 
 /// What an app's own sensitive route submits: the caller's re-authentication — any of their factors,
@@ -564,22 +556,22 @@ async fn accounts_show(
     let mut state = ViewState::from_uri(&uri);
     state.entity = Some(entity);
     match accounts(&app.engine, &app.auth).render_for(&headers, &state).await {
-        Ok(body) => Html(wide_page("Accounts", &who, &body)).into_response(),
+        Ok(body) => Html(wide_page("Accounts", &who, &body, &headers)).into_response(),
         // A signed-in non-admin lands here: the gate refuses the *read*, so there is no panel — a page
         // that says so, in our shell, rather than the library's bare status.
-        Err(relativelylight::crud::Error::Forbidden) => admins_only(&who),
+        Err(relativelylight::crud::Error::Forbidden) => admins_only(&who, &headers),
         Err(e) => e.into_response(),
     }
 }
 
 /// The 403 a signed-in non-admin gets for `/admin`: in the shell, saying why.
-fn admins_only(who: &Identity) -> Response {
+fn admins_only(who: &Identity, headers: &HeaderMap) -> Response {
     let body = format!(
         r#"<div class="alert alert-warning">The accounts panel is for the <b>{ADMIN_GROUP}</b> group, and
 <b>{}</b> isn't in it.</div>"#,
         who.username
     );
-    (StatusCode::FORBIDDEN, Html(page("Admins only", Some(who), &body))).into_response()
+    (StatusCode::FORBIDDEN, Html(page("Admins only", Some(who), &body, headers))).into_response()
 }
 
 /// `POST /admin/{entity}` — hand the body to the library and redirect, or re-render with the
@@ -602,11 +594,11 @@ async fn accounts_save(
         Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
         Ok(Outcome::Invalid(state)) => match panel.render_for(&headers, &state).await {
             Ok(body) => {
-                (StatusCode::UNPROCESSABLE_ENTITY, Html(wide_page("Accounts", &who, &body))).into_response()
+                (StatusCode::UNPROCESSABLE_ENTITY, Html(wide_page("Accounts", &who, &body, &headers))).into_response()
             }
             Err(e) => e.into_response(),
         },
-        Err(relativelylight::crud::Error::Forbidden) => admins_only(&who),
+        Err(relativelylight::crud::Error::Forbidden) => admins_only(&who, &headers),
         Err(e) => e.into_response(),
     }
 }
@@ -736,7 +728,11 @@ fn unauthorized(why: &str) -> Response {
 // leading to their profile, and "log out". The library renders fragments; the page is ours.
 
 /// The page around everything: the navbar for `who` (or none), `body` in the main column.
-fn shell(title: &str, who: Option<&Identity>, body: &str) -> String {
+/// The shell names the zone times are shown in (the footer), since the picker is only on `/profile`,
+/// and inlines `time::JS`, which sets that zone from the browser on a first visit and from the picker.
+fn shell(title: &str, who: Option<&Identity>, body: &str, headers: &HeaderMap) -> String {
+    let zone = relativelylight::crud::ui::esc(&serde_json::json!(relativelylight::time::Tz::from_headers(headers).name()));
+    let tz_js = relativelylight::time::JS;
     let mut left = String::new();
     let mut right = String::new();
     match who {
@@ -775,35 +771,38 @@ details.user-menu>summary::-webkit-details-marker{{display:none}}details.user-me
 <div class="d-flex align-items-center gap-3"><a class="navbar-brand" href="/">auth example</a>{left}</div>
 <div class="d-flex align-items-center gap-3 ms-auto">{right}</div></nav>
 <main class="container-fluid py-3 flex-grow-1">{body}</main>
-<footer class="border-top py-2 text-center small text-muted">relativelylight · demo accounts
-<code>admin</code> and <code>alice</code>, password <code>password</code></footer>
+<footer class="border-top py-2 text-center small text-muted">Times are shown in <b>{zone}</b>
+(<a href="/profile#preferences">change</a>) · demo accounts <code>admin</code> and <code>alice</code>,
+password <code>password</code></footer>
+<script>{tz_js}</script>
 </body></html>"#
     )
 }
 
 /// An app page: a heading and `body`, in a readable column.
-fn page(title: &str, who: Option<&Identity>, body: &str) -> String {
+fn page(title: &str, who: Option<&Identity>, body: &str, headers: &HeaderMap) -> String {
     shell(
         title,
         who,
         &format!(r#"<div class="mx-auto" style="max-width:48rem"><h1 class="h4 mb-3">{title}</h1>{body}</div>"#),
+        headers,
     )
 }
 
 /// A page at full width: the accounts panel's tables.
-fn wide_page(title: &str, who: &Identity, body: &str) -> String {
-    shell(title, Some(who), body)
+fn wide_page(title: &str, who: &Identity, body: &str, headers: &HeaderMap) -> String {
+    shell(title, Some(who), body, headers)
 }
 
 /// The library's profile fragment in our shell, with the signed-in navbar. The fragment is a grid of
 /// cards (two columns on a wide screen), so it gets a wide column, not a card of its own.
-fn profile_page(fragment: &str, who: &Identity) -> String {
-    shell("Profile", Some(who), &format!(r#"<div class="mx-auto" style="max-width:72rem">{fragment}</div>"#))
+fn profile_page(fragment: &str, who: &Identity, headers: &HeaderMap) -> String {
+    shell("Profile", Some(who), &format!(r#"<div class="mx-auto" style="max-width:72rem">{fragment}</div>"#), headers)
 }
 
 /// The library's login fragment as a centered card: the form, then the alternatives — the library's
 /// "or" and passkey button, and our SSO buttons under them.
-fn login_page(form: &str, sso_buttons: &str) -> String {
+fn login_page(form: &str, sso_buttons: &str, headers: &HeaderMap) -> String {
     shell(
         "Log in",
         None,
@@ -811,5 +810,6 @@ fn login_page(form: &str, sso_buttons: &str) -> String {
             r#"<div class="card shadow-sm mx-auto mt-4" style="max-width:24rem"><div class="card-body">
 <h1 class="h5 mb-3">Log in</h1>{form}{sso_buttons}</div></div>"#
         ),
+        headers,
     )
 }

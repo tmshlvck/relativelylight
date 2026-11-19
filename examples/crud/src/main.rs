@@ -22,10 +22,10 @@
 
 use askama::Template;
 use axum::body::Bytes;
-use axum::extract::{Form as AxumForm, Path, State};
+use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::Router;
 use model::{author, event, post, profile, tag, user};
 use relativelylight::authz::{Decision, Open, Operation};
@@ -36,7 +36,6 @@ use relativelylight::middleware::RealIp;
 use relativelylight::time::{Tz, TzPicker};
 use relativelylight::validate;
 use sea_orm::IdenStatic; // `post::Column::Title.as_str()` — a column name the compiler checks
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -51,8 +50,10 @@ struct Shell {
     /// `crud::ui::JS` on every page: the dialogs become real modals (Esc closes) and the relation
     /// dialogs (picker, "+ New", linked rows) work.
     js: &'static str,
-    /// The navbar timezone form (`time::TzPicker`), posting to our own `/_rl/tz`.
+    /// The navbar timezone picker (`time::TzPicker`), and `time::JS`, which sets the zone cookie from
+    /// it (and from the browser's own zone on a first visit).
     tz_picker: String,
+    tz_js: &'static str,
     /// Wrap the body in a card. The table pages want it; a `Form` renders its own card, and two
     /// nested ones look like a mistake.
     boxed: bool,
@@ -61,14 +62,6 @@ struct Shell {
 struct App {
     engine: Arc<Engine>,
     entities: Vec<String>,
-}
-
-/// The per-request bits every page needs beyond its own data: who is asking (the timezone cookie
-/// lives in their headers) and where they are (so the picker can return there).
-#[derive(Clone, Copy)]
-struct Req<'a> {
-    headers: &'a HeaderMap,
-    uri: &'a Uri,
 }
 
 #[tokio::main]
@@ -232,9 +225,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // the target's create form, which posts back here. Plumbing, not a page: under `/_rl/`,
         // the prefix this app keeps it in (docs/APP.md → Your URL namespace).
         .route("/_rl/pick", get(pick).post(pick_write))
-        // The timezone picker's handler — four lines, and the whole of this app's side of the
-        // feature. Everything the library renders then follows the cookie.
-        .route("/_rl/tz", post(set_tz))
         .with_state(app)
         // One resolution of the caller's address for the whole app (see relativelylight::middleware).
         // Mandatory: the write handlers read `RealIp` for the audit trail.
@@ -361,12 +351,6 @@ async fn home() -> Redirect {
     Redirect::to("/post")
 }
 
-/// Set the zone cookie and come back to the page it was set from.
-async fn set_tz(AxumForm(fields): AxumForm<HashMap<String, String>>) -> Response {
-    let (cookie, back) = TzPicker::submitted(fields.get("tz"), fields.get("back"));
-    ([(header::SET_COOKIE, cookie)], Redirect::to(&back)).into_response()
-}
-
 // ---- a page of the app's own: a dashboard (docs/APP.md §6) ----
 //
 // Nothing here is a library feature. The counts are `Engine::list` asked for one row — the backend
@@ -438,7 +422,7 @@ async fn dashboard(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) ->
     .render();
 
     match body {
-        Ok(body) => render(&app, "dashboard", Req { headers: &headers, uri: &uri }, Ok(body), false),
+        Ok(body) => render(&app, "dashboard", &headers, Ok(body), false),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -466,7 +450,7 @@ async fn entity_page(
             Err(e) => e.into_response(),
         };
     }
-    render(&app, &slug, Req { headers: &headers, uri: &uri }, table.render_for(&headers, &state).await, true)
+    render(&app, &slug, &headers, table.render_for(&headers, &state).await, true)
 }
 
 async fn entity_write(
@@ -485,7 +469,7 @@ async fn entity_write(
         // Refused: re-render with the messages and the typed values in place.
         Ok(Outcome::Invalid(state)) => {
             let html = table.render_for(&headers, &state).await;
-            let page = render(&app, &slug, Req { headers: &headers, uri: &uri }, html, true);
+            let page = render(&app, &slug, &headers, html, true);
             (StatusCode::UNPROCESSABLE_ENTITY, page).into_response()
         }
         Err(e) => e.into_response(),
@@ -514,7 +498,7 @@ async fn author_posts(
 ) -> Response {
     let state = ViewState::from_uri(&uri);
     let html = pinned(&app.engine, &id).render_for(&headers, &state).await;
-    render(&app, "post", Req { headers: &headers, uri: &uri }, html, true)
+    render(&app, "post", &headers, html, true)
 }
 
 async fn author_posts_write(
@@ -531,7 +515,7 @@ async fn author_posts_write(
         Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
         Ok(Outcome::Invalid(state)) => {
             let html = table.render_for(&headers, &state).await;
-            let page = render(&app, "post", Req { headers: &headers, uri: &uri }, html, true);
+            let page = render(&app, "post", &headers, html, true);
             (StatusCode::UNPROCESSABLE_ENTITY, page).into_response()
         }
         Err(e) => e.into_response(),
@@ -566,7 +550,7 @@ fn queue_table(engine: &Engine) -> Table<'_> {
 async fn queue(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
     let state = ViewState::from_uri(&uri);
     let html = queue_table(&app.engine).render_for(&headers, &state).await;
-    render(&app, "post", Req { headers: &headers, uri: &uri }, html, true)
+    render(&app, "post", &headers, html, true)
 }
 
 async fn queue_write(
@@ -582,7 +566,7 @@ async fn queue_write(
         Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
         Ok(Outcome::Invalid(state)) => {
             let html = table.render_for(&headers, &state).await;
-            let page = render(&app, "post", Req { headers: &headers, uri: &uri }, html, true);
+            let page = render(&app, "post", &headers, html, true);
             (StatusCode::UNPROCESSABLE_ENTITY, page).into_response()
         }
         Err(e) => e.into_response(),
@@ -635,7 +619,7 @@ fn now_secs() -> i64 {
 async fn new_post(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Response {
     let state = ViewState::from_uri(&uri);
     let html = new_form(&app.engine).render_for(&headers, &state).await;
-    render(&app, "post", Req { headers: &headers, uri: &uri }, html, false)
+    render(&app, "post", &headers, html, false)
 }
 
 async fn save_new_post(
@@ -651,7 +635,7 @@ async fn save_new_post(
         Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
         Ok(Outcome::Invalid(state)) => {
             let html = form.render_for(&headers, &state).await;
-            let page = render(&app, "post", Req { headers: &headers, uri: &uri }, html, false);
+            let page = render(&app, "post", &headers, html, false);
             (StatusCode::UNPROCESSABLE_ENTITY, page).into_response()
         }
         Err(e) => e.into_response(),
@@ -674,7 +658,7 @@ async fn edit_post(
 ) -> Response {
     let state = ViewState::from_uri(&uri);
     let html = edit_form(&app.engine, &id).render_for(&headers, &state).await;
-    render(&app, "post", Req { headers: &headers, uri: &uri }, html, false)
+    render(&app, "post", &headers, html, false)
 }
 
 async fn save_post(
@@ -691,7 +675,7 @@ async fn save_post(
         Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
         Ok(Outcome::Invalid(state)) => {
             let html = form.render_for(&headers, &state).await;
-            let page = render(&app, "post", Req { headers: &headers, uri: &uri }, html, false);
+            let page = render(&app, "post", &headers, html, false);
             (StatusCode::UNPROCESSABLE_ENTITY, page).into_response()
         }
         Err(e) => e.into_response(),
@@ -715,7 +699,6 @@ struct PostPage {
 async fn post_page(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
-    uri: Uri,
     Path(id): Path<String>,
 ) -> Response {
     // `Engine` is ungated; the table asks the gate before its own dialog, so this page does too.
@@ -725,7 +708,7 @@ async fn post_page(
         Decision::NeedsLogin => Err(Error::Unauthorized),
         Decision::Denied => Err(Error::Forbidden),
     };
-    render(&app, "post", Req { headers: &headers, uri: &uri }, html, true)
+    render(&app, "post", &headers, html, true)
 }
 
 async fn post_html(engine: &Engine, id: &str, tz: &Tz) -> CrudResult<String> {
@@ -752,10 +735,9 @@ async fn post_html(engine: &Engine, id: &str, tz: &Tz) -> CrudResult<String> {
 /// Wrap a rendered fragment in the app's shell — or report why it couldn't render. A misconfigured
 /// table or form (unknown column, a create missing a required one) is a programming error, and the
 /// message says which column; in a gated app `Unauthorized` would redirect to the login page instead.
-fn render(app: &App, current: &str, req: Req<'_>, fragment: CrudResult<String>, boxed: bool) -> Response {
+fn render(app: &App, current: &str, headers: &HeaderMap, fragment: CrudResult<String>, boxed: bool) -> Response {
     match fragment {
         Ok(body) => {
-            let back = req.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
             let page = Shell {
                 title: "relativelylight".into(),
                 entities: app.entities.clone(),
@@ -763,7 +745,8 @@ fn render(app: &App, current: &str, req: Req<'_>, fragment: CrudResult<String>, 
                 body,
                 css: CSS,
                 js: JS,
-                tz_picker: TzPicker::new().render(&Tz::from_headers(req.headers), back),
+                tz_picker: TzPicker::new().render(&Tz::from_headers(headers)),
+                tz_js: relativelylight::time::JS,
                 boxed,
             }
             .render();

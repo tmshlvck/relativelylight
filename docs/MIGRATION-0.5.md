@@ -18,7 +18,7 @@ until you add the argument:
 
 A function passed by name (`.login_shell(login_shell)`) gains a `req: &Parts` parameter. Ignore it
 (`_req`) to keep 0.4's pages, or use it to render the chrome the rest of your app renders, such as
-the timezone picker ([TIME.md §3](TIME.md#3-the-picker-and-its-handler)). A shell that rendered a
+the timezone picker ([TIME.md §3](TIME.md#3-the-picker-and-the-first-visit)). A shell that rendered a
 reduced navbar because it had no request can now render the full one.
 
 ## 2. Optional: API keys move into `auth`
@@ -239,20 +239,20 @@ columns by what each value means.
   as exactly `YYYY-MM-DD` and an instant as integer seconds. SQLite stores anything you give it,
   and a row in another format sorts and filters wrong without an error.
 
-## 12. `TzPicker` posts to `/_rl/tz`
+## 12. The timezone picker is a script
 
-`TzPicker`'s form posts to **`/_rl/tz`** by default, where it posted to `/tz`. An app that mounts its
-timezone handler at `/tz` and doesn't call `.action(…)` would have the picker post to a path nothing
-serves. Do one of:
+`TzPicker` no longer posts a form to a handler of yours: [`time::JS`](TIME.md#3-the-picker-and-the-first-visit)
+sets the zone cookie in the browser and reloads. Its list is every zone the server's database knows,
+led by UTC and "Browser timezone", and a first visit takes the browser's own zone.
 
-```rust
-.route("/_rl/tz", post(set_tz))                      // move the handler to the new default
-TzPicker::new().action("/tz")                        // or keep `/tz`, said explicitly
-```
+1. **Inline `time::JS` in every page's shell**, once, as `crud::ui::JS`:
+   `<script>{relativelylight::time::JS}</script>`. Without it the picker does nothing.
+2. **Remove your timezone route and handler** (`TzPicker::submitted` is gone).
+3. **Render without the return path:** `TzPicker::new().render(&tz)`; drop `.action(…)`.
+4. **Drop zone lists** (`.zones(…)`, `.all_zones()`, `unknown_zones()`, `zones_default()`,
+   `zones_all()`, `Tz::known`) and the exclusions (`time::EXCLUDED`, `is_excluded`): the list is now always the
+   full database. Nothing replaces a configured list.
+5. **If the picker isn't on every page, name the zone** on each page, in a footer say: times are
+   otherwise ambiguous ([TIME.md §3](TIME.md#3-the-picker-and-the-first-visit)).
 
-An app that already calls `.action(…)` needs nothing. The handler itself is unchanged.
-
-Why: the timezone form's target and the relation picker's route are plumbing, not pages, so the
-examples keep them under one prefix, `/_rl/` (`Crud::picker_path("/_rl/pick")`), and the default
-follows. Your relation picker's route stays where you mounted it; the crate has no default for it
-([APP.md → Your URL namespace](APP.md#your-url-namespace)).
+`Tz::from_headers` reads the same `rl_tz` cookie as before, so a zone users already chose stays.

@@ -56,7 +56,8 @@ URL, verified (and re-authenticated) before it's on.</sub></td>
   responses, and upload-form, preview and thumbnail components. Storage, naming and listing stay yours.
 - **Timezones** (`tz`): instants stored as integer UTC seconds (dates as a native `DATE`,
   [TIME.md](docs/TIME.md#1-storage-model)), rendered server-side in the operator's zone, and
-  `TzPicker`, a navbar or profile-page zone selector (a cookie; UTC until one is chosen).
+  `TzPicker`, a type-to-search zone selector for a navbar or the profile page (a cookie, set from the
+  browser's own zone on a first visit; UTC without one).
 
 ## Quick start
 

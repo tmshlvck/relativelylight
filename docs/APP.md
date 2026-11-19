@@ -65,7 +65,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/admin", get(|| async { Redirect::to("/admin/post") }))  // the panel's first table
         .route("/admin/{entity}", get(admin_show).post(admin_save))   // §4
         .route("/tickets/new", get(ticket_new).post(ticket_create))  // §5
-        .route("/_rl/tz", post(set_tz))                      // §2
         .with_state(app)
         .merge(auth.routes())                            // /login, /logout, /profile, 2FA
         // REQUIRED, and outermost.
@@ -106,10 +105,9 @@ The crate claims few paths, and owns none of the rest; decide yours before they 
   ([CRUD.md → The URL is the view](CRUD.md#the-url-is-the-view)).
 - **Name pages by purpose, and keep plumbing under one prefix.** Pages people navigate to (`/admin`,
   a dashboard, a workflow page with pickers in it) are named for what they are; users see and
-  bookmark them. Plumbing nobody navigates to (the picker's route, the timezone form's target) goes
-  under one prefix you reserve once, out of the way of your pages. The examples use **`/_rl/`**
-  (`/_rl/pick`, `/_rl/tz`), the underscore marking infrastructure as `/_next/` does in Next.js, and
-  `TzPicker` posts to `/_rl/tz` by default.
+  bookmark them. Plumbing nobody navigates to (the relation picker's route) goes under one prefix
+  you reserve once, out of the way of your pages. The examples use **`/_rl/`** (`/_rl/pick`), the
+  underscore marking infrastructure as `/_next/` does in Next.js.
 - **How a clash shows:** a route of yours at a path `auth` already serves (`/profile`) panics at
   startup ("Overlapping method route"). A fixed path of yours under a parameter of `auth`'s
   (`/profile/settings` beside `/profile/{id}`) is quieter: yours wins, and that path is no longer a
@@ -152,6 +150,7 @@ One askama template, one function, every page. The library never emits `<html>`.
   </nav>
   <main class="container-fluid my-4">{{ body|safe }}</main>
   <script>{{ js|safe }}</script>         {# relativelylight::crud::ui::JS — the relation picker #}
+  <script>{{ tz_js|safe }}</script>      {# relativelylight::time::JS — the timezone picker, §2 #}
 </body>
 </html>
 ```
@@ -166,6 +165,7 @@ struct Shell {
     body: String,            // the fragment
     tz_picker: String,
     css: &'static str,
+    tz_js: &'static str,
 }
 
 struct NavItem { label: &'static str, href: &'static str, active: bool }
@@ -181,15 +181,13 @@ impl Shell {
                 .map(|(label, href)| NavItem { label, href, active: here == href })
                 .into(),
             body,
-            // The picker returns to the page it was used on, so a zone change doesn't lose the view.
-            tz_picker: TzPicker::new().render(&Tz::from_headers(headers), full_path(uri)),
+            tz_picker: TzPicker::new().render(&Tz::from_headers(headers)),
             css: CSS,
+            tz_js: relativelylight::time::JS,
         }
     }
     fn html(self) -> Response { Html(self.render().unwrap_or_default()).into_response() }
 }
-
-fn full_path(uri: &Uri) -> &str { uri.path_and_query().map(|p| p.as_str()).unwrap_or("/") }
 
 /// One query parameter of your own, for pages that need something `ViewState` doesn't carry (§8).
 fn query_param<'a>(uri: &'a Uri, key: &str) -> Option<&'a str> {
@@ -201,19 +199,10 @@ fn query_param<'a>(uri: &'a Uri, key: &str) -> Option<&'a str> {
 }
 ```
 
-**The timezone route** is three lines and the only thing your app does about timezones
-([TIME.md](TIME.md)); everything the library renders then follows the cookie — cells, datetime
-inputs, and CSV exports alike:
-
-```rust
-async fn set_tz(Form(f): Form<HashMap<String, String>>) -> Response {
-    let (cookie, back) = TzPicker::submitted(f.get("tz"), f.get("back"));
-    ([(header::SET_COOKIE, cookie)], Redirect::to(&back)).into_response()
-}
-```
-
-Offer the zones your deployment cares about — usually a list from your own configuration:
-`TzPicker::new().zones(cfg.timezones)`, `.all_zones()`, or the default (UTC + Europe + US).
+**Timezones** are the picker and `time::JS` above, and nothing else: no route of yours. A first visit
+takes the browser's zone, the picker changes it, and everything the library renders follows the
+cookie: cells, datetime inputs and CSV exports alike ([TIME.md](TIME.md#3-the-picker-and-the-first-visit)).
+The navbar picker also shows the zone; a page without one should name it somewhere.
 
 **A "who is this?" helper**, used by every gated page:
 

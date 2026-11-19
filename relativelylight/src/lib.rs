@@ -55,8 +55,8 @@ mod urlform;
 mod html;
 
 /// Whether `path` is a path on this site (`/…`), safe to redirect to: not `//host` or `/\host`, which a
-/// browser reads as another origin. The timezone picker's and the SSO confirmation's `back`.
-#[cfg(any(feature = "tz", feature = "sso"))]
+/// browser reads as another origin. The SSO confirmation's `back`.
+#[cfg(feature = "sso")]
 pub(crate) fn is_local_path(path: &str) -> bool {
     path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\")
 }
