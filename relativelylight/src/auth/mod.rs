@@ -3009,8 +3009,8 @@ async fn profile_fragment(
     // account past the policy) and none of the app's own cards.
     let mut more = String::new();
     if !restricted {
-        if inner.api_keys.is_some() {
-            let keys = api_key::card(&inner.db, user.id, headers).await;
+        if let Some(config) = &inner.api_keys {
+            let keys = api_key::card(&inner.db, config, user.id, headers).await;
             more.push_str(&api_keys_html(&keys, &reauth, csrf));
         }
         more.push_str(&inner.profile_extra(who, &reauth, csrf, headers).await);

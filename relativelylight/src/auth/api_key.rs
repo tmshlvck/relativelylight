@@ -108,6 +108,7 @@ pub mod entity {
 #[non_exhaustive]
 pub struct ApiKeys {
     prefix: String,
+    name_placeholder: String,
 }
 
 impl ApiKeys {
@@ -125,7 +126,14 @@ impl ApiKeys {
                 && prefix.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
             "relativelylight: API key prefix {prefix:?} must be at most 32 ASCII letters, digits, `_` or `-`"
         );
-        Self { prefix }
+        Self { prefix, name_placeholder: "what will use it, e.g. a script".into() }
+    }
+
+    /// The hint in the mint form's empty label field, for what a key is for in your app: `"router at
+    /// home"`, `"Claude Code on my laptop"`. Default `"what will use it, e.g. a script"`.
+    pub fn name_placeholder(mut self, text: impl Into<String>) -> Self {
+        self.name_placeholder = text.into();
+        self
     }
 
     /// The configured prefix.
@@ -419,10 +427,11 @@ pub(super) struct Row {
 pub(super) struct Card {
     pub rows: Vec<Row>,
     pub zone: String,
+    pub placeholder: String,
 }
 
 /// Load and format `user_id`'s keys for the card, in the caller's display zone.
-pub(super) async fn card(db: &DatabaseConnection, user_id: i32, headers: &HeaderMap) -> Card {
+pub(super) async fn card(db: &DatabaseConnection, keys: &ApiKeys, user_id: i32, headers: &HeaderMap) -> Card {
     let (zone, fmt) = clock(headers);
     let now = super::now_secs();
     let rows = list(db, user_id)
@@ -444,7 +453,7 @@ pub(super) async fn card(db: &DatabaseConnection, user_id: i32, headers: &Header
             disabled: k.disabled,
         })
         .collect();
-    Card { rows, zone }
+    Card { rows, zone, placeholder: keys.name_placeholder.clone() }
 }
 
 /// The caller's display zone and a formatter for it: their timezone cookie with feature `tz`, UTC

@@ -908,6 +908,9 @@ use relativelylight::auth::api_key::ApiKeys;
 let auth = Auth::new(db, lockout).api_keys(ApiKeys::new("climb_"));
 ```
 
+`ApiKeys::name_placeholder("Claude Code on my laptop")` sets the hint in the mint form's empty label
+field, for what a key is for in your app (default "what will use it, e.g. a script").
+
 The card lists the caller's keys (label, prefix, created, expires, last used, and whether disabled)
 and offers:
 

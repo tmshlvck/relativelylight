@@ -102,6 +102,9 @@ is easy to miss in a diff.
 
 ### Added
 
+- **`ApiKeys::name_placeholder`**: the hint in the API-key label field, for what a key is for in your
+  app ([AUTH.md §5k](docs/AUTH.md#5k-api-keys)). The default is now neutral, "what will use it, e.g.
+  a script", where it was "router at home".
 - **The search box searches what the table shows** ([CRUD.md → Search](docs/CRUD.md#search)): text,
   numbers, dates, choices by value or label, `.datetime()` instants when the term names a period
   (`2026-03`, read in the viewer's zone), the row's own label and every relation's labels (to-one,

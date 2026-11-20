@@ -40,7 +40,8 @@ keep working: the stored hash is the SHA-256 hex of the raw key, as before.
    other columns (`user_id`, `name`, `hashed_key`, `prefix`, `expires_at`, `last_used_at`,
    `disabled`) have the same names and types.
 2. Configure `Auth::api_keys(ApiKeys::new("tddns_"))` with the prefix your keys already carry, and
-   drop your `profile_extra` card and its mint and revoke routes.
+   drop your `profile_extra` card and its mint and revoke routes. The label field's hint is now
+   neutral ("what will use it, e.g. a script"); `.name_placeholder("router at home")` keeps yours.
 3. In each machine endpoint, call `auth.identify_key(token, ip)` in place of your own lookup. It
    brakes on `auth.ip_lockout()`, so remove your own failure recording for keys, or a bad key counts
    twice. Build your principal from the returned `identity` (groups by name) and `key_id`.
@@ -143,6 +144,8 @@ Nothing to change in code for these, but they change what users see.
   - `create_user`, `set_password`, `make_admin` and `reset_admin_access` don't flag.
   - **If your app sets passwords for users itself and doesn't want this**, set
     `must_change_password` to `false` in the same write.
+- **The API-key label hint is neutral**: "what will use it, e.g. a script", where it was "router at
+  home". Set your own with `ApiKeys::name_placeholder` ([AUTH.md §5k](AUTH.md#5k-api-keys)).
 - **The search box finds more** ([CRUD.md → Search](CRUD.md#search)): numbers, dates, choice labels,
   instants by period and relations by their labels, case-insensitive on PostgreSQL too. A table
   whose search should stay narrow opts fields or relations out with `searchable = false`. A table

@@ -394,7 +394,7 @@ mod tests {
             used: bad.into(),
             disabled: true,
         };
-        let card = api_key::Card { rows: vec![row()], zone: bad.into() };
+        let card = api_key::Card { rows: vec![row()], zone: bad.into(), placeholder: bad.into() };
         let none = ReauthView::none();
         let target =
             Target { id: bad, sso: None, username: bad, totp_on: true, has_password: false, passkeys: 2 };

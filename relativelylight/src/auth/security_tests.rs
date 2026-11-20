@@ -3972,6 +3972,19 @@ impl crate::observe::WriteObserver for KeyEvents {
 }
 
 #[tokio::test]
+async fn the_key_label_hint_is_neutral_unless_the_app_sets_its_own() {
+    let hint = |html: &str| html.split(r#"id="rl-key-name""#).nth(1).and_then(|r| r.split(r#"placeholder=""#).nth(1)).map(|r| r.split('"').next().unwrap().to_string());
+    let fx = Fx::with(|a| a.api_keys(api_key::ApiKeys::new("test_"))).await;
+    fx.user("alice").await;
+    let page = fx.get("/profile", Some(&fx.cookie(&fx.session_for("alice").await))).await;
+    assert_eq!(hint(&page.body).as_deref(), Some("what will use it, e.g. a script"));
+    let fx = Fx::with(|a| a.api_keys(api_key::ApiKeys::new("test_").name_placeholder("router at home"))).await;
+    fx.user("alice").await;
+    let page = fx.get("/profile", Some(&fx.cookie(&fx.session_for("alice").await))).await;
+    assert_eq!(hint(&page.body).as_deref(), Some("router at home"));
+}
+
+#[tokio::test]
 async fn minting_and_revoking_are_audited_without_the_key() {
     let events = Arc::new(KeyEvents::default());
     let fx = Fx::with(|a| a.api_keys(api_key::ApiKeys::new("test_")).on_write(events.clone())).await;
