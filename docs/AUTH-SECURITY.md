@@ -389,7 +389,7 @@ in-memory SQLite:
   bearer-presented tokens all resolve to anonymous), login, TOTP and its replay guard, recovery codes,
   the profile and manager pages, re-authentication, the password policy, lockout (including the proxy
   flag, the whitelist, a locked key ignoring further failures and a lock that ran out counting
-  again), session rotation and revocation, CSRF on every unsafe route, the gate
+  again), the accounts panel's search, filters and sort never reaching a secret, session rotation and revocation, CSRF on every unsafe route, the gate
   presets as a matrix of caller × operation, and API keys (unknown, expired, disabled, inactive owner,
   locked address, a key never opening the UI, minting without re-authentication, revoking someone
   else's key).

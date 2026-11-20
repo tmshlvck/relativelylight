@@ -804,6 +804,15 @@ impl<'a> Table<'a> {
     fn effective_state(&self, state: &ViewState, cols: &[Column]) -> Result<ViewState> {
         let mut out = state.clone();
         out.per_page = out.per_page.min(self.per_page_max);
+        // Only sort keys the table offers: ordering rows by a hidden or write-only column (a secret)
+        // tells how its values compare.
+        out.sort.retain(|(name, _)| {
+            cols.iter().any(|c| {
+                render::name_of(c) == name
+                    && render::sortable(c)
+                    && !matches!(c, Column::Field { write_only: true, .. })
+            })
+        });
         if out.sort.is_empty() {
             out.sort = self.sort.clone();
         }

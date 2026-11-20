@@ -1206,10 +1206,14 @@ where
     /// Build the query condition from a `ListQuery` (shared by `list` and `delete_many`).
     fn build_condition(&self, q: &ListQuery) -> Result<Condition> {
         let mut cond = Condition::all();
+        // Search only what a reader could see: a hidden or write-only text column (a password hash, a
+        // TOTP secret) answered "is this in it?" one guess at a time, through which rows came back.
+        let searchable = |name: &str| self.model.fields.iter().any(|f| f.name == name && !f.hidden && !f.write_only);
         for (col, pat) in &q.search {
             match col {
                 Some(name) => {
                     let c = column::<E>(name)
+                        .filter(|_| searchable(name))
                         .ok_or_else(|| Error::BadRequest(format!("unknown column: {name}")))?;
                     // A substring match only means something on text. On an int/bool/date column it
                     // silently matched the wrong rows on SQLite (`3` also matching 13, 30, 103) and
@@ -1224,7 +1228,7 @@ where
                 None => {
                     let mut any = Condition::any();
                     for c in <E::Column as Iterable>::iter() {
-                        if logical_type(c.def().get_column_type()).is_text() {
+                        if logical_type(c.def().get_column_type()).is_text() && searchable(c.as_str()) {
                             any = any.add(c.contains(pat));
                         }
                     }

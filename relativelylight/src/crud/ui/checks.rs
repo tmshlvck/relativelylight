@@ -25,7 +25,8 @@ pub(crate) fn renders(only: &[String], omit: &[String], name: &str) -> bool {
 /// relation (whose FK the backend resolves).
 pub(crate) fn is_filterable(cols: &[Column], name: &str) -> bool {
     cols.iter().any(|c| match c {
-        Column::Field { name: n, .. } => n == name,
+        // Not a write-only column (a password hash): an exact match on it confirms a guess.
+        Column::Field { name: n, write_only, .. } => n == name && !write_only,
         Column::Relation { name: n, fk_column, .. } => n == name && fk_column.is_some(),
     })
 }

@@ -268,6 +268,13 @@ is easy to miss in a diff.
 
 ### Fixed
 
+- **Security: search, filters and sort reach only what a table shows.** The search box matched every
+  text column, hidden and write-only ones included, so a reader of a table could spell out a hidden
+  value a few characters at a time from which rows came back. In the accounts panel that was any
+  user's TOTP secret, which defeats their 2FA, or their password hash. A URL filter could also
+  name a write-only column, and a URL sort key a hidden one. Now the search covers the text columns
+  the table shows, filters refuse write-only columns, and a sort key the table doesn't offer is
+  dropped (it used to be an error) ([CRUD.md](docs/CRUD.md#the-url-is-the-view)).
 - **A lockout that ran out counts again.** A key that had been locked once recorded no further
   failures after its lock expired, until `prune` deleted the row or a successful sign-in cleared it,
   so between prunes an account or address that had been locked once had no limit. An expired count

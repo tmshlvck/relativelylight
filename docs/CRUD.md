@@ -334,10 +334,10 @@ parses it; `ViewState::default()` is page 1, unsorted, unfiltered. Every link th
 
 | Param | Meaning |
 |---|---|
-| `q=<term>` | naive full-text: `LIKE '%term%'` across text columns |
-| `filter[<name>]=<val>` | **exact** match. `<name>` is a column *or* a to-one relation (`filter[author]=7` → `author_id = 7`); an empty value matches rows that have none (`IS NULL`), and `*` means **no filter** — the value the toolbar's "all" submits, since a `<select>` must submit something and the empty one is taken |
+| `q=<term>` | naive full-text: `LIKE '%term%'` across the text columns the table shows (never a hidden or write-only one) |
+| `filter[<name>]=<val>` | **exact** match. `<name>` is a column the table shows (not a write-only one) *or* a to-one relation (`filter[author]=7` → `author_id = 7`); an empty value matches rows that have none (`IS NULL`), and `*` means **no filter** — the value the toolbar's "all" submits, since a `<select>` must submit something and the empty one is taken |
 | `filter[<col>][from]=<v>` / `filter[<col>][to]=<v>` | a **range**, `>=` / `<=`, either end optional; an empty value is an open end. Applied only by a table that declared [`range_filter`](#range-filters) for the column, which reads a `.datetime()` column's bounds as dates in the viewer's zone |
-| `sort=views:desc,title` | whitelisted sort (unknown key → an error). A **relation** sorts by the label its cells show |
+| `sort=views:desc,title` | sort by sortable columns the table shows; any other key is dropped. A **relation** sorts by the label its cells show |
 | `page` / `per_page` | pagination (`per_page` defaults to the component's, else 25) |
 | `entity=<slug>` | which panel an [`Admin`](#admin--a-whole-admin-in-one-component) is showing |
 | `new=1` / `edit=<pk>` / `import=1` | render the create / edit / CSV-import dialog over the list |

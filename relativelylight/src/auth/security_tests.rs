@@ -2623,6 +2623,58 @@ async fn a_locked_key_ignores_further_failures_and_an_expired_one_starts_over() 
     assert_eq!((u, i), (1, 1), "an expired count starts over");
 }
 
+/// The accounts panel's search, filters and sort reach only what it shows. A hidden or write-only
+/// text column (the TOTP secret, the password hash) answered "is this in it?" through which rows came
+/// back, so a reader of the panel could spell out another user's TOTP secret a few characters at a time.
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn the_accounts_panel_never_searches_filters_or_sorts_by_a_secret() {
+    use crate::crud::seaorm::Crud;
+    use crate::crud::ui::{Table, ViewState};
+    let fx = Fx::new().await;
+    fx.user("alice").await;
+    fx.user("bob").await;
+    // Secrets ordered against the usernames, so obeying `sort=totp_secret` would flip the rows.
+    fx.update_user("alice", |am| am.totp_secret = Set(Some("ZZBSWY3DPEHPK3PX".into()))).await;
+    fx.update_user("bob", |am| am.totp_secret = Set(Some("AAAQEAYEAUDAOCAJ".into()))).await;
+    let hash = fx.row("alice").await.password_hash;
+    let mut crud = Crud::new(fx.db.clone());
+    crud.register(user::meta_model(&fx.auth), crate::authz::Open);
+    let e = crud.into_engine();
+    let listed = |query: &'static str| {
+        let e = &e;
+        async move {
+            let html = Table::new(e, "auth_user").render_for(&HeaderMap::new(), &ViewState::from_query(query)).await.unwrap();
+            // A cell is `<td>name` and then markup or whitespace, never more letters.
+            let pos = |name: &str| {
+                let open = format!("<td>{name}");
+                html.match_indices(&open)
+                    .find(|(i, _)| !html[i + open.len()..].starts_with(|c: char| c.is_alphanumeric()))
+                    .map(|(i, _)| i)
+            };
+            let mut rows: Vec<(usize, &str)> =
+                ["alice", "bob"].into_iter().filter_map(|n| pos(n).map(|p| (p, n))).collect();
+            rows.sort();
+            rows.into_iter().map(|(_, n)| n).collect::<Vec<_>>()
+        }
+    };
+    // Search: the username finds its row (the control); a secret's fragment finds nothing.
+    assert_eq!(listed("q=alice").await, ["alice"]);
+    assert_eq!(listed("q=ZZBSWY3").await, Vec::<&str>::new(), "the TOTP secret is not searched");
+    assert_eq!(listed("q=argon2id").await, Vec::<&str>::new(), "nor the password hash");
+    // Filters: one on a published column narrows; one on the write-only hash is dropped.
+    assert_eq!(listed("filter[username]=alice").await, ["alice"]);
+    let by_hash = format!("filter[password_hash]={}", urlencode(&hash));
+    let by_hash: &'static str = Box::leak(by_hash.into_boxed_str());
+    assert_eq!(listed(by_hash).await, ["alice", "bob"], "the hash is not a filter");
+    // Sort: by a published column it reorders; by the hidden secret it is dropped.
+    assert_eq!(listed("sort=username:desc").await, ["bob", "alice"]);
+    assert_eq!(listed("sort=totp_secret").await, ["alice", "bob"], "the secret is not a sort key");
+    // The engine refuses a search naming a hidden column outright.
+    let q = crate::crud::engine::ListQuery { search: vec![(Some("totp_secret".into()), "ZZ".into())], ..Default::default() };
+    assert!(e.list("auth_user", &q, false).await.is_err());
+}
+
 #[tokio::test]
 async fn an_unknown_username_locks_the_same_way() {
     // Otherwise the lockout itself would reveal which accounts exist.
