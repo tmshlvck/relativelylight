@@ -143,6 +143,10 @@ Nothing to change in code for these, but they change what users see.
   - `create_user`, `set_password`, `make_admin` and `reset_admin_access` don't flag.
   - **If your app sets passwords for users itself and doesn't want this**, set
     `must_change_password` to `false` in the same write.
+- **The search box finds more** ([CRUD.md → Search](CRUD.md#search)): numbers, dates, choice labels,
+  instants by period and relations by their labels, case-insensitive on PostgreSQL too. A table
+  whose search should stay narrow opts fields or relations out with `searchable = false`. A table
+  with nothing to search now matches no row for a term.
 - **SSO accounts confirm at their provider before a sensitive change** (AUTH.md §5h), where they
   used to pass re-authentication unchallenged. That covers a manager's reset or 2FA removal, adding
   a factor on `/profile`, and every route of yours behind `reauthenticate_with`. The confirm block

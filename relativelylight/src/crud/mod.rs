@@ -27,6 +27,8 @@ mod relation_tests;
 /// holding for "delete all matching" and the export; `ListQuery::range` / `one_of` at the engine.
 #[cfg(all(test, feature = "ui"))]
 mod range_tests;
+#[cfg(all(test, feature = "ui"))]
+mod search_tests;
 
 /// `Table::fixed_filter` holding for the writes over a real database: the pinned value written on
 /// create, update and import, and a row outside the pin refused.

@@ -75,6 +75,11 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
   (`?pick=post.author&show=3`), so a link can't name an unrelated table, and each is gated on the
   target as the target's own table would be. After an edit the script renames the links in place
   rather than reloading, since a reload would lose a form being filled in underneath.
+- **Search matches what is printed**, in one query: an `OR` of a substring branch per field, and a
+  subquery per relation on its label rebuilt in SQL (hence labels declared as columns). Subqueries,
+  not joins, so no row repeats and "delete all matching" stays a plain `DELETE … WHERE`. Instants
+  are the exception the database can't print in a viewer's zone: a term naming a period finds them.
+  It sees only what the table shows: a hidden field searched is an oracle on its value.
 - **Display and storage are separate.** `format_cell`/`format_view` are display only; `on_read` /
   `on_write` are an inverse codec on the column's own type.
 - **One column type per kind of time value** ([TIME.md §1](TIME.md#1-storage-model)). An instant is

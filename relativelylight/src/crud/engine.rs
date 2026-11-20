@@ -297,8 +297,12 @@ pub enum Column {
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct ListQuery {
-    /// Search: `Some(col)` filters a column with LIKE, `None` is full-text across text columns.
+    /// Search: `Some(col)` matches one text column, `None` everything the table shows (CRUD.md →
+    /// Search).
     pub search: Vec<(Option<String>, String)>,
+    /// The period a `None` search names in the viewer's zone (`Tz::period`), matched against
+    /// `.datetime()` columns; `None` leaves them out.
+    pub search_period: Option<(i64, i64)>,
     /// Exact-match filters `column == value`.
     pub eq: Vec<(String, String)>,
     /// Range filters `(column, from, to)`: `column >= from` and `column <= to`, either bound left

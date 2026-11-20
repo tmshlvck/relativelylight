@@ -121,20 +121,52 @@ impl Tz {
         Some(dt.to_zoned(self.zone()).ok()?.timestamp().as_second())
     }
 
-    /// A calendar date (`YYYY-MM-DD`, what an `<input type="date">` posts) → the Unix seconds of
-    /// its first and last second **in this zone**, so a range "to" that day takes in the whole of
-    /// it. `None` if it isn't a date. A day that a DST change shortens or lengthens is as long as
-    /// it really is; a midnight that doesn't exist starts the day at the first moment that does.
+    /// A calendar date (`YYYY-MM-DD`, what an `<input type="date">` posts) → its first and last second
+    /// **in this zone** (a range's "to" day is inclusive). `None` if it isn't exactly a date.
     pub fn day_bounds(&self, input: &str) -> Option<(i64, i64)> {
-        // Strictly a date: jiff would also read the date out of `2026-11-01T10:00`, and a bound
-        // that silently dropped its time of day is a range nobody asked for.
-        let date: civil::Date = input.trim().parse().ok()?;
-        if date.to_string() != input.trim() {
-            return None;
-        }
-        let start = date.to_zoned(self.zone()).ok()?.timestamp().as_second();
-        let next = date.tomorrow().ok()?.to_zoned(self.zone()).ok()?.timestamp().as_second();
-        Some((start, next - 1))
+        (input.trim().len() == 10).then(|| self.period(input)).flatten()
+    }
+
+    /// The period a date-time prefix names, in this zone: `2026`, `2026-03`, `2026-03-05`,
+    /// `2026-03-05 14` or `2026-03-05 14:30` (a `T` for the space too) → its first and last second.
+    /// `None` for anything else. A DST change makes a day or hour as long as it really is.
+    pub fn period(&self, input: &str) -> Option<(i64, i64)> {
+        let s = input.trim();
+        let num = |range: std::ops::Range<usize>| -> Option<i64> {
+            let part = s.get(range)?;
+            part.bytes().all(|b| b.is_ascii_digit()).then(|| part.parse().ok()).flatten()
+        };
+        let sep = |i: usize, ok: &[u8]| s.as_bytes().get(i).is_some_and(|b| ok.contains(b));
+        let y = i16::try_from(num(0..4)?).ok()?;
+        let (start, next) = match s.len() {
+            4 => {
+                let d = civil::date(y, 1, 1);
+                (d.at(0, 0, 0, 0), d.checked_add(jiff::Span::new().years(1)).ok()?.at(0, 0, 0, 0))
+            }
+            7 if sep(4, b"-") => {
+                let d = civil::Date::new(y, num(5..7)? as i8, 1).ok()?;
+                (d.at(0, 0, 0, 0), d.checked_add(jiff::Span::new().months(1)).ok()?.at(0, 0, 0, 0))
+            }
+            10 | 13 | 16 if sep(4, b"-") && sep(7, b"-") => {
+                let d = civil::Date::new(y, num(5..7)? as i8, num(8..10)? as i8).ok()?;
+                let (h, unit) = match s.len() {
+                    10 => (0, jiff::Span::new().days(1)),
+                    _ if sep(10, b" T") => (num(11..13)?, jiff::Span::new().hours(1)),
+                    _ => return None,
+                };
+                let (mi, unit) = match s.len() {
+                    16 if sep(13, b":") => (num(14..16)?, jiff::Span::new().minutes(1)),
+                    16 => return None,
+                    _ => (0, unit),
+                };
+                let t = civil::Time::new(h as i8, mi as i8, 0, 0).ok()?;
+                let at = d.to_datetime(t);
+                (at, at.checked_add(unit).ok()?)
+            }
+            _ => return None,
+        };
+        let second = |dt: civil::DateTime| Some(dt.to_zoned(self.zone()).ok()?.timestamp().as_second());
+        Some((second(start)?, second(next)? - 1))
     }
 
     /// This zone as a `Set-Cookie` value, for an app that sets the zone itself (one it stores per user,
@@ -216,6 +248,25 @@ mod tests {
         for bad in ["", "2026-02-30", "yesterday", "2026-11-01T10:00"] {
             assert_eq!(prague.day_bounds(bad), None, "{bad:?} is not a date");
         }
+    }
+
+    #[test]
+    fn a_date_time_prefix_names_a_period_in_the_zone() {
+        let tz = Tz::named("Europe/Prague");
+        let at = |s: &str| tz.parse(s).unwrap(); // a wall-clock reading → Unix seconds
+        assert_eq!(tz.period("2026"), Some((at("2026-01-01T00:00"), at("2027-01-01T00:00") - 1)));
+        assert_eq!(tz.period("2026-03"), Some((at("2026-03-01T00:00"), at("2026-04-01T00:00") - 1)));
+        assert_eq!(tz.period("2026-03-05"), Some((at("2026-03-05T00:00"), at("2026-03-06T00:00") - 1)));
+        assert_eq!(tz.period("2026-03-05 14"), Some((at("2026-03-05T14:00"), at("2026-03-05T15:00") - 1)));
+        assert_eq!(tz.period("2026-03-05T14:30"), Some((at("2026-03-05T14:30"), at("2026-03-05T14:31") - 1)));
+        // The DST day is 23 hours long.
+        let (a, b) = tz.period("2026-03-29").unwrap();
+        assert_eq!(b - a + 1, 23 * 3600);
+        for no in ["", "20", "2026-3", "2026-13", "2026-02-30", "2026/03/05", "2026-03-05 1", "2026-03-05 14:3", "abc", "12026"] {
+            assert_eq!(tz.period(no), None, "{no:?}");
+        }
+        assert_eq!(tz.day_bounds("2026-03-05"), tz.period("2026-03-05"));
+        assert_eq!(tz.day_bounds("2026-03"), None, "a range bound is a whole date");
     }
 
     #[test]

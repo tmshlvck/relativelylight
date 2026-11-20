@@ -841,6 +841,8 @@ impl<'a> Table<'a> {
     fn list_query(&self, state: &ViewState, cols: &[Column], tz: &Tz) -> Result<ListQuery> {
         let mut q = state.to_list_query(self.per_page);
         q.per_page = self.page_size(state);
+        // A term that names a period (`2026-03`) also finds the instants in it, read in this zone.
+        q.search_period = tz.period(&state.q);
         for (name, from, to) in &state.ranges {
             let (from, to) = range_bounds(range_kind(&self.slug, cols, name)?, from, to, tz);
             if from.is_some() || to.is_some() {

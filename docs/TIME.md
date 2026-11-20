@@ -170,6 +170,7 @@ Everything the crate renders from a `datetime` column:
 | a form input (`datetime-local`) | pre-filled with the same wall-clock reading, and read back through the zone |
 | the form's help text | "Times are Europe/Prague." — so the reading is never ambiguous |
 | **a CSV export** | `2024-12-01 12:00`, and re-importing that file means what it says |
+| the search box | `2024-12` finds the instants in that month there ([CRUD.md → Search](CRUD.md#search)) |
 
 The CSV row is the one worth pausing on. While the zone was known only to the browser, an export
 *could not* agree with the screen: the server had no idea what the user was looking at, so files came

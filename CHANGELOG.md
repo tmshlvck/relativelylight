@@ -102,6 +102,14 @@ is easy to miss in a diff.
 
 ### Added
 
+- **The search box searches what the table shows** ([CRUD.md → Search](docs/CRUD.md#search)): text,
+  numbers, dates, choices by value or label, `.datetime()` instants when the term names a period
+  (`2026-03`, read in the viewer's zone), the row's own label and every relation's labels (to-one,
+  to-many, N:M), as one query. Case-insensitive on SQLite and PostgreSQL alike, and literal (`%`,
+  `_`). Opt out per field or relation with `searchable = false`. Was: `LIKE` over text columns only.
+- **`MetaModel::label_columns(cols, sep)`**: a label made of several columns, joined as shown
+  (`["first_name", "last_name"], " "`), which relations pointing here sort and search by.
+  `label_column` is its one-column case. `examples/crud` labels authors "Name, Country".
 - **Calendar dates can be written** ([TIME.md §1](docs/TIME.md#calendar-dates-a-native-date)): a
   `Date` column gets a date input and is accepted everywhere only as exactly `YYYY-MM-DD`, bound as a
   date. Every write to one used to fail.

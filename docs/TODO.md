@@ -6,10 +6,9 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
 
 ## crud / crud::ui
 
-- [ ] **Customisable search.** `q` is `LIKE '%term%'` over the entity's own text columns only. Let an
-  app search relation labels (a record by its zone's origin) and supply its own search (full-text,
-  a `tsvector`, an external index) per entity. Asked for by CLIMB; bigger than a builder flag, since
-  it reaches the `Accessor` seam.
+- [ ] **An app's own search** per entity: full-text (a `tsvector`) or an external index, beside the
+  built-in substring search (CRUD.md → Search). Additive: a `MetaModel` hook returning a condition
+  (or, for an index, matching keys).
 - [ ] **More filter operators** (`filter[ttl][gt]=300`, `[is_null]`). `[from]`/`[to]` ranges and the
   `fixed_in` set pin have shipped; the URL grammar nests for the rest. Wait for a real need.
 - [ ] **Ask each gate once per request.** A built-in gate resolves the caller (session, user,

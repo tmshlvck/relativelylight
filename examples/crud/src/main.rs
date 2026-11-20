@@ -79,11 +79,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // tag's form, so a tag's `post` field offers only existing posts. (Its labels still link.)
     tag_mm.relation("post").create(false);
 
-    // Label author rows by their name — and, because the column is *declared* rather than computed in
-    // a closure, `post` can be sorted by its `author` column: the engine turns `?sort=author` into an
-    // ORDER BY on `author.name`, so the order matches the labels on screen. A model whose label isn't
-    // a single column simply reports the relation as unsortable instead of guessing.
-    author_mm.label_column(author::Column::Name.as_str());
+    // Label authors "Name, Country". Declared as columns, so a post's `author` column sorts by them
+    // (?sort=author) and the search box finds posts by them ("Czech").
+    author_mm.label_columns([author::Column::Name.as_str(), author::Column::Country.as_str()], ", ");
 
     // Per-field presentation config (labels / help text / create defaults).
     post_mm.field(post::Column::Title.as_str()).label = Some("Title".into());

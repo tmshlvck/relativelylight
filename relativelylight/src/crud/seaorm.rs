@@ -102,6 +102,8 @@ pub struct MetaField {
     /// also signs the account out.
     pub create_only: bool,
     pub hidden: bool,
+    /// Whether the search box looks here (default `true`; a hidden or write-only field never).
+    pub searchable: bool,
     // Presentation — optional:
     pub label: Option<String>,       // display label (defaults to the field name in the UI)
     pub description: Option<String>, // help text shown under the field in forms
@@ -371,6 +373,8 @@ pub struct MetaRelation {
     pub fk_column: Option<String>,
     pub read_only: bool,
     pub hidden: bool,
+    /// Whether the search box matches this relation's labels (default `true`).
+    pub searchable: bool,
     pub label: Option<String>,
     pub description: Option<String>,
     /// Whether this relation's labels link to their rows, viewed in a dialog — see
@@ -546,6 +550,66 @@ fn json_to_db(ct: &ColumnType, v: &Value) -> DbValue {
     }
 }
 
+/// A label made of columns: their values joined by `sep`, in Rust for display and in SQL to search.
+#[derive(Clone)]
+struct Label {
+    cols: Vec<String>,
+    sep: String,
+}
+
+impl Label {
+    /// The label of a row, as shown.
+    fn of(&self, row: &Value) -> String {
+        let part = |c: &String| match row.get(c) {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Null) | None => String::new(),
+            Some(other) => other.to_string(),
+        };
+        self.cols.iter().map(part).collect::<Vec<_>>().join(&self.sep)
+    }
+
+    /// The same text in SQL, on `table`'s columns: `COALESCE(CAST(c AS TEXT), '')`, joined by `sep`.
+    fn sql(&self, table: &str) -> Expr {
+        use sea_orm::sea_query::{BinOper, ExprTrait, Func};
+        let part = |c: &String| -> Expr {
+            Func::coalesce([as_text(Expr::col((Alias::new(table), Alias::new(c)))), Expr::val("")]).into()
+        };
+        let mut parts = self.cols.iter().map(part);
+        let first = parts.next().unwrap_or_else(|| Expr::val(""));
+        parts.fold(first, |acc, p| {
+            acc.binary(BinOper::Custom("||"), Expr::val(self.sep.clone()))
+                .binary(BinOper::Custom("||"), p)
+        })
+    }
+}
+
+/// A field's column, table-qualified (a search subquery names other tables).
+fn field_col<E: EntityTrait>(name: &str) -> Result<Expr> {
+    let c = column::<E>(name).ok_or_else(|| Error::BadRequest(format!("unknown column: {name}")))?;
+    Ok(Expr::col(c.as_column_ref()))
+}
+
+/// `LOWER(expr) LIKE '%term%'` with the term taken literally: search's one matching rule, the same
+/// case-insensitive substring on SQLite and PostgreSQL.
+fn contains(expr: Expr, term: &str) -> Expr {
+    use sea_orm::sea_query::{ExprTrait, Func, LikeExpr};
+    let mut pattern = String::from("%");
+    for ch in term.to_lowercase().chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    Expr::expr(Func::lower(expr)).like(LikeExpr::new(pattern).escape('\\'))
+}
+
+/// `CAST(expr AS TEXT)`: a number, date, UUID or enum as the text it is shown as.
+fn as_text(expr: Expr) -> Expr {
+    use sea_orm::sea_query::ExprTrait;
+    expr.cast_as(Alias::new("TEXT"))
+}
+
 /// String (URL value) → ORM value, by column type.
 fn str_to_db(ct: &ColumnType, s: &str) -> DbValue {
     match logical_type(ct) {
@@ -650,9 +714,9 @@ trait SeaRow: Send + Sync {
     fn slug(&self) -> &str;
     fn pk_col(&self) -> String;
     fn label_of(&self, raw: &Value) -> String;
-    /// The column `label_of` reads, when it reads exactly one — what lets an entity pointing *here*
-    /// turn `?sort=<relation>` into an `ORDER BY` on this table. `None` = not sortable through.
-    fn label_col(&self) -> Option<String>;
+    /// The columns `label_of` joins, when it is made of columns: what lets an entity pointing *here*
+    /// sort and search by the label. `None`: neither.
+    fn label(&self) -> Option<Label>;
     /// The rows whose `col` is one of `vals`, in primary-key order.
     async fn list_in(&self, col: &str, vals: &[Value]) -> Result<Vec<Value>>;
 }
@@ -697,12 +761,10 @@ pub struct MetaModel<E: EntityTrait> {
     pub slug: String,
     pub row_label: RowLabel,
     pub validate_row: Option<RowValidator>,
-    /// The column `row_label` reads, when it reads exactly one — which is what makes a *pointing*
-    /// relation sortable (`ORDER BY <target>.<label_col>`). Set explicitly by
-    /// [`label_column`](MetaModel::label_column), otherwise discovered at registration by
-    /// [`probe_label_column`]. `None` means "the label isn't a column", and relations pointing here
-    /// report `sortable: false`.
-    label_col: Option<String>,
+    /// The columns `row_label` joins, when the label is made of columns — what lets a relation
+    /// pointing here sort and search by it. Set by [`label_columns`](MetaModel::label_columns), or
+    /// found at registration when `row_label` reads one column. `None`: neither.
+    label: Option<Label>,
     table: String,
     fields: Vec<MetaField>,
     relations: Vec<MetaRelation>,
@@ -741,6 +803,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                     write_only: false,
                     create_only: false,
                     hidden: is_fk,
+                    searchable: true,
                     is_pk,
                     is_fk,
                     name,
@@ -765,6 +828,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                 description: None,
                 links: None,
                 create: None,
+                searchable: true,
                 name: r.name,
                 target: r.target,
                 cardinality: r.cardinality,
@@ -779,7 +843,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
             slug,
             row_label: Box::new(default_label),
             validate_row: None,
-            label_col: None,
+            label: None,
             table,
             fields,
             relations,
@@ -824,41 +888,37 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
         })
     }
 
-    /// Label rows by one column, and make relations *pointing at this model* sortable by it.
-    ///
-    /// Sets `row_label` to read `col` and records the name, so another entity's `?sort=<relation>`
-    /// can become `ORDER BY <this table>.<col>` — see [`Column::Relation::sortable`]. Equivalent to
-    /// assigning `row_label` yourself, except that the sort survives:
-    ///
-    /// ```ignore
-    /// zone.label_column("origin");                                   // labelled *and* sortable
-    /// zone.row_label = Box::new(|r| r["origin"].as_str().unwrap_or_default().into()); // same label
-    /// ```
-    ///
-    /// The second form is not second-class — registration probes `row_label` and recognises a closure
-    /// that reads a single column, so the two behave alike. Declaring it is simply the version that
-    /// can't be broken by an edit to the closure.
-    ///
-    /// Panics if `col` isn't a column of this entity, matching [`field`](MetaModel::field).
-    pub fn label_column(&mut self, col: &str) -> &mut Self {
-        if !self.fields.iter().any(|f| f.name == col) {
-            panic!("relativelylight: no field '{col}' on '{}' to label rows by", self.slug);
+    /// Label rows by `cols`, joined by `sep` as shown (`["first_name", "last_name"], " "` → "Jan
+    /// Novak"), and let relations pointing here sort (by the columns in turn) and search by it.
+    /// Setting `row_label` to read one column does the same for that column. Panics if a column
+    /// isn't this entity's, as [`field`](MetaModel::field).
+    pub fn label_columns<I, S>(&mut self, cols: I, sep: &str) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let cols: Vec<String> = cols.into_iter().map(Into::into).collect();
+        for col in &cols {
+            if !self.fields.iter().any(|f| &f.name == col) {
+                panic!("relativelylight: no field '{col}' on '{}' to label rows by", self.slug);
+            }
         }
-        let owned = col.to_string();
-        self.row_label = Box::new(move |row: &Value| match row.get(&owned) {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Null) | None => String::new(),
-            Some(other) => other.to_string(),
-        });
-        self.label_col = Some(col.to_string());
+        let label = Label { cols, sep: sep.to_string() };
+        let text = label.clone();
+        self.row_label = Box::new(move |row: &Value| text.of(row));
+        self.label = Some(label);
         self
     }
 
-    /// Settle `label_col` at registration — after the app has finished configuring the model, which is
-    /// the earliest moment `row_label` is final.
+    /// [`label_columns`](MetaModel::label_columns) with one column.
+    pub fn label_column(&mut self, col: &str) -> &mut Self {
+        self.label_columns([col], "")
+    }
+
+    /// Settle the label at registration, once `row_label` is final.
     fn resolve_label_column(&mut self) {
-        if self.label_col.is_none() {
-            self.label_col = probe_label_column(&self.fields, &self.row_label);
+        if self.label.is_none() {
+            self.label = probe_label_column(&self.fields, &self.row_label).map(|c| Label { cols: vec![c], sep: String::new() });
         }
     }
 
@@ -897,6 +957,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
             description: None,
             links: None,
             create: None,
+            searchable: true,
             from_col: self.pk.first().cloned().unwrap_or_default(),
             to_col: String::new(),
             is_nm: true,
@@ -1168,7 +1229,7 @@ where
 {
     /// Resolve a relation name from `?sort=` into the relation and the target column its label comes
     /// from — or say, specifically, why that relation can't be ordered.
-    fn sortable_relation(&self, name: &str) -> Result<(&MetaRelation, String)> {
+    fn sortable_relation(&self, name: &str) -> Result<(&MetaRelation, Label)> {
         let rel = self
             .model
             .relations
@@ -1180,18 +1241,14 @@ where
                 "cannot sort by '{name}': a row has many {name}, so there is no single label to order on"
             )));
         }
-        let label_col = self
-            .registry
-            .by_table(&rel.target)
-            .and_then(|t| t.label_col())
-            .ok_or_else(|| {
-                Error::BadRequest(format!(
-                    "cannot sort by '{name}': its label is not a single column of '{}' \
-                     (declare one with MetaModel::label_column)",
-                    rel.target
-                ))
-            })?;
-        Ok((rel, label_col))
+        let label = self.registry.by_table(&rel.target).and_then(|t| t.label()).ok_or_else(|| {
+            Error::BadRequest(format!(
+                "cannot sort by '{name}': its label is not made of columns of '{}' \
+                 (declare them with MetaModel::label_columns)",
+                rel.target
+            ))
+        })?;
+        Ok((rel, label))
     }
 
     /// The FK column behind a to-one relation name, if `name` is one — `"zone"` → `"zone_id"`.
@@ -1203,38 +1260,103 @@ where
             .and_then(|r| r.fk_column.clone())
     }
 
+    /// The fields the search box looks in: searchable, and shown (never a hidden or write-only one,
+    /// which a search would turn into an oracle on its value).
+    fn searchable_fields(&self) -> impl Iterator<Item = &MetaField> {
+        self.model.fields.iter().filter(|f| f.searchable && !f.hidden && !f.write_only)
+    }
+
+    /// One search term over everything the table shows, as printed (CRUD.md → Search): an `OR` of a
+    /// branch per field, the row's own label, and each relation's labels. Nothing to look in matches
+    /// nothing.
+    fn search_any(&self, term: &str, period: Option<(i64, i64)>) -> Result<Condition> {
+        use sea_orm::sea_query::ExprTrait;
+        let mut any = Condition::any();
+        let needle = term.to_lowercase();
+        for f in self.searchable_fields() {
+            let col = field_col::<E>(&f.name)?;
+            if f.display.as_ref().is_some_and(|d| d.is_datetime()) {
+                if let Some((from, to)) = period {
+                    any = any.add(col.between(from, to));
+                }
+                continue;
+            }
+            let shown = match f.logical_type {
+                LogicalType::Text => col.clone(),
+                LogicalType::Int | LogicalType::Float | LogicalType::Date | LogicalType::Uuid | LogicalType::Enum => {
+                    as_text(col.clone())
+                }
+                _ => continue,
+            };
+            any = any.add(contains(shown, term));
+            // A choice shown by its label ("In review") matches by the label.
+            let labelled: Vec<String> = f
+                .option_labels
+                .iter()
+                .filter(|(_, label)| label.to_lowercase().contains(&needle))
+                .map(|(value, _)| value.clone())
+                .collect();
+            if !labelled.is_empty() {
+                any = any.add(as_text(col).is_in(labelled));
+            }
+        }
+        // The row's own label, when it spans columns ("Jan Novak" is in neither alone).
+        if let Some(label) = self.model.label.as_ref().filter(|l| l.cols.len() > 1) {
+            any = any.add(contains(label.sql(&self.model.table), term));
+        }
+        // Each relation by its labels, as its cells show them to any reader of this table.
+        let here = Alias::new(&self.model.table);
+        for rel in self.model.relations.iter().filter(|r| r.searchable && !r.hidden) {
+            let Some(target) = self.registry.by_table(&rel.target) else { continue };
+            let Some(label) = target.label() else { continue };
+            let t = Alias::new(&rel.target);
+            let labelled = |key: &str| {
+                Query::select()
+                    .column((t.clone(), Alias::new(key)))
+                    .from(t.clone())
+                    .and_where(contains(label.sql(&rel.target), term))
+                    .to_owned()
+            };
+            let keys = match self.model.nm.get(&rel.name).filter(|_| rel.is_nm) {
+                // N:M: the rows linked to a matching target.
+                Some(nm) => {
+                    let link = Alias::new(&nm.junction);
+                    Query::select()
+                        .column((link.clone(), Alias::new(&nm.source_col)))
+                        .from(link.clone())
+                        .and_where(Expr::col((link, Alias::new(&nm.target_col))).in_subquery(labelled(&target.pk_col())))
+                        .to_owned()
+                }
+                // To-one (`from` is our FK) or the other side of a to-many (`to` is theirs).
+                None => labelled(&rel.to_col),
+            };
+            any = any.add(Expr::col((here.clone(), Alias::new(&rel.from_col))).in_subquery(keys));
+        }
+        if any.is_empty() {
+            any = any.add(Expr::cust("1 = 0"));
+        }
+        Ok(any)
+    }
+
     /// Build the query condition from a `ListQuery` (shared by `list` and `delete_many`).
     fn build_condition(&self, q: &ListQuery) -> Result<Condition> {
         let mut cond = Condition::all();
-        // Search only what a reader could see: a hidden or write-only text column (a password hash, a
-        // TOTP secret) answered "is this in it?" one guess at a time, through which rows came back.
-        let searchable = |name: &str| self.model.fields.iter().any(|f| f.name == name && !f.hidden && !f.write_only);
-        for (col, pat) in &q.search {
-            match col {
+        for (col, term) in &q.search {
+            cond = cond.add(match col {
                 Some(name) => {
-                    let c = column::<E>(name)
-                        .filter(|_| searchable(name))
+                    let f = self
+                        .searchable_fields()
+                        .find(|f| f.name == *name)
                         .ok_or_else(|| Error::BadRequest(format!("unknown column: {name}")))?;
-                    // A substring match only means something on text. On an int/bool/date column it
-                    // silently matched the wrong rows on SQLite (`3` also matching 13, 30, 103) and
-                    // was a type error on PostgreSQL, so it is refused rather than guessed at.
-                    if !logical_type(c.def().get_column_type()).is_text() {
+                    if !f.logical_type.is_text() {
                         return Err(Error::BadRequest(format!(
                             "column '{name}' is not text: use filter[{name}] for an exact match"
                         )));
                     }
-                    cond = cond.add(c.contains(pat));
+                    Condition::all().add(contains(field_col::<E>(&f.name)?, term))
                 }
-                None => {
-                    let mut any = Condition::any();
-                    for c in <E::Column as Iterable>::iter() {
-                        if logical_type(c.def().get_column_type()).is_text() && searchable(c.as_str()) {
-                            any = any.add(c.contains(pat));
-                        }
-                    }
-                    cond = cond.add(any);
-                }
-            }
+                None => self.search_any(term, q.search_period)?,
+            });
         }
         for (name, val) in &q.eq {
             // A filter may name a *relation* rather than a column — `filter[zone]=7` on a record table
@@ -1452,8 +1574,8 @@ where
     fn label_of(&self, raw: &Value) -> String {
         (self.model.row_label)(raw)
     }
-    fn label_col(&self) -> Option<String> {
-        self.model.label_col.clone()
+    fn label(&self) -> Option<Label> {
+        self.model.label.clone()
     }
     async fn list_in(&self, col: &str, vals: &[Value]) -> Result<Vec<Value>> {
         let c = column::<E>(col).ok_or_else(|| Error::BadRequest(format!("unknown column: {col}")))?;
@@ -1567,7 +1689,7 @@ where
                     // its columns the label comes from.
                     sortable: cardinality == Cardinality::ToOne
                         && fk_column.is_some()
-                        && self.registry.by_table(&target).and_then(|t| t.label_col()).is_some(),
+                        && self.registry.by_table(&target).and_then(|t| t.label()).is_some(),
                     target: self.registry.slug_for(&target).unwrap_or(target),
                     name,
                     cardinality,
@@ -1593,7 +1715,7 @@ where
                 sel = sel.order_by_with_nulls(c, ord, NullOrdering::Last);
                 continue;
             }
-            let (rel, label_col) = self.sortable_relation(name)?;
+            let (rel, label) = self.sortable_relation(name)?;
             // Order by the label the cell actually shows, not the FK id behind it. A to-one join
             // cannot multiply rows (the FK points at a unique key), so `total` and the page
             // boundaries are unaffected.
@@ -1616,11 +1738,14 @@ where
                         condition_type: ConditionType::All,
                     },
                 )
-                .order_by_with_nulls(
-                    Expr::col((target, Alias::new(label_col))),
-                    ord,
+;
+            for col in &label.cols {
+                sel = sel.order_by_with_nulls(
+                    Expr::col((target.clone(), Alias::new(col))),
+                    ord.clone(),
                     NullOrdering::Last,
                 );
+            }
         }
         // Always break ties on the primary key. Without it an `ORDER BY` on a non-unique column — the
         // ttl of ten thousand records that nearly all share one value — leaves the row order inside a
@@ -2503,6 +2628,7 @@ mod tests {
             write_only: false,
             create_only: false,
             hidden: false,
+            searchable: true,
             label: None,
             description: None,
             default: None,

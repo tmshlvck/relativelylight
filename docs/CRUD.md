@@ -53,7 +53,7 @@ add labels/help/defaults, attach validators, or declare N:M.
 | `.relate(&other)` | mut | Declare a relation to another model — **required for N:M**. Chainable. |
 | `slug: String` | field | URL segment; default `slugify(table_name)`. Override before register. |
 | `row_label: Box<dyn Fn(&Value) -> String + ...>` | field | Row's display label; default fallback chain (below). |
-| `.label_column(col)` | mut | Label rows by one column — and let *other* entities sort by a relation pointing here (below). |
+| `.label_columns(cols, sep)` / `.label_column(col)` | mut | Label rows by columns joined by `sep` — and let *other* entities sort and search by a relation pointing here (below). |
 | `validate_row: Option<...>` | field | Cross-field validator (see [validation](#validation--transforms)). |
 
 `Crud::register(mm, gate)` consumes the model and takes its authorization gate (`authz::Open` for
@@ -73,20 +73,22 @@ post.relate(&tag);
 **Row label** (used in relation links, terse rows, pickers): default is the first present of
 `name | title | username | bio | label`, else `#<pk>`. Reassign the closure to override.
 
-**Labels and sorting.** Another entity can sort by a relation pointing here — `?sort=author` ordering
-by `author.name` rather than `author_id` — but only if the label is expressible as SQL. At registration
-the label closure is **probed** once with a synthetic row, so the common one-column case is recognised
-whether you wrote it as a closure or declared it:
+**Labels, sorting and search.** Another entity can sort and [search](#search) by a relation
+pointing here (`?sort=author` orders by the author's name, not `author_id`), but only if the label
+is made of columns, which SQL can then rebuild. Declare them, joined as shown; a closure reading one
+column is recognised too, by probing it once at registration:
 
 ```rust
-author.label_column("name");                                              // declared
-author.row_label = Box::new(|r| r["name"].as_str().unwrap_or_default().into()); // probed — same result
-author.row_label = Box::new(|r| format!("{} <{}>", r["name"], r["email"]));     // not a column → not sortable
+person.label_columns(["first_name", "last_name"], " ");                   // "Jan Novak"
+aircraft.label_columns(["manufacturer", "type"], ": ");                   // "Boeing: 737"
+author.label_column("name");                                              // one column
+author.row_label = Box::new(|r| r["name"].as_str().unwrap_or_default().into()); // probed: the same
+author.row_label = Box::new(|r| format!("{} <{}>", r["name"], r["email"]));     // code: label only
 ```
 
-The third form still labels rows perfectly; relations pointing at it just report `sortable: false` and
-400 an attempt to order by them, rather than quietly sorting by one part of a label. `label_column`
-panics on an unknown column, like `field`.
+The last form still labels rows; relations pointing at it report `sortable: false` and are not
+searched. Sorting by a label of several columns orders by them in turn. An unknown column panics,
+like `field`.
 
 ### Column names the compiler checks
 
@@ -134,6 +136,7 @@ pub struct MetaField {
     pub write_only: bool,  // in writes, omitted from reads      default: false (e.g. password)
     pub create_only: bool, // written on create, never by update default: false (e.g. a first password)
     pub hidden: bool,      // in neither reads/writes/metadata   default: true if is_fk
+    pub searchable: bool,  // the search box looks here           default: true (never if hidden/write-only)
     // presentation (optional; surfaced in metadata for the UI):
     pub label: Option<String>,
     pub description: Option<String>,
@@ -334,7 +337,7 @@ parses it; `ViewState::default()` is page 1, unsorted, unfiltered. Every link th
 
 | Param | Meaning |
 |---|---|
-| `q=<term>` | naive full-text: `LIKE '%term%'` across the text columns the table shows (never a hidden or write-only one) |
+| `q=<term>` | [search](#search): rows where what the table shows contains `term` |
 | `filter[<name>]=<val>` | **exact** match. `<name>` is a column the table shows (not a write-only one) *or* a to-one relation (`filter[author]=7` → `author_id = 7`); an empty value matches rows that have none (`IS NULL`), and `*` means **no filter** — the value the toolbar's "all" submits, since a `<select>` must submit something and the empty one is taken |
 | `filter[<col>][from]=<v>` / `filter[<col>][to]=<v>` | a **range**, `>=` / `<=`, either end optional; an empty value is an open end. Applied only by a table that declared [`range_filter`](#range-filters) for the column, which reads a `.datetime()` column's bounds as dates in the viewer's zone |
 | `sort=views:desc,title` | sort by sortable columns the table shows; any other key is dropped. A **relation** sorts by the label its cells show |
@@ -365,6 +368,22 @@ target to know which column its label comes from — see [`label_column`](#metam
 a **to-one that owns its FK** only: a row has many tags, so there is no single label to order it by,
 and to-many/N:M report `sortable: false` and refuse an attempt. Each column carries `sortable`, so the
 UI knows which headers to make links without guessing.
+
+<a id="search"></a>**Search.** `?q=term` finds the rows where what the table *shows* contains `term`:
+a case-insensitive substring, taken literally (`%` and `_` are no wildcards), in one query (an `OR`
+of a branch per field and relation):
+
+| What | Matched as |
+|---|---|
+| text, numbers, a `Date`, a UUID | the text it prints as (`123` finds `1234`) |
+| a choice | its value, or its label (`in rev` finds `review` shown as "In review") |
+| a `.datetime()` instant | only when `term` names a period: `2026`, `2026-03`, `2026-03-05`, `2026-03-05 14`, `2026-03-05 14:30`, read in the viewer's zone |
+| the row's own label, a relation | the label as shown ([labels made of columns](#metamodele)), through a subquery: to-one, to-many and N:M |
+
+Never a hidden or write-only field. Opt out with `model.field("notes").searchable = false` or
+`model.relation("author").searchable = false`. Booleans, JSON, a native date-time, a label built
+in code, and what `format_cell` or a codec renders are not searched: the search sees stored values.
+On a table with nothing to search, a term matches no row.
 
 **Bulk delete** runs one set-based `DELETE … WHERE` in the backend (plus a subquery to clear N:M
 junctions) — not a per-row loop, so it scales. It refuses to wipe the whole unfiltered table unless
