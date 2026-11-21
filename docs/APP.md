@@ -321,8 +321,10 @@ Points worth internalising:
   page with the rows in it. Hiding buttons is a *second* thing it does, not the main one.
 - **`Outcome::Invalid` carries a `ViewState`** with the messages and the operator's input; re-render
   with it and answer `422`. Don't redirect — that would throw the input away.
-- **Everything the panel links to is relative** (`?entity=tag&page=2`), so it works wherever you mount
-  it, and both handlers must live on the same path.
+- **Everything inside a table links relative to the page** (`?page=2`, `?edit=7`), and with `base`
+  the nav links to `/admin/tag`, so it works wherever you mount it, and both handlers must live on
+  the same path. A link carries only what the operator chose, never the table's defaults
+  ([CRUD.md → The URL is the view](CRUD.md#the-url-is-the-view)).
 
 ## 5. Your own pages
 

@@ -122,6 +122,13 @@ pub struct ViewState {
     /// the dialog can re-render with both in place instead of losing the input.
     pub(crate) rejected: Option<ValidationErrors>,
     pub(crate) posted: BTreeMap<String, Vec<String>>,
+    /// What the rendering table applies by itself, so its links leave it out: its default sort
+    /// (`Table::sort`) and its pinned filters (`Table::fixed_filter`). A link carries only what
+    /// the operator chose; the table supplies the rest again. Set by the table, never parsed.
+    pub(crate) default_sort: Vec<(String, bool)>,
+    pub(crate) pinned: Vec<String>,
+    /// The table's own page size (`Table::per_page`), likewise left out of links. `0`: none known.
+    pub(crate) default_per_page: u64,
 }
 
 impl ViewState {
@@ -193,7 +200,10 @@ impl ViewState {
         urlform::query(&self.pairs())
     }
 
-    fn pairs(&self) -> Vec<(String, String)> {
+    /// The list state as query pairs: what the operator chose, without what the rendering table
+    /// supplies by itself (its default sort and page size, its pinned filters). Every link, redirect
+    /// and the toolbar form's hidden inputs are built from this one list.
+    pub(crate) fn pairs(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
         if let Some(e) = &self.entity {
             out.push(("entity".into(), e.clone()));
@@ -201,7 +211,7 @@ impl ViewState {
         if let Some((slug, relation)) = &self.pick {
             out.push(("pick".into(), format!("{slug}.{relation}")));
         }
-        for (name, value) in &self.filters {
+        for (name, value) in self.filters.iter().filter(|(n, _)| !self.pinned.contains(n)) {
             out.push((format!("filter[{name}]"), value.clone()));
         }
         for (key, value) in self.range_pairs() {
@@ -210,10 +220,10 @@ impl ViewState {
         if !self.q.is_empty() {
             out.push(("q".into(), self.q.clone()));
         }
-        if !self.sort.is_empty() {
+        if !self.sort.is_empty() && self.sort != self.default_sort {
             out.push(("sort".into(), fmt_sort(&self.sort)));
         }
-        if self.per_page > 0 {
+        if self.per_page > 0 && self.per_page != self.default_per_page {
             out.push(("per_page".into(), self.per_page.to_string()));
         }
         if self.page > 1 {
@@ -277,7 +287,8 @@ impl ViewState {
     /// A different page size starts at the first page: the row you were looking at is on a
     /// different page now, and page 9 of a 250-row listing usually doesn't exist.
     pub(crate) fn href_per_page(&self, per_page: u64) -> String {
-        self.href(&[("per_page", &per_page.to_string()), ("page", "")])
+        let n = if per_page == self.default_per_page { String::new() } else { per_page.to_string() };
+        self.href(&[("per_page", &n), ("page", "")])
     }
     /// The link to another entity's panel. `keep` decides which filters travel: an
     /// [`Admin`](super::Admin) passes the ones it declared as shared **and** the target actually
@@ -327,8 +338,10 @@ impl ViewState {
     pub(crate) fn href_show(&self, id: &str) -> String {
         self.href(&[("show", id)])
     }
+    /// The export of this view: its filters, search and sort, not its page — the export is the
+    /// whole matching set.
     pub(crate) fn href_csv(&self) -> String {
-        self.href(&[("format", "csv")])
+        self.href(&[("format", "csv"), ("page", ""), ("per_page", "")])
     }
     pub(crate) fn href_filter(&self, name: &str, value: &str) -> String {
         let mut pairs = self.pairs();
@@ -355,7 +368,9 @@ impl ViewState {
             }
             None => keys.push((column.to_string(), false)),
         }
-        self.href(&[("sort", &fmt_sort(&keys)), ("page", "")])
+        // The table's own default needs no saying (and "unsorted" falls back to it anyway).
+        let sort = if keys == self.default_sort { String::new() } else { fmt_sort(&keys) };
+        self.href(&[("sort", &sort), ("page", "")])
     }
 
     /// Fold this view into a backend query. `per_page` is the component's default, used unless the URL

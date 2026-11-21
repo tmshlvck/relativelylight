@@ -721,6 +721,8 @@ impl<'a> Table<'a> {
         if out.sort.is_empty() {
             out.sort = self.sort.clone();
         }
+        out.default_sort = self.sort.clone();
+        out.default_per_page = self.per_page;
         // Only filters this entity *has* a column for. An `Admin` shared filter travels in the URL
         // from table to table — that is the point of it — so most tables meet one naming a column
         // they don't have, and passing it to the backend would refuse the whole listing. Dropping
@@ -735,6 +737,7 @@ impl<'a> Table<'a> {
         for f in self.applicable_filters(cols)? {
             if let Some(value) = f.fixed {
                 out.filters.retain(|(n, _)| *n != f.name);
+                out.pinned.push(f.name.clone());
                 out.filters.push((f.name, value));
             }
         }
@@ -795,30 +798,13 @@ impl<'a> Table<'a> {
     /// Hidden inputs that carry the rest of the view through the toolbar's GET form. Not the page
     /// (a new search starts at the first one) and not the filters it renders itself.
     fn keep(&self, state: &ViewState) -> Vec<(String, String)> {
-        let rendered: Vec<&str> = self.filters.iter().map(|f| f.name.as_str()).collect();
-        let mut out = Vec::new();
-        if let Some(e) = &state.entity {
-            out.push(("entity".to_string(), e.clone()));
-        }
-        if let Some((slug, relation)) = &state.pick {
-            out.push(("pick".to_string(), format!("{slug}.{relation}")));
-        }
-        for (name, value) in &state.filters {
-            if !rendered.contains(&name.as_str()) {
-                out.push((format!("filter[{name}]"), value.clone()));
-            }
-        }
-        if !state.sort.is_empty() {
-            let keys: Vec<String> = state
-                .sort
-                .iter()
-                .map(|(c, d)| if *d { format!("{c}:desc") } else { c.clone() })
-                .collect();
-            out.push(("sort".to_string(), keys.join(",")));
-        }
-        if state.per_page > 0 {
-            out.push(("per_page".to_string(), state.per_page.to_string()));
-        }
+        // The form's own inputs (the search box, the filter controls, the range inputs) say the
+        // rest; the page starts over.
+        let controls: Vec<String> = self.filters.iter().map(|f| format!("filter[{}]", f.name)).collect();
+        let mut out = state.pairs();
+        out.retain(|(k, _)| {
+            k != "q" && k != "page" && !controls.contains(k) && !k.ends_with("][from]") && !k.ends_with("][to]")
+        });
         out
     }
 

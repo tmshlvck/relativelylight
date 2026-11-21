@@ -456,6 +456,14 @@ parses it; `ViewState::default()` is page 1, unsorted, unfiltered. Every link th
 
 Unknown parameters are **ignored**, so your own may share the URL.
 
+**A link carries what the operator chose, and nothing else.** A dialog's links (Edit, View, New)
+and a write's redirect keep the list's state, so closing or saving lands on the same page, sort and
+filters. They leave out what the table supplies by itself: its default `sort` and `per_page`, its
+[pinned filters](#a-pinned-filter), and under [`Admin::base`](#addressing-a-model) the entity, which
+the path names. A key the table dropped (an unsortable column, a filter it has no column for) is
+not repeated either. A new search starts on page 1, and the export link has no page, since it is the
+whole matching set. The one-shot `done=` and `saved=1` are never carried on.
+
 **Why brackets.** The reserved words above (`page`, `sort`, `entity`, …) would shadow a column of the
 same name if bare `?<col>=` were accepted. Brackets can't occur in a column or relation name (those
 come from Rust identifiers), so `filter[…]` is collision-proof by construction whatever an app calls

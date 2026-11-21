@@ -316,6 +316,16 @@ is easy to miss in a diff.
 
 ### Fixed
 
+- **Links carry only what the operator chose**
+  ([CRUD.md → The URL is the view](docs/CRUD.md#the-url-is-the-view)): a table's default sort and
+  page size and its pinned filters no longer appear in its links, its redirects or the toolbar
+  form's hidden inputs (`?sort=title&edit=3` for a table sorted by title by default is now
+  `?edit=3`), and the export link drops the page. The toolbar form builds its inputs from the same
+  list as every link.
+- **`Admin::base`: the table's links no longer repeat the entity.** Addressed by path, a table's
+  View, Edit, sort and pager links and a write's redirect carried `entity=` as well
+  (`/admin/post?entity=post&show=1`); they are now `/admin/post?show=1`, as `base` documents.
+
 - **The table's toolbar wraps instead of overflowing.** Many filters, ranges and the search ran past
   the table's card and gave the page a horizontal scrollbar; they now wrap onto more rows (below the
   title when they don't fit beside it), and the search box stretches to fill its row.

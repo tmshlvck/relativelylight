@@ -870,6 +870,26 @@ async fn a_pinned_filter_is_shown_but_not_offered_and_cannot_be_cleared() {
 // ---------- Admin ----------
 
 #[tokio::test]
+async fn a_refused_write_under_a_path_re_renders_the_same_entity() {
+    // The table writes without the entity (the path has it); the state it hands back for the
+    // re-render gets it again, or the panel would show its first entity with the messages lost.
+    let mut e = Engine::new();
+    e.add(Arc::new(Mock::new("tag", vec![field("id", false, true, None)]).rows(vec![])), Arc::new(Open));
+    e.add(Arc::new(Mock::new("post", post_columns()).rejecting("title")), Arc::new(Open));
+    e.add(Arc::new(Mock::new("author", vec![field("id", false, true, None)]).rows(vec![])), Arc::new(Open));
+    let admin = Admin::new(&e).base("/admin").entity("tag").entity("post");
+    let state = ViewState { entity: Some("post".into()), ..Default::default() };
+    let Outcome::Invalid(back) =
+        admin.submit(&no_headers(), IP, b"_op=create&title=x&slug=s", &state).await.unwrap()
+    else {
+        panic!("the mock rejects every write");
+    };
+    assert_eq!(back.entity.as_deref(), Some("post"));
+    let html = admin.render_for(&no_headers(), &back).await.unwrap();
+    assert!(html.contains("<dialog open") && !html.contains("entity="), "{html}");
+}
+
+#[tokio::test]
 async fn an_admin_can_address_its_entities_by_path() {
     let (e, _) = engine();
     let admin = Admin::new(&e).base("/admin").filter("author").entity("post").entity("note").entity("tag");
@@ -893,6 +913,13 @@ async fn an_admin_can_address_its_entities_by_path() {
     assert!(!panel.contains("/admin/"), "the table knows nothing about the mount: {panel}");
     assert!(panel.contains(r#"href="?"#) || panel.contains(r#"href="?filter"#), "{panel}");
     assert!(panel.contains("edit=7"), "and its row links still work: {panel}");
+    assert!(!panel.contains("entity="), "the path names the entity, the query doesn't: {panel}");
+    assert!(panel.contains(r#"href="?filter%5Bauthor%5D=3&#38;page=2&#38;show=7""#), "{panel}");
+
+    // A write lands back on the list without it too.
+    let done = admin.submit(&no_headers(), IP, b"_op=update&_id=7&title=t&slug=s", &state).await.unwrap();
+    let Outcome::Done(to) = done else { panic!("saved: {done:?}") };
+    assert!(to.starts_with('?') && !to.contains("entity="), "{to}");
 
     // Without `base` it is one page addressed by query, as before.
     let one_page = Admin::new(&e).entity("post").entity("tag");
@@ -1206,6 +1233,51 @@ async fn a_crafted_body_cannot_reach_a_column_the_form_never_rendered() {
     let got = log.last().1;
     let keys: Vec<&String> = got.as_object().unwrap().keys().collect();
     assert_eq!(keys, vec!["slug", "title"], "only the rendered fields are written: {got}");
+}
+
+#[tokio::test]
+async fn a_tables_defaults_stay_out_of_its_links() {
+    // Positive control: a sort the operator chose rides in every link, so the view comes back.
+    let (e, _) = engine();
+    let chosen = render(&Table::new(&e, "post"), &ViewState::from_query("sort=views")).await;
+    assert!(chosen.contains("sort=views&#38;edit=7"), "{chosen}");
+
+    // The table's own default sort is applied, and marked, but not written into the links.
+    let table = Table::new(&e, "post").sort("title").fixed_filter("status", "draft");
+    let html = render(&table, &list()).await;
+    assert!(html.contains(r#"href="?edit=7""#), "{html}");
+    assert!(!html.contains("sort=title&#38;") && !html.contains("sort=title\""), "{html}");
+    assert!(!html.contains("filter%5Bstatus%5D"), "nor the pinned filter: {html}");
+    assert!(html.contains("<strong>draft</strong>"), "which is still chipped: {html}");
+    // The header still cycles from the default: ascending is in force, so a click reverses it.
+    assert!(html.contains("sort=title%3Adesc"), "{html}");
+}
+
+#[tokio::test]
+async fn the_toolbar_form_carries_only_what_the_operator_chose() {
+    let (e, _) = engine();
+    let table = Table::new(&e, "post").sort("title").per_page(30).fixed_filter("status", "draft");
+    let hidden = |html: &str| -> Vec<String> {
+        html.split(r#"<input type="hidden" name=""#).skip(1).map(|s| s.split('"').next().unwrap().to_string()).collect()
+    };
+    // Positive control: a chosen sort and page size ride through a new search; the page doesn't.
+    let chosen = render(&table, &ViewState::from_query("sort=views&per_page=10&page=3")).await;
+    let toolbar = chosen.split("</form>").next().unwrap();
+    assert_eq!(hidden(toolbar), ["sort", "per_page"], "{toolbar}");
+
+    // The table's defaults and its pin are its own: no hidden input repeats them.
+    let html = render(&table, &list()).await;
+    let toolbar = html.split("</form>").next().unwrap();
+    assert!(hidden(toolbar).is_empty(), "{toolbar}");
+}
+
+#[tokio::test]
+async fn the_export_link_is_the_view_without_its_page() {
+    let (e, _) = engine();
+    let html = render(&Table::new(&e, "post"), &ViewState::from_query("q=x&sort=views&per_page=10&page=3")).await;
+    let link = html.split("format=csv").next().unwrap().rsplit("href=\"").next().unwrap();
+    assert!(link.contains("q=x") && link.contains("sort=views"), "the rows and their order: {link}");
+    assert!(!link.contains("page="), "not which page of them: {link}");
 }
 
 // ---------- the write path ----------
@@ -1689,7 +1761,9 @@ async fn the_toolbar_offers_page_sizes_and_marks_the_one_in_force() {
     let table = Table::new(&e, "thing").per_page(30);
     let html = table.render_for(&no_headers(), &ViewState::from_query("per_page=100")).await.unwrap();
     assert!(html.contains("<strong>100</strong>"), "the size in force is marked: {html}");
-    assert!(html.contains("per_page=30"), "the others are links: {html}");
+    assert!(html.contains(">30</a>"), "the others are links: {html}");
+    let back = html.split(">30</a>").next().unwrap().rsplit("href=\"").next().unwrap();
+    assert!(!back.contains("per_page"), "back to the table's own size needs no saying: {back}");
     assert!(html.contains("Page 1 / 5"), "and it is the size actually used: {html}");
     assert!(html.contains("Total: 500"), "the count shows even on one page");
 

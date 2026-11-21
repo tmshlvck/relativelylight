@@ -142,7 +142,7 @@ impl<'a> Admin<'a> {
     pub async fn render_for(&self, headers: &HeaderMap, state: &ViewState) -> Result<String> {
         self.check_filters()?;
         let active = self.active(state)?;
-        let panel = active.render_for(headers, state).await?;
+        let panel = active.render_for(headers, &self.table_state(state)).await?;
         AdminTmpl {
             title: self.title.clone().unwrap_or_default(),
             nav: self.nav(&active.slug, state),
@@ -168,13 +168,31 @@ impl<'a> Admin<'a> {
             Some(slug) => self.table(&slug).ok_or(Error::NotFound)?,
             None => self.active(state)?,
         };
-        table.submit(headers, client_ip, body, state).await
+        match table.submit(headers, client_ip, body, &self.table_state(state)).await? {
+            // Re-rendered through this panel, which needs to know the entity again.
+            Outcome::Invalid(mut rejected) => {
+                rejected.entity = state.entity.clone();
+                Ok(Outcome::Invalid(rejected))
+            }
+            done => Ok(done),
+        }
+    }
+
+    /// The state the active table renders and writes with. Addressed by path ([`base`](Admin::base)),
+    /// the entity is in the path, so it is left out of the table's relative links
+    /// (`/admin/post?show=1`, not `/admin/post?entity=post&show=1`); on one page it stays in them.
+    fn table_state(&self, state: &ViewState) -> ViewState {
+        let mut s = state.clone();
+        if self.base.is_some() {
+            s.entity = None;
+        }
+        s
     }
 
     /// The CSV export of the active table — see [`Table::csv`].
     #[cfg(feature = "csv")]
     pub async fn csv(&self, headers: &HeaderMap, state: &ViewState) -> Result<String> {
-        self.active(state)?.csv(headers, state).await
+        self.active(state)?.csv(headers, &self.table_state(state)).await
     }
 
     /// The table `?entity=` names, else the first listed — with the shared filters attached.
