@@ -6,7 +6,7 @@ use super::state::{Mode, ViewState};
 use super::widgets::{self, FieldV, Opt, Widget};
 use super::{
     apply, authorize, banner, check_fields, check_initial, check_sort, check_widgets, csrf_token,
-    csv_header, is_filterable, range_kind, render_err, renders, Fmt, Outcome, RangeKind, RowClass,
+    csv_header, is_filterable, range_kind, render_err, renders, Outcome, RangeKind, RowClass,
     Surface, Writes,
 };
 use crate::authz::Operation;
@@ -64,13 +64,6 @@ struct Offer {
     bulk_delete: bool,
     import: bool,
     export: bool,
-}
-
-/// Where a renderer applies: [`Table::format_cell`] or [`Table::format_view`].
-#[derive(Clone, Copy, PartialEq)]
-enum Scope {
-    Cell,
-    View,
 }
 
 struct ControlV {
@@ -193,11 +186,9 @@ pub struct Table<'a> {
     import: bool,
     export: bool,
     confirm: bool,
-    picker_threshold: u64,
     fields: Vec<String>,
     omit: Vec<String>,
     columns: Vec<String>,
-    formatters: Vec<(String, Scope, Fmt)>,
     row_class: Option<RowClass>,
     detail: bool,
     detail_href: Option<String>,
@@ -239,11 +230,9 @@ impl<'a> Table<'a> {
             import: true,
             export: true,
             confirm: true,
-            picker_threshold: 50,
             fields: Vec::new(),
             omit: Vec::new(),
             columns: Vec::new(),
-            formatters: Vec::new(),
             row_class: None,
             detail: true,
             detail_href: None,
@@ -421,15 +410,6 @@ impl<'a> Table<'a> {
         self.confirm = on;
         self
     }
-    /// How many target rows a relation may list as a `<select>` (or multi-select) in the form.
-    /// Default: 50. Past it, the field shows its selection and edits it in a
-    /// [`Picker`](super::Picker) dialog — if the app serves one (`Crud::picker_path`); without one it
-    /// stays a `<select>` of every row. A [`filter`](Table::filter) control always lists every row —
-    /// see `docs/CRUD.md`.
-    pub fn picker_threshold(mut self, n: u64) -> Self {
-        self.picker_threshold = n;
-        self
-    }
     /// Show **only** these columns in the **table**, in this order. Default: every published
     /// column, in the model's order.
     ///
@@ -578,44 +558,6 @@ impl<'a> Table<'a> {
         self.initial.push((field, value.into()));
         self
     }
-    /// A renderer for the column's **table cells**: `(value, row) -> HTML`, called during render. The
-    /// output is inserted verbatim, so wrap database values in [`esc`](super::esc):
-    ///
-    /// ```ignore
-    /// .format_cell("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))
-    /// .format_cell("body", truncate(60))   // a corner of it in the table — View still shows it all
-    /// ```
-    ///
-    /// Cells only: the View dialog renders the column by default unless it has a
-    /// [`format_view`](Table::format_view) of its own. The two are independent — for the same
-    /// rendering in both, pass the same function to each.
-    pub fn format_cell<F>(mut self, column: impl Into<String>, render: F) -> Self
-    where
-        F: Fn(&Value, &Value) -> String + Send + Sync + 'static,
-    {
-        self.formatters.push((column.into(), Scope::Cell, Arc::new(render)));
-        self
-    }
-    /// A renderer for the column in the **View dialog**, as [`format_cell`](Table::format_cell) is for
-    /// the cells, and independent of it. E.g. a multi-line text kept as typed:
-    /// `|v, _| format!("<pre>{}</pre>", esc(v))`. (With [`detail_href`](Table::detail_href) the view
-    /// is the app's own page, and this is never called.)
-    pub fn format_view<F>(mut self, column: impl Into<String>, render: F) -> Self
-    where
-        F: Fn(&Value, &Value) -> String + Send + Sync + 'static,
-    {
-        self.formatters.push((column.into(), Scope::View, Arc::new(render)));
-        self
-    }
-
-    /// The renderers for one place a row is shown, by column name.
-    fn formatters_for(&self, scope: Scope) -> Vec<(String, Fmt)> {
-        self.formatters
-            .iter()
-            .filter(|(_, s, _)| *s == scope)
-            .map(|(n, _, f)| (n.clone(), f.clone()))
-            .collect()
-    }
     /// Namespaces the fragment's DOM id, so two tables for the same entity can share a page.
     pub fn dom_id(mut self, id: impl Into<String>) -> Self {
         self.dom_id = Some(id.into());
@@ -656,7 +598,7 @@ impl<'a> Table<'a> {
                 self.in_view(&pins, id).await?;
                 let edit = if can.edit { state.href_edit(id) } else { String::new() };
                 let chrome = DetailChrome { close: Some(state.href_list()), edit, saved: None };
-                self.detail_view(&cols, id, &tz, &links, chrome).await?
+                self.detail_view(&cols, id, headers, &tz, &links, chrome).await?
             }
             Mode::New if can.create => {
                 self.dialog(&cols, &pins, state.mode(), &state, headers, &csrf).await?
@@ -689,7 +631,7 @@ impl<'a> Table<'a> {
             rows: render::rows(
                 &page,
                 &shown,
-                &self.formatters_for(Scope::Cell),
+                Some(headers),
                 self.row_class.as_ref(),
                 &state,
                 &tz,
@@ -739,11 +681,12 @@ impl<'a> Table<'a> {
             q: state.q.clone(),
             keep: self.keep(&state),
             heads: render::heads(&shown, &state),
-            // No links here: a click in the picker's list chooses a row, it doesn't open one.
+            // No links and no formatters here: a click in the picker's list chooses a row, and a
+            // link a formatter drew would take the browser away from the form being filled in.
             rows: render::rows(
                 &page,
                 &shown,
-                &self.formatters_for(Scope::Cell),
+                None,
                 None,
                 &state,
                 &tz,
@@ -1183,7 +1126,7 @@ impl<'a> Table<'a> {
             row.as_ref(),
             state,
             &tz,
-            &widgets::Relations::new(&self.slug, self.picker_threshold, headers),
+            &widgets::Relations::new(&self.slug, headers),
             &widgets::Presets { initial: &self.initial, sets: &pins.sets },
         )
         .await?;
@@ -1221,14 +1164,17 @@ impl<'a> Table<'a> {
         let cols = self.engine.columns(&self.slug)?;
         let tz = Tz::from_headers(headers);
         let links = render::Links::resolve(self.engine, &self.slug, &cols, headers).await;
-        self.detail_view(&cols, id, &tz, &links, DetailChrome { close: None, edit, saved }).await
+        let chrome = DetailChrome { close: None, edit, saved };
+        self.detail_view(&cols, id, headers, &tz, &links, chrome).await
     }
 
-    /// One row, read-only: every published column, rendered by the same code as the table's cells.
+    /// One row, read-only: every published column, rendered by the same code as the table's cells,
+    /// with the fields' `format_view`.
     async fn detail_view(
         &self,
         cols: &[Column],
         id: &str,
+        headers: &HeaderMap,
         tz: &Tz,
         links: &render::Links,
         chrome: DetailChrome,
@@ -1236,7 +1182,6 @@ impl<'a> Table<'a> {
         // `render_for` has already authorized `Read` for this caller (every non-list mode does),
         // with their real headers — there is nothing left to check here.
         let row = self.engine.get(&self.slug, id).await?;
-        let fmts = self.formatters_for(Scope::View);
         let fields = cols
             .iter()
             // A write-only column has nothing to show — the backend never returns one — so it
@@ -1247,7 +1192,7 @@ impl<'a> Table<'a> {
                 value: render::cell(
                     c,
                     &row,
-                    fmts.iter().find(|(n, _)| n == render::name_of(c)).map(|(_, f)| f),
+                    render::format_view(c).map(|f| (f, headers)),
                     tz,
                     Some(links),
                 ),

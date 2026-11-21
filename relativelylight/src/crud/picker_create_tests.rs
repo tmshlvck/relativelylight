@@ -14,6 +14,7 @@
 
 use crate::authz::{Authz, Decision, Open, Operation};
 use crate::crud::engine::{Engine, Error};
+use crate::crud::fmt::{esc, FmtCtx};
 use crate::crud::seaorm::{Crud, MetaModel};
 use crate::crud::ui::{Form, Outcome, Picker, Table, ViewState};
 use async_trait::async_trait;
@@ -130,6 +131,11 @@ struct Setup {
     airline_links: Option<bool>,
     airline_create: Option<bool>,
     airline_gate: Gate,
+    /// `Crud::picker_threshold`, and `workorder.airline`'s own (`MetaRelation::picker_threshold`).
+    threshold: Option<u64>,
+    airline_threshold: Option<u64>,
+    /// `airline.name` links to the airline's own page, in the cells and where one row is shown.
+    airline_page_link: bool,
     #[cfg(feature = "csrf")]
     csrf: Option<crate::csrf::Csrf>,
 }
@@ -144,6 +150,9 @@ impl Default for Setup {
             airline_links: None,
             airline_create: None,
             airline_gate: Gate::Open,
+            threshold: None,
+            airline_threshold: None,
+            airline_page_link: false,
             #[cfg(feature = "csrf")]
             csrf: None,
         }
@@ -172,6 +181,9 @@ async fn fixture(setup: Setup) -> (Engine, DatabaseConnection) {
     if let Some(path) = setup.view_path {
         crud.view_path("airline", path);
     }
+    if let Some(n) = setup.threshold {
+        crud.picker_threshold(n);
+    }
     #[cfg(feature = "csrf")]
     if let Some(csrf) = setup.csrf {
         crud.csrf(csrf);
@@ -179,6 +191,13 @@ async fn fixture(setup: Setup) -> (Engine, DatabaseConnection) {
     crud.register(MetaModel::new(address::Entity), Open);
     let mut airline = MetaModel::new(airline::Entity);
     airline.field("name").validate_str(|s| if s.trim().is_empty() { Err("required".into()) } else { Ok(()) });
+    if setup.airline_page_link {
+        // CLIMB's identifier link: the record's own page, marked as leaving this one.
+        let link = |cx: &FmtCtx| {
+            format!(r#"<a href="/airlines/{}" target="_top">{}</a> →"#, esc(&cx.row()["id"]), esc(cx.value()))
+        };
+        airline.field("name").format_cell(link).format_view(link);
+    }
     crud.register(airline, setup.airline_gate);
     let mut workorder = MetaModel::new(workorder::Entity);
     if let Some(on) = setup.airline_links {
@@ -186,6 +205,9 @@ async fn fixture(setup: Setup) -> (Engine, DatabaseConnection) {
     }
     if let Some(on) = setup.airline_create {
         workorder.relation("airline").create(on);
+    }
+    if let Some(n) = setup.airline_threshold {
+        workorder.relation("airline").picker_threshold(n);
     }
     crud.register(workorder, Open);
     (crud.into_engine(), db)
@@ -382,16 +404,14 @@ async fn a_pinned_set_offers_no_plus_a_free_relation_does() {
 
 #[tokio::test]
 async fn a_relation_past_the_threshold_puts_its_new_button_in_the_picker() {
-    let (e, _db) = fixture(Setup::default()).await;
-    let html =
-        Form::new(&e, "workorder").picker_threshold(0).render_for(&h(), &ViewState::default()).await.unwrap();
+    let (e, _db) = fixture(Setup { threshold: Some(0), ..Default::default() }).await;
+    let html = Form::new(&e, "workorder").render_for(&h(), &ViewState::default()).await.unwrap();
     // The form has no button of its own; the field tells the picker's dialog where "New" goes.
     assert!(!html.contains("rl-new\""), "no + in the form: {html}");
     assert!(html.contains(r#"data-rl-new="/pick?pick=workorder.airline&#38;new=1""#), "{html}");
 
-    let (off, _db) = fixture(Setup { on: false, ..Default::default() }).await;
+    let (off, _db) = fixture(Setup { on: false, threshold: Some(0), ..Default::default() }).await;
     let html = Form::new(&off, "workorder")
-        .picker_threshold(0)
         .render_for(&h(), &ViewState::default())
         .await
         .unwrap();
@@ -664,4 +684,61 @@ async fn a_relations_own_choice_wins_over_the_except_list_but_never_over_the_gat
     let gated = Setup { airline_create: Some(true), airline_gate: Gate::NoCreate, ..Default::default() };
     let (e, _db) = fixture(gated).await;
     assert!(!offers(&workorder_form(&e).await).1, "on, but the caller may not create airlines");
+}
+
+// ---- the model's display formatters, and the relation's own threshold ----
+
+const KLM_PAGE: &str = r#"<a href="/airlines/1" target="_top">KLM</a> →"#;
+
+#[tokio::test]
+async fn a_linked_rows_dialog_shows_the_targets_format_view() {
+    // The work order's airline opens in a dialog; there the airline's name is the app's link to
+    // the airline's own page — a plain `<a href>` in the server's HTML, so it works without the
+    // script, and `target="_top"` takes the whole window rather than the dialog's iframe.
+    let (e, _db) = fixture(Setup { airline_page_link: true, ..viewing() }).await;
+    let page = Picker::new(&e).render_for(&h(), &q("pick=workorder.airline&show=1")).await.unwrap();
+    assert!(page.contains(KLM_PAGE), "{page}");
+    // The airline's own table draws it too, from the same declaration.
+    let table = Table::new(&e, "airline").render_for(&h(), &q("")).await.unwrap();
+    assert!(table.contains(KLM_PAGE), "{table}");
+    // A relation's label is not the target's field: it still opens the dialog, unmarked.
+    assert!(workorders(&e, "").await.contains(KLM_LINK), "the label stays a dialog link");
+    // The gate is unchanged: no Read, no dialog to show it in.
+    let (shut, _db) = fixture(Setup { airline_page_link: true, airline_gate: Gate::NoRead, ..viewing() }).await;
+    let r = Picker::new(&shut).render_for(&h(), &q("pick=workorder.airline&show=1")).await;
+    assert!(matches!(r, Err(Error::Forbidden)), "{r:?}");
+
+    // Control: without the formatter the dialog shows the name as text.
+    let (plain, _db) = fixture(viewing()).await;
+    let page = Picker::new(&plain).render_for(&h(), &q("pick=workorder.airline&show=1")).await.unwrap();
+    assert!(page.contains("KLM") && !page.contains("/airlines/1"), "{page}");
+}
+
+#[tokio::test]
+async fn a_formatters_values_are_escaped_in_the_linked_rows_dialog() {
+    let (e, db) = fixture(Setup { airline_page_link: true, ..viewing() }).await;
+    db.execute_unprepared("UPDATE airline SET name = '<script>alert(1)</script>' WHERE id = 1").await.unwrap();
+    let page = Picker::new(&e).render_for(&h(), &q("pick=workorder.airline&show=1")).await.unwrap();
+    assert!(!page.contains("<script>alert"), "{page}");
+    assert!(
+        page.contains(r#"<a href="/airlines/1" target="_top">&lt;script&gt;alert(1)&lt;/script&gt;</a> →"#),
+        "{page}"
+    );
+}
+
+#[tokio::test]
+async fn a_relations_own_threshold_overrides_the_app_wide_one() {
+    const PICKED: &str = r#"data-rl-src="/pick?pick=workorder.airline""#;
+    // One airline: past an app-wide threshold of 0, so the picker...
+    let (e, _db) = fixture(Setup { threshold: Some(0), ..Default::default() }).await;
+    assert!(workorder_form(&e).await.contains(PICKED), "app-wide 0: the picker");
+    // ...unless the relation says more.
+    let (e, _db) = fixture(Setup { threshold: Some(0), airline_threshold: Some(5), ..Default::default() }).await;
+    let html = workorder_form(&e).await;
+    assert!(!html.contains(PICKED) && html.contains(r#"<option value="1">KLM</option>"#), "{html}");
+    // And the other way: the default (50) lists it, the relation's 0 doesn't.
+    let (e, _db) = fixture(Setup { airline_threshold: Some(0), ..Default::default() }).await;
+    assert!(workorder_form(&e).await.contains(PICKED), "the relation's 0: the picker");
+    let (e, _db) = fixture(Setup::default()).await;
+    assert!(!workorder_form(&e).await.contains(PICKED), "control: the default lists one airline");
 }

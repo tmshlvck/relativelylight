@@ -27,8 +27,8 @@ in the docs: before adding a second way, or a second explanation, find the first
   so a handler that calls `Engine::get` directly must call `Engine::decide` first.
 - **The URL is the state.** `ViewState` parses page, sort, filters, search, entity and the open
   dialog; every href the crate renders is relative (`?page=2`), so it needs no route of its own.
-- **Display vs storage.** `Table::format_cell` / `format_view` are display only (their output is
-  inserted verbatim — escape with `crud::ui::esc`). `MetaField::on_read` / `on_write` are a storage
+- **Display vs storage.** `MetaField::format_cell` / `format_view` are display only (their output
+  is inserted verbatim — escape with `crud::fmt::esc`). `MetaField::on_read` / `on_write` are a storage
   codec, an inverse pair that also fills the edit form — never a place to mask a value
   ([CRUD.md → A column's way in and out](docs/CRUD.md#a-columns-way-in-and-out)).
 - **The form and CSV read typed text through one function** (`crud::text`); the engine then applies

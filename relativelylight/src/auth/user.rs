@@ -183,6 +183,9 @@ impl ActiveModelBehavior for ActiveModel {
 /// - `must_change_password`, `password_changed_at` and the timestamps are shown, read-only: the row
 ///   hook maintains them, and an editable checkbox would post `false` and keep the flag from ever
 ///   being set.
+/// - `id` links to the account's credentials page, `{profile_path}/{id}` (`Auth::profile_path`), in
+///   the cells and wherever one account is shown: there a manager resets the password, turns 2FA off
+///   and removes passkeys. `target="_top"`, so from a linked row's dialog it takes the whole window.
 /// - `username` is checked with [`valid_username`](super::valid_username); groups are edited through
 ///   the N:M relation `auth_group` (`auth_user_group` is never a model of its own).
 ///
@@ -200,6 +203,8 @@ pub fn meta_model(auth: &super::Auth) -> crate::crud::seaorm::MetaModel<Entity> 
     use Column as C;
     let mut m = crate::crud::seaorm::MetaModel::new(Entity);
     m.label_column(C::Username.as_str());
+    let link = credentials_link(auth.profile_path());
+    m.field(C::Id.as_str()).format_cell(link.clone()).format_view(link);
     let f = m.field(C::Username.as_str());
     f.label = Some("Username".into());
     f.validate_str(super::valid_username);
@@ -253,21 +258,17 @@ pub fn meta_model(auth: &super::Auth) -> crate::crud::seaorm::MetaModel<Entity> 
     m
 }
 
-/// An account's id as a link to its credentials page, `{profile_path}/{id}` — where a manager resets
-/// the password, turns 2FA off and removes passkeys. For an accounts panel's id column, in the cells
-/// and the View dialog (feature `ui`):
-///
-/// ```ignore
-/// let link = auth::user::credentials_link(auth.profile_path());
-/// t.format_cell("id", link.clone()).format_view("id", link)
-/// ```
-#[cfg(feature = "ui")]
-pub fn credentials_link(
+/// An account's id as a link to its credentials page, `{profile_path}/{id}`.
+#[cfg(feature = "crud")]
+fn credentials_link(
     profile_path: &str,
-) -> impl Fn(&serde_json::Value, &serde_json::Value) -> String + Clone + Send + Sync + 'static {
-    let base = crate::crud::ui::esc_str(profile_path.trim_end_matches('/'));
-    move |v, _row| {
-        let id = crate::crud::ui::esc(v);
-        format!(r#"<a href="{base}/{id}" title="Password, two-factor and passkeys">{id}</a>"#)
+) -> impl Fn(&crate::crud::fmt::FmtCtx) -> String + Clone + Send + Sync + 'static {
+    use crate::crud::fmt::{esc, esc_str};
+    let base = esc_str(profile_path.trim_end_matches('/'));
+    move |cx| {
+        let id = esc(cx.value());
+        format!(
+            r#"<a href="{base}/{id}" target="_top" title="Password, two-factor and passkeys">{id}</a>"#
+        )
     }
 }

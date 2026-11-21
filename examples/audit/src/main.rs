@@ -61,7 +61,8 @@ use relativelylight::auth::{self, Auth, GroupReadWrite, Identity, UserReadWrite}
 use relativelylight::authz::Operation;
 use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::{esc_str, Admin, Outcome, ViewState, CSS};
+use relativelylight::crud::fmt::esc_str;
+use relativelylight::crud::ui::{Admin, Outcome, ViewState, CSS};
 use relativelylight::middleware::{resolve_real_ip, RealIp, TrustProxy};
 use relativelylight::observe::{ErrorEvent, ErrorObserver, WriteEvent, WriteObserver};
 use sea_orm::IdenStatic; // `post::Column::Title.as_str()` — a column name the compiler checks
@@ -364,14 +365,12 @@ async fn panel_save(
 fn panel<'a>(app: &'a AppState, who: &Identity) -> Admin<'a> {
     let mut admin = Admin::new(&app.engine).title("Data").base("/data").entity("post").entity("author");
     if app.accounts.admits(who) {
-        // The id opens the account's credentials page: password reset, 2FA off.
-        let credentials = auth::user::credentials_link(app.auth.profile_path());
+        // The id opens the account's credentials page (password reset, 2FA off): the link comes
+        // with `auth::user::meta_model`.
         admin = admin
             .separator()
             .group("Accounts")
-            .entity_with("auth_user", |t| {
-                t.title("Users").format_cell("id", credentials.clone()).format_view("id", credentials)
-            })
+            .entity_with("auth_user", |t| t.title("Users"))
             .entity_with("auth_group", |t| t.title("Groups"))
             // Minted on /profile, where the raw value can be shown once.
             .entity_with("auth_api_key", |t| t.title("API keys").create(false))

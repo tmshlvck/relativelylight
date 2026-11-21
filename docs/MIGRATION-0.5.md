@@ -177,7 +177,7 @@ to its credentials page for everything after ([AUTH.md §5j](AUTH.md#the-account
 | `MetaModel::new(auth::user::Entity)` + `.password()`, the policy validator, hidden TOTP columns, read-only stamps, `relate(&group)` | `auth::user::meta_model(&auth)` (the policy comes from `Auth`) |
 | `MetaModel::new(auth::group::Entity)` + read-only stamps, `relate(&user)` | `auth::group::meta_model()` |
 | `MetaModel::new(auth::lockout::username_entity::Entity)` / `ip_entity` + read-only counters | `auth::lockout::username_meta_model()` / `ip_meta_model()`, shown with `Table::create(false).edit(false)` |
-| a `format_cell` linking the id to `/profile/{id}` | `auth::user::credentials_link(auth.profile_path())` |
+| a `format_cell` linking the id to `/profile/{id}` | nothing: `auth::user::meta_model` links it ([§13](#13-display-formatters-move-to-the-field-the-picker-threshold-to-the-relation)) |
 | — | `auth::passkey::meta_model()`, shown with `Table::read_only(true)` |
 
 Drop the hand-written configuration with it: the hook-maintained columns, the hidden ones and the
@@ -264,3 +264,50 @@ led by UTC and "Browser timezone", and a first visit takes the browser's own zon
    otherwise ambiguous ([TIME.md §3](TIME.md#3-the-picker-and-the-first-visit)).
 
 `Tz::from_headers` reads the same `rl_tz` cookie as before, so a zone users already chose stays.
+
+## 13. Display formatters move to the field, the picker threshold to the relation
+
+**Formatters.** `Table::format_cell` / `format_view` are gone; declare the same closures once on the
+field, and every table of the entity uses them, along with the dialog a relation's link opens
+([CRUD.md → Display formatters](CRUD.md#display-formatters--how-a-field-is-shown)). The closure takes
+one `&FmtCtx` instead of `(value, row)`:
+
+```rust
+// 0.4
+use relativelylight::crud::ui::{esc, truncate};
+Table::new(&engine, "post")
+    .format_cell("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))
+    .format_cell("body", truncate(60))
+
+// 0.5
+use relativelylight::crud::fmt::{esc, truncate};
+post.field("title").format_cell(|cx| {
+    format!(r#"<a href="/post/{}" target="_top">{}</a>"#, esc(&cx.row()["id"]), esc(cx.value()))
+});
+post.field("body").format_cell(truncate(60));
+```
+
+1. **Move each `format_cell` / `format_view` to the field** it names, on the `MetaModel` before
+   `register`: `(v, row)` becomes `cx`, with `cx.value()` and `cx.row()`. The same closure passed to
+   both is still how one rendering serves the cells and View.
+2. **Import `esc`, `esc_str` and `truncate` from `crud::fmt`**, not `crud::ui`.
+3. **Add `target="_top"` to a link a `format_view` draws**: it now also renders in the linked
+   row's dialog, an `<iframe>`, where a plain link would load the page inside the dialog.
+4. **Two tables that formatted one column differently** now share one formatter: keep the one the
+   entity should show everywhere. A link to the row's own Edit dialog (`?edit={id}`) is better
+   dropped: the row's Edit already does it.
+5. **The accounts panel:** drop `auth::user::credentials_link` and the `format_cell` /
+   `format_view` on `auth_user`'s id; `auth::user::meta_model` sets them.
+
+**Picker threshold.** `Table::picker_threshold`, `Form::picker_threshold` and
+`RelationField::picker_threshold` are gone. Set the app-wide one on `Crud`, and a relation's own on
+its model:
+
+```rust
+crud.picker_threshold(100);                           // every relation (default 50)
+workorder.relation("aircraft").picker_threshold(200); // this one
+```
+
+**An app with its own `Accessor`** (or a `Column` literal, or a match without `..`): add
+`format_cell: None, format_view: None` to `Column::Field` and `picker_threshold: None` to
+`Column::Relation`.

@@ -16,15 +16,7 @@ use super::engine::{Column, LogicalType};
 use crate::time::Tz;
 use serde_json::{json, Value};
 
-/// A stored scalar as text: `null` is blank rather than "null" — an empty cell reads as "nothing
-/// here", which is what it means — a string loses its quotes, anything else prints as JSON.
-pub(crate) fn text(v: Option<&Value>) -> String {
-    match v {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-    }
-}
+pub(crate) use super::fmt::text;
 
 /// A relation target id: numeric when it looks numeric (the common case), else the trimmed string —
 /// a slug or UUID primary key travels unchanged.

@@ -263,6 +263,12 @@ pub enum Column {
         /// Whether `?sort=<name>` is accepted. False for `Json`/`Other`, whose ordering the database
         /// would happily invent but nobody could predict.
         sortable: bool,
+        /// The field's display formatter in a table's cells
+        /// ([`MetaField::format_cell`](crate::crud::seaorm::MetaField::format_cell)); its output is HTML.
+        format_cell: Option<crate::crud::fmt::Fmt>,
+        /// The field's display formatter wherever one row is shown: the View dialog, a linked row's
+        /// dialog ([`MetaField::format_view`](crate::crud::seaorm::MetaField::format_view)).
+        format_view: Option<crate::crud::fmt::Fmt>,
     },
     Relation {
         name: String,
@@ -288,6 +294,10 @@ pub enum Column {
         /// ([`MetaRelation::create`](crate::crud::seaorm::MetaRelation::create)); `None` follows
         /// `Crud::picker_create` and `picker_create_except`.
         create: Option<bool>,
+        /// How many target rows this relation's form input lists before it opens the picker
+        /// ([`MetaRelation::picker_threshold`](crate::crud::seaorm::MetaRelation::picker_threshold));
+        /// `None` follows `Crud::picker_threshold`.
+        picker_threshold: Option<u64>,
     },
 }
 
@@ -554,6 +564,10 @@ pub struct Engine {
     /// UI renders. `None`: no picker, so a relation too large for its threshold stays a `<select>`.
     #[cfg(feature = "ui")]
     picker_path: Option<String>,
+    /// How many target rows a relation's input lists before it uses the picker, where the relation
+    /// sets none (`MetaRelation::picker_threshold`).
+    #[cfg(feature = "ui")]
+    picker_threshold: u64,
     /// Whether a relation field offers "+" — a new target row, made in a dialog over the form.
     #[cfg(feature = "ui")]
     picker_create: bool,
@@ -582,6 +596,8 @@ impl Engine {
             #[cfg(feature = "ui")]
             picker_path: None,
             #[cfg(feature = "ui")]
+            picker_threshold: 50,
+            #[cfg(feature = "ui")]
             picker_create: false,
             #[cfg(feature = "ui")]
             picker_create_except: Vec::new(),
@@ -602,6 +618,19 @@ impl Engine {
     #[cfg(feature = "ui")]
     pub(crate) fn picker_path(&self) -> Option<&str> {
         self.picker_path.as_deref()
+    }
+
+    /// How many target rows a relation's input lists before it uses the picker, where the relation
+    /// sets none. Usually set via `Crud::picker_threshold`.
+    #[cfg(feature = "ui")]
+    pub fn set_picker_threshold(&mut self, n: u64) {
+        self.picker_threshold = n;
+    }
+
+    /// A relation's threshold: its own (`explicit`), else the app-wide one.
+    #[cfg(feature = "ui")]
+    pub(crate) fn picker_threshold(&self, explicit: Option<u64>) -> u64 {
+        explicit.unwrap_or(self.picker_threshold)
     }
 
     /// Offer "+ New" on relation fields: a new target row, created in a dialog over the form. Needs

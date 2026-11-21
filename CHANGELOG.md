@@ -13,6 +13,22 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
+- **Display formatters belong to the field**
+  ([CRUD.md → Display formatters](docs/CRUD.md#display-formatters--how-a-field-is-shown)):
+  `MetaField::format_cell` / `format_view` replace `Table::format_cell` / `format_view`. Declared
+  once, they show on every table of the entity, its View dialog, **and the dialog a relation's link
+  opens** (`picker_view`), which no formatter reached before; a picker's list applies none. The
+  closure takes one `&FmtCtx` (`value()`, `row()`, and the request's `headers()`, for the viewer's
+  zone) instead of `(value, row)`. `esc`, `esc_str` and `truncate` move from `crud::ui` to the new
+  `crud::fmt`. `auth::user::meta_model` now links an account's id to its credentials page itself,
+  with `target="_top"`; `auth::user::credentials_link` is gone. CRUD.md shows how to link a row to
+  the app's own page through its identifier. **Upgrade:**
+  [MIGRATION-0.5.md §13](docs/MIGRATION-0.5.md#13-display-formatters-move-to-the-field-the-picker-threshold-to-the-relation).
+- **The picker threshold belongs to the relation**: `MetaRelation::picker_threshold(n)`, with the
+  app-wide default `Crud::picker_threshold(n)` (50), replace `Table`, `Form` and
+  `RelationField::picker_threshold`, so every form that edits a relation decides the same way.
+  `Column::Field` gains `format_cell` / `format_view` and `Column::Relation` `picker_threshold`, for
+  an app with its own `Accessor`. **Upgrade:** the same section.
 - **The timezone picker sets the zone in the browser** ([TIME.md §3](docs/TIME.md#3-the-picker-and-the-first-visit)):
   `time::picker(&tz)` is a type-to-search list of every zone the server knows, led by UTC and
   "Browser timezone", driven by the new `time::JS`; a first visit takes the browser's own zone.
@@ -102,6 +118,8 @@ is easy to miss in a diff.
 
 ### Added
 
+- **docs.rs documents every feature**: it built only the defaults, which left out `crud::ui`, `auth`,
+  `files` and `time`. Each item is labelled with the feature it needs.
 - **`ApiKeys::name_placeholder`**: the hint in the API-key label field, for what a key is for in your
   app ([AUTH.md §5k](docs/AUTH.md#5k-api-keys)). The default is now neutral, "what will use it, e.g.
   a script", where it was "router at home".
@@ -135,7 +153,7 @@ is easy to miss in a diff.
   (`must_change_password`, `password_changed_at`, the timestamps) shown read-only, the username
   checked, groups as an N:M relation. The panel sets an account's **first** password only, screened
   by the policy `Auth` was given; every later change is the manager's reset at `/profile/{id}`,
-  which also signs the account out. `auth::user::credentials_link` links an account's id there.
+  which also signs the account out. The account's id links there.
   **Upgrade (recommended):** replace a hand-configured panel
   ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#8-the-accounts-panel-comes-from-auths-meta_models)).
 - **`MetaField::create_only`**: a column a create writes and an update never does. The edit form

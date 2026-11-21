@@ -19,7 +19,8 @@
 //! - the write path's outcomes: a redirect that lands on the row, and a rejection that comes back with
 //!   the messages *and* the operator's input.
 
-use super::ui::{esc, truncate, Admin, Form, Mode, Outcome, Picker, RelationField, Table, ViewState};
+use super::fmt::{esc, esc_str, truncate, Fmt, FmtCtx};
+use super::ui::{Admin, Form, Mode, Outcome, Picker, RelationField, Table, ViewState};
 use crate::authz::{Authz, Decision, Open, Operation};
 use crate::crud::engine::{
     Accessor, Cardinality, Column, Engine, Error, FieldDisplay, ListQuery, LogicalType, Page,
@@ -51,6 +52,8 @@ fn field(name: &str, required: bool, read_only: bool, default: Option<Value>) ->
         default,
         display: None,
         sortable: true,
+        format_cell: None,
+        format_view: None,
     }
 }
 
@@ -70,6 +73,8 @@ fn typed(name: &str, lt: LogicalType, nullable: bool) -> Column {
         default: None,
         display: None,
         sortable: true,
+        format_cell: None,
+        format_view: None,
     }
 }
 
@@ -89,7 +94,17 @@ fn with_display(name: &str, lt: LogicalType, options: Vec<String>, d: Option<Fie
         default: None,
         display: d,
         sortable: true,
+        format_cell: None,
+        format_view: None,
     }
+}
+
+/// `col` with these display formatters, as `MetaField::format_cell` / `format_view` report them.
+fn formatted(mut col: Column, cell: Option<Fmt>, view: Option<Fmt>) -> Column {
+    if let Column::Field { format_cell, format_view, .. } = &mut col {
+        (*format_cell, *format_view) = (cell, view);
+    }
+    col
 }
 
 /// What a write reached the backend as — so a test can assert on the decoded body, and a gate test can
@@ -239,6 +254,8 @@ fn post_columns() -> Vec<Column> {
             default: None,
             display: None,
             sortable: true,
+            format_cell: None,
+            format_view: None,
         },
         Column::Field {
             name: "secret".into(),
@@ -255,6 +272,8 @@ fn post_columns() -> Vec<Column> {
             default: None,
             display: None,
             sortable: false,
+            format_cell: None,
+            format_view: None,
         },
         Column::Field {
             name: "pin".into(),
@@ -271,6 +290,8 @@ fn post_columns() -> Vec<Column> {
             default: None,
             display: None,
             sortable: true,
+            format_cell: None,
+            format_view: None,
         },
         Column::Relation {
             name: "author".into(),
@@ -283,6 +304,7 @@ fn post_columns() -> Vec<Column> {
             sortable: true,
             links: None,
             create: None,
+            picker_threshold: None,
         },
         Column::Relation {
             name: "tag".into(),
@@ -295,6 +317,7 @@ fn post_columns() -> Vec<Column> {
             sortable: false,
             links: None,
             create: None,
+            picker_threshold: None,
         },
     ]
 }
@@ -341,7 +364,12 @@ impl Authz for ReadOnlyGate {
 
 /// An engine with `post` (rows and relations), plus the two relation targets it points at.
 fn engine_with(gate: Arc<dyn Authz>) -> (Engine, Arc<Log>) {
-    let post = Mock::new("post", post_columns()).rows(post_rows());
+    engine_of(post_columns(), gate)
+}
+
+/// [`engine_with`]'s entities, with `post`'s columns as given.
+fn engine_of(post_cols: Vec<Column>, gate: Arc<dyn Authz>) -> (Engine, Arc<Log>) {
+    let post = Mock::new("post", post_cols).rows(post_rows());
     let log = post.log.clone();
     let mut e = Engine::new();
     e.add(Arc::new(post), gate);
@@ -378,6 +406,7 @@ fn engine_with(gate: Arc<dyn Authz>) -> (Engine, Arc<Log>) {
                         sortable: true,
                         links: None,
                         create: None,
+                        picker_threshold: None,
                     },
                 ],
             )
@@ -586,12 +615,39 @@ async fn a_datetime_cell_and_input_follow_the_callers_zone() {
 
 #[tokio::test]
 async fn a_format_closure_replaces_the_cell_and_escaping_is_its_job() {
-    let (e, _) = engine();
-    let table = Table::new(&e, "post").format_cell("title", |v, row| {
-        format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v))
+    let link = Fmt::new(|cx: &FmtCtx| {
+        format!(r#"<a href="/post/{}">{}</a>"#, esc(&cx.row()["id"]), esc(cx.value()))
     });
-    let html = render(&table, &list()).await;
+    let mut cols = post_columns();
+    cols[1] = formatted(cols[1].clone(), Some(link), None);
+    let (e, _) = engine_of(cols, Arc::new(Open));
+    let html = render(&Table::new(&e, "post"), &list()).await;
     assert!(html.contains(r#"<a href="/post/7">First post</a>"#), "{html}");
+    // Display only: the edit form is filled with the stored value.
+    let form = render(&Table::new(&e, "post"), &ViewState::from_query("edit=7")).await;
+    assert!(form.contains(r#"value="First post""#), "{form}");
+}
+
+#[tokio::test]
+async fn a_formatter_sees_the_request_and_escaping_holds_at_its_boundary() {
+    // The viewer's zone reaches the closure through the headers; a value it escapes stays text.
+    let fmt = Fmt::new(|cx: &FmtCtx| {
+        let zone = crate::time::Tz::from_headers(cx.headers());
+        format!("<i>{}</i> in {}", esc(cx.value()), esc_str(zone.name()))
+    });
+    let cols = vec![
+        field("id", false, true, None),
+        formatted(field("body", true, false, None), Some(fmt.clone()), Some(fmt)),
+    ];
+    let mut e = Engine::new();
+    e.add(Arc::new(Mock::new("thing", cols).rows(vec![json!({"id": 1, "body": NASTY})])), Arc::new(Open));
+    let html = Table::new(&e, "thing")
+        .render_for(&zone("Asia/Tokyo"), &ViewState::from_query("show=1"))
+        .await
+        .unwrap();
+    let escaped = "<i>&lt;script&gt;alert(1)&lt;/script&gt;</i> in Asia/Tokyo";
+    assert_eq!(html.matches(escaped).count(), 2, "the cell and the View dialog: {html}");
+    assert!(!html.contains("<script>"), "{html}");
 }
 
 // ---------- escaping: server-rendering makes this ours ----------
@@ -617,11 +673,8 @@ async fn nothing_that_reaches_the_page_can_carry_markup() {
 
     // Twice: the author as a `<select>`, then as the id input with the current label beside it.
     for picker in [20, 0] {
-        let table = Table::new(&e, "post")
-            .title(NASTY)
-            .description(NASTY)
-            .filter("mood")
-            .picker_threshold(picker);
+        e.set_picker_threshold(picker);
+        let table = Table::new(&e, "post").title(NASTY).description(NASTY).filter("mood");
         for state in [
             ViewState::from_query(&format!("q={NASTY}&filter[mood]={NASTY}")),
             ViewState::from_query("edit=%3Cscript%3Ealert(1)%3C%2Fscript%3E"),
@@ -761,7 +814,8 @@ async fn a_filter_is_a_menu_of_every_value_however_large_its_target() {
     );
     e.add(Arc::new(Mock::new("tag", vec![field("id", false, true, None)]).rows(vec![])), Arc::new(Open));
 
-    let table = Table::new(&e, "post").filter("author").picker_threshold(20);
+    e.set_picker_threshold(20);
+    let table = Table::new(&e, "post").filter("author");
     let html = render(&table, &ViewState::from_query("filter[author]=42")).await;
     assert!(html.contains(r#"<option value="*">Author: all</option>"#), "{html}");
     assert!(html.contains(r#"<option value="42" selected>author 42</option>"#), "{html}");
@@ -1536,11 +1590,11 @@ async fn view_can_link_to_a_page_of_the_apps_own() {
 }
 
 /// One `thing` with a `body`, for the renderers below: (the listing's cell, the View dialog's value).
-async fn cell_and_detail(table: impl Fn(&Engine) -> Table<'_>, body: &str) -> (String, String) {
-    let cols = vec![field("id", false, true, None), field("body", true, false, None)];
+async fn cell_and_detail(cell: Option<Fmt>, view: Option<Fmt>, body: &str) -> (String, String) {
+    let cols = vec![field("id", false, true, None), formatted(field("body", true, false, None), cell, view)];
     let mut e = Engine::new();
     e.add(Arc::new(Mock::new("thing", cols).rows(vec![json!({"id": 1, "body": body})])), Arc::new(Open));
-    let html = render(&table(&e), &ViewState::from_query("show=1")).await;
+    let html = render(&Table::new(&e, "thing"), &ViewState::from_query("show=1")).await;
     let (listing, dialog) = html.split_once("<dialog").expect("the dialog");
     // The cells: the selection checkbox, `id`, `body`.
     let cell = listing.split("<td>").nth(3).expect("the body cell").split("</td>").next().unwrap();
@@ -1550,31 +1604,27 @@ async fn cell_and_detail(table: impl Fn(&Engine) -> Table<'_>, body: &str) -> (S
 
 #[tokio::test]
 async fn format_cell_and_format_view_each_render_one_place() {
-    let mark = |tag: &'static str| move |v: &Value, _: &Value| format!("[{tag}:{}]", esc(v));
+    let mark = |tag: &'static str| Some(Fmt::new(move |cx: &FmtCtx| format!("[{tag}:{}]", esc(cx.value()))));
 
     // Neither: the default rendering in both places (the control for the cases below).
-    let (cell, dd) = cell_and_detail(|e| Table::new(e, "thing"), "x").await;
+    let (cell, dd) = cell_and_detail(None, None, "x").await;
     assert_eq!((cell.as_str(), dd.as_str()), ("x", "x"));
 
     // Each applies where it says and nowhere else — no inheritance either way.
-    let (cell, dd) = cell_and_detail(|e| Table::new(e, "thing").format_cell("body", mark("cell")), "x").await;
+    let (cell, dd) = cell_and_detail(mark("cell"), None, "x").await;
     assert_eq!((cell.as_str(), dd.as_str()), ("[cell:x]", "x"));
-    let (cell, dd) = cell_and_detail(|e| Table::new(e, "thing").format_view("body", mark("view")), "x").await;
+    let (cell, dd) = cell_and_detail(None, mark("view"), "x").await;
     assert_eq!((cell.as_str(), dd.as_str()), ("x", "[view:x]"));
 
-    // Both, in either order.
-    let (cell, dd) = cell_and_detail(
-        |e| Table::new(e, "thing").format_view("body", mark("view")).format_cell("body", mark("cell")),
-        "x",
-    )
-    .await;
+    // Both.
+    let (cell, dd) = cell_and_detail(mark("cell"), mark("view"), "x").await;
     assert_eq!((cell.as_str(), dd.as_str()), ("[cell:x]", "[view:x]"));
 }
 
 #[tokio::test]
 async fn truncate_shortens_the_cell_and_leaves_the_view_whole() {
     let long = "Ünïcödé <script>alert(1)</script> and a good deal more after it";
-    let (cell, dd) = cell_and_detail(|e| Table::new(e, "thing").format_cell("body", truncate(10)), long).await;
+    let (cell, dd) = cell_and_detail(Some(Fmt::new(truncate(10))), None, long).await;
     // Cut at ten *characters* (not bytes — the accents are two each), trailing space dropped, the
     // whole value in the tooltip; everything escaped, in the text and in the attribute.
     assert_eq!(
@@ -1586,7 +1636,7 @@ async fn truncate_shortens_the_cell_and_leaves_the_view_whole() {
     assert_eq!(dd, "Ünïcödé &#60;script&#62;alert(1)&#60;/script&#62; and a good deal more after it", "the view: all of it");
 
     // A value that fits is shown as is — no ellipsis, no tooltip.
-    let (cell, _) = cell_and_detail(|e| Table::new(e, "thing").format_cell("body", truncate(10)), "<b>short").await;
+    let (cell, _) = cell_and_detail(Some(Fmt::new(truncate(10))), None, "<b>short").await;
     assert_eq!(cell, "&lt;b&gt;short");
 }
 
@@ -1920,14 +1970,15 @@ async fn a_relation_is_a_select_until_its_target_outgrows_the_threshold_then_a_p
 
     // Past the threshold with no picker to open: still every row, rather than a page that broke
     // the day its table grew.
-    let capped = Table::new(&e, "post").picker_threshold(1);
+    e.set_picker_threshold(1);
+    let capped = Table::new(&e, "post");
     let html = render(&capped, &edit).await;
     assert!(html.contains(r#"<option value="4">Grace</option>"#), "{html}");
     assert!(!html.contains("rl-picked"), "{html}");
 
     // With one: the selection, read-only, posted back as hidden inputs, and the dialog's address.
     e.set_picker_path("/pick");
-    let capped = Table::new(&e, "post").picker_threshold(1);
+    let capped = Table::new(&e, "post");
     let html = render(&capped, &edit).await;
     assert!(!html.contains(r#"<option value="4">"#), "no list past the threshold: {html}");
     for expect in [
@@ -1950,8 +2001,8 @@ async fn a_relation_is_a_select_until_its_target_outgrows_the_threshold_then_a_p
     assert!(fresh.contains(r#"data-rl-src="/pick?pick=post.author""#), "{fresh}");
     assert!(!fresh.contains(r#"type="hidden" name="author""#), "{fresh}");
 
-    // The standalone form takes the same setting.
-    let form = Form::new(&e, "post").fields(["title", "slug", "author"]).picker_threshold(1);
+    // The standalone form follows the same setting.
+    let form = Form::new(&e, "post").fields(["title", "slug", "author"]);
     let html = form.render_for(&no_headers(), &list()).await.unwrap();
     assert!(html.contains(r#"data-rl-src="/pick?pick=post.author""#), "{html}");
 }
@@ -1963,7 +2014,8 @@ async fn a_relation_naming_no_row_is_a_field_error_before_the_backend() {
     // `relations_decode_to_ids` (author 3 exists).
     let (mut e, log) = engine();
     e.set_picker_path("/pick");
-    let table = Table::new(&e, "post").picker_threshold(1);
+    e.set_picker_threshold(1);
+    let table = Table::new(&e, "post");
     for (posted, field, message) in [
         ("author=Ada", "author", "no author matches 'Ada'"),
         ("author=99", "author", "no author matches '99'"),
@@ -2098,6 +2150,7 @@ async fn a_picker_leaves_out_the_targets_to_many_columns() {
         sortable: false,
         links: None,
         create: None,
+        picker_threshold: None,
     };
     e.add(Arc::new(Mock::new("comment", vec![field("id", false, true, None), to_post])), Arc::new(Open));
     let state = ViewState::from_query("pick=comment.post");
@@ -2107,6 +2160,37 @@ async fn a_picker_leaves_out_the_targets_to_many_columns() {
     // Positive control: the post's own table does show its tags.
     let table = render(&Table::new(&e, "post"), &list()).await;
     assert!(table.contains("Tags") && table.contains(">rust<"), "{table}");
+}
+
+#[tokio::test]
+async fn a_pickers_list_applies_no_cell_formatter() {
+    // A click in the picker's list chooses the row; a link a formatter drew there would take the
+    // browser away from the form being filled in.
+    let link = Fmt::new(|cx: &FmtCtx| {
+        format!(r#"<a href="/post/{}" target="_top">{}</a> →"#, esc(&cx.row()["id"]), esc(cx.value()))
+    });
+    let mut cols = post_columns();
+    cols[1] = formatted(cols[1].clone(), Some(link.clone()), Some(link));
+    let (mut e, _) = engine_of(cols, Arc::new(Open));
+    let to_post = Column::Relation {
+        name: "post".into(),
+        target: "post".into(),
+        cardinality: Cardinality::ToOne,
+        fk_column: Some("post_id".into()),
+        read_only: false,
+        label: None,
+        description: None,
+        sortable: false,
+        links: None,
+        create: None,
+        picker_threshold: None,
+    };
+    e.add(Arc::new(Mock::new("comment", vec![field("id", false, true, None), to_post])), Arc::new(Open));
+    let html = Picker::new(&e).render_for(&no_headers(), &ViewState::from_query("pick=comment.post")).await.unwrap();
+    assert!(html.contains("First post") && !html.contains("/post/7"), "plain in the picker: {html}");
+    // Positive control: the post's own table draws the link.
+    let table = render(&Table::new(&e, "post"), &list()).await;
+    assert!(table.contains(r#"<a href="/post/7" target="_top">First post</a> →"#), "{table}");
 }
 
 #[tokio::test]
@@ -2157,13 +2241,13 @@ async fn a_relation_field_is_the_forms_own_field_select_or_picker() {
             e.set_picker_path("/pick");
         }
         for threshold in [50, 1] {
+            e.set_picker_threshold(threshold);
             let row = e.get("post", "7").await.unwrap();
-            let form = Form::new(&e, "post").edit("7").fields(["author", "tag"]).picker_threshold(threshold);
+            let form = Form::new(&e, "post").edit("7").fields(["author", "tag"]);
             let form = form.render_for(&no_headers(), &list()).await.unwrap();
             for (relation, ids) in [("author", vec!["3"]), ("tag", vec!["1", "2"])] {
                 let field = RelationField::new(&e, "post", relation)
                     .selected(&ids)
-                    .picker_threshold(threshold)
                     .render_for(&no_headers())
                     .await
                     .unwrap();
@@ -2176,7 +2260,8 @@ async fn a_relation_field_is_the_forms_own_field_select_or_picker() {
         }
     }
     // And it is the picker past the threshold: the selection (labels looked up) and the dialog.
-    let html = RelationField::new(&e, "post", "tag").selected([1, 2]).picker_threshold(1);
+    e.set_picker_threshold(1);
+    let html = RelationField::new(&e, "post", "tag").selected([1, 2]);
     let html = html.render_for(&no_headers()).await.unwrap();
     for expect in [
         r#"data-rl-src="/pick?pick=post.tag""#,
@@ -2191,13 +2276,13 @@ async fn a_relation_field_is_the_forms_own_field_select_or_picker() {
 async fn a_relation_field_takes_its_own_name_label_and_error() {
     let (mut e, _) = engine();
     e.set_picker_path("/pick");
+    e.set_picker_threshold(1);
     let field = RelationField::new(&e, "post", "tag")
         .name("add_tags")
         .label("Tags to add")
         .help("Added to every post.")
         .required(true)
         .error("choose at least one")
-        .picker_threshold(1)
         .selected(["2"]);
     let html = field.render_for(&no_headers()).await.unwrap();
     for expect in [
@@ -2213,7 +2298,7 @@ async fn a_relation_field_takes_its_own_name_label_and_error() {
         assert!(html.contains(expect), "missing {expect}:\n{html}");
     }
     // A to-one shows one, however many it's given.
-    let one = RelationField::new(&e, "post", "author").selected([3, 4]).picker_threshold(1);
+    let one = RelationField::new(&e, "post", "author").selected([3, 4]);
     let one = one.render_for(&no_headers()).await.unwrap();
     assert!(one.contains(r#"value="3">"#) && !one.contains(r#"value="4">"#), "{one}");
 }
@@ -2298,13 +2383,13 @@ async fn a_relation_field_escapes_labels_names_and_messages() {
         if threshold == 0 {
             e.set_picker_path("/pick");
         }
+        e.set_picker_threshold(threshold);
         let html = RelationField::new(&e, "post", "tag")
             .name("t\"><script>")
             .label("<script>l</script>")
             .help("<script>h</script>")
             .error("<script>e</script>")
             .selected(["1", "<script>"])
-            .picker_threshold(threshold)
             .render_for(&no_headers())
             .await
             .unwrap();
@@ -2331,7 +2416,8 @@ async fn a_to_many_lists_every_target_row_so_saving_cannot_unlink_one() {
         Arc::new(Open),
     );
 
-    let html = render(&Table::new(&e, "post").picker_threshold(20), &ViewState::from_query("edit=7")).await;
+    e.set_picker_threshold(20);
+    let html = render(&Table::new(&e, "post"), &ViewState::from_query("edit=7")).await;
     assert!(html.contains(r#"<option value="2" selected>tag 2</option>"#), "{html}");
     assert!(html.contains(r#"<option value="45" selected>tag 45</option>"#), "linked past the cap: {html}");
     assert!(html.contains(r#"<option value="50">tag 50</option>"#), "and every row can be added: {html}");
@@ -2356,6 +2442,8 @@ async fn a_select_offers_a_blank_only_where_the_column_takes_one() {
             default: None,
             display: None,
             sortable: true,
+            format_cell: None,
+            format_view: None,
         },
         Column::Field {
             name: "optional".into(),
@@ -2372,6 +2460,8 @@ async fn a_select_offers_a_blank_only_where_the_column_takes_one() {
             default: None,
             display: None,
             sortable: true,
+            format_cell: None,
+            format_view: None,
         },
     ];
     let mut e = Engine::new();
@@ -2401,6 +2491,8 @@ async fn a_required_field_is_marked_and_help_text_is_shown() {
         default: None,
         display: None,
         sortable: true,
+        format_cell: None,
+        format_view: None,
     };
     let mut e = Engine::new();
     e.add(Arc::new(Mock::new("post", cols)), Arc::new(Open));

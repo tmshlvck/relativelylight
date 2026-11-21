@@ -17,7 +17,7 @@ struct FieldTmpl {
 
 /// One relation's input, for a `<form>` of the app's own — the same input `Form`, `Table` and `Admin`
 /// render for that relation: a `<select>` (a multi-select for a to-many) while the target has at most
-/// [`picker_threshold`](RelationField::picker_threshold) rows, else the selection as badges plus a
+/// the relation's `picker_threshold` rows ([`MetaRelation::picker_threshold`](crate::crud::seaorm::MetaRelation::picker_threshold)), else the selection as badges plus a
 /// button opening the [`Picker`](super::Picker) dialog. One function decides that and one template
 /// draws it, for all four, so the field can't drift from the crate's own forms.
 ///
@@ -58,7 +58,6 @@ pub struct RelationField<'a> {
     error: String,
     required: bool,
     selected: Vec<String>,
-    picker_threshold: u64,
 }
 
 impl<'a> RelationField<'a> {
@@ -74,7 +73,6 @@ impl<'a> RelationField<'a> {
             error: String::new(),
             required: false,
             selected: Vec::new(),
-            picker_threshold: 50,
         }
     }
 
@@ -115,27 +113,28 @@ impl<'a> RelationField<'a> {
         self.selected = ids.into_iter().map(|id| id.to_string()).filter(|id| !id.is_empty()).collect();
         self
     }
-    /// How many target rows a `<select>` may list before the field switches to the picker.
-    /// Default 50, as in [`Form`](super::Form).
-    pub fn picker_threshold(mut self, n: u64) -> Self {
-        self.picker_threshold = n;
-        self
-    }
 
     fn input_name(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.relation)
     }
 
-    /// The relation's target, cardinality, label, description and own "+ New" choice.
-    fn column(&self) -> Result<(String, Cardinality, String, String, Option<bool>)> {
+    /// The relation's target, cardinality, label, description, own "+ New" choice and own picker
+    /// threshold.
+    #[allow(clippy::type_complexity)]
+    fn column(&self) -> Result<(String, Cardinality, String, String, Option<bool>, Option<u64>)> {
         let cols = self.engine.columns(&self.slug)?;
         match cols.iter().find(|c| render::name_of(c) == self.relation) {
-            Some(col @ Column::Relation { target, cardinality, description, create, .. }) => Ok((
+            Some(
+                col @ Column::Relation {
+                    target, cardinality, description, create, picker_threshold, ..
+                },
+            ) => Ok((
                 target.clone(),
                 *cardinality,
                 render::label_of(col),
                 description.clone().unwrap_or_default(),
                 *create,
+                *picker_threshold,
             )),
             _ => Err(Error::BadRequest(format!(
                 "crud::ui::RelationField: {} has no relation '{}'",
@@ -148,15 +147,16 @@ impl<'a> RelationField<'a> {
     /// for the inside of your `<form>`. `400` when `slug` has no relation by that name, `404` when
     /// there is no entity `slug`.
     pub async fn render_for(&self, headers: &HeaderMap) -> Result<String> {
-        let (target, cardinality, label, description, explicit) = self.column()?;
+        let (target, cardinality, label, description, explicit, threshold) = self.column()?;
         let many = cardinality == Cardinality::ToMany;
         let mut ids = self.selected.clone();
         if !many {
             ids.truncate(1);
         }
-        let rel = widgets::Relations::new(&self.slug, self.picker_threshold, headers);
+        let rel = widgets::Relations::new(&self.slug, headers);
         let widget: Widget =
-            widgets::relation(self.engine, &rel, &self.relation, &target, many, ids, None).await?;
+            widgets::relation(self.engine, &rel, &self.relation, &target, threshold, many, ids, None)
+                .await?;
         let create = widgets::create_src(self.engine, &rel, &self.relation, &target, explicit).await;
         FieldTmpl {
             f: FieldV {

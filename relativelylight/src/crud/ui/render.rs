@@ -5,13 +5,14 @@
 //! exactly the places that must handle it.
 
 use super::state::ViewState;
-use super::Fmt;
 use crate::crud::engine::{Cardinality, Column, LogicalType, Page};
+use crate::crud::fmt::{Fmt, FmtCtx};
+use http::HeaderMap;
 use crate::time::Tz;
 use serde_json::Value;
 
 /// One table cell, as a *shape* rather than as HTML — so the template escapes the text and only
-/// [`Raw`](Cell::Raw) (a `format` closure's output) is inserted verbatim. That keeps the entire
+/// [`Raw`](Cell::Raw) (a field's formatter's output) is inserted verbatim. That keeps the entire
 /// raw-HTML surface of this crate to one template branch, which is a thing a reviewer can check.
 pub(crate) enum Cell {
     Text(String),
@@ -174,12 +175,19 @@ pub(crate) fn option_label<'a>(col: &'a Column, value: &'a str) -> &'a str {
     }
 }
 
-/// One cell of one row. A `format` closure wins over everything; then a relation's [`Links`].
-pub(crate) fn cell(col: &Column, row: &Value, fmt: Option<&Fmt>, tz: &Tz, links: Option<&Links>) -> Cell {
+/// One cell of one row. A field's formatter (`fmt`, with the request it renders for) wins over
+/// everything; then a relation's [`Links`].
+pub(crate) fn cell(
+    col: &Column,
+    row: &Value,
+    fmt: Option<(&Fmt, &HeaderMap)>,
+    tz: &Tz,
+    links: Option<&Links>,
+) -> Cell {
     let name = name_of(col);
     let raw = row.get(name);
-    if let Some(f) = fmt {
-        return Cell::Raw(f(raw.unwrap_or(&Value::Null), row));
+    if let Some((f, headers)) = fmt {
+        return Cell::Raw(f.call(&FmtCtx::new(raw.unwrap_or(&Value::Null), row, headers)));
     }
     if let Some(cell) = links.and_then(|l| l.cell(col, raw)) {
         return cell;
@@ -215,6 +223,22 @@ fn badge(link: &Value) -> String {
     }
 }
 
+/// The field's formatter for a table's cells (`MetaField::format_cell`).
+pub(crate) fn format_cell(col: &Column) -> Option<&Fmt> {
+    match col {
+        Column::Field { format_cell, .. } => format_cell.as_ref(),
+        Column::Relation { .. } => None,
+    }
+}
+
+/// The field's formatter where one row is shown (`MetaField::format_view`).
+pub(crate) fn format_view(col: &Column) -> Option<&Fmt> {
+    match col {
+        Column::Field { format_view, .. } => format_view.as_ref(),
+        Column::Relation { .. } => None,
+    }
+}
+
 pub(crate) fn name_of(col: &Column) -> &str {
     match col {
         Column::Field { name, .. } | Column::Relation { name, .. } => name,
@@ -236,11 +260,13 @@ pub(crate) fn sortable(col: &Column) -> bool {
 }
 
 /// Every row of the page, with its edit link — and its View link from `show`, if it has one.
+/// `formatted`: the request the fields' `format_cell` render for; `None` shows every value plain
+/// (a picker's list, where a click chooses the row and a link in a cell would leave the form).
 #[allow(clippy::too_many_arguments)] // one page's context, passed straight through
 pub(crate) fn rows(
     page: &Page,
     cols: &[Column],
-    fmts: &[(String, Fmt)],
+    formatted: Option<&HeaderMap>,
     row_class: Option<&super::RowClass>,
     state: &ViewState,
     tz: &Tz,
@@ -259,7 +285,7 @@ pub(crate) fn rows(
                 cells: cols
                     .iter()
                     .map(|c| {
-                        let fmt = fmts.iter().find(|(n, _)| n == name_of(c)).map(|(_, f)| f);
+                        let fmt = formatted.and_then(|h| format_cell(c).map(|f| (f, h)));
                         cell(c, &row, fmt, tz, links)
                     })
                     .collect(),

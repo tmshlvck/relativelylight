@@ -1,6 +1,7 @@
 //! SeaORM backend flavor: introspection + the `MetaModel` builder + an `Accessor` implementation.
 //! This is the only module that depends on SeaORM.
 
+use crate::crud::fmt::{Fmt, FmtCtx};
 use crate::crud::engine::{
     BatchApplied,
     coerce, default_label, slugify, value_key, Accessor, Cardinality, Column, Engine, Error,
@@ -132,9 +133,14 @@ pub struct MetaField {
     ///
     /// Which is why it is **not a display hook.** Masking a phone number here puts the mask in the
     /// edit form, and the next save stores it. Shape a value for the page with
-    /// `Table::format_cell` / `format_view` (which no form sees); keep a secret out of reads
-    /// altogether with [`write_only`](Self::write_only) or [`hidden`](Self::hidden).
+    /// [`format_cell`](Self::format_cell) / [`format_view`](Self::format_view) (which no form
+    /// sees); keep a secret out of reads altogether with [`write_only`](Self::write_only) or
+    /// [`hidden`](Self::hidden).
     pub on_read: Option<ReadTransform>,
+    /// The display formatter for a table's cells — see [`format_cell`](Self::format_cell).
+    pub format_cell: Option<Fmt>,
+    /// The display formatter where one row is shown — see [`format_view`](Self::format_view).
+    pub format_view: Option<Fmt>,
 }
 
 impl MetaField {
@@ -341,6 +347,51 @@ impl MetaField {
         (!ok).then(|| format!("must be one of: {}", self.options.join(", ")))
     }
 
+    /// How this field is shown in a **table's cells**: a closure from [`FmtCtx`] (the value, the
+    /// row and the request's headers) to **HTML, inserted verbatim**. Every table of the entity
+    /// uses it — its own page, `Admin`, an accounts panel — but not a picker's list, where a click
+    /// chooses a row. **Escape every value** with [`esc`](crate::crud::fmt::esc): an unescaped one
+    /// is a stored XSS.
+    ///
+    /// Display only: the edit form, CSV, search and sort see the stored value. Independent of
+    /// [`format_view`](Self::format_view) — for the same rendering in both, pass the same closure
+    /// to each.
+    ///
+    /// ```ignore
+    /// use relativelylight::crud::fmt::{esc, truncate};
+    /// post.field("body").format_cell(truncate(60));   // a corner in the table, all of it in View
+    /// ```
+    pub fn format_cell<F>(&mut self, f: F) -> &mut Self
+    where
+        F: Fn(&FmtCtx) -> String + Send + Sync + 'static,
+    {
+        self.format_cell = Some(Fmt::new(f));
+        self
+    }
+
+    /// How this field is shown where **one row** is: a table's View dialog, and the dialog a
+    /// relation's link opens (`Crud::picker_view`) — the same closure shape and the same rule
+    /// (**escape every value**) as [`format_cell`](Self::format_cell), and independent of it.
+    ///
+    /// A link to the record's own page belongs here, with `target="_top"`: in a linked row's
+    /// dialog, an `<iframe>`, it takes the whole window rather than loading the page inside the
+    /// dialog. Mark it as leaving the page (`→`), so it is told apart from a relation's label,
+    /// which opens a dialog:
+    ///
+    /// ```ignore
+    /// workorder.field("number").format_view(|cx| format!(
+    ///     r#"<a href="/work-orders/{}" target="_top">{}</a> →"#,
+    ///     esc(&cx.row()["id"]), esc(cx.value()),
+    /// ));
+    /// ```
+    pub fn format_view<F>(&mut self, f: F) -> &mut Self
+    where
+        F: Fn(&FmtCtx) -> String + Send + Sync + 'static,
+    {
+        self.format_view = Some(Fmt::new(f));
+        self
+    }
+
     pub fn validate_str<F>(&mut self, f: F) -> &mut Self
     where
         F: Fn(&str) -> std::result::Result<(), String> + Send + Sync + 'static,
@@ -383,6 +434,9 @@ pub struct MetaRelation {
     /// Whether this relation's field offers "+ New" — see [`create`](MetaRelation::create).
     /// `None`: as `Crud::picker_create` (and `picker_create_except`) say.
     pub create: Option<bool>,
+    /// How many target rows this relation's input lists — see
+    /// [`picker_threshold`](MetaRelation::picker_threshold). `None`: as `Crud::picker_threshold`.
+    pub picker_threshold: Option<u64>,
     from_col: String,
     to_col: String,
     is_nm: bool,
@@ -415,6 +469,19 @@ impl MetaRelation {
     /// ```
     pub fn create(&mut self, on: bool) -> &mut Self {
         self.create = Some(on);
+        self
+    }
+
+    /// How many target rows this relation's form input may list as a `<select>` (a multi-select
+    /// for a to-many) before it shows the selection and edits it in the picker's dialog — overriding
+    /// `Crud::picker_threshold` (default 50) for this relation. Without `Crud::picker_path` the
+    /// input stays a `<select>` of every row.
+    ///
+    /// ```ignore
+    /// workorder.relation("aircraft").picker_threshold(200);   // registrations are quick to scan
+    /// ```
+    pub fn picker_threshold(&mut self, n: u64) -> &mut Self {
+        self.picker_threshold = Some(n);
         self
     }
 }
@@ -814,6 +881,8 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                     validate: None,
                     on_write: None,
                     on_read: None,
+                    format_cell: None,
+                    format_view: None,
                 }
             })
             .collect();
@@ -828,6 +897,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                 description: None,
                 links: None,
                 create: None,
+                picker_threshold: None,
                 searchable: true,
                 name: r.name,
                 target: r.target,
@@ -957,6 +1027,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
             description: None,
             links: None,
             create: None,
+            picker_threshold: None,
             searchable: true,
             from_col: self.pk.first().cloned().unwrap_or_default(),
             to_col: String::new(),
@@ -997,6 +1068,8 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
                     // `Json`/`Other` order by whatever the backend's internal representation happens
                     // to compare as — a total order, but not one that means anything to a reader.
                     sortable: !matches!(f.logical_type, LogicalType::Json | LogicalType::Other),
+                    format_cell: f.format_cell.clone(),
+                    format_view: f.format_view.clone(),
                 });
             }
         }
@@ -1141,6 +1214,7 @@ fn relation_column(r: &MetaRelation) -> Column {
         sortable: false,
         links: r.links,
         create: r.create,
+        picker_threshold: r.picker_threshold,
     }
 }
 
@@ -1681,6 +1755,7 @@ where
                     description,
                     links,
                     create,
+                    picker_threshold,
                     ..
                 } => Column::Relation {
                     // Sortable exactly when the cell's label can be turned into an `ORDER BY`: one
@@ -1699,6 +1774,7 @@ where
                     description,
                     links,
                     create,
+                    picker_threshold,
                 },
                 other => other,
             })
@@ -2006,6 +2082,15 @@ impl Crud {
     #[cfg(feature = "ui")]
     pub fn picker_path(&mut self, path: impl Into<String>) -> &mut Self {
         self.engine.set_picker_path(path);
+        self
+    }
+
+    /// How many target rows a relation's form input may list as a `<select>` before it uses the
+    /// picker (default 50). A relation's own
+    /// [`MetaRelation::picker_threshold`](MetaRelation::picker_threshold) overrides it.
+    #[cfg(feature = "ui")]
+    pub fn picker_threshold(&mut self, n: u64) -> &mut Self {
+        self.engine.set_picker_threshold(n);
         self
     }
 
@@ -2636,6 +2721,8 @@ mod tests {
             validate: None,
             on_write: None,
             on_read: None,
+            format_cell: None,
+            format_view: None,
         }
     }
 

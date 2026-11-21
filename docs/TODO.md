@@ -4,7 +4,22 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
 **decision** (rejected or bounded on purpose), kept so it isn't re-derived. Shipped work goes to
 [CHANGELOG.md](../CHANGELOG.md); the design is [DESIGN.md](DESIGN.md).
 
+## The crate
+
+- [ ] **Revisit the feature set and the module layout.** The admin UI is the crate's main product,
+  yet `ui` is not a default feature (the defaults are `crud` + `axum`). Decide which features earn
+  their switch, meaning a real app that wants the engine without the UI, or the UI without `tz`,
+  and fold the rest into the always-on core. Also decide whether `crud::ui` nested under `crud`
+  matches the code. `ui` depends on `crud`, but the formatters, `esc` and `ViewState` sit on the
+  boundary between them.
+
 ## crud / crud::ui
+
+- [ ] **`docs/SECURITY.md`: what an app must get right**, collected in one place after the model-level
+  formatters ship: escaping in formatters (their HTML is inserted verbatim), `on_read` never masking a
+  value, the mandatory `resolve_real_ip`, gating a direct `Engine` call, registering `auth_*` only
+  through `meta_model()`, and the like. The guides keep each rule where it applies and link there;
+  `AUTH-SECURITY.md` keeps the crate's own reasoning.
 
 - [ ] **An app's own search** per entity: full-text (a `tsvector`) or an external index, beside the
   built-in substring search (CRUD.md → Search). Additive: a `MetaModel` hook returning a condition

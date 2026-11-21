@@ -48,12 +48,11 @@ pub(crate) enum Widget {
 }
 
 /// What a relation input needs beyond its column: whose field it is (the picker's `?pick=` names
-/// it), how many target rows a `<select>` may list, and who is asking — the **target's** gate
+/// it), and who is asking — the **target's** gate
 /// decides whether its rows are listed at all, since a form for one table is no licence to read
 /// another.
 pub(crate) struct Relations<'r> {
     pub slug: &'r str,
-    pub threshold: u64,
     pub headers: &'r HeaderMap,
     /// The gates' answers so far in this render, `(target, op, allowed)`: a gate may cost a session
     /// lookup, and a form asks the same target's List for its input and its "+ New", and again for
@@ -62,8 +61,8 @@ pub(crate) struct Relations<'r> {
 }
 
 impl<'r> Relations<'r> {
-    pub fn new(slug: &'r str, threshold: u64, headers: &'r HeaderMap) -> Self {
-        Self { slug, threshold, headers, gates: Default::default() }
+    pub fn new(slug: &'r str, headers: &'r HeaderMap) -> Self {
+        Self { slug, headers, gates: Default::default() }
     }
 
     /// `engine.permits(target, op, headers)`, asked once per render.
@@ -273,7 +272,7 @@ async fn widget(
                 _ => Widget::Text { value, kind: "text", placeholder: String::new() },
             })
         }
-        Column::Relation { target, cardinality, .. } => {
+        Column::Relation { target, cardinality, picker_threshold, .. } => {
             // Rejected input is ids only; the edited row embeds `{id, label}`, so its labels are free.
             // (A create has no row to embed labels; its initial ids are looked up instead.)
             let linked = match (state.posted(name), row) {
@@ -282,7 +281,7 @@ async fn widget(
             };
             let many = *cardinality == Cardinality::ToMany;
             let ids = relation_values(name, row, state, presets);
-            relation(engine, rel, name, target, many, ids, linked).await
+            relation(engine, rel, name, target, *picker_threshold, many, ids, linked).await
         }
     }
 }
@@ -291,17 +290,21 @@ async fn widget(
 /// opening the [`Picker`](super::Picker). The **one** place that decision is made: [`fields`] calls it
 /// for `Form`/`Table`/`Admin`, and [`RelationField`](super::RelationField) for an app's own form.
 ///
-/// `relation` is the relation's name on `rel.slug` (what the picker's `?pick=` names); `ids` the
-/// current selection, and `linked` the same selection with labels when they're already in hand.
+/// `relation` is the relation's name on `rel.slug` (what the picker's `?pick=` names), `threshold`
+/// its own `picker_threshold`; `ids` the current selection, and `linked` the same selection with
+/// labels when they're already in hand.
+#[allow(clippy::too_many_arguments)] // one relation's facts, passed straight through
 pub(crate) async fn relation(
     engine: &Engine,
     rel: &Relations<'_>,
     relation: &str,
     target: &str,
+    threshold: Option<u64>,
     many: bool,
     ids: Vec<String>,
     linked: Option<Vec<Opt>>,
 ) -> Result<Widget> {
+    let threshold = engine.picker_threshold(threshold);
     let listable = rel.permits(engine, target, Operation::List).await;
     let as_options = |page: &crate::crud::engine::Page| -> Vec<Opt> {
         page.data
@@ -317,7 +320,7 @@ pub(crate) async fn relation(
         // list left out would be unlinked by saving. (`per_page: 0` is the backend's
         // default page, not "no limit".)
         true => ListQuery { all: true, ..Default::default() },
-        false => ListQuery { per_page: rel.threshold.max(1), ..Default::default() },
+        false => ListQuery { per_page: threshold.max(1), ..Default::default() },
     };
     let select = |options: Vec<Opt>| match many {
         true => Widget::Multi { options },
@@ -327,7 +330,7 @@ pub(crate) async fn relation(
     let probe = if listable { Some(engine.list(target, &query(false), true).await?) } else { None };
     let picker = engine.picker_path();
     match (&probe, picker) {
-        (Some(page), _) if page.total <= rel.threshold => Ok(select(as_options(page))),
+        (Some(page), _) if page.total <= threshold => Ok(select(as_options(page))),
         // No picker to open: the whole list, however long. A page that errored once its
         // table grew past a number would be worse than a long menu.
         (Some(_), None) => Ok(select(as_options(&engine.list(target, &query(true), true).await?))),

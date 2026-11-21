@@ -31,7 +31,8 @@ use model::{author, event, post, profile, tag, user};
 use relativelylight::authz::{Decision, Open, Operation};
 use relativelylight::crud::engine::{Engine, Error, Result as CrudResult};
 use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::{esc, truncate, Form, Outcome, Picker, Table, ViewState, CSS, JS};
+use relativelylight::crud::fmt::{esc, truncate, FmtCtx};
+use relativelylight::crud::ui::{Form, Outcome, Picker, Table, ViewState, CSS, JS};
 use relativelylight::middleware::RealIp;
 use relativelylight::time::{picker, Tz};
 use relativelylight::validate;
@@ -92,6 +93,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // different one where the type alone can't know better. Cells are unaffected — a table row is no
     // place for a slider.
     post_mm.field(post::Column::Body.as_str()).textarea(8); // prose wants more than a one-line input
+    // **Display formatters**, declared once on the model: every table of posts shows them, and so do
+    // its View dialog and a post opened from a tag's link (the linked-row dialog). The output is HTML
+    // inserted verbatim, so every value goes through `esc`: an unescaped one is a stored XSS.
+    //
+    // The title links to the post's own edit page. `target="_top"`, so that from the linked-row
+    // dialog (an iframe) it takes the whole window; "→", so it reads as leaving the page, unlike a
+    // relation's label, which opens a dialog. A plain `<a href>`: a new tab and no-script work.
+    let to_edit = |cx: &FmtCtx| {
+        format!(r#"<a href="/post/{}/edit" target="_top">{}</a> →"#, esc(&cx.row()["id"]), esc(cx.value()))
+    };
+    post_mm.field(post::Column::Title.as_str()).format_cell(to_edit).format_view(to_edit);
+    // The listing shows the start of the body (whole in the tooltip); View and the post's own page
+    // show all of it.
+    post_mm.field(post::Column::Body.as_str()).format_cell(truncate(60));
     post_mm.field(post::Column::Views.as_str()).default = Some(serde_json::json!(0));
     post_mm.field(post::Column::Views.as_str()).range(0.0, 500.0, 1.0);
     post_mm.field(post::Column::Views.as_str()).description =
@@ -276,18 +291,10 @@ fn table<'a>(engine: &'a Engine, slug: &str) -> Table<'a> {
     }
 }
 
-/// The post table shows the rest: cell renderers, a relation filter, a default sort, and a View
-/// that opens a page of the app's own.
+/// The post table shows the rest: a relation filter, a default sort, and a View that opens a page
+/// of the app's own. (Its title link and shortened body come from the model, above.)
 fn post_table(t: Table<'_>) -> Table<'_> {
     t
-        // Custom cell renderer: link each title to its own edit page. Escaping is the app's job
-        // and `esc` is how — the closure's output is inserted verbatim.
-        .format_cell(post::Column::Title.as_str(), |v, row| {
-            format!(r#"<a href="/post/{}/edit">{}</a>"#, esc(&row["id"]), esc(v))
-        })
-        // The listing shows the start of the body (whole in the tooltip); the post's own page
-        // below shows all of it.
-        .format_cell(post::Column::Body.as_str(), truncate(60))
         // A filter on a *relation*: the toolbar gets an author picker, and choosing one narrows
         // the listing, the CSV export and "delete all matching" alike. Sorting by `author` orders
         // by the name shown in the cell rather than the foreign key.
@@ -398,9 +405,6 @@ async fn dashboard(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) ->
             Some("draft") => "table-warning".into(),
             Some("archived") => "text-body-secondary".into(),
             _ => String::new(),
-        })
-        .format_cell(post::Column::Title.as_str(), |v, row| {
-            format!(r#"<a href="/post/{}/edit">{}</a>"#, esc(&row["id"]), esc(v))
         })
         .render_for(&headers, &state)
         .await;

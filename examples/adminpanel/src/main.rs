@@ -26,7 +26,8 @@ use model::{author, post, profile, tag, user};
 use relativelylight::auth::{self, Auth, GroupReadWrite, Identity, UserReadGroupWrite};
 use relativelylight::crud::engine::Engine;
 use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::{esc, truncate, Admin, Outcome, Picker, ViewState, CSS, JS};
+use relativelylight::crud::fmt::truncate;
+use relativelylight::crud::ui::{Admin, Outcome, Picker, ViewState, CSS, JS};
 use relativelylight::middleware::RealIp;
 use relativelylight::time::{picker, Tz};
 use relativelylight::validate;
@@ -105,7 +106,7 @@ struct App {
 // can be rendered *for the caller*. `is_manager` says the accounts tables' gate admits the caller:
 // only then is the Accounts section listed (anyone else would get 403 reading it). Each user-id links
 // to its credentials page.
-fn build_admin<'a>(engine: &'a Engine, auth: &Auth, is_manager: bool) -> Admin<'a> {
+fn build_admin<'a>(engine: &'a Engine, is_manager: bool) -> Admin<'a> {
     let mut admin = Admin::new(engine)
         .title("relativelylight")
         // Each model gets a path of its own: /admin/post, /admin/auth_user. Only the side panel's
@@ -118,17 +119,7 @@ fn build_admin<'a>(engine: &'a Engine, auth: &Auth, is_manager: bool) -> Admin<'
         // at a time. The choice travels in the query string, so it can be linked.
         .filter("author")
         .group("Content")
-        .entity_with("post", |t| {
-            // A cell renderer is a Rust closure now, and escaping is what `esc` is for: this link
-            // opens the row's own edit dialog, which is just a URL. Cells only: in the View dialog —
-            // which has an Edit button of its own — the title stays plain text.
-            t.per_page(10)
-                .format_cell(post::Column::Title.as_str(), |v, row| {
-                    format!(r#"<a href="?entity=post&amp;edit={}">{}</a>"#, esc(&row["id"]), esc(v))
-                })
-                // The listing shows the start of the body (whole in the tooltip); View shows it all.
-                .format_cell(post::Column::Body.as_str(), truncate(60))
-        })
+        .entity_with("post", |t| t.per_page(10))
         .entity("tag")
         .separator()
         .group("People")
@@ -136,20 +127,14 @@ fn build_admin<'a>(engine: &'a Engine, auth: &Auth, is_manager: bool) -> Admin<'
         .entity_with("user", |t| t.read_only(true))
         .entity("profile");
     if is_manager {
-        // The id opens the account's credentials page: password reset, 2FA off, passkeys removed.
-        let credentials = auth::user::credentials_link(auth.profile_path());
         admin = admin
             .separator()
             .group("Accounts (auth)")
-            // Login accounts: create/edit inline (password is the write-only field above); the id
-            // links to /profile/{id} for a dedicated password reset. Password never shows in reads.
-            .entity_with("auth_user", |t| {
-                // Wanted in the cells *and* the View dialog: the two are independent, so one
-                // function, passed to both.
-                t.title("Login accounts")
-                    .format_cell("id", credentials.clone())
-                    .format_view("id", credentials)
-            })
+            // Login accounts: create/edit inline (password is the write-only field above). The id
+            // links to the account's credentials page, `/profile/{id}` (password reset, 2FA off,
+            // passkeys removed): `auth::user::meta_model` declares that link, so every table of
+            // accounts has it. Password never shows in reads.
+            .entity_with("auth_user", |t| t.title("Login accounts"))
             .entity_with("auth_group", |t| t.title("Groups"))
             .entity_with("auth_username_lockout", |t| {
                 t.title("Locked accounts").create(false).edit(false).description(
@@ -291,6 +276,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     post_mm.field(post::Column::PublishedAt.as_str()).description =
         Some("When the post went live (blank = draft).".into());
     post_mm.field(post::Column::PublishedAt.as_str()).datetime();
+    // The listing shows the start of the body (whole in the tooltip); View shows it all. A display
+    // formatter belongs to the field, so every table of posts shows it the same way.
+    post_mm.field(post::Column::Body.as_str()).format_cell(truncate(60));
     post_mm.relation("author").label = Some("Author".into());
     post_mm.relation("tag").label = Some("Tags".into());
     post_mm.field(post::Column::Title.as_str()).validate = Some(Box::new(|v| {
@@ -476,7 +464,7 @@ async fn save(
 /// The panel for this caller: the accounts section when the accounts gate admits them — the gate that
 /// guards those tables, asked without a second session lookup.
 fn panel<'a>(app: &'a App, who: &Identity) -> Admin<'a> {
-    build_admin(&app.engine, &app.auth, app.accounts.admits(who))
+    build_admin(&app.engine, app.accounts.admits(who))
 }
 
 fn page(body: String, who: &Identity, headers: &HeaderMap) -> Response {

@@ -82,6 +82,33 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
   It sees only what the table shows: a hidden field searched is an oracle on its value.
 - **Display and storage are separate.** `format_cell`/`format_view` are display only; `on_read` /
   `on_write` are an inverse codec on the column's own type.
+- **A field's display formatters belong to its model** (`MetaField::format_cell` / `format_view`),
+  not to a table. Every surface that shows a row reads the model: the table, its View dialog,
+  `Admin`, the linked-row dialog (`picker_view`) and an app's own view. A formatter kept on `Table`
+  could reach only that table: the linked-row dialog builds a default `Table` of the target, so
+  an app's link to the record's own page never showed there. On the model it is declared once, the
+  same on every table of the entity. **No per-table override:** nobody has needed one, and adding
+  one later breaks nothing, while removing one would.
+  - **The closure takes one context argument**: the value, the row (a link needs the key while
+    it formats another column), and the request headers. The headers carry what depends on the
+    viewer, the timezone first (`Tz::from_headers`). The argument is a struct (`FmtCtx`), so the
+    crate can add a member later without breaking anyone's closures. Being on the field, it names
+    no column. It is synchronous: display that needs a query belongs to the app's own view.
+  - **Its output is HTML, inserted verbatim.** That is the point of it, and also the risk: a value
+    it fails to escape is stored XSS. The docs say so wherever a formatter is introduced.
+    `FmtCtx`, `esc` and `truncate` live in `crud`, because `MetaField` names them and `crud` doesn't
+    depend on `ui`.
+  - **Display only:** never the edit form, the CSV export, search or sort, which work on the stored
+    value.
+  - **The picker's list applies no cell formatter.** There a click chooses a row, and a link in
+    the cell would take the browser away from a half-filled form. The linked-row dialog applies
+    `format_view`: leaving the page from it is what such a link is for, and `target="_top"` takes
+    the whole window instead of the iframe. A picker-specific formatter waits for a need.
+- **A relation's picker threshold is the relation's**: `MetaRelation::picker_threshold(n)`, with a
+  crate-wide default beside `picker_path` (50). It decides only how a relation's input renders in
+  a form, so it was never the table's to set. Three builders (`Table`, `Form`, `RelationField`)
+  each carried a copy that could disagree, for example between a `Form` and the same entity's
+  edit dialog.
 - **One column type per kind of time value** ([TIME.md §1](TIME.md#1-storage-model)). An instant is
   integer Unix seconds: it compares, sorts and adds as an integer, in the same SQL and on an ordinary
   index on SQLite and PostgreSQL alike, where native timestamps are text in several shapes on SQLite

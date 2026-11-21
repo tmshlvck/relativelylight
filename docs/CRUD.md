@@ -15,7 +15,7 @@ New here? **[APP.md](APP.md)** builds a whole app end to end (shell, nav bar, lo
 pages); this document is the reference for the parts. Upgrading? **[MIGRATION-0.5.md](MIGRATION-0.5.md)** (and from 0.3, [MIGRATION-0.4.md](MIGRATION-0.4.md)).
 
 - [Install & quick start](#install--quick-start)
-- [Configuring a model](#configuring-a-model) — `MetaModel`, `MetaField`, `MetaRelation`
+- [Configuring a model](#configuring-a-model) — `MetaModel`, `MetaField` and its [display formatters](#display-formatters--how-a-field-is-shown), `MetaRelation`
 - [Reading and writing](#reading-and-writing) — the engine API, the URL as state, errors, CSRF
 - [Validation & transforms](#validation--transforms)
 - [Columns](#columns) — what the UI renders from
@@ -93,7 +93,7 @@ like `field`.
 ### Column names the compiler checks
 
 Every setting that names a column takes a string. That includes `field`, `label_column`, and the UI's
-`columns`, `fields`, `format_cell`, `format_view`, `sort`, `filter` and `fixed_filter`. A field's name *is* SeaORM's
+`columns`, `fields`, `sort`, `filter` and `fixed_filter`. A field's name *is* SeaORM's
 column name, so the `Column` enum that `DeriveEntityModel` generates can supply it.
 `IdenStatic::as_str` returns exactly the string the crate uses, and a misspelt variant fails to compile:
 
@@ -151,6 +151,8 @@ pub struct MetaField {
     pub blank_is_null: bool,    // nullable + empty string submitted → store NULL (default true)
     pub on_write:  Option<Box<dyn Fn(Value) -> Value + ...>>,   // storage codec, inbound  (e.g. hash)
     pub on_read:   Option<Box<dyn Fn(&Value) -> Value + ...>>,  // storage codec, outbound: on_write's inverse
+    pub format_cell: Option<Fmt>,  // display: HTML for a table's cells        (set with .format_cell(..))
+    pub format_view: Option<Fmt>,  // display: HTML where one row is shown     (set with .format_view(..))
 }
 ```
 
@@ -246,6 +248,73 @@ a sibling `widget` object (`{"rows": 8}`, `{"min":0.0,"max":500.0,"step":1.0}`),
 string rather than unpacking a tagged shape. Adding a widget is one variant in `FieldDisplay`, one case in
 the resolver, one branch in the markup.
 
+### Display formatters — how a field is shown
+
+`format_cell` and `format_view` shape how a field is shown on a page, as HTML of the app's: a link, a
+shortened text, a `<pre>`. They belong to the field, so they are declared once and every surface
+that shows the row uses them:
+
+| | Where |
+|---|---|
+| `format_cell(closure)` | the cells of every table of the entity: its `Table`s, `Admin`, an accounts panel. Not a [picker](#picker--choosing-from-a-large-relation)'s list, where a click chooses the row |
+| `format_view(closure)` | wherever **one row** is shown: a table's View dialog, and the dialog a relation's link opens ([`picker_view`](#viewing-the-linked-row)) |
+
+They are independent, neither falls back to the other: a long text can be shortened in the listing
+and shown whole in View, and for the same rendering in both you pass the same closure to each. The
+closure gets a [`FmtCtx`](#a-formatters-context): `value()`, the `row()` (`row()["id"]` is the key a link
+needs while it formats another column) and the request's `headers()`.
+
+> **The output is inserted into the page verbatim. Escape every value** with `crud::fmt::esc`
+> (a JSON value) or `esc_str` (a `&str`). A formatter that writes `format!("<b>{}</b>", cx.value())`
+> lets anyone who can store a value run a script in every viewer's browser: a stored XSS.
+> Formatters are the one place app-supplied HTML enters the crate's pages; everything else is escaped
+> by the template engine, and tested against `<script>`-bearing data in every cell, label, chip,
+> option and input value (`crud/ui_tests.rs`).
+
+```rust
+use relativelylight::crud::fmt::{esc, truncate};
+
+post.field("body").format_cell(truncate(60));          // a corner in the table, all of it in View
+post.field("notes").format_view(|cx| format!("<pre>{}</pre>", esc(cx.value())));   // keep the line breaks
+```
+
+`truncate(n)` is the shortening formatter: the first `n` characters and `…`, the whole value in
+the tooltip, escaped. The View dialog shows text with ordinary HTML whitespace, so line breaks
+collapse; a `format_view` choosing `<pre>` (or turning `\n` into `<br>`) is how a pre-formatted
+column keeps them.
+
+<a id="linking-a-row-to-the-apps-own-page"></a>**Linking a row to the app's own page.** A record
+that has a page of the app's own (a work order's workflow, an invoice) is reached through its
+**identifier**: a formatter on that field, in the cells and in the one-row views, that draws an
+ordinary `<a href>`. A new tab, a middle click and a browser without the script all work, and the
+row's View, Edit and Delete keep meaning the built-in dialog, form and delete:
+
+```rust
+let to_page = |cx: &FmtCtx| format!(
+    r#"<a href="/work-orders/{}" target="_top">{}</a> →"#,
+    esc(&cx.row()["id"]), esc(cx.value()),
+);
+workorder.field("number").format_cell(to_page).format_view(to_page);
+```
+
+- **`target="_top"`**: the one-row view may be the linked row's dialog, an `<iframe>`; without it the
+  page loads inside the dialog. In a table's own View it changes nothing, so a formatter needn't
+  know where it renders.
+- **Mark it as navigation**, with a sign of the app's choosing (`→` above). A relation's label is a
+  link too, but it opens a dialog over the page; the marker tells the two apart. It is a suggestion:
+  the crate adds no marker and checks for none.
+
+Because the link is on the field, it shows wherever the record does: its module page, a records
+browser, the admin console, and the dialog a work log's `workorder` link opens.
+`auth::user::meta_model` links an account's id to its credentials page this way.
+
+<a id="a-formatters-context"></a>**What a formatter is handed.** `FmtCtx::headers()` carries what
+depends on the viewer, the timezone first: `Tz::from_headers(cx.headers())`. The closure is
+synchronous, so display that needs a query (related rows, a lookup) belongs on a page of the app's
+own ([`detail_href`](#your-own-view-page)). Formatters are display only: the edit form, CSV, search
+and sort see the stored value. An app that renders rows itself finds them on
+`Column::Field { format_cell, format_view, .. }` and calls `fmt.call(&FmtCtx::new(value, row, headers))`.
+
 ### `MetaRelation`
 
 Auto-discovered from the entity's relations; you rarely construct one. To-one (owns the FK) and N:M
@@ -264,11 +333,12 @@ pub struct MetaRelation {
     pub description: Option<String>,
     pub links: Option<bool>,         // label links to the row; None = as Crud::picker_view says
     pub create: Option<bool>,        // "+ New" on the field; None = as Crud::picker_create says
+    pub picker_threshold: Option<u64>, // rows a <select> lists; None = as Crud::picker_threshold says
 }
 ```
 
-`links` and `create` are this relation's own answer to the two app-wide switches, set with
-`model.relation("author").links(true)` / `.create(false)`: see
+`links`, `create` and `picker_threshold` are this relation's own answer to the app-wide settings,
+set with `model.relation("author").links(true)` / `.create(false)` / `.picker_threshold(200)`: see
 [Per relation](#per-relation-one-switch-each).
 
 ## Reading and writing
@@ -382,7 +452,8 @@ of a branch per field and relation):
 
 Never a hidden or write-only field. Opt out with `model.field("notes").searchable = false` or
 `model.relation("author").searchable = false`. Booleans, JSON, a native date-time, a label built
-in code, and what `format_cell` or a codec renders are not searched: the search sees stored values.
+in code, and what a display formatter or a codec renders are not searched: the search sees stored
+values.
 On a table with nothing to search, a term matches no row.
 
 **Bulk delete** runs one set-based `DELETE … WHERE` in the backend (plus a subquery to clear N:M
@@ -448,7 +519,7 @@ A value passes through up to three layers, and only the outer two take your code
 |---|---|---|---|
 | **Storage codec** — every surface: UI, CSV, your own `Engine` calls | `on_read` | coercion, `blank_is_null`, `validate`, then `on_write` | the model (`MetaField`) |
 | **Typed text** — the form and CSV, one shared reading | built in by type: a datetime in the caller's zone, a relation as its id(s), else the value as text | built in by type: numbers and JSON parsed, a datetime read in the caller's zone, the blank rules below | the model (`display`: `.datetime()`, `.textarea()`, …) |
-| **Display** — the table's cells and the View dialog only | built in by type (a bool badge, a relation's label), or `Table::format_cell` / `format_view` | — | the table |
+| **Display** — the table's cells and the one-row views only | built in by type (a bool badge, a relation's label), or the field's `format_cell` / `format_view` | — | the model (`MetaField`) |
 
 - **The codec is an inverse pair.** `on_read`'s output is what *every* read returns, the edit form
   included, so saving an untouched form writes `on_write(on_read(stored))`. A phone stored as digits
@@ -647,8 +718,8 @@ Or by hand, on any closed set; an option left out shows as stored:
 order.field("state").option_labels([("in_progress", "In-Progress")]);
 ```
 
-`examples/crud` shows a post's `review` status as "In review" this way. A `Table::format_cell`
-closure still gets the stored value, and wins over the label in its column.
+`examples/crud` shows a post's `review` status as "In review" this way. A field's `format_cell`
+still gets the stored value, and wins over the label in its column.
 
 ## Columns
 
@@ -867,9 +938,6 @@ and in the examples.
 | `range_filter(col)` | **from/to** inputs in the toolbar, `>=`/`<=`; dates in the viewer's zone for a `.datetime()` column ([below](#range-filters)) |
 | `fixed_in(name, values)` | a pin to a **set**, `name IN (…)`, with no control; writes must stay in it, and an empty set means no rows ([below](#a-pinned-set)) |
 | `initial(field, value)` | pre-fill the **create** dialog for this request ([`Form::initial`](#initial-values)) |
-| `format_cell(col, closure)` | a custom renderer for the column's cells, `(value, row) -> HTML` |
-| `format_view(col, closure)` | the same for the View dialog — independent of `format_cell` |
-| `picker_threshold(n)` | how many target rows a relation may list as a `<select>` / multi-select before it uses the [picker](#picker--choosing-from-a-large-relation) (default 50) |
 | `dom_id(id)` | namespaces the fragment's id, so two tables of one entity can share a page |
 
 **Every filter in force is chipped**, whether the table declared a control for it or not — one
@@ -898,38 +966,21 @@ Table::new(&engine, "invoice")
 Both are checked: a name `columns` doesn't recognise is a render-time error naming it, and the class
 is escaped like any other attribute.
 
-**`format_cell` is a Rust closure** whose output is inserted verbatim, so wrap database values in
-`crud::ui::esc`:
+**How a field is shown** — a link to the record's page, a shortened text — is the model's, not a
+table's: [display formatters](#display-formatters--how-a-field-is-shown), declared once on the
+field and used by every table of the entity.
 
-```rust
-.format_cell("title", |v, row| format!(r#"<a href="/post/{}">{}</a>"#, esc(&row["id"]), esc(v)))
-```
-
-It renders the column's **cells**; `format_view(col, closure)` renders it in the **View dialog**.
-They are independent — neither falls back to the other — so a long text can be shortened in the
-listing and shown whole in View, and for the same rendering in both you pass the same function to
-each (`examples/adminpanel` does, for the accounts table's id). `crud::ui::truncate(n)` is the
-shortening renderer: the first `n` characters and `…`, the whole value in the tooltip, escaped:
-
-```rust
-.format_cell("body", truncate(60))                              // a corner in the table, all of it in View
-.format_view("notes", |v, _| format!("<pre>{}</pre>", esc(v)))   // keep the line breaks it was typed with
-```
-
-The dialog shows text with ordinary HTML whitespace, so line breaks collapse; a `format_view`
-choosing `<pre>` (or turning `\n` into `<br>`) is how a pre-formatted column keeps them.
-
-That is the one place (two closures of one shape) app-supplied HTML enters the page; everything else is escaped by the template
-engine, and the escaping is tested against `<script>`-bearing data in every cell, label, chip, option
-and input value (`crud/ui_tests.rs`).
-
-**Relations in the form.** A relation whose target has at most `picker_threshold` rows (default 50)
-renders as a `<select>` (to-one) or a multi-select (to-many) of every target row. Above that, and if
+**Relations in the form.** A relation whose target has at most its threshold of rows renders as a
+`<select>` (to-one) or a multi-select (to-many) of every target row. Above that, and if
 the app serves a [picker](#picker--choosing-from-a-large-relation), the field shows its selection as
 badges and edits it in a dialog. Without a picker it stays a `<select>` of every row, however long:
 the threshold depends on data, so failing past it would break a working page the day a table grew.
 A to-many always lists **every** row it lists at all, because a posted multi-select replaces the
 relation set and a linked row the list left out would be unlinked by an unchanged save.
+
+The threshold is `Crud::picker_threshold(n)` (default 50) for every relation, and a relation's own
+`MetaRelation::picker_threshold(n)` overrides it. It belongs to the relation, so every form that
+edits it (a `Table`'s dialog, a `Form`, a `RelationField`) decides the same way.
 
 The options are the target's rows, so they answer to the **target's** gate: a caller who may not
 list the target gets the field's current selection, read-only, and nothing to choose from. Any posted
@@ -1012,14 +1063,16 @@ parameters in another table's URL are ignored, and an `Admin` doesn't carry them
 listing *every* published column, not just the writable ones. It is the only way to see a generated
 id, a hook-stamped `created_at`, or a column `columns([…])` leaves out of the listing, and the only
 row view a caller who may not write gets at all. Values come from the same renderer as the cells, so
-relations show labels and datetimes are in the caller's zone; a `format_view` closure replaces that.
+relations show labels and datetimes are in the caller's zone; a field's `format_view` replaces that.
 Write-only columns are left out — the backend never returns one, so the row would be blank beside
 "Password". `detail(false)` removes it: the button, and the dialog — a `?show=7` typed into the URL
 renders the plain listing without reading the row.
 
-**Your own view page.** The dialog's layout is fixed (a label/value list). For a row laid out your
-way — your own template, related rows, anything async — point View at a route of the app's with
-`detail_href("/post/{id}")`; `{id}` is replaced with the row's id, percent-encoded. The table then
+**Your own view page.** The dialog's layout is fixed (a label/value list). `detail_href` replaces
+**the layout of the row's own view**: a row whose blob or JSON decodes into a chart or an image,
+its related rows, anything async. It is not the way to a record's workflow page: that is a link on
+its identifier ([linking a row to the app's own page](#linking-a-row-to-the-apps-own-page)), which
+leaves View meaning View. Point View at a route of the app's with `detail_href("/post/{id}")`; `{id}` is replaced with the row's id, percent-encoded. The table then
 draws only the link, and `?show=` opens nothing (`detail(false)` still wins and removes the button).
 The page is yours, and so is its gate: `Engine` is ungated, so ask
 `engine.decide("post", Operation::Read, &headers)` before `engine.get("post", &id)` — the check the
@@ -1363,16 +1416,19 @@ The dialog looks like the table's own View and edit dialogs: the page inside it 
 its own, and the script moves its buttons (Edit; Cancel and Save; Create) into the dialog's footer.
 Without the script they stay under the fields.
 
-Links are not drawn in forms, where a click means choosing, nor in the picker's list. A cell with a
-`format_cell` closure is the closure's: it gets no link.
+Links are not drawn in forms, where a click means choosing, nor in the picker's list. In the
+dialog, the target's fields are shown with their own `format_view`, so a link to the target's page
+([linking a row to the app's own page](#linking-a-row-to-the-apps-own-page)) is there too, and
+`target="_top"` takes the whole window when it is followed. Nothing else changes: the dialog is
+still gated by the target's Read, and its Edit by Update.
 
 Both examples turn it on: in `examples/adminpanel` the editor (read-only) can open a post's author
 but gets no Edit, and the admin can edit it in place.
 
 ### Per relation: one switch each
 
-`picker_view` and `picker_create` are the app's defaults. Each relation can answer for itself on
-its model, and its answer wins either way:
+`picker_view`, `picker_create` and `picker_threshold` are the app's defaults. Each relation can
+answer for itself on its model, and its answer wins either way:
 
 ```rust
 // Only this relation links and offers "+ New"; the app-wide switches stay off.
@@ -1383,6 +1439,9 @@ workorder.relation("airline").links(true).create(true);
 crud.picker_view(true);
 crud.picker_create(true);
 workorder.relation("invoice_contact").create(false);
+
+// Registrations are quick to scan: a menu of up to 200 rather than the picker past 50.
+workorder.relation("aircraft").picker_threshold(200);
 ```
 
 A relation's own `create(true)` also wins over `picker_create_except`, which is a default for every
@@ -1396,8 +1455,8 @@ relation, its picker URLs answer `400`, as when the app has it off.
 `Form` edits one row of one entity. A form that isn't that — a bulk action, a filter, a wizard step —
 is hand-written, and `RelationField` puts one relation input into it: **the same input** `Form`,
 `Table` and `Admin` render for that relation, from the same function and the same template. So it is
-a `<select>` (a multi-select for a to-many) up to `picker_threshold` target rows (default 50), and the
-picker past it; the picker needs exactly what it needs for a `Form` — `picker_path`, the `/_rl/pick`
+a `<select>` (a multi-select for a to-many) up to the relation's
+[threshold](#per-relation-one-switch-each) of target rows (default 50), and the picker past it; the picker needs exactly what it needs for a `Form` — `picker_path`, the `/_rl/pick`
 route, `crud::ui::JS` in the shell.
 
 It is named by a **relation** of a registered entity, because that is what the picker browses — the
@@ -1434,7 +1493,7 @@ match tags(&engine).read(&headers, &body).await {
   it sees the selection as ids, with nothing to browse, as in a `Form`. Rendering and reading change
   nothing, so they ask no other gate — **your write does**: `Engine` is ungated, so a handler writing
   through it asks `engine.decide(slug, Operation::Update, &headers)` first.
-- Other builders: `.help(..)`, `.required(true)` (the label's `*` only), `.picker_threshold(n)`.
+- Other builders: `.help(..)`, `.required(true)` (the label's `*` only).
   `render_for` is `400` naming the problem when the entity has no relation by that name (`404` for
   an unknown entity).
 

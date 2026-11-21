@@ -516,19 +516,15 @@ fn accounts_engine(db: DatabaseConnection, auth: &Auth) -> Arc<Engine> {
 
 /// The panel's shape. Built per request (it borrows the engine), which is also what lets it be
 /// rendered *for a caller*. Each table offers only what is done here and nowhere else.
-fn accounts<'a>(engine: &'a Engine, auth: &Auth) -> Admin<'a> {
-    // The account's id opens its credentials page (`/profile/{id}`): resetting the password, turning
-    // 2FA off and removing passkeys happen there, under re-authentication, and nowhere else.
-    let credentials = auth::user::credentials_link(auth.profile_path());
+fn accounts(engine: &Engine) -> Admin<'_> {
+    // The account's id opens its credentials page (`/profile/{id}`), a link `auth::user::meta_model`
+    // declares: resetting the password, turning 2FA off and removing passkeys happen there, under
+    // re-authentication, and nowhere else.
     Admin::new(engine)
         .title("Accounts")
         .base("/admin")
         .group("People")
-        .entity_with("auth_user", |t| {
-            t.title("Users")
-                .format_cell("id", credentials.clone())
-                .format_view("id", credentials)
-        })
+        .entity_with("auth_user", |t| t.title("Users"))
         .entity_with("auth_group", |t| t.title("Groups"))
         // Keys are minted on /profile, where the raw value can be shown once; one made here would
         // have no value anyone could see. Disabling, re-dating and deleting someone's key is here.
@@ -555,7 +551,7 @@ async fn accounts_show(
     };
     let mut state = ViewState::from_uri(&uri);
     state.entity = Some(entity);
-    match accounts(&app.engine, &app.auth).render_for(&headers, &state).await {
+    match accounts(&app.engine).render_for(&headers, &state).await {
         Ok(body) => Html(wide_page("Accounts", &who, &body, &headers)).into_response(),
         // A signed-in non-admin lands here: the gate refuses the *read*, so there is no panel — a page
         // that says so, in our shell, rather than the library's bare status.
@@ -589,7 +585,7 @@ async fn accounts_save(
     };
     let mut state = ViewState::from_uri(&uri);
     state.entity = Some(entity);
-    let panel = accounts(&app.engine, &app.auth);
+    let panel = accounts(&app.engine);
     match panel.submit(&headers, ip, &body, &state).await {
         Ok(Outcome::Done(to)) => Redirect::to(&to).into_response(),
         Ok(Outcome::Invalid(state)) => match panel.render_for(&headers, &state).await {
@@ -731,7 +727,7 @@ fn unauthorized(why: &str) -> Response {
 /// The shell names the zone times are shown in (the footer), since the picker is only on `/profile`,
 /// and inlines `time::JS`, which sets that zone from the browser on a first visit and from the picker.
 fn shell(title: &str, who: Option<&Identity>, body: &str, headers: &HeaderMap) -> String {
-    let zone = relativelylight::crud::ui::esc(&serde_json::json!(relativelylight::time::Tz::from_headers(headers).name()));
+    let zone = relativelylight::crud::fmt::esc(&serde_json::json!(relativelylight::time::Tz::from_headers(headers).name()));
     let tz_js = relativelylight::time::JS;
     let mut left = String::new();
     let mut right = String::new();

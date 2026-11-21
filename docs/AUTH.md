@@ -790,13 +790,13 @@ crud.register(auth::lockout::username_meta_model(), gate.clone()); // §5e, dele
 crud.register(auth::lockout::ip_meta_model(), gate);
 ```
 
-and in the panel, the account's id links to its credentials page, and each table offers only what
-is done there:
+and in the panel each table offers only what is done there. The account's id links to its
+credentials page, `{profile_path}/{id}`, wherever an account is shown: `auth::user::meta_model`
+declares that link ([CRUD.md → display formatters](CRUD.md#display-formatters--how-a-field-is-shown)).
 
 ```rust
-let link = auth::user::credentials_link(auth.profile_path());
 admin
-    .entity_with("auth_user", |t| t.format_cell("id", link.clone()).format_view("id", link))
+    .entity("auth_user")
     .entity("auth_group")
     .entity_with("auth_api_key", |t| t.create(false))      // minted on /profile, shown once
     .entity_with("auth_passkey", |t| t.read_only(true))    // removed on /profile/{id}

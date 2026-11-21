@@ -78,6 +78,8 @@ impl Accessor for Stub {
             default: None,
             display: None,
             sortable: true,
+            format_cell: None,
+            format_view: None,
         };
         vec![field("id", true), field("name", false), field("nickname", true)]
     }

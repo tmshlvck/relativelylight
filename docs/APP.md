@@ -265,16 +265,11 @@ fn panel<'a>(app: &'a App, who: &Identity) -> Admin<'a> {
         .base("/admin")                                  // /admin/post, /admin/tag — see CRUD.md
         .filter("zone")                                  // one control across every table that has it
         .group("Content")
-        .entity_with("post", |t| t.per_page(25).format_cell("title", |v, row| {
-            format!(r#"<a href="?entity=post&amp;edit={}">{}</a>"#, esc(&row["id"]), esc(v))
-        }))
+        .entity_with("post", |t| t.per_page(25))
         .entity("tag");
     if app.admins.admits(who) {                          // the accounts tables' own gate decides
-        let link = auth::user::credentials_link(app.auth.profile_path()); // id → /profile/{id}
         admin = admin.separator().group("Accounts")
-            .entity_with("auth_user", |t| {
-                t.title("Login accounts").format_cell("id", link.clone()).format_view("id", link)
-            })
+            .entity_with("auth_user", |t| t.title("Login accounts"))  // id → /profile/{id}, from the model
             .entity_with("auth_group", |t| t.title("Groups"));
     }
     admin

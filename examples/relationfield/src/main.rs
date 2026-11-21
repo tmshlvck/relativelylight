@@ -19,7 +19,8 @@
 //! Below the form a read-only `Table` pinned to the chosen author shows the result.
 //!
 //! Try:  open http://127.0.0.1:3000/ · pick an author and two tags · Apply · then try "Replace".
-//! Set `.picker_threshold(100)` on a field and it is a plain `<select>` — the handlers don't change.
+//! Give the relation a threshold of its own on the model (`post_mm.relation("tag").picker_threshold(100)`)
+//! and it is a plain `<select>` — the handlers don't change.
 
 use askama::Template;
 use axum::body::Bytes;

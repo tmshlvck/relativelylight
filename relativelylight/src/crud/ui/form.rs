@@ -66,7 +66,6 @@ pub struct Form<'a> {
     saved_message: Option<String>,
     cancel_href: Option<String>,
     redirect: Option<String>,
-    picker_threshold: u64,
     initial: Vec<(String, Value)>,
     /// Inside a [`Picker`](super::Picker)'s dialog: no card (the dialog is one).
     embedded: bool,
@@ -90,7 +89,6 @@ impl<'a> Form<'a> {
             saved_message: None,
             cancel_href: None,
             redirect: None,
-            picker_threshold: 50,
             initial: Vec::new(),
             embedded: false,
         }
@@ -179,11 +177,6 @@ impl<'a> Form<'a> {
         self.initial.push((field, value.into()));
         self
     }
-    /// See [`Table::picker_threshold`](super::Table::picker_threshold).
-    pub fn picker_threshold(mut self, n: u64) -> Self {
-        self.picker_threshold = n;
-        self
-    }
     pub(crate) fn embedded(mut self) -> Self {
         self.embedded = true;
         self
@@ -225,7 +218,7 @@ impl<'a> Form<'a> {
             row.as_ref(),
             state,
             &tz,
-            &widgets::Relations::new(&self.slug, self.picker_threshold, headers),
+            &widgets::Relations::new(&self.slug, headers),
             &widgets::Presets { initial: &self.initial, ..Default::default() },
         )
         .await?;

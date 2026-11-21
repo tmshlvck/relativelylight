@@ -7,6 +7,7 @@
 //! in between. [`csv_io`] is an optional adapter. See `docs/CRUD.md`.
 
 pub mod engine;
+pub mod fmt;
 pub mod seaorm;
 
 /// Negative-path tests for gate enforcement on the UI's write path (needs `auth` for the presets).

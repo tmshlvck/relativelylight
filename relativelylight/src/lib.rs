@@ -51,8 +51,9 @@ pub mod files;
 #[cfg(any(feature = "csrf", feature = "tz", feature = "ui"))]
 mod urlform;
 
-/// HTML escaping for fragments built without a template (`ui` implies `tz`, `auth` implies `csrf`).
-#[cfg(any(feature = "csrf", feature = "tz", feature = "files"))]
+/// HTML escaping for fragments built without a template, and `crud::fmt::esc` (`ui` implies `tz`,
+/// `auth` implies `csrf`).
+#[cfg(any(feature = "crud", feature = "csrf", feature = "tz", feature = "files"))]
 mod html;
 
 /// Whether `path` is a path on this site (`/…`), safe to redirect to: not `//host` or `/\host`, which a
