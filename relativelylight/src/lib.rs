@@ -17,6 +17,7 @@
 //! crud.register(post, Open);                  // each model takes a gate (Open = ungated)
 //! let engine = crud.into_engine();            // render tables/forms from it on your own routes
 //! ```
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// The per-model authorization gate: [`Authz`](authz::Authz), [`Operation`](authz::Operation),
 /// [`Decision`](authz::Decision) and the [`Open`](authz::Open) gate. Identity-resolving presets live
