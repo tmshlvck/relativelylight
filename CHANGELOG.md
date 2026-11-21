@@ -13,6 +13,25 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
+- **`axum` and `csrf` are no longer features; `ui` is a default.** The axum plumbing
+  (`middleware`, the `IntoResponse` impls) and the CSRF token (`csrf`, `Crud::csrf`,
+  `Upload::csrf`) are always compiled: every surface is an axum handler and every
+  cookie-authenticated write needs the token. The defaults are now `crud` and `ui`. **Upgrade:**
+  remove `"axum"`, `"csrf"` (and a now-default `"ui"`) from your `features`; a build of `auth` or
+  `files` alone adds `default-features = false`
+  ([MIGRATION-0.5.md §15](docs/MIGRATION-0.5.md#15-axum-and-csrf-are-always-on-ui-is-a-default)).
+- **A row's page, "+ New" per target and the row class belong to the model**
+  ([CRUD.md → The entity as a whole](docs/CRUD.md#entity-wide-settings)):
+  `MetaModel::view_path(template)` replaces both `Table::detail_href` and `Crud::view_path(slug, …)`,
+  one setting for each table's View and a relation link's `href`, which could disagree.
+  `MetaModel::picker_create(bool)` replaces `Crud::picker_create_except` (relation, then target,
+  then app decide), and `MetaModel::picker_create_fields([…])` replaces `Picker::create_fields`,
+  panicking at startup on an unknown name. `MetaModel::row_class` replaces `Table::row_class`: every
+  table of the entity uses it, and the closure takes `&RowCtx` (row and request headers) and returns
+  `Option<String>`. An app with its own `Accessor` reports them from the new `Accessor::meta` as an
+  `EntityMeta`; `Engine::meta(slug)` reads them. `Engine::set_view_path` and
+  `set_picker_create_except` are gone. **Upgrade:**
+  [MIGRATION-0.5.md §14](docs/MIGRATION-0.5.md#14-entity-wide-settings-move-to-the-model).
 - **Display formatters belong to the field**
   ([CRUD.md → Display formatters](docs/CRUD.md#display-formatters--how-a-field-is-shown)):
   `MetaField::format_cell` / `format_view` replace `Table::format_cell` / `format_view`. Declared

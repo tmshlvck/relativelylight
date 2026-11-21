@@ -14,6 +14,7 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 | `crud::ui` | the web UI: form, table, admin panel, relation picker, CSV | [CRUD.md → Web UI](CRUD.md#web-ui-ui) |
 | `auth` | users/groups, sessions, login, TOTP 2FA, OIDC SSO, API keys, gate presets | [AUTH.md](AUTH.md); the reasoning in [AUTH-SECURITY.md](AUTH-SECURITY.md) |
 | `middleware` | `resolve_real_ip` — required; the caller's address, resolved once | [AUTH.md §4](AUTH.md#4-middleware-the-module-provides) |
+| `csrf` | the double-submit token every cookie-authenticated write checks | [AUTH.md §7](AUTH.md#7-csrf-double-submit-token) |
 | `observe` | the write observer for audit logging, and the error observer for failures a response hides | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
 | `time` | instants as integer UTC seconds, rendered in the request's zone; dates as native `DATE` | [TIME.md](TIME.md) |
 | `validate` | typed field validators and normalizers | [DATAINPUT.md](DATAINPUT.md) |
@@ -28,7 +29,13 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
    An app wanting a JSON API writes it over `Engine`, where its versioning belongs.
 3. **No mandatory coupling between modules.** `auth` works without `crud`; `files` needs neither; an
    unused feature costs no dependencies. The one required piece is `middleware::resolve_real_ip`, so
-   the lockout, audit events and the app's log agree about who called.
+   the lockout, audit events and the app's log agree about who called. **A feature must name a real
+   build that leaves it out.** What every surface needs is not a feature: axum (every module is
+   handlers and extractors) and the CSRF token (every cookie-authenticated write) are always
+   compiled. Their switches caught nobody's build and cost a cfg pair at each use, two code paths
+   per switch, and an "implies" note in every feature that needed them. `ui` is a default with
+   `crud`, the main product; it stays a switch for `auth`- or `files`-only builds, which skip SeaORM
+   and askama with `default-features = false`.
 4. **Authorization is a per-model gate handed the request headers.** It resolves identity itself, so
    it needs no middleware and works for credentials this crate doesn't know.
    Row-level access is out of scope; an app expresses it by shape (a table per document kind) or in
@@ -109,6 +116,23 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
   a form, so it was never the table's to set. Three builders (`Table`, `Form`, `RelationField`)
   each carried a copy that could disagree, for example between a `Form` and the same entity's
   edit dialog.
+- **What holds for every row of an entity is the entity's model**: its rows' own page
+  (`MetaModel::view_path`), whether "+ New" creates it (`picker_create`), the fields that form shows
+  (`picker_create_fields`) and a row's CSS class (`row_class`), reported to the UI as `EntityMeta`
+  (`Accessor::meta`). Each sat elsewhere and was said twice or keyed by slug: a row's page was
+  `Table::detail_href` for View and `Crud::view_path(slug, …)` for a relation's link, two settings
+  for one fact that could disagree; the "+ New" exception list and the create form's fields were
+  slug lists on `Crud` and `Picker`, where a misspelt slug did nothing. The rule for a setting:
+  if it describes the data it belongs on the model, and if it describes one screen (`columns`,
+  `fields`, the filters and pins, `initial`) it stays on that screen. Precedence for "+ New" is
+  relation, then target, then app.
+  - **`row_class` returns `Option<String>`** and takes a `RowCtx` (the row and the request headers),
+    for the same reasons `FmtCtx` is a struct: the viewer's zone decides "due today", and a member
+    can be added without breaking closures. Its output is an attribute value, escaped, not HTML.
+  - **A table's View doesn't also open the dialog when the model names a page.** Two views of one
+    row, one of them reachable only by typing `?show=`, would be two ways to look at it. So
+    `view_path` is a page of the app's own, never a table's `?show=`; a relation's link without
+    the script falls back to the picker's page, which exists for every row.
 - **One column type per kind of time value** ([TIME.md §1](TIME.md#1-storage-model)). An instant is
   integer Unix seconds: it compares, sorts and adds as an integer, in the same SQL and on an ordinary
   index on SQLite and PostgreSQL alike, where native timestamps are text in several shapes on SQLite

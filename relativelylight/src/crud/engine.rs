@@ -292,7 +292,7 @@ pub enum Column {
         links: Option<bool>,
         /// This relation's own choice about "+ New"
         /// ([`MetaRelation::create`](crate::crud::seaorm::MetaRelation::create)); `None` follows
-        /// `Crud::picker_create` and `picker_create_except`.
+        /// the target's [`EntityMeta::picker_create`], then `Crud::picker_create`.
         create: Option<bool>,
         /// How many target rows this relation's form input lists before it opens the picker
         /// ([`MetaRelation::picker_threshold`](crate::crud::seaorm::MetaRelation::picker_threshold));
@@ -474,6 +474,30 @@ pub(crate) fn value_key(v: &Value) -> String {
     }
 }
 
+/// What a model says about the entity as a whole, beyond its [`Column`]s: where its rows have a
+/// page of the app's own, how "+ New" treats it, and a CSS class per row. Reported by
+/// [`Accessor::meta`]; configure it on [`MetaModel`](crate::crud::seaorm::MetaModel).
+///
+/// **`#[non_exhaustive]`** with [`Default`]: an out-of-crate [`Accessor`] starts from
+/// `EntityMeta::default()` and assigns what it has.
+#[derive(Debug, Default, Clone)]
+#[non_exhaustive]
+pub struct EntityMeta {
+    /// The page where a row is viewed, `{id}` standing for its id
+    /// ([`MetaModel::view_path`](crate::crud::seaorm::MetaModel::view_path)).
+    pub view_path: Option<String>,
+    /// Whether "+ New" on a relation field pointing here may create one of these rows
+    /// ([`MetaModel::picker_create`](crate::crud::seaorm::MetaModel::picker_create)); `None`
+    /// follows `Crud::picker_create`.
+    pub picker_create: Option<bool>,
+    /// The fields that "+ New"'s create form shows, in order; empty for every writable one
+    /// ([`MetaModel::picker_create_fields`](crate::crud::seaorm::MetaModel::picker_create_fields)).
+    pub picker_create_fields: Vec<String>,
+    /// A CSS class for each row of a table
+    /// ([`MetaModel::row_class`](crate::crud::seaorm::MetaModel::row_class)).
+    pub row_class: Option<crate::crud::fmt::RowClass>,
+}
+
 // ===================== The Accessor seam =====================
 
 /// The meeting point between a backend (SeaORM / memory / no-SQL / …) and the generic engine.
@@ -492,6 +516,10 @@ pub trait Accessor: Send + Sync {
     fn pk(&self) -> String;
     /// Backend-agnostic column metadata (fields + relations).
     fn columns(&self) -> Vec<Column>;
+    /// What the model says about the entity as a whole. Default: nothing.
+    fn meta(&self) -> EntityMeta {
+        EntityMeta::default()
+    }
 
     /// A page of rows. `terse` returns only `{id, label}` per item (e.g. relation pickers);
     /// otherwise each item also carries the finished `row`. `ListQuery::all` returns every match.
@@ -558,7 +586,6 @@ pub struct Engine {
     /// Optional audit sink; fired after each committed write (see [`crate::observe`]).
     observer: Option<Arc<dyn crate::observe::WriteObserver>>,
     /// Optional CSRF checker; when set, every write must carry a valid token (see [`crate::csrf`]).
-    #[cfg(feature = "csrf")]
     csrf: Option<crate::csrf::Csrf>,
     /// Where the app serves [`crud::ui::Picker`](crate::crud::ui::Picker) — the one absolute URL the
     /// UI renders. `None`: no picker, so a relation too large for its threshold stays a `<select>`.
@@ -571,16 +598,9 @@ pub struct Engine {
     /// Whether a relation field offers "+" — a new target row, made in a dialog over the form.
     #[cfg(feature = "ui")]
     picker_create: bool,
-    /// Targets "+ New" never creates, whatever their gates allow.
-    #[cfg(feature = "ui")]
-    picker_create_except: Vec<String>,
     /// Whether a relation's label links to the linked row, viewed (and edited) in a dialog.
     #[cfg(feature = "ui")]
     picker_view: bool,
-    /// Where each entity's rows are viewed as a page, `(slug, "/author?show={id}")` — the link's
-    /// `href`, followed without the script.
-    #[cfg(feature = "ui")]
-    view_paths: Vec<(String, String)>,
 }
 
 impl Engine {
@@ -591,7 +611,6 @@ impl Engine {
             accessors: BTreeMap::new(),
             authz: BTreeMap::new(),
             observer: None,
-            #[cfg(feature = "csrf")]
             csrf: None,
             #[cfg(feature = "ui")]
             picker_path: None,
@@ -600,11 +619,7 @@ impl Engine {
             #[cfg(feature = "ui")]
             picker_create: false,
             #[cfg(feature = "ui")]
-            picker_create_except: Vec::new(),
-            #[cfg(feature = "ui")]
             picker_view: false,
-            #[cfg(feature = "ui")]
-            view_paths: Vec::new(),
         }
     }
 
@@ -641,27 +656,11 @@ impl Engine {
         self.picker_create = on;
     }
 
-    /// Entities (slugs) "+ New" never creates, though it is on. Usually set via
-    /// `Crud::picker_create_except`.
-    #[cfg(feature = "ui")]
-    pub fn set_picker_create_except(&mut self, targets: Vec<String>) {
-        self.picker_create_except = targets;
-    }
-
     /// Link each relation's label to the linked row, opened in a dialog over the page. Usually set
     /// via `Crud::picker_view`.
     #[cfg(feature = "ui")]
     pub fn set_picker_view(&mut self, on: bool) {
         self.picker_view = on;
-    }
-
-    /// The page where `slug`'s rows are viewed, `{id}` standing for the row's id. Usually set via
-    /// `Crud::view_path`.
-    #[cfg(feature = "ui")]
-    pub fn set_view_path(&mut self, slug: impl Into<String>, template: impl Into<String>) {
-        let slug = slug.into();
-        self.view_paths.retain(|(s, _)| *s != slug);
-        self.view_paths.push((slug, template.into()));
     }
 
     /// The picker path, when a relation's labels link to their rows: its own choice (`explicit`),
@@ -671,18 +670,15 @@ impl Engine {
         self.picker_path().filter(|_| explicit.unwrap_or(self.picker_view))
     }
 
-    #[cfg(feature = "ui")]
-    pub(crate) fn view_path(&self, slug: &str) -> Option<&str> {
-        self.view_paths.iter().find(|(s, _)| s == slug).map(|(_, t)| t.as_str())
-    }
-
     /// The path "+ New" opens for a new row of `target`, through a relation whose own choice is
-    /// `explicit`: that choice when it made one, else the app-wide `picker_create` unless the
-    /// target is excepted. `None` when off, or without a picker path.
+    /// `explicit`: that choice when it made one, else the target's ([`EntityMeta::picker_create`]),
+    /// else the app-wide `picker_create`. `None` when off, or without a picker path.
     #[cfg(feature = "ui")]
     pub(crate) fn picker_create_path(&self, target: &str, explicit: Option<bool>) -> Option<&str> {
-        let excepted = self.picker_create_except.iter().any(|t| t == target);
-        self.picker_path().filter(|_| explicit.unwrap_or(self.picker_create && !excepted))
+        let on = explicit
+            .or_else(|| self.accessors.get(target).and_then(|a| a.meta().picker_create))
+            .unwrap_or(self.picker_create);
+        self.picker_path().filter(|_| on)
     }
 
     /// Register an audit sink fired after each committed write (create/update/delete). See
@@ -694,14 +690,13 @@ impl Engine {
     /// Require a valid CSRF token on every write through this engine — see [`crate::csrf`]. Pass the
     /// app's checker (`auth.csrf()`) so the API and the auth forms share one token cookie. Usually set
     /// via `Crud::csrf`.
-    #[cfg(feature = "csrf")]
     pub fn set_csrf(&mut self, csrf: crate::csrf::Csrf) {
         self.csrf = Some(csrf);
     }
 
     /// Whether this request satisfies the CSRF check (always `true` when CSRF isn't configured).
     /// `form_token` is the `_csrf` field of a posted form — the carrier the UI's own forms use.
-    #[cfg(all(feature = "ui", feature = "csrf"))]
+    #[cfg(feature = "ui")]
     pub(crate) fn csrf_ok(&self, headers: &::http::HeaderMap, form_token: Option<&str>) -> bool {
         match &self.csrf {
             Some(csrf) => csrf.verify(headers, form_token),
@@ -709,13 +704,8 @@ impl Engine {
         }
     }
 
-    #[cfg(all(feature = "ui", not(feature = "csrf")))]
-    pub(crate) fn csrf_ok(&self, _h: &::http::HeaderMap, _form_token: Option<&str>) -> bool {
-        true
-    }
-
     /// The CSRF checker this engine enforces, if any — the UI renders its hidden `_csrf` input from it.
-    #[cfg(all(feature = "ui", feature = "csrf"))]
+    #[cfg(feature = "ui")]
     pub(crate) fn csrf(&self) -> Option<&crate::csrf::Csrf> {
         self.csrf.as_ref()
     }
@@ -785,6 +775,12 @@ impl Engine {
     }
 
     /// The entity's (single) primary-key field name.
+    /// What `slug`'s model says about the entity as a whole: its rows' own page, "+ New", a row's
+    /// class.
+    pub fn meta(&self, slug: &str) -> Result<EntityMeta> {
+        Ok(self.accessor(slug)?.meta())
+    }
+
     pub fn pk(&self, slug: &str) -> Result<String> {
         Ok(self.accessor(slug)?.pk())
     }
@@ -883,13 +879,12 @@ impl Default for Engine {
     }
 }
 
-// ===================== HTTP error mapping (feature `axum`) =====================
+// ===================== HTTP error mapping =====================
 
 /// How an engine failure becomes a response, for an app that wants to hand one straight back.
 /// Plain text, deliberately: this crate serves HTML pages now, and a page-level error belongs in the
 /// app's own shell (see [`crud::ui`](crate::crud::ui), whose `submit` returns the `Error` for exactly
 /// that reason).
-#[cfg(feature = "axum")]
 impl axum::response::IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
         use axum::http::StatusCode as S;

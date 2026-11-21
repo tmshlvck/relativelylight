@@ -23,14 +23,14 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 http = "1"                       # the `authz` gate trait takes `http::HeaderMap` (no axum needed)
 sea-orm = { workspace = true, optional = true }
-axum = { version = "0.8", optional = true }
+axum = "0.8"                     # always on: every surface is an axum handler or extractor
 askama = { version = "0.16", default-features = false, features = ["derive", "std"], optional = true } # no `config`: it reads askama.toml with the unmaintained basic-toml
 csv = { version = "1", optional = true }
 jiff = { version = "0.2", optional = true }   # IANA tz database: render a UTC epoch in the user's zone, and read a `datetime-local` back
 argon2 = { version = "0.6", optional = true }
-getrandom = { version = "0.4", optional = true }   # the OS CSPRNG: CSRF/session tokens, recovery codes
-axum-extra = { version = "0.12", features = ["cookie"], optional = true }
-time = { version = "0.3", optional = true }
+getrandom = "0.4"                # the OS CSPRNG: CSRF/session tokens, recovery codes
+axum-extra = { version = "0.12", features = ["cookie"] } # the CSRF and session cookies
+time = "0.3"                     # a cookie's `Max-Age` (axum-extra's cookie type)
 totp-rs = { version = "6", features = ["qr", "gen_secret"], optional = true } # TOTP 2FA: secret, otpauth URL, QR
 sha2 = { version = "0.11", optional = true }       # hash TOTP recovery codes (high-entropy → a fast hash, see auth::recovery)
 openidconnect = { version = "4", optional = true } # OIDC relying-party (SSO); default async reqwest + rustls
@@ -63,30 +63,22 @@ rand_core = { version = "0.6", features = ["getrandom"] } # the RNG rsa 0.9 gene
 chrono = "0.4"
 
 [features]
-default = ["crud", "axum"]
+# The engine and its admin UI: what almost every app is here for. `axum` and the CSRF token are not
+# features: every surface is an axum handler, and every cookie-authenticated write needs the token.
+default = ["crud", "ui"]
 # the CRUD engine + SeaORM backend (the `crud` module). `with-chrono` binds a `Date` as a date;
 # `serde` makes SeaORM's `ChronoUnixTimestamp` (an instant as Unix seconds) serialize as an `i64`,
 # which the engine reads every model through (docs/TIME.md §1).
 crud = ["dep:sea-orm", "sea-orm/with-chrono", "sea-orm/serde"]
-axum = ["dep:axum"]           # the HTTP router/handlers
-# `ui` needs the **`axum` feature**, not merely askama: it parses a request's query string into a
-# `ViewState`, decodes posted form bodies, and answers with `axum::Response`. Depending on askama alone
-# would leave `ui`-without-`axum` a combination that doesn't compile — the mistake `auth` already made
-# once, and one `--all-features` cannot catch.
-ui = ["dep:askama", "crud", "axum", "tz"]  # the server-rendered admin components (Table, Form, Admin)
+ui = ["dep:askama", "crud", "tz"]  # the server-rendered admin components (Table, Form, Admin)
 csv = ["dep:csv", "crud", "tz"]  # export formats datetime columns in the caller's zone, so it needs `tz`
 tz = ["dep:jiff"]             # timezone-aware rendering of integer-UTC timestamps (the `time` module)
-# `auth` needs the **`axum` feature**, not merely the axum dependency: it serves routes, and it reads the
-# caller's address from `middleware::RealIp`, which is `#[cfg(feature = "axum")]`. Depending on `dep:axum`
-# alone left `auth`-without-`axum` a combination that didn't compile (and `--all-features` can't catch that,
-# because it turns everything on).
-auth = ["csrf", "axum", "dep:askama", "dep:sea-orm", "dep:axum-extra", "dep:argon2", "dep:totp-rs", "dep:sha2"] # sessions/login + TOTP 2FA + Authz gate
-csrf = ["axum", "dep:getrandom", "dep:axum-extra", "dep:time"] # the double-submit CSRF token (the `csrf` module); implied by `auth`
+auth = ["dep:askama", "dep:sea-orm", "dep:argon2", "dep:totp-rs", "dep:sha2"] # sessions/login + TOTP 2FA + Authz gate
 sso = ["auth", "dep:openidconnect", "dep:regex", "dep:base64"] # OIDC single sign-on (Google / Okta / corporate) + group mapping
 # Files on a page: the streaming upload reader, the response builder and the upload/preview/thumbnail
 # components (docs/FILES.md). Storage, naming and listing are the app's, so this needs neither `crud`
 # nor a database.
-files = ["axum", "dep:tokio", "dep:sha2", "dep:tokio-util", "dep:multer"]
+files = ["dep:tokio", "dep:sha2", "dep:tokio-util", "dep:multer"]
 # Passkeys (WebAuthn): enrolment on /profile, sign-in, a second factor, re-authentication (docs/AUTH.md
 # §5l). The tables are `auth`'s and exist without it. `webauthn-rs` is pure Rust; the features keep a
 # ceremony's state in our database row and read a credential's backup flags.

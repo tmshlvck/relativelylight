@@ -26,7 +26,7 @@ pub(crate) enum Cell {
 
 /// One linked row in a [`Cell::Links`]. `view` is the picker page that shows it in a dialog (what
 /// `crud::ui::JS` opens); `href` is where the link goes without the script: the app's own page for
-/// the target (`Crud::view_path`), else that same picker page. `key` (`target:id`) is how the
+/// the target (`MetaModel::view_path`), else that same picker page. `key` (`target:id`) is how the
 /// script finds every link to a row whose label an edit just changed. An empty `href` is no link:
 /// the "+3 more" at the end of a cut list.
 pub(crate) struct LinkV {
@@ -76,7 +76,7 @@ impl Links {
                     relation: name.clone(),
                     target: target.clone(),
                     picker: super::picker::pick_href(path, slug, name, None),
-                    page: engine.view_path(target).map(str::to_string),
+                    page: engine.meta(target).ok().and_then(|m| m.view_path),
                 });
             }
         }
@@ -125,7 +125,7 @@ pub(crate) struct RowV {
     /// Empty when the table offers no detail view.
     pub show_href: String,
     pub cells: Vec<Cell>,
-    /// From [`Table::row_class`](super::Table::row_class); empty unless one is configured.
+    /// From `MetaModel::row_class`; empty unless one is configured.
     pub class: String,
 }
 
@@ -260,14 +260,15 @@ pub(crate) fn sortable(col: &Column) -> bool {
 }
 
 /// Every row of the page, with its edit link — and its View link from `show`, if it has one.
-/// `formatted`: the request the fields' `format_cell` render for; `None` shows every value plain
-/// (a picker's list, where a click chooses the row and a link in a cell would leave the form).
+/// `formatted`: the request the fields' `format_cell` and the entity's `row_class` render for;
+/// `None` shows every value plain and classes no row (a picker's list, where a click chooses the
+/// row and a link in a cell would leave the form).
 #[allow(clippy::too_many_arguments)] // one page's context, passed straight through
 pub(crate) fn rows(
     page: &Page,
     cols: &[Column],
     formatted: Option<&HeaderMap>,
-    row_class: Option<&super::RowClass>,
+    row_class: Option<&crate::crud::fmt::RowClass>,
     state: &ViewState,
     tz: &Tz,
     show: Option<&dyn Fn(&str) -> String>,
@@ -281,7 +282,10 @@ pub(crate) fn rows(
             RowV {
                 edit_href: state.href_edit(&id),
                 show_href: show.map(|f| f(&id)).unwrap_or_default(),
-                class: row_class.map(|f| f(&row)).unwrap_or_default(),
+                class: row_class
+                    .zip(formatted)
+                    .and_then(|(f, h)| f.call(&crate::crud::fmt::RowCtx::new(&row, h)))
+                    .unwrap_or_default(),
                 cells: cols
                     .iter()
                     .map(|c| {

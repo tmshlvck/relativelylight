@@ -355,7 +355,7 @@ rotation.
 
 ## CSRF
 
-Explains [AUTH.md §7](AUTH.md#7-csrf-double-submit-token-feature-csrf).
+Explains [AUTH.md §7](AUTH.md#7-csrf-double-submit-token).
 
 **The cookie is not `HttpOnly`, and that is safe**, because the token is *not a credential* — it
 grants nothing on its own. A same-site client can always satisfy the check (read your own cookie,

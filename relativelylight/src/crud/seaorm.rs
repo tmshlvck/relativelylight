@@ -1,11 +1,11 @@
 //! SeaORM backend flavor: introspection + the `MetaModel` builder + an `Accessor` implementation.
 //! This is the only module that depends on SeaORM.
 
-use crate::crud::fmt::{Fmt, FmtCtx};
+use crate::crud::fmt::{Fmt, FmtCtx, RowClass, RowCtx};
 use crate::crud::engine::{
     BatchApplied,
-    coerce, default_label, slugify, value_key, Accessor, Cardinality, Column, Engine, Error,
-    FieldDisplay, ListQuery, LogicalType, Page, Result, RowItem, ValidationErrors,
+    coerce, default_label, slugify, value_key, Accessor, Cardinality, Column, Engine, EntityMeta,
+    Error, FieldDisplay, ListQuery, LogicalType, Page, Result, RowItem, ValidationErrors,
 };
 use async_trait::async_trait;
 use sea_orm::sea_query::{
@@ -432,7 +432,7 @@ pub struct MetaRelation {
     /// [`links`](MetaRelation::links). `None`: as `Crud::picker_view` says.
     pub links: Option<bool>,
     /// Whether this relation's field offers "+ New" — see [`create`](MetaRelation::create).
-    /// `None`: as `Crud::picker_create` (and `picker_create_except`) say.
+    /// `None`: as the target's `MetaModel::picker_create`, else `Crud::picker_create`, says.
     pub create: Option<bool>,
     /// How many target rows this relation's input lists — see
     /// [`picker_threshold`](MetaRelation::picker_threshold). `None`: as `Crud::picker_threshold`.
@@ -457,8 +457,8 @@ impl MetaRelation {
         self
     }
 
-    /// Offer "+ New" on this relation's field, or not — whatever `Crud::picker_create` and
-    /// `picker_create_except` say for the rest. `true` turns it on here alone; `false` keeps it off
+    /// Offer "+ New" on this relation's field, or not — whatever the target's
+    /// [`MetaModel::picker_create`] and `Crud::picker_create` say for the rest. `true` turns it on here alone; `false` keeps it off
     /// here (say, an invoicing contact that must be an existing one) while the airline beside it
     /// has it. The target's gate still decides per caller (create and list), and it needs
     /// `Crud::picker_path` and a `POST` on its route.
@@ -837,6 +837,8 @@ pub struct MetaModel<E: EntityTrait> {
     relations: Vec<MetaRelation>,
     nm: HashMap<String, Nm>,
     pk: Vec<String>,
+    /// The entity-wide settings: `view_path`, `picker_create`, `picker_create_fields`, `row_class`.
+    meta: EntityMeta,
     entity: E,
 }
 
@@ -919,6 +921,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
             relations,
             nm: HashMap::new(),
             pk,
+            meta: EntityMeta::default(),
             entity,
         }
     }
@@ -977,6 +980,93 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
         let text = label.clone();
         self.row_label = Box::new(move |row: &Value| text.of(row));
         self.label = Some(label);
+        self
+    }
+
+    /// Where a row of this entity is viewed as a **page of the app's own** — `"/post/{id}"`, `{id}`
+    /// replaced with the row's id (percent-encoded). Every surface that shows a row points there:
+    /// a table's **View** (the built-in dialog is then not offered: `?show=` opens nothing), and a
+    /// relation's link to one of these rows, as its `href` without the script (with it, the link
+    /// still opens the row in a dialog over the page — see `Crud::picker_view`).
+    ///
+    /// The page is the app's route, so its gate is the app's check: `Engine` is ungated, so ask
+    /// `Engine::decide(slug, Operation::Read, &headers)` before `Engine::get`, as a table does
+    /// before its own dialog. Point it at a page of your own, not at a table's `?show=`, which this
+    /// turns off.
+    ///
+    /// ```ignore
+    /// post.view_path("/post/{id}");
+    /// ```
+    pub fn view_path(&mut self, template: impl Into<String>) -> &mut Self {
+        self.meta.view_path = Some(template.into());
+        self
+    }
+
+    /// Whether "+ New" on a relation field pointing at this entity may create one of its rows —
+    /// whatever `Crud::picker_create` says for the rest. `false` for a table your own pages show
+    /// read-only, or rows that need more than a form to make; `true` to offer it for this target
+    /// alone. A relation's own [`MetaRelation::create`] still wins, and the gate still decides per
+    /// caller. Its button isn't drawn when off, and the picker's create URLs for it answer `400`.
+    ///
+    /// ```ignore
+    /// user.picker_create(false);   // accounts are made by an administrator, never from a form
+    /// ```
+    pub fn picker_create(&mut self, on: bool) -> &mut Self {
+        self.meta.picker_create = Some(on);
+        self
+    }
+
+    /// The fields "+ New"'s create form shows for this entity, in this order — as `Form::fields`.
+    /// Without it the form shows every writable column. It covers every relation that points here.
+    /// **Panics** if a name is neither a field nor a relation of this entity, as
+    /// [`field`](MetaModel::field).
+    ///
+    /// ```ignore
+    /// airline.picker_create_fields(["name", "hq"]);   // what a new airline needs on the spot
+    /// ```
+    pub fn picker_create_fields<I, S>(&mut self, names: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let names: Vec<String> = names.into_iter().map(Into::into).collect();
+        for name in &names {
+            let known = self.fields.iter().any(|f| &f.name == name)
+                || self.relations.iter().any(|r| &r.name == name);
+            if !known {
+                panic!(
+                    "{}: no field or relation '{name}' for picker_create_fields. It has: {}; {}",
+                    self.table,
+                    self.field_names(),
+                    self.relation_names()
+                );
+            }
+        }
+        self.meta.picker_create_fields = names;
+        self
+    }
+
+    /// A CSS class for each row, from the row: how a table says something without a column
+    /// saying it. Like the [display formatters](MetaField::format_cell) it belongs to the entity, so
+    /// every table of it uses it — its own page, `Admin`, an accounts panel — but not a picker's
+    /// list. The closure gets a [`RowCtx`] (the `row()` and the request's `headers()`) and returns
+    /// the class, or `None`:
+    ///
+    /// ```ignore
+    /// invoice.row_class(|cx| match cx.row()["status"].as_str() {
+    ///     Some("overdue") => Some("table-danger".into()),
+    ///     Some("draft") => Some("text-body-secondary".into()),
+    ///     _ => None,
+    /// });
+    /// ```
+    ///
+    /// The class lands in the `<tr class>` attribute, escaped like any other value (it is not
+    /// HTML); Bootstrap's `table-*` contextual classes are the obvious things to reach for.
+    pub fn row_class<F>(&mut self, class: F) -> &mut Self
+    where
+        F: Fn(&RowCtx) -> Option<String> + Send + Sync + 'static,
+    {
+        self.meta.row_class = Some(RowClass::new(class));
         self
     }
 
@@ -1739,6 +1829,9 @@ where
     fn pk(&self) -> String {
         self.model.pk.first().cloned().unwrap_or_else(|| "id".into())
     }
+    fn meta(&self) -> EntityMeta {
+        self.model.meta.clone()
+    }
     fn columns(&self) -> Vec<Column> {
         // Map each relation's target table → the target's slug (the engine wants slugs, not tables).
         self.model
@@ -2070,7 +2163,6 @@ impl Crud {
     /// `Authorization` header, which is exempt). Any app whose writes are cookie-authenticated wants
     /// this; it is off by default only because a `crud` build without `auth` may have no cookies at
     /// all. See `docs/AUTH.md` §7.
-    #[cfg(feature = "csrf")]
     pub fn csrf(&mut self, csrf: crate::csrf::Csrf) -> &mut Self {
         self.engine.set_csrf(csrf);
         self
@@ -2095,7 +2187,8 @@ impl Crud {
     }
 
     /// Offer **"+ New"** on relation fields: create the missing target row in a dialog over the
-    /// form, and come back with it chosen. Off by default. Needs [`picker_path`](Crud::picker_path),
+    /// form, and come back with it chosen. Off by default; a target's own
+    /// [`MetaModel::picker_create`] and a relation's [`MetaRelation::create`] override it. Needs [`picker_path`](Crud::picker_path),
     /// and the picker route must answer `POST` too ([`Picker::submit`](crate::crud::ui::Picker::submit))
     /// — see `docs/CRUD.md` → "Creating the missing row".
     #[cfg(feature = "ui")]
@@ -2113,30 +2206,6 @@ impl Crud {
     #[cfg(feature = "ui")]
     pub fn picker_view(&mut self, on: bool) -> &mut Self {
         self.engine.set_picker_view(on);
-        self
-    }
-
-    /// Where `slug`'s rows are viewed as a page of your app — `"/admin/author?show={id}"`, `{id}`
-    /// replaced with the row's id. A relation link's `href`, followed without the script (or
-    /// opened in a new tab); with it, the link opens the row in a dialog instead. Without one,
-    /// the `href` is the dialog's own page.
-    #[cfg(feature = "ui")]
-    pub fn view_path(&mut self, slug: impl Into<String>, template: impl Into<String>) -> &mut Self {
-        self.engine.set_view_path(slug, template);
-        self
-    }
-
-    /// Never offer "+ New" for these target entities (slugs), though
-    /// [`picker_create`](Crud::picker_create) is on and their gates would allow a create — for a
-    /// table your own pages show read-only, or rows that need more than a form to make. The
-    /// picker's create URLs for them answer `400`, as when it is off.
-    #[cfg(feature = "ui")]
-    pub fn picker_create_except<I, S>(&mut self, targets: I) -> &mut Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.engine.set_picker_create_except(targets.into_iter().map(Into::into).collect());
         self
     }
 

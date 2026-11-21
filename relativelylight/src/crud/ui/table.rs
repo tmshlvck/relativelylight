@@ -6,18 +6,17 @@ use super::state::{Mode, ViewState};
 use super::widgets::{self, FieldV, Opt, Widget};
 use super::{
     apply, authorize, banner, check_fields, check_initial, check_sort, check_widgets, csrf_token,
-    csv_header, is_filterable, range_kind, render_err, renders, Outcome, RangeKind, RowClass,
-    Surface, Writes,
+    csv_header, is_filterable, range_kind, render_err, renders, Outcome, RangeKind, Surface,
+    Writes,
 };
 use crate::authz::Operation;
 use crate::crud::text::Pins;
-use crate::crud::engine::{Cardinality, Column, Engine, Error, ListQuery, Result};
+use crate::crud::engine::{Cardinality, Column, Engine, EntityMeta, Error, ListQuery, Result};
 use crate::time::Tz;
 use askama::Template;
 use http::HeaderMap;
 use serde_json::Value;
 use std::net::IpAddr;
-use std::sync::Arc;
 
 #[derive(Template)]
 #[template(path = "table.html")]
@@ -189,9 +188,7 @@ pub struct Table<'a> {
     fields: Vec<String>,
     omit: Vec<String>,
     columns: Vec<String>,
-    row_class: Option<RowClass>,
     detail: bool,
-    detail_href: Option<String>,
     pub(super) filters: Vec<FilterSpec>,
     /// [`range_filter`](Table::range_filter) columns, in toolbar order.
     ranges: Vec<String>,
@@ -233,9 +230,7 @@ impl<'a> Table<'a> {
             fields: Vec::new(),
             omit: Vec::new(),
             columns: Vec::new(),
-            row_class: None,
             detail: true,
-            detail_href: None,
             filters: Vec::new(),
             ranges: Vec::new(),
             sets: Vec::new(),
@@ -376,28 +371,15 @@ impl<'a> Table<'a> {
         self.detail = on;
         self
     }
-    /// Point each row's **View** at a page of the app's own instead of the built-in dialog —
-    /// `"/post/{id}"`, `{id}` replaced with the row's id (percent-encoded). The page renders the row
-    /// however it likes, with its own template and whatever else it looks up; the crate draws only
-    /// the link. `?show=` then opens nothing here, as with [`detail(false)`](Table::detail), which
-    /// still wins: it removes the button too.
-    ///
-    /// The page is the app's route, so its gate is the app's check: `Engine` is ungated, so ask
-    /// `Engine::decide(slug, Operation::Read, &headers)` before `Engine::get`, exactly as this
-    /// table does before its own dialog.
-    pub fn detail_href(mut self, template: impl Into<String>) -> Self {
-        self.detail_href = Some(template.into());
-        self
-    }
-
-    /// Whether `?show=` opens the built-in dialog here.
-    fn detail_dialog_on(&self) -> bool {
-        self.detail && self.detail_href.is_none()
+    /// Whether `?show=` opens the built-in dialog here: on, and the entity has no page of the
+    /// app's own (`MetaModel::view_path`).
+    fn detail_dialog_on(&self, meta: &EntityMeta) -> bool {
+        self.detail && meta.view_path.is_none()
     }
 
     /// Each row's View link, or empty when the table offers none.
-    fn show_href(&self, state: &ViewState, id: &str) -> String {
-        match (&self.detail_href, self.detail) {
+    fn show_href(&self, meta: &EntityMeta, state: &ViewState, id: &str) -> String {
+        match (&meta.view_path, self.detail) {
             (_, false) => String::new(),
             (Some(t), true) => crate::urlform::fill_id(t, id),
             (None, true) => state.href_show(id),
@@ -423,27 +405,6 @@ impl<'a> Table<'a> {
         S: Into<String>,
     {
         self.columns = names.into_iter().map(Into::into).collect();
-        self
-    }
-
-    /// A CSS class for each row, from the row itself — how a table says something without a column
-    /// saying it:
-    ///
-    /// ```ignore
-    /// .row_class(|row| match row["status"].as_str() {
-    ///     Some("overdue") => "table-danger".into(),
-    ///     Some("draft") => "text-body-secondary".into(),
-    ///     _ => String::new(),
-    /// })
-    /// ```
-    ///
-    /// The value lands in the `<tr class>` attribute and is escaped like any other; Bootstrap's
-    /// `table-*` contextual classes are the obvious things to reach for.
-    pub fn row_class<F>(mut self, class: F) -> Self
-    where
-        F: Fn(&Value) -> String + Send + Sync + 'static,
-    {
-        self.row_class = Some(Arc::new(class));
         self
     }
 
@@ -572,6 +533,7 @@ impl<'a> Table<'a> {
     /// control that silently did nothing is the bug that gets found in production.
     pub async fn render_for(&self, headers: &HeaderMap, state: &ViewState) -> Result<String> {
         let cols = self.engine.columns(&self.slug)?;
+        let meta = self.engine.meta(&self.slug)?;
         check_widgets(&self.slug, &cols)?;
         check_sort(&self.slug, &cols, &self.sort)?;
         // **The read enforcement point.** With no JSON API behind the UI, a caller who may not list
@@ -594,7 +556,7 @@ impl<'a> Table<'a> {
 
         let dialog = match state.mode() {
             // A read-only row is a *read*: a caller who may not write still gets it.
-            Mode::Show(id) if self.detail_dialog_on() => {
+            Mode::Show(id) if self.detail_dialog_on(&meta) => {
                 self.in_view(&pins, id).await?;
                 let edit = if can.edit { state.href_edit(id) } else { String::new() };
                 let chrome = DetailChrome { close: Some(state.href_list()), edit, saved: None };
@@ -632,10 +594,10 @@ impl<'a> Table<'a> {
                 &page,
                 &shown,
                 Some(headers),
-                self.row_class.as_ref(),
+                meta.row_class.as_ref(),
                 &state,
                 &tz,
-                Some(&|id: &str| self.show_href(&state, id)),
+                Some(&|id: &str| self.show_href(&meta, &state, id)),
                 Some(&links),
             ),
             detail: self.detail,

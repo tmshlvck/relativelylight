@@ -1,6 +1,7 @@
 //! A field's display formatters: [`MetaField::format_cell`](super::seaorm::MetaField::format_cell)
 //! and [`format_view`](super::seaorm::MetaField::format_view), what each is handed ([`FmtCtx`]), and
-//! the helpers they are written with ([`esc`], [`esc_str`], [`truncate`]).
+//! the helpers they are written with ([`esc`], [`esc_str`], [`truncate`]). Also a row's CSS class,
+//! [`MetaModel::row_class`](super::seaorm::MetaModel::row_class) ([`RowClass`], handed a [`RowCtx`]).
 //!
 //! **A formatter's output is HTML, inserted into the page verbatim.** That is what it is for — a
 //! link, a badge, a `<pre>` — and it is also the one way this crate's pages can carry a script an
@@ -74,6 +75,58 @@ impl Fmt {
 impl std::fmt::Debug for Fmt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Fmt(..)")
+    }
+}
+
+/// What a [`RowClass`] is handed: the row and the request it renders for.
+/// **`#[non_exhaustive]`** — a member may be added without breaking a closure.
+#[non_exhaustive]
+pub struct RowCtx<'a> {
+    row: &'a Value,
+    headers: &'a HeaderMap,
+}
+
+impl<'a> RowCtx<'a> {
+    /// For an app that renders rows itself and calls the [`RowClass`] the model carries
+    /// (`EntityMeta::row_class`).
+    pub fn new(row: &'a Value, headers: &'a HeaderMap) -> Self {
+        Self { row, headers }
+    }
+    /// The whole row, as read (after `on_read`); a relation is `{id, label}`.
+    pub fn row(&self) -> &'a Value {
+        self.row
+    }
+    /// The request's headers, for what depends on the viewer: "due today" in their zone
+    /// (`Tz::from_headers(cx.headers())`).
+    pub fn headers(&self) -> &'a HeaderMap {
+        self.headers
+    }
+}
+
+/// A row's CSS class, `(&RowCtx) -> Option<class>`, as [`MetaModel`](super::seaorm::MetaModel)
+/// stores it and [`EntityMeta`](super::engine::EntityMeta) reports it. Unlike a [`Fmt`] its output
+/// is not HTML: it lands in the `<tr class>` attribute, escaped.
+#[derive(Clone)]
+pub struct RowClass(Arc<RowClassFn>);
+
+type RowClassFn = dyn Fn(&RowCtx) -> Option<String> + Send + Sync;
+
+impl RowClass {
+    pub fn new<F>(f: F) -> Self
+    where
+        F: Fn(&RowCtx) -> Option<String> + Send + Sync + 'static,
+    {
+        Self(Arc::new(f))
+    }
+    /// Run it: the class for this row, `None` for none.
+    pub fn call(&self, cx: &RowCtx) -> Option<String> {
+        (self.0)(cx)
+    }
+}
+
+impl std::fmt::Debug for RowClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RowClass(..)")
     }
 }
 

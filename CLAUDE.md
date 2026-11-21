@@ -83,7 +83,7 @@ a helper that is dead code in a narrower build. Before a release, check the matr
 as well as errors:
 
 ```bash
-for f in "" crud axum csrf tz csv auth auth,sso passkeys crud,ui crud,ui,csv files files,csrf; do
+for f in "" crud tz csv auth auth,sso passkeys crud,ui crud,ui,csv files files,auth; do
   cargo build -p relativelylight --no-default-features ${f:+--features $f} 2>&1 \
     | grep -E "^(error|warning: )" | grep -v "the following packages"
 done

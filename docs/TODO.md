@@ -6,12 +6,13 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
 
 ## The crate
 
-- [ ] **Revisit the feature set and the module layout.** The admin UI is the crate's main product,
-  yet `ui` is not a default feature (the defaults are `crud` + `axum`). Decide which features earn
-  their switch, meaning a real app that wants the engine without the UI, or the UI without `tz`,
-  and fold the rest into the always-on core. Also decide whether `crud::ui` nested under `crud`
-  matches the code. `ui` depends on `crud`, but the formatters, `esc` and `ViewState` sit on the
-  boundary between them.
+- [ ] **Finish the feature and module review.** `axum` and `csrf` are now always on and `ui` is a
+  default (DESIGN.md principle 3). Still open: whether `crud` without `ui` earns its switch (the
+  engine tests `list_tests`, `relation_tests` and `search_tests` need `ui` only for `ViewState`), and
+  whether `tz` stands alone or folds into `ui`/`csv`. Also: whether `crud::ui` nested under `crud`
+  matches the code. The entity-wide settings moved to `MetaModel` (`EntityMeta`), but `Engine` still
+  holds the app-wide UI defaults (`picker_path`, `picker_threshold`, `picker_create`,
+  `picker_view`) as `cfg(ui)` fields; one `ui` settings struct on it would be one field instead.
 
 ## crud / crud::ui
 

@@ -15,7 +15,7 @@ New here? **[APP.md](APP.md)** builds a whole app end to end (shell, nav bar, lo
 pages); this document is the reference for the parts. Upgrading? **[MIGRATION-0.5.md](MIGRATION-0.5.md)** (and from 0.3, [MIGRATION-0.4.md](MIGRATION-0.4.md)).
 
 - [Install & quick start](#install--quick-start)
-- [Configuring a model](#configuring-a-model) — `MetaModel`, `MetaField` and its [display formatters](#display-formatters--how-a-field-is-shown), `MetaRelation`
+- [Configuring a model](#configuring-a-model) — `MetaModel` and its [entity-wide settings](#entity-wide-settings), `MetaField` and its [display formatters](#display-formatters--how-a-field-is-shown), `MetaRelation`
 - [Reading and writing](#reading-and-writing) — the engine API, the URL as state, errors, CSRF
 - [Validation & transforms](#validation--transforms)
 - [Columns](#columns) — what the UI renders from
@@ -55,6 +55,7 @@ add labels/help/defaults, attach validators, or declare N:M.
 | `row_label: Box<dyn Fn(&Value) -> String + ...>` | field | Row's display label; default fallback chain (below). |
 | `.label_columns(cols, sep)` / `.label_column(col)` | mut | Label rows by columns joined by `sep` — and let *other* entities sort and search by a relation pointing here (below). |
 | `validate_row: Option<...>` | field | Cross-field validator (see [validation](#validation--transforms)). |
+| `.view_path(t)` / `.picker_create(b)` / `.picker_create_fields([…])` / `.row_class(f)` | mut | The [entity as a whole](#entity-wide-settings): its rows' own page, "+ New", a row's CSS class. |
 
 `Crud::register(mm, gate)` consumes the model and takes its authorization gate (`authz::Open` for
 ungated — see [docs/AUTH.md](AUTH.md)). FK relations need no `relate`; `relate` exists only because
@@ -89,6 +90,40 @@ author.row_label = Box::new(|r| format!("{} <{}>", r["name"], r["email"]));     
 The last form still labels rows; relations pointing at it report `sortable: false` and are not
 searched. Sorting by a label of several columns orders by them in turn. An unknown column panics,
 like `field`.
+
+<a id="entity-wide-settings"></a>
+
+### The entity as a whole — its page, "+ New", a row's class
+
+What holds for every row of an entity, wherever it is shown, is declared once on its model, as a
+field's [display formatters](#display-formatters--how-a-field-is-shown) are. Every surface that
+shows the entity reads it ([why](DESIGN.md#decisions)):
+
+| | What | Where it shows |
+|---|---|---|
+| `view_path("/post/{id}")` | the row's **page of the app's own**; `{id}` is the row's id, percent-encoded | each table's **View** links there, and the built-in dialog is not offered ([your own view page](#your-own-view-page)); a [relation's link](#viewing-the-linked-row) to the row uses it as its `href` without the script |
+| `picker_create(bool)` | whether [**"+ New"**](#creating-the-missing-row) may create one of these rows, over `Crud::picker_create` | every relation field pointing here; a relation's own [`create`](#per-relation-one-switch-each) still wins |
+| `picker_create_fields([…])` | the fields "+ New"'s create form shows, in order (default: every writable one) | every relation pointing here; an unknown name panics, like `field` |
+| `row_class(closure)` | a **CSS class per row**, from the row | the `<tr>` of every table of the entity (its `Table`s, `Admin`), not a picker's list |
+
+```rust
+post.view_path("/post/{id}");                       // View and links open the app's own page
+user.picker_create(false);                          // accounts are never made from a form's "+"
+airline.picker_create_fields(["name", "hq"]);       // what a new airline needs on the spot
+invoice.row_class(|cx| match cx.row()["status"].as_str() {
+    Some("overdue") => Some("table-danger".into()),
+    Some("draft") => Some("text-body-secondary".into()),
+    _ => None,
+});
+```
+
+**`row_class`** gets a `RowCtx`: the `row()` and the request's `headers()` (for "due today" in the
+viewer's zone, `Tz::from_headers(cx.headers())`), and returns the class or `None`. The class is not
+HTML: it lands in the `class` attribute, escaped like any other value. Bootstrap's `table-*`
+contextual classes are the obvious things to reach for.
+
+An app with its own `Accessor` reports these as an `EntityMeta` from `Accessor::meta` (default:
+none); `Engine::meta(slug)` reads them back for an app that renders rows itself.
 
 ### Column names the compiler checks
 
@@ -311,7 +346,7 @@ browser, the admin console, and the dialog a work log's `workorder` link opens.
 <a id="a-formatters-context"></a>**What a formatter is handed.** `FmtCtx::headers()` carries what
 depends on the viewer, the timezone first: `Tz::from_headers(cx.headers())`. The closure is
 synchronous, so display that needs a query (related rows, a lookup) belongs on a page of the app's
-own ([`detail_href`](#your-own-view-page)). Formatters are display only: the edit form, CSV, search
+own ([`view_path`](#your-own-view-page)). Formatters are display only: the edit form, CSV, search
 and sort see the stored value. An app that renders rows itself finds them on
 `Column::Field { format_cell, format_view, .. }` and calls `fmt.call(&FmtCtx::new(value, row, headers))`.
 
@@ -480,7 +515,7 @@ foreign-key constraint rejected the write), **422** (validation), **500** (other
 from a posted form is not an error at all to the UI: `submit` returns `Outcome::Invalid` so the dialog
 can re-render with the messages in place.
 
-### CSRF on writes (feature `csrf`)
+### CSRF on writes
 
 Cookie-authenticated writes are a CSRF target, so the engine can require a double-submit token:
 
@@ -924,14 +959,12 @@ and in the examples.
 | `per_page_choices([…])` | the sizes the toolbar offers (default `[10, 30, 100, 250]`; empty hides the control) |
 | `per_page_max(n)` | the largest page this table will fetch, however large a `?per_page=` asks for (default **2,000**) |
 | `detail(bool)` | the per-row **View** action and its read-only dialog (default on) |
-| `detail_href("/post/{id}")` | point **View** at a page of the app's own instead of the dialog |
 | `create` / `edit` / `delete` / `bulk_delete` / `import(bool)` | each write action, separately (default on) — see *Which controls a table offers* below |
 | `export(bool)` | the **Export CSV** link, and `Table::csv` (default on) |
 | `read_only(bool)` | every write off, for anyone; export stays |
 | `confirm(bool)` | an `onclick` confirm on destructive buttons (default on) |
 | `columns([…])` | which columns the **table** shows, and in what order (default: all of them) |
 | `fields([…])` / `omit([…])` | which columns the **dialog's form** shows, and in what order |
-| `row_class(closure)` | a CSS class per row, from the row — `(row) -> class` |
 | `sort(col)` / `sort_desc(col)` | the default sort, used until the URL says otherwise |
 | `filter(name)` | a filter `<select>` in the toolbar, for a column or a to-one relation |
 | `fixed_filter(name, value)` | a filter **pinned** to one value, with no control — a table *about* that value, whose writes stay inside it ([below](#a-pinned-filter)) |
@@ -950,25 +983,17 @@ and it shows as a chip above the table, because a narrowed table that looked lik
 an operator concludes their rows were deleted. A pinned or shared filter's chip has no ✕: it isn't
 that table's to clear.
 
-**`columns` and `row_class` are the table's own** — a column left out of `columns` is still edited
-in the dialog and still exported to CSV, and `row_class` puts a class on the `<tr>` so a table can
-say something no column says:
+**`columns` is the table's own**: a column left out of it is still edited in the dialog and still
+exported to CSV, and a name it doesn't recognise is a render-time error naming it.
 
 ```rust
-Table::new(&engine, "invoice")
-    .columns(["number", "customer", "due", "total"])       // not the other sixteen
-    .row_class(|row| match row["status"].as_str() {
-        Some("overdue") => "table-danger".into(),
-        _ => String::new(),
-    })
+Table::new(&engine, "invoice").columns(["number", "customer", "due", "total"]) // not the other sixteen
 ```
 
-Both are checked: a name `columns` doesn't recognise is a render-time error naming it, and the class
-is escaped like any other attribute.
-
-**How a field is shown** — a link to the record's page, a shortened text — is the model's, not a
-table's: [display formatters](#display-formatters--how-a-field-is-shown), declared once on the
-field and used by every table of the entity.
+**How a field or a row is shown** (a link to the record's page, a shortened text, a row's colour)
+is the model's, not a table's: [display formatters](#display-formatters--how-a-field-is-shown) on
+the field and [`row_class`](#entity-wide-settings) on the entity,
+declared once and used by every table of it.
 
 **Relations in the form.** A relation whose target has at most its threshold of rows renders as a
 `<select>` (to-one) or a multi-select (to-many) of every target row. Above that, and if
@@ -1068,16 +1093,17 @@ Write-only columns are left out — the backend never returns one, so the row wo
 "Password". `detail(false)` removes it: the button, and the dialog — a `?show=7` typed into the URL
 renders the plain listing without reading the row.
 
-**Your own view page.** The dialog's layout is fixed (a label/value list). `detail_href` replaces
-**the layout of the row's own view**: a row whose blob or JSON decodes into a chart or an image,
-its related rows, anything async. It is not the way to a record's workflow page: that is a link on
-its identifier ([linking a row to the app's own page](#linking-a-row-to-the-apps-own-page)), which
-leaves View meaning View. Point View at a route of the app's with `detail_href("/post/{id}")`; `{id}` is replaced with the row's id, percent-encoded. The table then
-draws only the link, and `?show=` opens nothing (`detail(false)` still wins and removes the button).
-The page is yours, and so is its gate: `Engine` is ungated, so ask
-`engine.decide("post", Operation::Read, &headers)` before `engine.get("post", &id)` — the check the
-table makes before its own dialog. In `Admin` it is per entity:
-`.entity_with("post", |t| t.detail_href("/post/{id}"))`. (Example: `crud`'s `/post/{id}`.)
+<a id="your-own-view-page"></a>**Your own view page.** The dialog's layout is fixed (a label/value
+list). The model's [`view_path`](#entity-wide-settings) replaces **the
+row's own view** with a route of the app's: a row whose blob or JSON decodes into a chart or an
+image, its related rows, anything async. It is not the way to a record's workflow page: that is a
+link on its identifier ([linking a row to the app's own page](#linking-a-row-to-the-apps-own-page)),
+which leaves View meaning View. With `post.view_path("/post/{id}")` every table of posts draws only
+the link, and `?show=` opens nothing there (`detail(false)` still wins and removes the button); a
+relation's link to a post goes there too without the script. Point it at a page of your own, not at
+a table's `?show=`, which it turns off. The page is yours, and so is its gate: `Engine` is ungated,
+so ask `engine.decide("post", Operation::Read, &headers)` before `engine.get("post", &id)` — the
+check the table makes before its own dialog. (Example: `crud`'s `/post/{id}`.)
 
 **Which controls a table offers.** A write control is drawn when **its switch is on and the model's gate allows its operation** to this
 caller: `+ New` and Import ask `Create`, Edit asks `Update`, the deletes ask `Delete`. A switch that
@@ -1353,12 +1379,13 @@ outer form saves.
 - **The gate decides, not a table's switches.** A `Table` with `create(false)` or `read_only(true)`
   is a choice about that view; "+ New" on another table's relation field is a different surface,
   and the target's gate is what it asks. To keep a target out of "+ New" while its gate allows
-  creating (say, a table your panel shows read-only), list it:
-  `crud.picker_create_except(["user"])`. Its button isn't drawn and its create URLs answer `400`.
+  creating (say, a table your panel shows read-only), its model says so:
+  `user.picker_create(false)`. Its button isn't drawn and its create URLs answer `400`.
 
 **Which fields.** By default the create form shows every writable column of the target. Narrow it
-per target with `Picker::create_fields("airline", ["name", "hq"])`, as `Form::fields` does. A field
-that doesn't exist is a render-time error naming it.
+on the target's model with `airline.picker_create_fields(["name", "hq"])`, as `Form::fields` does;
+it holds for every relation pointing at airlines. A name the model doesn't have panics at startup,
+like `field`.
 
 **Things to know.**
 
@@ -1370,7 +1397,7 @@ that doesn't exist is a render-time error naming it.
 
 `examples/crud` turns it on: a profile's user (a `<select>`), and a post's author and tags and a
 tag's posts (in the picker). `examples/adminpanel` does too, gated: the admin gets "+ New", the
-read-only editor doesn't, and `user`, read-only in that panel, is excepted.
+read-only editor doesn't, and `user`, read-only in that panel, says no on its model.
 
 ### Viewing the linked row
 
@@ -1383,7 +1410,7 @@ nothing reloaded.
 ```rust
 crud.picker_path("/_rl/pick");
 crud.picker_view(true);                              // relation labels link to their rows
-crud.view_path("author", "/admin/author?show={id}"); // optional: the link's href without the script
+author.view_path("/author/{id}");                   // optional: a page of your own, the href without the script
 // …
 .route("/_rl/pick", get(pick).post(pick_write))          // the same two handlers as "+ New"
 ```
@@ -1398,8 +1425,8 @@ How it works, on the picker route again:
    save comes back with its messages. A saved one lands on `&show=3&saved=1`, whose page carries
    the row's new label for the script to update the links underneath.
 3. Without the script, or with a click that opens a new tab, the link is an ordinary link to its
-   `href`: the target's `view_path` when you set one (your page for that row), else the dialog's
-   page itself.
+   `href`: the target model's [`view_path`](#entity-wide-settings)
+   when it has one (your page for that row), else the dialog's page itself.
 
 **What it refuses.**
 
@@ -1444,8 +1471,8 @@ workorder.relation("invoice_contact").create(false);
 workorder.relation("aircraft").picker_threshold(200);
 ```
 
-A relation's own `create(true)` also wins over `picker_create_except`, which is a default for every
-relation pointing at those targets. What no switch overrides is the target's gate: a link still
+A relation's own `create(true)` also wins over the target model's `picker_create(false)`, which is
+a default for every relation pointing at that entity: relation, then target, then app. What no switch overrides is the target's gate: a link still
 needs Read, Edit still needs Update, "+ New" still needs Create and List, per caller. Either
 feature needs `picker_path`, and "+ New" or Edit a `POST` on its route. With a feature off for a
 relation, its picker URLs answer `400`, as when the app has it off.
@@ -1614,7 +1641,7 @@ request** (after the commit, before the response), so real work belongs on a cha
 ## Extending
 
 The **`Engine`** holds the registered entities and their gates and forwards to one **`Accessor`** per
-entity: `slug` / `pk` / `columns` plus `list` / `get` / `create` / `update` / `delete` / `delete_many` /
+entity: `slug` / `pk` / `columns` / `meta` (the [entity-wide settings](#entity-wide-settings), default none) plus `list` / `get` / `create` / `update` / `delete` / `delete_many` /
 `write_batch`, each returning finished rows. The trait names no ORM types; the SeaORM backend
 (`crud::seaorm`) is one implementation, and another backend would reuse the engine and the UI
 unchanged. `Accessor` and `Column` may gain members in any release

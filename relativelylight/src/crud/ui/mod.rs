@@ -74,8 +74,6 @@ pub(crate) use checks::{
 };
 pub(crate) use write::{apply, authorize, csrf_token, Surface, Writes};
 
-use serde_json::Value;
-use std::sync::Arc;
 
 /// The stylesheet the components need beyond Bootstrap 5 (mostly `<dialog>`).
 /// Inline it once in your shell: `<style>{{ relativelylight::crud::ui::CSS }}</style>`.
@@ -100,6 +98,3 @@ pub enum Outcome {
     /// messages beside the fields and the operator's input still in them. Answer `422`.
     Invalid(ViewState),
 }
-
-/// A per-row CSS class, `(row) -> class`, as [`Table::row_class`] stores it.
-pub(crate) type RowClass = Arc<dyn Fn(&Value) -> String + Send + Sync>;

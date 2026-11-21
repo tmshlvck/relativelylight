@@ -107,6 +107,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The listing shows the start of the body (whole in the tooltip); View and the post's own page
     // show all of it.
     post_mm.field(post::Column::Body.as_str()).format_cell(truncate(60));
+    // A post has a page of this app's own (`post_page` below, its own template): every table's View
+    // opens it instead of the built-in dialog, and a post's link from a tag goes there without the
+    // script.
+    post_mm.view_path("/post/{id}");
+    // A row can say something no column does, on every table of posts: the admin's and the
+    // dashboard's.
+    post_mm.row_class(|cx| match cx.row()["status"].as_str() {
+        Some("draft") => Some("table-warning".into()),
+        Some("archived") => Some("text-body-secondary".into()),
+        _ => None,
+    });
     post_mm.field(post::Column::Views.as_str()).default = Some(serde_json::json!(0));
     post_mm.field(post::Column::Views.as_str()).range(0.0, 500.0, 1.0);
     post_mm.field(post::Column::Views.as_str()).description =
@@ -164,6 +175,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .field(author::Column::Homepage.as_str())
         .validate_str(validate::optional(Box::new(validate::url)));
 
+    // "+ New" on a post's author asks for what a new author needs on the spot; the rest waits
+    // for the author's own form.
+    author_mm.picker_create_fields([author::Column::Name.as_str(), author::Column::Country.as_str()]);
+
     // A cross-field row validator → the dialog's banner rather than one field's message.
     post_mm.validate_row = Some(Box::new(|fields| {
         let get = |k: &str| fields.get(k).and_then(|v| v.as_str()).unwrap_or("");
@@ -210,13 +225,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.picker_create(true);
     // And each relation's label is a link: a post's author opens that author in a dialog over the
     // table, with Edit, and closing it is back where you were. Without the script (or in a new
-    // tab) the link goes to the entity's own page here — where it has one: the author table has
-    // no View (`detail(false)` below), so an author's link falls back to the dialog's page.
+    // tab) the link goes to the row's own page where the model names one (a post's,
+    // `post_mm.view_path` above), else to the dialog's page.
     crud.picker_view(true);
-    for slug in ["tag", "user", "profile", "event"] {
-        crud.view_path(slug, format!("/{slug}?show={{id}}"));
-    }
-    crud.view_path("post", "/post/{id}");
 
     let engine = Arc::new(crud.into_engine());
     let entities = engine.tables();
@@ -302,9 +313,6 @@ fn post_table(t: Table<'_>) -> Table<'_> {
         // A number range beside it: from/to inputs, either end optional, in the URL like the rest.
         .range_filter(post::Column::Views.as_str())
         .sort(post::Column::Title.as_str())
-        // View opens this app's own page for the row (`post_page` below, its own template)
-        // rather than the built-in dialog, which `?show=` then doesn't open here either.
-        .detail_href("/post/{id}")
 }
 
 /// The page inside the picker dialog: the target's own table, with a radio or a checkbox per row.
@@ -400,12 +408,7 @@ async fn dashboard(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) ->
             post::Column::Status.as_str(),
             post::Column::PublishedAt.as_str(),
         ])
-        // …and a row can say something no column does.
-        .row_class(|row| match row["status"].as_str() {
-            Some("draft") => "table-warning".into(),
-            Some("archived") => "text-body-secondary".into(),
-            _ => String::new(),
-        })
+        // (A draft's row is marked by the model's `row_class`, as on every table of posts.)
         .render_for(&headers, &state)
         .await;
 
@@ -684,7 +687,7 @@ async fn save_post(
     }
 }
 
-// ---- a row's own page: what the post table's View opens (`Table::detail_href`) ----
+// ---- a row's own page: what a post's View opens (`MetaModel::view_path`) ----
 
 /// One post, laid out by this app's template rather than the built-in dialog's label/value list.
 #[derive(Template)]

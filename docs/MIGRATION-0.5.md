@@ -311,3 +311,74 @@ workorder.relation("aircraft").picker_threshold(200); // this one
 **An app with its own `Accessor`** (or a `Column` literal, or a match without `..`): add
 `format_cell: None, format_view: None` to `Column::Field` and `picker_threshold: None` to
 `Column::Relation`.
+
+## 14. Entity-wide settings move to the model
+
+Four settings that describe an entity, not one screen, are now declared on its `MetaModel`
+([CRUD.md → The entity as a whole](CRUD.md#entity-wide-settings)):
+
+| 0.4 | 0.5 |
+|---|---|
+| `Table::detail_href("/post/{id}")` (`Admin`: `entity_with("post", \|t\| t.detail_href(…))`) | `post.view_path("/post/{id}")` |
+| `crud.view_path("post", "/post/{id}")` | `post.view_path("/post/{id}")` |
+| `crud.picker_create_except(["user"])` | `user.picker_create(false)` |
+| `Picker::new(&e).create_fields("airline", ["name", "hq"])` | `airline.picker_create_fields(["name", "hq"])` |
+| `Table::row_class(\|row\| … -> String)` | `invoice.row_class(\|cx\| … -> Option<String>)` |
+
+```rust
+// 0.4
+crud.view_path("post", "/post/{id}");
+crud.picker_create_except(["user"]);
+Table::new(&engine, "invoice")
+    .detail_href("/invoice/{id}")
+    .row_class(|row| match row["status"].as_str() {
+        Some("overdue") => "table-danger".into(),
+        _ => String::new(),
+    })
+
+// 0.5, on the models before `register`
+post.view_path("/post/{id}");
+invoice.view_path("/invoice/{id}");
+user.picker_create(false);
+invoice.row_class(|cx| match cx.row()["status"].as_str() {
+    Some("overdue") => Some("table-danger".into()),
+    _ => None,
+});
+```
+
+1. **`detail_href` and `view_path` become one `MetaModel::view_path`.** If you set both for an
+   entity, keep one; it now drives every table's View *and* a relation link's `href`.
+2. **Drop a `view_path` that pointed at a table's own `?show=`** (`"/admin/post?show={id}"`, a
+   no-script fallback for relation links): on the model it turns that table's built-in View off.
+   Without it, a link's no-script `href` is the picker's page for the row.
+3. **`picker_create_except([...])`**: call `picker_create(false)` on each listed target's model. A
+   misspelt slug used to be ignored; a model can't be misspelt.
+4. **`Picker::create_fields(target, names)`**: move the list to the target's model. An unknown
+   name now **panics at startup** instead of failing the render.
+5. **`row_class`**: move it to the model, so every table of the entity (`Admin` included) uses it.
+   The closure takes `&RowCtx` (`cx.row()`, `cx.headers()`) and returns `Option<String>`: `None`
+   where it returned `String::new()`. A table that wanted a class the others don't should say it
+   with data instead, or render its own rows.
+6. **An app with its own `Accessor`** reports these by overriding `Accessor::meta` (default: none).
+   `Engine::set_view_path` and `Engine::set_picker_create_except` are gone with the `Crud` methods.
+
+## 15. `axum` and `csrf` are always on, `ui` is a default
+
+The `axum` and `csrf` features are gone: what they gated is always compiled. The defaults are now
+`crud` and `ui`. Cargo refuses a feature that doesn't exist, so a manifest naming one fails to build
+until it is updated:
+
+```toml
+# 0.4
+relativelylight = { version = "0.4", features = ["ui", "csv", "auth"] }
+relativelylight = { version = "0.4", default-features = false, features = ["files", "csrf"] }
+
+# 0.5
+relativelylight = { version = "0.5", features = ["csv", "auth"] }
+relativelylight = { version = "0.5", default-features = false, features = ["files"] }
+```
+
+1. **Remove `"axum"` and `"csrf"`** from `features`.
+2. **`"ui"` may go too**: it is a default. Keep it where you set `default-features = false`.
+3. **A build without the admin** (`auth` alone, `files` alone) sets `default-features = false`, or
+   it now compiles `crud` and `ui` with SeaORM and askama.

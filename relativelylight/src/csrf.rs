@@ -1,5 +1,5 @@
 //! `relativelylight::csrf` — CSRF protection for **cookie-authenticated unsafe requests**
-//! (POST/PATCH/PUT/DELETE), as a **double-submit token** (feature `csrf`, implied by `auth`). See
+//! (POST/PATCH/PUT/DELETE), as a **double-submit token** (always compiled). See
 //! `docs/AUTH.md` §7.
 //!
 //! A random token lives in a cookie that JavaScript *can* read (deliberately **not** `HttpOnly` — it
@@ -54,7 +54,6 @@ pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Renders the response for a rejected request — see [`Csrf::on_reject`].
-#[cfg(feature = "axum")]
 pub(crate) type RejectFn = std::sync::Arc<
     dyn Fn(&http::request::Parts) -> axum::response::Response + Send + Sync + 'static,
 >;
@@ -72,7 +71,6 @@ pub struct Csrf {
     lax: bool,
     ttl_secs: i64,
     /// The app's own rejection page, if it set one ([`Csrf::on_reject`]).
-    #[cfg(feature = "axum")]
     pub(crate) reject: Option<RejectFn>,
 }
 
@@ -85,7 +83,6 @@ impl std::fmt::Debug for Csrf {
             .field("secure", &self.secure)
             .field("same_site_lax", &self.lax)
             .field("ttl_secs", &self.ttl_secs);
-        #[cfg(feature = "axum")]
         s.field("on_reject", &self.reject.as_ref().map(|_| "<set>").unwrap_or("<default>"));
         s.finish()
     }
@@ -106,7 +103,6 @@ impl Csrf {
             lax: false,
             ttl_secs: 7 * 24 * 3600,
             max_upload: MAX_BUFFERED_UPLOAD,
-            #[cfg(feature = "axum")]
             reject: None,
         }
     }
@@ -233,7 +229,6 @@ impl Csrf {
     /// ```
     ///
     /// [`Auth::csrf_rejection`]: crate::auth::Auth::csrf_rejection
-    #[cfg(feature = "axum")]
     pub fn on_reject<F>(mut self, render: F) -> Self
     where
         F: Fn(&http::request::Parts) -> axum::response::Response + Send + Sync + 'static,
@@ -245,7 +240,6 @@ impl Csrf {
     /// The response for a request that failed the check: the app's [`on_reject`](Csrf::on_reject) page
     /// if it set one, else a bare, shell-less `403`. `req` is the rejected request's head, handed to
     /// that page.
-    #[cfg(feature = "axum")]
     pub fn reject(&self, req: &http::request::Parts) -> axum::response::Response {
         use axum::response::IntoResponse;
         if let Some(render) = &self.reject {
@@ -276,7 +270,6 @@ impl Csrf {
 /// The largest form body [`enforce`] will buffer to look for a `_csrf` field. Generous for a form, small
 /// enough that the layer can't be used to make a server hold arbitrary memory; a bigger unsafe request
 /// (a file upload) must carry the token in the [`HEADER`] instead.
-#[cfg(feature = "axum")]
 const MAX_BUFFERED_FORM: usize = 64 * 1024;
 
 /// How much of a **multipart** body [`enforce`] will hold to find the token in. 16 MiB: enough for
@@ -312,7 +305,6 @@ const MAX_BUFFERED_UPLOAD: usize = 16 * 1024 * 1024;
 /// Anything else gets [`Csrf::reject`], so your [`on_reject`](Csrf::on_reject) page applies here too.
 /// A body over its cap is refused rather than read; set `max_upload` just above the largest upload the
 /// guarded routes accept.
-#[cfg(feature = "axum")]
 pub async fn enforce(
     axum::extract::State(csrf): axum::extract::State<Csrf>,
     req: axum::extract::Request,
@@ -358,7 +350,6 @@ pub async fn enforce(
 }
 
 /// Whether the body is a URL-encoded form (ignoring any `; charset=…` parameter).
-#[cfg(feature = "axum")]
 fn is_urlencoded_form(headers: &HeaderMap) -> bool {
     headers
         .get(http::header::CONTENT_TYPE)
@@ -370,7 +361,6 @@ fn is_urlencoded_form(headers: &HeaderMap) -> bool {
 /// Pull one field out of a URL-encoded body. Hand-rolled for the same reason as the rest of this crate's
 /// small parsers: it is a dozen lines and saves a dependency, and a token is hex so the only decoding
 /// that matters is `+` and `%XX`.
-#[cfg(feature = "axum")]
 fn form_field(body: &[u8], name: &str) -> Option<String> {
     let body = std::str::from_utf8(body).ok()?;
     for pair in body.split('&') {
@@ -382,7 +372,6 @@ fn form_field(body: &[u8], name: &str) -> Option<String> {
     None
 }
 
-#[cfg(feature = "axum")]
 fn header_token(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(HEADER)?.to_str().ok()?.trim();
     (!value.is_empty()).then(|| value.to_string())

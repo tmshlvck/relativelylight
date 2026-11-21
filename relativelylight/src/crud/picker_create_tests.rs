@@ -124,9 +124,12 @@ impl Authz for Gate {
 
 struct Setup {
     on: bool,
-    except: Vec<&'static str>,
     view: bool,
+    /// The airline model's own choices: `MetaModel::picker_create`, `view_path`,
+    /// `picker_create_fields`.
+    airline_target_create: Option<bool>,
     view_path: Option<&'static str>,
+    airline_fields: Option<Vec<&'static str>>,
     /// `workorder.airline`'s own choices (`MetaRelation::links` / `create`).
     airline_links: Option<bool>,
     airline_create: Option<bool>,
@@ -136,7 +139,6 @@ struct Setup {
     airline_threshold: Option<u64>,
     /// `airline.name` links to the airline's own page, in the cells and where one row is shown.
     airline_page_link: bool,
-    #[cfg(feature = "csrf")]
     csrf: Option<crate::csrf::Csrf>,
 }
 
@@ -144,16 +146,16 @@ impl Default for Setup {
     fn default() -> Self {
         Self {
             on: true,
-            except: Vec::new(),
             view: false,
+            airline_target_create: None,
             view_path: None,
+            airline_fields: None,
             airline_links: None,
             airline_create: None,
             airline_gate: Gate::Open,
             threshold: None,
             airline_threshold: None,
             airline_page_link: false,
-            #[cfg(feature = "csrf")]
             csrf: None,
         }
     }
@@ -176,15 +178,10 @@ async fn fixture(setup: Setup) -> (Engine, DatabaseConnection) {
     let mut crud = Crud::new(db.clone());
     crud.picker_path("/pick");
     crud.picker_create(setup.on);
-    crud.picker_create_except(setup.except);
     crud.picker_view(setup.view);
-    if let Some(path) = setup.view_path {
-        crud.view_path("airline", path);
-    }
     if let Some(n) = setup.threshold {
         crud.picker_threshold(n);
     }
-    #[cfg(feature = "csrf")]
     if let Some(csrf) = setup.csrf {
         crud.csrf(csrf);
     }
@@ -197,6 +194,15 @@ async fn fixture(setup: Setup) -> (Engine, DatabaseConnection) {
             format!(r#"<a href="/airlines/{}" target="_top">{}</a> →"#, esc(&cx.row()["id"]), esc(cx.value()))
         };
         airline.field("name").format_cell(link).format_view(link);
+    }
+    if let Some(on) = setup.airline_target_create {
+        airline.picker_create(on);
+    }
+    if let Some(path) = setup.view_path {
+        airline.view_path(path);
+    }
+    if let Some(names) = setup.airline_fields {
+        airline.picker_create_fields(names);
     }
     crud.register(airline, setup.airline_gate);
     let mut workorder = MetaModel::new(workorder::Entity);
@@ -346,9 +352,14 @@ async fn the_form_in_the_dialog_has_its_own_plus_which_is_how_dialogs_nest() {
 }
 
 #[tokio::test]
-async fn the_create_form_shows_the_fields_the_app_chose_for_that_target() {
-    let (e, db) = fixture(Setup::default()).await;
-    let picker = Picker::new(&e).create_fields("airline", ["name", "hq"]);
+async fn the_create_form_shows_the_fields_the_target_model_chose() {
+    // Control: without a choice, every writable column is in the form.
+    let (e, _db) = fixture(Setup::default()).await;
+    let html = Picker::new(&e).render_for(&h(), &q("pick=workorder.airline&new=1")).await.unwrap();
+    assert!(html.contains(r#"name="code""#), "{html}");
+
+    let (e, db) = fixture(Setup { airline_fields: Some(vec!["name", "hq"]), ..Default::default() }).await;
+    let picker = Picker::new(&e);
     let html = picker.render_for(&h(), &q("pick=workorder.airline&new=1")).await.unwrap();
     assert!(html.contains(r#"name="name""#) && !html.contains(r#"name="code""#), "{html}");
     let Outcome::Done(_) = picker
@@ -368,14 +379,12 @@ async fn the_create_form_shows_the_fields_the_app_chose_for_that_target() {
         .unwrap()
         .unwrap();
     assert_eq!(row.try_get::<Option<String>>("", "code").unwrap(), None);
+}
 
-    // A field the target doesn't have is a render-time error naming it, as on any form.
-    let err = picker
-        .create_fields("airline", ["name", "hq", "nope"])
-        .render_for(&h(), &q("pick=workorder.airline&new=1"))
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("nope"), "{err}");
+#[test]
+#[should_panic(expected = "no field or relation 'nope'")]
+fn a_picker_create_field_the_target_lacks_panics_at_startup() {
+    MetaModel::new(airline::Entity).picker_create_fields(["name", "nope"]);
 }
 
 #[tokio::test]
@@ -419,7 +428,6 @@ async fn a_relation_past_the_threshold_puts_its_new_button_in_the_picker() {
 }
 
 /// A CSRF checker, and headers carrying its cookie with the token `TOKEN`.
-#[cfg(feature = "csrf")]
 fn csrf_cookie() -> (crate::csrf::Csrf, HeaderMap) {
     let csrf = crate::csrf::Csrf::new().secure(false);
     let mut headers = HeaderMap::new();
@@ -427,10 +435,8 @@ fn csrf_cookie() -> (crate::csrf::Csrf, HeaderMap) {
     (csrf, headers)
 }
 
-#[cfg(feature = "csrf")]
 const TOKEN: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
-#[cfg(feature = "csrf")]
 #[tokio::test]
 async fn the_create_form_checks_csrf_like_every_write() {
     let (csrf, headers) = csrf_cookie();
@@ -448,10 +454,10 @@ async fn the_create_form_checks_csrf_like_every_write() {
 }
 
 #[tokio::test]
-async fn an_excepted_target_gets_no_plus_whatever_its_gate_allows() {
-    let (e, db) = fixture(Setup { except: vec!["airline"], ..Default::default() }).await;
+async fn a_target_that_says_no_gets_no_plus_whatever_its_gate_allows() {
+    let (e, db) = fixture(Setup { airline_target_create: Some(false), ..Default::default() }).await;
     let html = workorder_form(&e).await;
-    assert!(!html.contains(PLUS_AIRLINE), "excepted: {html}");
+    assert!(!html.contains(PLUS_AIRLINE), "the target said no: {html}");
     let state = q("pick=workorder.airline&new=1");
     let r = Picker::new(&e).render_for(&h(), &state).await;
     assert!(matches!(r, Err(Error::BadRequest(_))), "its create form is not served: {r:?}");
@@ -605,7 +611,6 @@ async fn a_links_label_is_escaped_and_so_is_the_saved_report() {
     }
 }
 
-#[cfg(feature = "csrf")]
 #[tokio::test]
 async fn an_edit_checks_csrf_like_every_write() {
     let (csrf, headers) = csrf_cookie();
@@ -666,10 +671,16 @@ async fn one_relation_can_switch_both_off_with_the_app_wide_switches_on() {
 }
 
 #[tokio::test]
-async fn a_relations_own_choice_wins_over_the_except_list_but_never_over_the_gate() {
-    let setup = Setup { except: vec!["airline"], airline_create: Some(true), ..Default::default() };
+async fn a_relations_own_choice_wins_over_the_targets_but_never_over_the_gate() {
+    let setup = Setup { airline_target_create: Some(false), airline_create: Some(true), ..Default::default() };
     let (e, _db) = fixture(setup).await;
     assert!(offers(&workorder_form(&e).await).1, "the relation said yes, for itself");
+
+    // The target's yes wins over the app's off, for that target alone.
+    let (e, _db) = fixture(Setup { on: false, airline_target_create: Some(true), ..Default::default() }).await;
+    assert!(offers(&workorder_form(&e).await).1, "the target said yes");
+    let airline = Form::new(&e, "airline").render_for(&h(), &ViewState::default()).await.unwrap();
+    assert!(!airline.contains(PLUS_HQ), "the address follows the app, which is off: {airline}");
 
     let gated = Setup {
         airline_links: Some(true),

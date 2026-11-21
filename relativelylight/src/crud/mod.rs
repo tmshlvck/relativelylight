@@ -66,7 +66,7 @@ pub mod csv_io;
 mod text;
 
 pub use engine::{
-    coerce, default_label, slugify, Accessor, BatchApplied, Cardinality, Column, Engine, Error,
-    ListQuery,
+    coerce, default_label, slugify, Accessor, BatchApplied, Cardinality, Column, Engine,
+    EntityMeta, Error, ListQuery,
     LogicalType, Page, Result, RowItem, ValidationErrors,
 };

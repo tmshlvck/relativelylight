@@ -66,7 +66,6 @@ pub(crate) fn parse(body: &[u8], boundary: &str) -> Result<Vec<Part>, String> {
 
 /// The value of the first **text** field named `name`, without copying any file part. This is what
 /// [`csrf::enforce`](crate::csrf::enforce) looks for in an upload.
-#[cfg(feature = "csrf")]
 pub(crate) fn field(body: &[u8], boundary: &str, name: &str) -> Result<Option<String>, String> {
     Ok(scan(body, boundary)?
         .into_iter()

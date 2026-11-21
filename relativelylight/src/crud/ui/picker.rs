@@ -56,7 +56,6 @@ struct CreatedTmpl {
 pub struct Picker<'a> {
     engine: &'a Engine,
     per_page: u64,
-    create_fields: Vec<(String, Vec<String>)>,
 }
 
 /// The relation a `?pick=` names, its target, and what it allows here: viewing (and editing) its
@@ -87,26 +86,12 @@ pub(crate) fn pick_href(path: &str, slug: &str, relation: &str, extra: Option<(&
 
 impl<'a> Picker<'a> {
     pub fn new(engine: &'a Engine) -> Self {
-        Self { engine, per_page: 10, create_fields: Vec::new() }
+        Self { engine, per_page: 10 }
     }
 
     /// Rows per page in the dialog. Default 10.
     pub fn per_page(mut self, n: u64) -> Self {
         self.per_page = n.max(1);
-        self
-    }
-
-    /// The fields the create form for `target` shows, in this order — as [`Form::fields`]. Without
-    /// it the form shows every writable column of the target. Keyed by the **target** entity, so
-    /// one call covers every relation that points at it.
-    pub fn create_fields<I, S>(mut self, target: impl Into<String>, names: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let target = target.into();
-        self.create_fields.retain(|(t, _)| *t != target);
-        self.create_fields.push((target, names.into_iter().map(Into::into).collect()));
         self
     }
 
@@ -197,7 +182,7 @@ impl<'a> Picker<'a> {
         if !on {
             return Err(Error::BadRequest(format!(
                 "crud::ui::Picker: {}.{} offers no such page (Crud::picker_create / picker_view, \
-                 MetaRelation::create / links)",
+                 MetaModel::picker_create, MetaRelation::create / links)",
                 p.slug, p.relation
             )));
         }
@@ -206,9 +191,10 @@ impl<'a> Picker<'a> {
 
     fn form(&self, target: &str) -> Form<'a> {
         let form = Form::new(self.engine, target).embedded().submit_label("Create");
-        match self.create_fields.iter().find(|(t, _)| t == target) {
-            Some((_, names)) => form.fields(names.clone()),
-            None => form,
+        // The target's own choice (`MetaModel::picker_create_fields`), else every writable field.
+        match self.engine.meta(target).map(|m| m.picker_create_fields) {
+            Ok(names) if !names.is_empty() => form.fields(names),
+            _ => form,
         }
     }
 

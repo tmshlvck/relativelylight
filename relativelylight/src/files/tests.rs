@@ -241,7 +241,6 @@ async fn a_file_in_another_field_or_a_body_that_is_not_multipart_is_refused() {
     assert_eq!(err.status(), http::StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
 
-#[cfg(feature = "csrf")]
 mod csrf_order {
     use super::*;
     use crate::csrf::Csrf;

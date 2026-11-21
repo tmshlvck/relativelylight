@@ -1,5 +1,5 @@
 //! The authorization gate — the seam between the `crud` engine (which enforces) and `auth` (which
-//! resolves identities). **Always compiled**, independent of the `auth`/`axum` features, so a model
+//! resolves identities). **Always compiled**, independent of the `auth` feature, so a model
 //! can be registered with a gate in any build (`Open` when nothing needs gating).
 //!
 //! A gate is attached **per model** (so it takes no model argument), is handed the request headers,

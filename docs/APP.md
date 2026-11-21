@@ -6,7 +6,7 @@ workflows.
 
 The library contributes fragments and a write path. *You* own the router, the `<html>`, and every
 decision about layout. This document is the worked example of that division, using
-`relativelylight = { version = "0.5", features = ["ui", "csv", "auth"] }`.
+`relativelylight = { version = "0.5", features = ["csv", "auth"] }`.
 
 - [1. The skeleton](#1-the-skeleton) — one shell, one state, one layer
 - [2. The page shell and the nav bar](#2-the-page-shell-and-the-nav-bar)
@@ -424,7 +424,8 @@ Two more habits worth keeping:
 - **`read_only(true)` + `pagination(false)` + `search(false)`** turns a `Table` into a plain panel of
   rows — the cheapest way to get consistent cells, badges, relation labels and timezone-correct
   timestamps on a page that isn't an admin. Add `columns([…])` to show four of the model's twenty,
-  and `row_class(|row| …)` to colour the ones that need attention.
+  and the model's [`row_class`](CRUD.md#entity-wide-settings) colours the ones that need attention
+  there as on every table of the entity.
 - **For anything the engine can't express** — a `GROUP BY`, a window function, a join across three
   tables — use SeaORM (or raw SQL) against the same `DatabaseConnection` you handed to `Crud`. Mixing
   is expected: the engine is for CRUD-shaped questions and gets out of the way for the rest.
@@ -443,7 +444,7 @@ if let Err(msg) = validate::int_range(1, 65535)(input.port.into()) { errors.fiel
 Two things to carry over from the library's own forms, because they are easy to forget:
 
 - **The CSRF token.** Render it in the form, and put the POST routes behind the layer, which checks
-  it ([AUTH.md §7](AUTH.md#7-csrf-double-submit-token-feature-csrf)):
+  it ([AUTH.md §7](AUTH.md#7-csrf-double-submit-token)):
   ```rust
   let (token, set_cookie) = auth.csrf().ensure(&headers);     // render Csrf::hidden_input(&token)
   // …

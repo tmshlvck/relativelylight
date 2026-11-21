@@ -19,11 +19,11 @@
 //! - the write path's outcomes: a redirect that lands on the row, and a rejection that comes back with
 //!   the messages *and* the operator's input.
 
-use super::fmt::{esc, esc_str, truncate, Fmt, FmtCtx};
+use super::fmt::{esc, esc_str, truncate, Fmt, FmtCtx, RowClass};
 use super::ui::{Admin, Form, Mode, Outcome, Picker, RelationField, Table, ViewState};
 use crate::authz::{Authz, Decision, Open, Operation};
 use crate::crud::engine::{
-    Accessor, Cardinality, Column, Engine, Error, FieldDisplay, ListQuery, LogicalType, Page,
+    Accessor, Cardinality, Column, Engine, EntityMeta, Error, FieldDisplay, ListQuery, LogicalType, Page,
     Result, RowItem, ValidationErrors,
 };
 use async_trait::async_trait;
@@ -133,11 +133,24 @@ struct Mock {
     /// A column name whose write is always refused, to exercise the `422` path.
     reject: Option<String>,
     log: Arc<Log>,
+    /// What the "model" says about the entity as a whole (`MetaModel::view_path`, `row_class`…).
+    meta: EntityMeta,
 }
 
 impl Mock {
     fn new(slug: &str, cols: Vec<Column>) -> Self {
-        Self { slug: slug.into(), cols, rows: Vec::new(), reject: None, log: Arc::default() }
+        Self {
+            slug: slug.into(),
+            cols,
+            rows: Vec::new(),
+            reject: None,
+            log: Arc::default(),
+            meta: EntityMeta::default(),
+        }
+    }
+    fn meta(mut self, meta: EntityMeta) -> Self {
+        self.meta = meta;
+        self
     }
     fn rows(mut self, rows: Vec<Value>) -> Self {
         self.rows = rows;
@@ -159,6 +172,9 @@ impl Accessor for Mock {
     }
     fn columns(&self) -> Vec<Column> {
         self.cols.clone()
+    }
+    fn meta(&self) -> EntityMeta {
+        self.meta.clone()
     }
     /// Honours `pk_in`, `per_page` and `all` — what the UI leans on (an exact id lookup for a
     /// filter's label, the cap that decides whether a relation can be listed at all, and the uncapped
@@ -369,7 +385,16 @@ fn engine_with(gate: Arc<dyn Authz>) -> (Engine, Arc<Log>) {
 
 /// [`engine_with`]'s entities, with `post`'s columns as given.
 fn engine_of(post_cols: Vec<Column>, gate: Arc<dyn Authz>) -> (Engine, Arc<Log>) {
-    let post = Mock::new("post", post_cols).rows(post_rows());
+    engine_full(post_cols, gate, EntityMeta::default())
+}
+
+/// [`engine`], with `post`'s model saying `meta` about the entity.
+fn engine_meta(meta: EntityMeta) -> Engine {
+    engine_full(post_columns(), Arc::new(Open), meta).0
+}
+
+fn engine_full(post_cols: Vec<Column>, gate: Arc<dyn Authz>, meta: EntityMeta) -> (Engine, Arc<Log>) {
+    let post = Mock::new("post", post_cols).rows(post_rows()).meta(meta);
     let log = post.log.clone();
     let mut e = Engine::new();
     e.add(Arc::new(post), gate);
@@ -1565,10 +1590,20 @@ async fn a_declined_detail_view_does_not_open_from_the_url_either() {
     assert!(html.contains("First post"), "the listing renders as usual");
 }
 
+/// An `EntityMeta` with its rows' own page at `template`.
+fn viewed_at(template: &str) -> EntityMeta {
+    EntityMeta { view_path: Some(template.into()), ..Default::default() }
+}
+
 #[tokio::test]
 async fn view_can_link_to_a_page_of_the_apps_own() {
-    let (e, _) = engine();
-    let table = Table::new(&e, "post").detail_href("/post/{id}");
+    // Positive control: without a page of its own, View opens the built-in dialog.
+    let (plain, _) = engine();
+    let html = render(&Table::new(&plain, "post"), &list()).await;
+    assert!(html.contains("show=7"), "{html}");
+
+    let e = engine_meta(viewed_at("/post/{id}"));
+    let table = Table::new(&e, "post");
     let html = render(&table, &list()).await;
     assert!(html.contains(r#"href="/post/7">View</a>"#), "{html}");
     assert!(!html.contains("show=7"), "no link to the built-in dialog: {html}");
@@ -1576,16 +1611,16 @@ async fn view_can_link_to_a_page_of_the_apps_own() {
     let html = render(&table, &ViewState::from_query("show=7")).await;
     assert!(!html.contains("<dialog"), "the view lives elsewhere, so ?show= opens nothing: {html}");
 
-    // `detail(false)` still wins, in either order.
-    let html = render(&Table::new(&e, "post").detail_href("/post/{id}").detail(false), &list()).await;
+    // `detail(false)` still wins: no View at all.
+    let html = render(&Table::new(&e, "post").detail(false), &list()).await;
     assert!(!html.contains(">View</a>"), "{html}");
 
     // The id goes into a path, so it is percent-encoded — a space as %20, not a query's `+`.
     let cols = vec![field("id", false, true, None), field("title", true, false, None)];
     let mut e = Engine::new();
     let rows = vec![json!({"id": "a b/\"c", "title": "odd"})];
-    e.add(Arc::new(Mock::new("thing", cols).rows(rows)), Arc::new(Open));
-    let html = render(&Table::new(&e, "thing").detail_href("/thing/{id}"), &list()).await;
+    e.add(Arc::new(Mock::new("thing", cols).rows(rows).meta(viewed_at("/thing/{id}"))), Arc::new(Open));
+    let html = render(&Table::new(&e, "thing"), &list()).await;
     assert!(html.contains(r#"href="/thing/a%20b%2F%22c">View</a>"#), "{html}");
 }
 
@@ -1742,26 +1777,50 @@ async fn an_unknown_column_is_refused_by_name() {
     assert!(msg.contains("cannot show column 'ttile'") && msg.contains("known:"), "{msg}");
 }
 
+/// An `EntityMeta` with a row class.
+fn classed<F>(f: F) -> EntityMeta
+where
+    F: Fn(&crate::crud::fmt::RowCtx) -> Option<String> + Send + Sync + 'static,
+{
+    EntityMeta { row_class: Some(RowClass::new(f)), ..Default::default() }
+}
+
 #[tokio::test]
 async fn a_row_can_be_marked_from_its_own_data() {
-    let (e, _) = engine();
-    let table = Table::new(&e, "post")
-        .row_class(|row| match row["status"].as_str() {
-            Some("draft") => "table-warning".into(),
-            _ => String::new(),
-        });
-    let html = render(&table, &list()).await;
+    let e = engine_meta(classed(|cx| match cx.row()["status"].as_str() {
+        Some("draft") => Some("table-warning".into()),
+        _ => None,
+    }));
+    let html = render(&Table::new(&e, "post"), &list()).await;
     assert!(html.contains(r#"<tr id="row-7" class="table-warning">"#), "{html}");
 
-    // No closure, no attribute — a table that wants none pays nothing.
-    let plain = render(&Table::new(&e, "post"), &list()).await;
+    // No closure, no attribute — an entity that wants none pays nothing.
+    let (plain, _) = engine();
+    let plain = render(&Table::new(&plain, "post"), &list()).await;
     assert!(plain.contains(r#"<tr id="row-7">"#), "{plain}");
 }
 
 #[tokio::test]
+async fn a_row_class_sees_the_request() {
+    // The viewer's zone reaches the closure, for "due today" where they are.
+    let e = engine_meta(classed(|cx| {
+        Some(crate::time::Tz::from_headers(cx.headers()).name().replace('/', "-"))
+    }));
+    let html = Table::new(&e, "post").render_for(&zone("Europe/Prague"), &list()).await.unwrap();
+    assert!(html.contains(r#"class="Europe-Prague""#), "{html}");
+}
+
+#[tokio::test]
+async fn a_row_class_shows_in_every_table_of_the_entity() {
+    let e = engine_meta(classed(|_| Some("rl-marked".into())));
+    let html = Admin::new(&e).entity("post").render_for(&no_headers(), &list()).await.unwrap();
+    assert!(html.contains(r#"class="rl-marked""#), "the Admin's table too: {html}");
+}
+
+#[tokio::test]
 async fn a_row_class_cannot_break_out_of_its_attribute() {
-    let (e, _) = engine();
-    let html = render(&Table::new(&e, "post").row_class(|_| NASTY.to_string()), &list()).await;
+    let e = engine_meta(classed(|_| Some(NASTY.to_string())));
+    let html = render(&Table::new(&e, "post"), &list()).await;
     assert!(!html.contains("<script>"), "{html}");
 }
 

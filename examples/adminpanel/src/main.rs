@@ -245,7 +245,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // "order by the label in the cell" into `ORDER BY author.name`. Without it the relation would
     // still render, just without a clickable header.
     author_mm.label_column(author::Column::Name.as_str());
-    let user_mm = MetaModel::new(user::Entity);
+    let mut user_mm = MetaModel::new(user::Entity);
+    // `user` is shown read-only in the panel (see `build_admin`), so "+ New" never creates one
+    // either: a table-level switch is a view's choice, which only the gate or the model carries
+    // over to "+ New".
+    user_mm.picker_create(false);
     let profile_mm = MetaModel::new(profile::Entity);
     let mut post_mm = MetaModel::new(post::Entity);
     // `post.status` needs no line here: it is a `db_type = "Enum"` ActiveEnum (`post::Status`), so the
@@ -316,17 +320,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.picker_path("/_rl/pick");
     // "+ New" for a relation whose target doesn't have the row yet: a new author made in a dialog
     // over the half-filled post, and chosen in it. The target's gate decides, so the editor
-    // (read-only) never sees the button. `user` is shown read-only in the panel (see `build_admin`),
-    // so it is never created this way either: a table-level switch is a view's choice, which only
-    // the gate or this list carries over to "+ New".
+    // (read-only) never sees the button, and the `user` model says no for itself (above).
     crud.picker_create(true);
-    crud.picker_create_except(["user"]);
     // Each relation's label links to its row, opened in a dialog (with Edit for the admin). Without
-    // the script, or in a new tab, the link is the row's View in this panel.
+    // the script, or in a new tab, the link is that dialog's page.
     crud.picker_view(true);
-    for slug in ["post", "tag", "author", "user", "profile", "auth_user", "auth_group"] {
-        crud.view_path(slug, format!("/admin/{slug}?show={{id}}"));
-    }
 
     // One shared engine, rendered from *per request*, so write controls hide for users who can't
     // write — and a forged write is refused by the same gate regardless.

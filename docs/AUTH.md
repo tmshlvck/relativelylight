@@ -11,7 +11,7 @@ Feature `auth`, usable without `crud`. It provides:
 - API keys for machine endpoints, each acting as its owner, with self-service on `/profile` (§5k);
 - passkeys: sign-in without a password, a second factor, re-authentication (feature `passkeys`, §5l);
 - a sign-in policy as one minimum assurance level, and "password change required" (§5m);
-- double-submit CSRF (feature `csrf`, §7);
+- double-submit CSRF (always on, §7);
 - per-model gate presets for `crud` (§6).
 
 **There is no authn middleware.** `Auth::identify(&headers)` resolves the session cookie → user →
@@ -55,12 +55,13 @@ else is the app's ([APP.md → Your URL namespace](APP.md#your-url-namespace)):
 | Feature | Adds | Pulls |
 |---|---|---|
 | (always) | `authz`: the `Authz` trait, `Operation`, `Decision`, `Open` | `http`, `async-trait` |
-| `auth` | users, groups, sessions, login, profile pages, 2FA, lockout, gate presets | `sea-orm`, `argon2`, `totp-rs`, `askama`, cookies; implies `csrf` |
+| `auth` | users, groups, sessions, login, profile pages, 2FA, lockout, gate presets | `sea-orm`, `argon2`, `totp-rs`, `askama` |
 | `sso` | `auth::sso`: OIDC sign-in and group mapping (§5b) | `openidconnect`, `regex`, `base64` |
 | `passkeys` | passkeys: sign-in, a second factor, re-authentication, the profile section (§5l) | `webauthn-rs`, `base64`; implies `auth` |
 
-`auth` works without `crud`: `features = ["auth"]` for login alone, `["crud", "auth"]` for a gated
-admin, plus `"sso"` for single sign-on.
+`auth` works without `crud`: `default-features = false, features = ["auth"]` for login alone,
+`features = ["auth"]` (beside the default `crud` and `ui`) for a gated admin, plus `"sso"` for single
+sign-on.
 
 ## 3. Identity mechanism: server-side session
 
@@ -1193,11 +1194,11 @@ of yours that calls `Engine` directly must call `Engine::decide` first.
 **The whole app** — `Auth`, the gates, the panel, the router and the shell put together — is
 [APP.md](APP.md).
 
-## 7. CSRF (double-submit token, feature `csrf`)
+## 7. CSRF (double-submit token)
 
 Cookie-authenticated **unsafe** requests (POST/PATCH/PUT/DELETE) must carry a CSRF token, checked
 against a cookie-bound value (double-submit). Defense-in-depth on top of `SameSite=Strict`. The module
-is `relativelylight::csrf` (feature `csrf`, implied by `auth`); the type is `Csrf`.
+is `relativelylight::csrf` (always on); the type is `Csrf`.
 
 **The token.** 256 random bits (hex) in the `rl_csrf` cookie (name configurable) — `SameSite=Strict`,
 `Path=/`, `Secure` unless told otherwise, lifetime matching the session TTL, and deliberately **not

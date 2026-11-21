@@ -118,14 +118,12 @@ pub enum Part<'u> {
 /// ```
 pub struct Upload<'a> {
     parts: multer::Multipart<'static>,
-    // The request the token is checked against; unread without `csrf`, kept so the type is the same.
-    #[cfg_attr(not(feature = "csrf"), allow(dead_code))]
+    // The request the token is checked against.
     headers: &'a HeaderMap,
     state: State,
     file_field: String,
     max_field_bytes: usize,
     max_files: usize,
-    #[cfg(feature = "csrf")]
     csrf: Option<&'a crate::csrf::Csrf>,
 }
 
@@ -160,7 +158,6 @@ impl<'a> Upload<'a> {
             file_field: "file".into(),
             max_field_bytes: 64 * 1024,
             max_files: 32,
-            #[cfg(feature = "csrf")]
             csrf: None,
         })
     }
@@ -193,7 +190,6 @@ impl<'a> Upload<'a> {
 
     /// Require a valid `_csrf` field **before** the first file part. Pass `auth.csrf()`, or your
     /// own [`Csrf`](crate::csrf::Csrf).
-    #[cfg(feature = "csrf")]
     pub fn csrf(mut self, csrf: &'a crate::csrf::Csrf) -> Self {
         self.csrf = Some(csrf);
         self.state.csrf_ok = false;
@@ -243,7 +239,6 @@ impl<'a> Upload<'a> {
                     buf.extend_from_slice(&chunk);
                 }
                 let value = String::from_utf8_lossy(&buf).into_owned();
-                #[cfg(feature = "csrf")]
                 if name == "_csrf" {
                     if let Some(c) = self.csrf {
                         if !c.verify(self.headers, Some(&value)) {

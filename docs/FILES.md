@@ -9,7 +9,7 @@ see it and how a page lists files. Nothing here reads, writes, lists or deletes 
 camera), a listing with thumbnails, preview, download and delete. Its storage (`src/store.rs`) and
 thumbnail cache (`src/thumbs.rs`) are app code, written to be copied.
 
-`files` needs neither `crud`, `auth` nor a database; add `csrf` for `Upload::csrf`.
+`files` needs neither `crud`, `auth` nor a database (`default-features = false, features = ["files"]`).
 
 ## 1. Upload — `Upload`
 

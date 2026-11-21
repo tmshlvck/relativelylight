@@ -403,13 +403,7 @@ async fn notify(
 /// The hidden `_csrf` value, or empty when this engine enforces no token. The **cookie** must already
 /// exist — `auth`'s login issues it; an app without `auth` calls `Csrf::ensure` when rendering the
 /// page (see `docs/AUTH.md` §7).
-#[cfg(feature = "csrf")]
 pub(crate) fn csrf_token(engine: &Engine, headers: &HeaderMap) -> String {
     engine.csrf().and_then(|c| c.token(headers)).unwrap_or_default()
-}
-
-#[cfg(not(feature = "csrf"))]
-pub(crate) fn csrf_token(_engine: &Engine, _headers: &HeaderMap) -> String {
-    String::new()
 }
 

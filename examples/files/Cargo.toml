@@ -9,7 +9,7 @@ publish = false
 # the responses and the components; storage, naming, listing and thumbnails are this app's code.
 # See docs/FILES.md.
 [dependencies]
-relativelylight = { path = "../../relativelylight", default-features = false, features = ["files", "csrf"] }
+relativelylight = { path = "../../relativelylight", default-features = false, features = ["files"] }
 axum = "0.8"
 axum-extra = { version = "0.12", features = ["cookie"] }
 tokio = { workspace = true, features = ["fs", "io-util", "net", "sync"] }

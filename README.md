@@ -63,7 +63,7 @@ URL, verified (and re-authenticated) before it's on.</sub></td>
 
 ```toml
 [dependencies]
-relativelylight = { version = "0.5", features = ["ui", "csv"] }
+relativelylight = { version = "0.5", features = ["csv"] }
 sea-orm = { version = "2.0", features = ["macros", "with-json"] }
 ```
 
@@ -128,16 +128,19 @@ async fn save(headers: HeaderMap, uri: Uri, RealIp(ip): RealIp,
 | Feature | Default | Adds |
 |---|---|---|
 | `crud` | ✅ | the CRUD engine + SeaORM backend |
-| `axum` | ✅ | the request plumbing and the `middleware` module |
-| `ui` | | `crud::ui`: `Table`, `Form`, `Admin`, `Picker`, `RelationField`; implies `axum` + `tz` |
+| `ui` | ✅ | `crud::ui`: `Table`, `Form`, `Admin`, `Picker`, `RelationField`; implies `crud` + `tz` |
 | `csv` | | CSV import/export in the UI; implies `tz` |
 | `tz` | | server-side timezone rendering (the `time` module) |
 | `auth` | | sessions, login, TOTP 2FA, lockout, profile pages, API keys, gate presets |
-| `csrf` | | the double-submit CSRF token; implied by `auth` |
 | `sso` | | OIDC single sign-on + group mapping; implies `auth` |
 | `passkeys` | | passkeys (WebAuthn): sign-in, a second factor, re-authentication; implies `auth` |
-| `files` | | streaming upload reader, download responses, upload form/preview/thumbnail components; implies `axum` |
+| `files` | | streaming upload reader, download responses, upload form/preview/thumbnail components |
 | `validate-regex`, `validate-base64` | | the regex and base64 validators in `validate` ([docs/DATAINPUT.md](docs/DATAINPUT.md)) |
+
+Always on, with no feature: the axum plumbing (`middleware::resolve_real_ip`, `RealIp`), the
+double-submit CSRF token (`csrf`), the gate trait (`authz`), `validate` and `observe`. Every surface is
+an axum handler and every cookie-authenticated write needs the token, so neither earned a switch. A
+build of `auth` or `files` alone sets `default-features = false`.
 
 Registered entities need a **single-column primary key**, **single-column to-one FKs**, and
 `Serialize`/`Deserialize` (SeaORM's `with-json`).
