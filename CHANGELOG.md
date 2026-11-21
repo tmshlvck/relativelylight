@@ -297,6 +297,9 @@ is easy to miss in a diff.
 
 ### Fixed
 
+- **The table's toolbar wraps instead of overflowing.** Many filters, ranges and the search ran past
+  the table's card and gave the page a horizontal scrollbar; they now wrap onto more rows (below the
+  title when they don't fit beside it), and the search box stretches to fill its row.
 - **Security: search, filters and sort reach only what a table shows.** The search box matched every
   text column, hidden and write-only ones included, so a reader of a table could spell out a hidden
   value a few characters at a time from which rows came back. In the accounts panel that was any
