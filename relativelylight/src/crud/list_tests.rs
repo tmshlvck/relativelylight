@@ -6,14 +6,13 @@
 //! interesting cases (does the join reproduce the *displayed* order, does an FK filter match exactly,
 //! does a tie in the sort column repeat rows across pages) are all invisible to a stub accessor.
 //!
-//! They call `Engine::list` with the `ViewState` a URL parses to, which is exactly what the UI does:
-//! there is no HTTP layer in between any more, so a failure here is a failure in the backend rather
-//! than in a wire format.
+//! They call `Engine::list` with the `ListQuery` a table builds from its URL (that parsing is
+//! `ViewState`'s, tested beside it), so a failure here is a failure in the backend rather than in a
+//! wire format. They need no `ui`.
 
 use crate::authz::Open;
 use crate::crud::engine::{Engine, ListQuery, Page, Result};
 use crate::crud::seaorm::{Crud, MetaModel};
-use crate::crud::ui::ViewState;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 
 // ---- entities ----
@@ -145,10 +144,34 @@ enum Label {
     Computed,
 }
 
-/// List through the same path a rendered table takes: a query string → `ViewState` → `ListQuery`.
-async fn list(engine: &Engine, slug: &str, query: &str) -> Result<Page> {
-    let state = ViewState::from_query(query);
-    engine.list(slug, &state.to_list_query(25), false).await
+/// A query as a table would build it: 25 rows a page unless [`Q::page`] says otherwise.
+struct Q(ListQuery);
+
+fn q() -> Q {
+    Q(ListQuery { per_page: 25, ..Default::default() })
+}
+
+impl Q {
+    fn sort(mut self, column: &str) -> Self {
+        self.0.sort.push((column.into(), false));
+        self
+    }
+    fn desc(mut self, column: &str) -> Self {
+        self.0.sort.push((column.into(), true));
+        self
+    }
+    fn eq(mut self, column: &str, value: &str) -> Self {
+        self.0.eq.push((column.into(), value.into()));
+        self
+    }
+    fn page(mut self, page: u64, per_page: u64) -> Self {
+        (self.0.page, self.0.per_page) = (page, per_page);
+        self
+    }
+}
+
+async fn list(engine: &Engine, slug: &str, query: Q) -> Result<Page> {
+    engine.list(slug, &query.0, false).await
 }
 
 /// The `name` of each returned row, in order.
@@ -174,7 +197,7 @@ fn zone_labels(page: &Page) -> Vec<String> {
 #[tokio::test]
 async fn sorting_by_a_relation_orders_by_the_shown_label_not_the_foreign_key() {
     let e = engine_with(Label::Declared).await;
-    let page = list(&e, "record", "sort=zone").await.expect("lists");
+    let page = list(&e, "record", q().sort("zone")).await.expect("lists");
 
     // Alphabetical by origin. Sorting by `zone_id` instead would give zeta, zeta, alpha, … — the
     // control that proves this isn't just the FK order under another name.
@@ -192,7 +215,7 @@ async fn sorting_by_a_relation_orders_by_the_shown_label_not_the_foreign_key() {
         "rows must come back ordered by the label the cell shows"
     );
 
-    let desc = list(&e, "record", "sort=zone:desc").await.expect("lists");
+    let desc = list(&e, "record", q().desc("zone")).await.expect("lists");
     let mut reversed = zone_labels(&desc);
     reversed.retain(|l| l != "—");
     assert_eq!(reversed.first().map(String::as_str), Some("zeta.example."));
@@ -203,7 +226,7 @@ async fn a_row_label_closure_that_reads_one_column_is_still_sortable() {
     // The probe's whole point: an app that already assigns the common one-column closure gets a
     // sortable relation without rewriting it as `label_column`.
     let e = engine_with(Label::Closure).await;
-    let page = list(&e, "record", "sort=zone").await.expect("lists");
+    let page = list(&e, "record", q().sort("zone")).await.expect("lists");
     assert_eq!(zone_labels(&page)[0], "alpha.example.");
     assert_eq!(page.total, 7);
 }
@@ -211,13 +234,13 @@ async fn a_row_label_closure_that_reads_one_column_is_still_sortable() {
 #[tokio::test]
 async fn a_label_that_is_not_a_single_column_is_refused_rather_than_ordered_by_a_guess() {
     let e = engine_with(Label::Computed).await;
-    let err = list(&e, "record", "sort=zone")
+    let err = list(&e, "record", q().sort("zone"))
         .await
         .expect_err("a label SQL can't reproduce must not be silently ordered by one of its parts");
     assert!(err.to_string().contains("zone"), "the error names the column: {err}");
 
     // Unsorted listing is unaffected — the control.
-    assert_eq!(list(&e, "record", "").await.expect("lists").total, 7);
+    assert_eq!(list(&e, "record", q()).await.expect("lists").total, 7);
 }
 
 #[tokio::test]
@@ -237,12 +260,12 @@ async fn the_columns_say_which_ones_can_be_sorted() {
             .expect("a zone relation");
         assert_eq!(advertised, zone_sortable);
         assert_eq!(
-            list(&e, "record", "sort=zone").await.is_ok(),
+            list(&e, "record", q().sort("zone")).await.is_ok(),
             zone_sortable,
             "a header the UI renders as a link must be one the backend will sort by"
         );
 
-        let by_column = list(&e, "record", "sort=name").await.expect("a plain column always sorts");
+        let by_column = list(&e, "record", q().sort("name")).await.expect("a plain column always sorts");
         assert_eq!(names(&by_column)[0], "ftp");
     }
 }
@@ -251,14 +274,14 @@ async fn the_columns_say_which_ones_can_be_sorted() {
 async fn sorting_by_a_to_many_relation_is_refused() {
     let e = engine_with(Label::Declared).await;
     // A zone has many records, so there is no single label to order a zone by.
-    let err = list(&e, "zone", "sort=record").await.unwrap_err();
+    let err = list(&e, "zone", q().sort("record")).await.unwrap_err();
     assert!(err.to_string().contains("record"), "{err}");
 }
 
 #[tokio::test]
 async fn an_unknown_sort_key_is_refused() {
     let e = engine_with(Label::Declared).await;
-    assert!(list(&e, "record", "sort=nope").await.is_err());
+    assert!(list(&e, "record", q().sort("nope")).await.is_err());
 }
 
 // ---- page stability ----
@@ -271,7 +294,7 @@ async fn paging_a_tied_sort_column_shows_every_row_exactly_once() {
     let e = engine_with(Label::Declared).await;
     let mut seen = Vec::new();
     for page in 1..=4 {
-        let p = list(&e, "record", &format!("sort=ttl&per_page=2&page={page}")).await.expect("lists");
+        let p = list(&e, "record", q().sort("ttl").page(page, 2)).await.expect("lists");
         seen.extend(names(&p));
     }
     seen.sort();
@@ -287,7 +310,7 @@ async fn paging_a_tied_sort_column_shows_every_row_exactly_once() {
 #[tokio::test]
 async fn a_relation_filter_matches_the_foreign_key_exactly() {
     let e = engine_with(Label::Declared).await;
-    let page = list(&e, "record", "filter[zone]=1").await.expect("lists");
+    let page = list(&e, "record", q().eq("zone", "1")).await.expect("lists");
 
     let mut got = names(&page);
     got.sort();
@@ -299,20 +322,20 @@ async fn a_relation_filter_matches_the_foreign_key_exactly() {
 #[tokio::test]
 async fn a_filter_may_name_a_plain_column_too() {
     let e = engine_with(Label::Declared).await;
-    assert_eq!(names(&list(&e, "record", "filter[ttl]=300").await.expect("lists")), vec!["vpn"]);
+    assert_eq!(names(&list(&e, "record", q().eq("ttl", "300")).await.expect("lists")), vec!["vpn"]);
 }
 
 #[tokio::test]
 async fn an_empty_filter_value_finds_the_rows_that_have_none() {
     let e = engine_with(Label::Declared).await;
-    let page = list(&e, "record", "filter[zone]=").await.expect("lists");
+    let page = list(&e, "record", q().eq("zone", "")).await.expect("lists");
     assert_eq!(names(&page), vec!["orphan"], "an empty value means IS NULL");
 }
 
 #[tokio::test]
 async fn an_unknown_filter_name_is_refused() {
     let e = engine_with(Label::Declared).await;
-    assert!(list(&e, "record", "filter[nope]=1").await.is_err());
+    assert!(list(&e, "record", q().eq("nope", "1")).await.is_err());
 }
 
 #[tokio::test]
@@ -338,7 +361,7 @@ async fn a_substring_search_on_a_non_text_column_is_refused() {
 async fn several_conditions_in_one_query_all_apply() {
     // A `HashMap` of parameters kept only the last of these; both must survive and combine.
     let e = engine_with(Label::Declared).await;
-    let page = list(&e, "record", "filter[zone]=2&filter[ttl]=300").await.expect("lists");
+    let page = list(&e, "record", q().eq("zone", "2").eq("ttl", "300")).await.expect("lists");
     assert_eq!(names(&page), vec!["vpn"]);
 
     let mut q = ListQuery::default();
@@ -352,13 +375,13 @@ async fn several_conditions_in_one_query_all_apply() {
 #[tokio::test]
 async fn a_filtered_bulk_delete_deletes_only_the_matching_rows_and_needs_no_all_flag() {
     let e = engine_with(Label::Declared).await;
-    let filtered = ViewState::from_query("filter[zone]=1").to_list_query(25);
+    let filtered = q().eq("zone", "1").0;
     let gone = e.delete_where("record", &filtered).await.expect("a filter is a filter for the guard");
     assert_eq!(gone.len(), 2);
     // The rows come back finished, which is the whole point: after a set-based delete this is the
     // only way anything can learn *what* went — a parent to re-render, an index entry to evict.
     assert!(gone.iter().all(|r| !r["zone"].is_null()), "relations resolved: {gone:?}");
-    assert_eq!(list(&e, "record", "").await.expect("lists").total, 5, "other zones untouched");
+    assert_eq!(list(&e, "record", q()).await.expect("lists").total, 5, "other zones untouched");
 
     // The guard still holds for an unfiltered delete — the UI's "Delete all matching" is what sets
     // the flag, and it says so on the button.
@@ -370,6 +393,6 @@ async fn a_filtered_bulk_delete_deletes_only_the_matching_rows_and_needs_no_all_
 #[tokio::test]
 async fn a_filter_and_a_sort_compose() {
     let e = engine_with(Label::Declared).await;
-    let page = list(&e, "record", "filter[ttl]=3600&sort=name:desc").await.expect("lists");
+    let page = list(&e, "record", q().eq("ttl", "3600").desc("name")).await.expect("lists");
     assert_eq!(names(&page), vec!["www", "orphan", "ns2", "ns1", "mail", "ftp"]);
 }

@@ -197,6 +197,7 @@ async fn relations_match_by_their_labels_as_shown() {
     assert_eq!(found(&e, "post", "Novak", None).await, Vec::<i64>::new());
 }
 
+#[cfg(feature = "tz")]
 #[tokio::test]
 async fn an_instant_matches_when_the_term_names_its_period() {
     use crate::time::Tz;
@@ -211,6 +212,7 @@ async fn an_instant_matches_when_the_term_names_its_period() {
     assert_eq!(found(&e, "post", "03-05", None).await, Vec::<i64>::new());
 }
 
+#[cfg(feature = "ui")]
 #[tokio::test]
 async fn the_table_reads_the_period_in_the_viewers_zone() {
     use crate::crud::ui::{Table, ViewState};

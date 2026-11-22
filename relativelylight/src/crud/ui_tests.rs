@@ -1271,6 +1271,7 @@ async fn the_toolbar_form_carries_only_what_the_operator_chose() {
     assert!(hidden(toolbar).is_empty(), "{toolbar}");
 }
 
+#[cfg(feature = "csv")]
 #[tokio::test]
 async fn the_export_link_is_the_view_without_its_page() {
     let (e, _) = engine();

@@ -8,8 +8,8 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
 
 - [ ] **Finish the feature and module review.** `axum` and `csrf` are now always on and `ui` is a
   default (DESIGN.md principle 3). Still open: whether `crud` without `ui` earns its switch (the
-  engine tests `list_tests`, `relation_tests` and `search_tests` need `ui` only for `ViewState`), and
-  whether `tz` stands alone or folds into `ui`/`csv`. Also: whether `crud::ui` nested under `crud`
+  engine's tests run without `ui`, so it builds and works; the question is whether anyone wants an
+  engine with no admin), and whether `tz` stands alone or folds into `ui`/`csv`. Also: whether `crud::ui` nested under `crud`
   matches the code. The entity-wide settings moved to `MetaModel` (`EntityMeta`), but `Engine` still
   holds the app-wide UI defaults (`picker_path`, `picker_threshold`, `picker_create`,
   `picker_view`) as `cfg(ui)` fields; one `ui` settings struct on it would be one field instead.

@@ -15,20 +15,21 @@ pub mod seaorm;
 mod gate_tests;
 
 /// Listing over a real database: sorting by a relation's label, `filter[…]`, page stability.
-/// Needs `ui` — it lists through the `ViewState` a URL parses to, exactly as a rendered table does.
-#[cfg(all(test, feature = "ui"))]
+#[cfg(test)]
 mod list_tests;
 
 /// Relation reads over a real database: what each kind resolves to, the inverse cap, and a page's
 /// query count staying flat as its rows grow.
-#[cfg(all(test, feature = "ui"))]
+#[cfg(test)]
 mod relation_tests;
 
 /// `Table::range_filter` over a real database: dates in the viewer's zone, open ends, the range
 /// holding for "delete all matching" and the export; `ListQuery::range` / `one_of` at the engine.
 #[cfg(all(test, feature = "ui"))]
 mod range_tests;
-#[cfg(all(test, feature = "ui"))]
+/// The built-in search over a real database: what the table shows, relations' labels, instants by
+/// the period a term names.
+#[cfg(test)]
 mod search_tests;
 
 /// `Table::fixed_filter` holding for the writes over a real database: the pinned value written on
