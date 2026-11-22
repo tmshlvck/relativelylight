@@ -39,6 +39,18 @@ pub struct ImportError {
     pub message: String,
 }
 
+impl ImportReport {
+    /// Record that data row `i` (0-based) failed: the header is line 1, so it is line `i + 2`.
+    fn fail(&mut self, i: usize, message: String) {
+        self.failed += 1;
+        self.errors.push(ImportError { row: i + 2, message });
+    }
+
+    fn has_failed(&self) -> bool {
+        self.failed > 0
+    }
+}
+
 fn be<E: std::fmt::Display>(e: E) -> Error {
     Error::Backend(e.to_string())
 }
@@ -47,16 +59,6 @@ fn be<E: std::fmt::Display>(e: E) -> Error {
 /// would import a secret in clear text.
 fn exported(cols: &[Column]) -> Vec<&Column> {
     cols.iter().filter(|c| !matches!(c, Column::Field { write_only: true, .. })).collect()
-}
-
-fn name_of(col: &Column) -> &str {
-    match col {
-        Column::Field { name, .. } | Column::Relation { name, .. } => name,
-    }
-}
-
-fn is_datetime(col: &Column) -> bool {
-    matches!(col, Column::Field { display: Some(d), .. } if d.is_datetime())
 }
 
 /// Export every row matching `q` (search / filters / sort apply; pagination is lifted) as CSV text.
@@ -69,7 +71,7 @@ pub async fn export_csv(
 ) -> Result<String> {
     let cols = exported(cols);
     let mut wtr = csv::Writer::from_writer(vec![]);
-    wtr.write_record(cols.iter().map(|c| name_of(c))).map_err(be)?;
+    wtr.write_record(cols.iter().map(|c| c.name())).map_err(be)?;
 
     let mut all = q.clone();
     all.all = true; // the full (filtered) set, unpaginated
@@ -83,14 +85,14 @@ pub async fn export_csv(
 
 /// One CSV cell, from an assembled row (relations arrive as `{id, label}`).
 fn cell(row: &Value, col: &Column, tz: &Tz) -> String {
-    let raw = row.get(name_of(col));
+    let raw = row.get(col.name());
     match col {
         Column::Relation { cardinality: Cardinality::ToMany, .. } => raw
             .and_then(Value::as_array)
             .map(|items| items.iter().map(|i| text::text(i.get("id"))).collect::<Vec<_>>().join("|"))
             .unwrap_or_default(),
         Column::Relation { .. } => text::text(raw.and_then(|r| r.get("id"))),
-        _ if is_datetime(col) => raw.and_then(Value::as_i64).map(|s| tz.format(s)).unwrap_or_default(),
+        _ if col.is_datetime() => raw.and_then(Value::as_i64).map(|s| tz.format(s)).unwrap_or_default(),
         _ => text::text(raw),
     }
 }
@@ -111,7 +113,7 @@ pub async fn import_csv(
     import_pinned(engine, slug, cols, text, tz, &text::Pins::default()).await
 }
 
-/// [`import`] through a pinned view (`Table::fixed_filter`, `Table::fixed_in`): every row is written
+/// [`import_csv`] through a pinned view (`Table::fixed_filter`, `Table::fixed_in`): every row is written
 /// with the single-value pins, whatever its own cells say; a row whose set-pinned column holds a
 /// value outside its set is rejected; and a row naming a primary key outside the view is rejected
 /// rather than updated — an import can't reach further than the table it was posted from.
@@ -134,35 +136,30 @@ pub(crate) async fn import_pinned(
     for (i, record) in rdr.records().enumerate() {
         match record {
             Ok(record) => rows.push(body(&headers, &record, cols, &pk, tz)),
-            Err(e) => {
-                report.failed += 1;
-                report.errors.push(ImportError { row: i + 2, message: e.to_string() });
-            }
+            Err(e) => report.fail(i, e.to_string()),
         }
     }
-    if report.failed > 0 {
+    if report.has_failed() {
         return Ok(report); // unparseable CSV: say so, write nothing
     }
     for (i, (key, body)) in rows.iter_mut().enumerate() {
         pins.apply(body, cols, tz);
         // A row without a key is a create, and must carry a value in each set.
         for (name, message) in pins.refusals(body, cols, key.is_none()) {
-            report.failed += 1;
-            report.errors.push(ImportError { row: i + 2, message: format!("{name}: {message}") });
+            report.fail(i, format!("{name}: {message}"));
         }
     }
-    if report.failed > 0 {
+    if report.has_failed() {
         return Ok(report);
     }
     let keys: Vec<String> = rows.iter().filter_map(|(key, _)| key.clone()).collect();
     let outside = engine.outside(slug, pins, &keys).await?;
     for (i, (key, _)) in rows.iter().enumerate() {
         if let Some(key) = key.as_ref().filter(|k| outside.contains(k)) {
-            report.failed += 1;
-            report.errors.push(ImportError { row: i + 2, message: format!("no row {key} in this view") });
+            report.fail(i, format!("no row {key} in this view"));
         }
     }
-    if report.failed > 0 {
+    if report.has_failed() {
         return Ok(report);
     }
 
@@ -172,10 +169,9 @@ pub(crate) async fn import_pinned(
             report.updated = applied.updated as usize;
         }
         Err(Error::BatchRejected(bad)) => {
-            report.failed = bad.len();
-            report.errors.extend(
-                bad.into_iter().map(|(i, e)| ImportError { row: i + 2, message: e.one_line() }),
-            );
+            for (i, e) in bad {
+                report.fail(i, e.one_line());
+            }
         }
         Err(e) => return Err(e),
     }
@@ -199,7 +195,7 @@ fn body(
             }
             continue; // the PK itself is never written into the body
         }
-        let Some(col) = cols.iter().find(|c| name_of(c) == header) else { continue };
+        let Some(col) = crate::crud::engine::find(cols, header) else { continue };
         match col {
             Column::Relation { read_only: true, .. } | Column::Field { read_only: true, .. } => {}
             Column::Relation { cardinality: Cardinality::ToMany, .. } => {

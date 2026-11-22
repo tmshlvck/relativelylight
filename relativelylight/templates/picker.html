@@ -7,11 +7,7 @@
   {%- if search %}
   <form method="get" class="mb-2">
     {%- for h in keep %}<input type="hidden" name="{{ h.0 }}" value="{{ h.1 }}">{% endfor %}
-    <input type="search" class="form-control form-control-sm" name="q" value="{{ q }}"
-           placeholder="Search…" aria-label="Search"{% if !q.is_empty() %} autofocus{% endif %}
-           onfocus="this.setSelectionRange(this.value.length, this.value.length)"
-           oninput="clearTimeout(this.t); this.t = setTimeout(() => this.form.submit(), 1000)"
-           onsearch="clearTimeout(this.t); this.form.submit()">
+    {% include "_search.html" %}
   </form>
   {%- endif %}
   <div class="table-responsive">
@@ -20,12 +16,7 @@
         <tr>
           <th style="width:1%"><span class="visually-hidden">Choose</span></th>
           {%- for h in heads %}
-          <th aria-sort="{{ h.aria }}">
-            {%- match h.sort_href %}
-            {%- when Some with (href) %}<a class="text-body text-decoration-none" href="{{ href }}">{{ h.label }}{{ h.mark }}</a>
-            {%- when None %}{{ h.label }}
-            {%- endmatch %}
-          </th>
+          {% include "_head.html" %}
           {%- endfor %}
         </tr>
       </thead>
@@ -35,18 +26,9 @@
           <td><input class="form-check-input rl-pick-row" type="{% if many %}checkbox{% else %}radio{% endif %}"
                      name="rl-pick" value="{{ r.id }}" data-label="{{ r.label }}" id="pick-{{ r.id }}"
                      aria-label="Choose {{ r.label }}"></td>
-          {%- for c in r.cells %}
-          <td>
-            {%- match c %}
-            {%- when Cell::Text with (s) %}<label class="d-block" for="pick-{{ r.id }}">{{ s }}</label>
-            {%- when Cell::Bool with (Some(true)) %}<span class="badge text-bg-success">Yes</span>
-            {%- when Cell::Bool with (Some(false)) %}<span class="badge text-bg-danger">No</span>
-            {%- when Cell::Bool with (None) %}<span class="text-muted">—</span>
-            {%- when Cell::Badges with (labels) %}{% for l in labels %}<span class="badge text-bg-secondary">{{ l }}</span> {% endfor %}
-            {%- when Cell::Links with { links, badges } %}{% include "_links.html" %}
-            {%- when Cell::Raw with (html) %}{{ html|safe }}
-            {%- endmatch %}
-          </td>
+          {%- let pick_for = r.id.as_str() %}
+          {%- for cell in r.cells %}
+          <td>{% include "_cell.html" %}</td>
           {%- endfor %}
         </tr>
         {%- endfor %}
@@ -56,18 +38,5 @@
       </tbody>
     </table>
   </div>
-  <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
-    <small class="text-muted">Total: {{ pager.total }}{% if pager.pages > 1 %} · Page {{ pager.page }} / {{ pager.pages }}{% endif %}</small>
-    {%- if !pager.links.is_empty() %}
-    <nav aria-label="Pagination">
-      <ul class="pagination pagination-sm mb-0">
-        {%- for l in pager.links %}
-        <li class="page-item{% if l.active %} active{% endif %}{% if l.disabled %} disabled{% endif %}">
-          <a class="page-link" href="{{ l.href }}">{{ l.label }}</a>
-        </li>
-        {%- endfor %}
-      </ul>
-    </nav>
-    {%- endif %}
-  </div>
+  {% include "_pager.html" %}
 </section>

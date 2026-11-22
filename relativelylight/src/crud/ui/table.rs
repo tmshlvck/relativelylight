@@ -1,17 +1,19 @@
 //! [`Table`] — one entity on screen: toolbar, rows, bulk actions, pager, and whichever dialog the
 //! URL asks for (create, edit, read-only detail, CSV import).
 
+use super::decode::Posted;
 use super::render::{self, Cell, Chip, HeadV, PageLink, Pager, RowV};
 use super::state::{Mode, ViewState};
 use super::widgets::{self, FieldV, Opt, Widget};
 use super::{
     apply, authorize, banner, check_fields, check_initial, check_sort, check_widgets, csrf_token,
-    csv_header, is_filterable, range_kind, render_err, renders, Outcome, RangeKind, Surface,
-    Writes,
+    csv_header, in_view, is_filterable, range_kind, render_err, renders, Outcome, RangeKind,
+    Surface, Writes,
 };
 use crate::authz::Operation;
+use crate::crud::engine::find;
 use crate::crud::text::Pins;
-use crate::crud::{Cardinality, Column, Engine, EntityMeta, Error, ListQuery, Result};
+use crate::crud::{Cardinality, Column, Engine, EntityMeta, Error, ListQuery, Page, Result};
 use crate::time::Tz;
 use askama::Template;
 use http::HeaderMap;
@@ -26,8 +28,9 @@ struct TableTmpl {
     description: String,
     search: bool,
     pagination: bool,
-    /// What this caller is offered here — see [`Offer`].
-    can: Offer,
+    /// The writes this caller is offered here — see [`Table::offer`].
+    can: Writes,
+    export: bool,
     confirm: bool,
     /// Whether rows offer a View action (and therefore whether the actions column exists for a
     /// caller who can't write).
@@ -52,17 +55,6 @@ struct TableTmpl {
     flash: String,
     /// The same view without the report — where the alert's dismiss link goes.
     flash_dismiss: String,
-}
-
-/// The table's controls this caller gets: a switch that is on, and that the gate allows them.
-#[derive(Clone, Copy)]
-struct Offer {
-    create: bool,
-    edit: bool,
-    delete: bool,
-    bulk_delete: bool,
-    import: bool,
-    export: bool,
 }
 
 struct ControlV {
@@ -95,6 +87,18 @@ struct PickTmpl {
     heads: Vec<HeadV>,
     rows: Vec<RowV>,
     pager: Pager,
+    /// `_pager.html` offers page sizes; a picker offers none.
+    per_page_options: Vec<PageLink>,
+}
+
+/// What a listing renders from — see [`Table::listing`].
+struct Listing {
+    /// The URL state as the table acts on it ([`Table::effective_state`]).
+    state: ViewState,
+    tz: Tz,
+    page: Page,
+    /// The columns on screen ([`Table::shown_columns`]).
+    shown: Vec<Column>,
 }
 
 #[derive(Template)]
@@ -170,7 +174,7 @@ pub struct Table<'a> {
     pub(super) engine: &'a Engine,
     pub(super) slug: String,
     dom_id: Option<String>,
-    pub(super) title: Option<String>,
+    title: Option<String>,
     description: Option<String>,
     search: bool,
     pagination: bool,
@@ -345,19 +349,23 @@ impl<'a> Table<'a> {
     }
 
     /// What this caller is offered: each write this table accepts that the gate also allows them.
-    async fn offer(&self, headers: &HeaderMap) -> Offer {
+    async fn offer(&self, headers: &HeaderMap) -> Writes {
         let w = self.writes();
         let permits = |on: bool, op: Operation| async move {
             on && self.engine.permits(&self.slug, op, headers).await
         };
-        Offer {
+        Writes {
             create: permits(w.create, Operation::Create).await,
-            edit: permits(w.update, Operation::Update).await,
+            update: permits(w.update, Operation::Update).await,
             delete: permits(w.delete, Operation::Delete).await,
             bulk_delete: permits(w.bulk_delete, Operation::Delete).await,
             import: permits(w.import, Operation::Create).await,
-            export: self.export,
         }
+    }
+
+    /// The table's heading: its [`title`](Table::title), else its slug.
+    pub(super) fn heading(&self) -> String {
+        self.title.clone().unwrap_or_else(|| self.slug.clone())
     }
     /// Offer a **View** action per row, opening a read-only dialog (`?show=<id>`) with every
     /// published column. Default: on.
@@ -536,19 +544,9 @@ impl<'a> Table<'a> {
         let meta = self.engine.meta(&self.slug)?;
         check_widgets(&self.slug, &cols)?;
         check_sort(&self.slug, &cols, &self.sort)?;
-        // **The read enforcement point.** With no JSON API behind the UI, a caller who may not list
-        // this entity must not receive its rows in an HTML page either — so this is a refusal, not a
-        // matter of which buttons get drawn.
-        authorize(self.engine, Operation::List, &self.slug, headers).await?;
-        if *state.mode() != Mode::List {
-            authorize(self.engine, Operation::Read, &self.slug, headers).await?;
-        }
+        let Listing { state, tz, page, shown } = self.listing(&cols, headers, state).await?;
         let can = self.offer(headers).await;
-        let tz = Tz::from_headers(headers);
-        let state = self.effective_state(state, &cols)?;
-        let page = self.engine.list(&self.slug, &self.list_query(&state, &cols, &tz)?, false).await?;
         let csrf = csrf_token(self.engine, headers);
-        let shown = self.shown_columns(&cols)?;
         let per_page_options = self.per_page_options(&state);
         let (controls, ranges, chips) = self.filter_views(&cols, &state, &tz).await?;
         let pins = self.pins(&cols)?;
@@ -557,25 +555,32 @@ impl<'a> Table<'a> {
         let dialog = match state.mode() {
             // A read-only row is a *read*: a caller who may not write still gets it.
             Mode::Show(id) if self.detail_dialog_on(&meta) => {
-                self.in_view(&pins, id).await?;
-                let edit = if can.edit { state.href_edit(id) } else { String::new() };
+                in_view(self.engine, &self.slug, &pins, id).await?;
+                let edit = if can.update { state.href_edit(id) } else { String::new() };
                 let chrome = DetailChrome { close: Some(state.href_list()), edit, saved: None };
                 self.detail_view(&cols, id, headers, &tz, &links, chrome).await?
             }
             Mode::New if can.create => {
                 self.dialog(&cols, &pins, state.mode(), &state, headers, &csrf).await?
             }
-            Mode::Edit(id) if can.edit => {
-                self.in_view(&pins, id).await?;
+            Mode::Edit(id) if can.update => {
+                in_view(self.engine, &self.slug, &pins, id).await?;
                 self.dialog(&cols, &pins, state.mode(), &state, headers, &csrf).await?
             }
             Mode::Import if can.import => self.import_dialog(&cols, &state, &csrf)?,
             // The list, or a dialog this caller isn't offered here: a typed URL opens nothing.
             _ => String::new(),
         };
+        let show = |id: &str| self.show_href(&meta, &state, id);
+        let decor = render::Decor {
+            formatted: Some(headers),
+            row_class: meta.row_class.as_ref(),
+            show: Some(&show),
+            links: Some(&links),
+        };
         TableTmpl {
             dom_id: self.dom_id.clone().unwrap_or_else(|| format!("rl-{}", self.slug)),
-            title: self.title.clone().unwrap_or_else(|| self.slug.clone()),
+            title: self.heading(),
             description: self.description.clone().unwrap_or_default(),
             search: self.search,
             pagination: self.pagination,
@@ -583,23 +588,14 @@ impl<'a> Table<'a> {
             q: state.q.clone(),
             span: shown.len()
                 + usize::from(can.bulk_delete)
-                + usize::from(can.edit || can.delete || self.detail),
+                + usize::from(can.update || can.delete || self.detail),
             keep: self.keep(&state),
             per_page_options,
             controls,
             ranges,
             chips,
             heads: render::heads(&shown, &state),
-            rows: render::rows(
-                &page,
-                &shown,
-                Some(headers),
-                meta.row_class.as_ref(),
-                &state,
-                &tz,
-                Some(&|id: &str| self.show_href(&meta, &state, id)),
-                Some(&links),
-            ),
+            rows: render::rows(&page, &shown, &state, &tz, &decor),
             detail: self.detail,
             pager: if self.pagination {
                 render::pager(&page, &state)
@@ -610,9 +606,10 @@ impl<'a> Table<'a> {
             new_href: state.href_new(),
             import_href: state.href_import(),
             flash: state.done.map(|d| d.message()).unwrap_or_default(),
-            flash_dismiss: state.href_dismiss(),
+            flash_dismiss: state.href_list(),
             csrf,
             dialog,
+            export: self.export,
             can,
         }
         .render()
@@ -629,36 +626,44 @@ impl<'a> Table<'a> {
         many: bool,
     ) -> Result<String> {
         let cols = self.engine.columns(&self.slug)?;
-        authorize(self.engine, Operation::List, &self.slug, headers).await?;
-        let tz = Tz::from_headers(headers);
-        let state = self.effective_state(state, &cols)?;
-        let page = self.engine.list(&self.slug, &self.list_query(&state, &cols, &tz)?, false).await?;
+        let Listing { state, tz, page, mut shown } = self.listing(&cols, headers, state).await?;
         // A to-many column is a stack of badges per row — every post an author wrote — which says
         // nothing about which author to choose and makes each row a screen tall.
-        let mut shown = self.shown_columns(&cols)?;
         shown.retain(|c| !matches!(c, Column::Relation { cardinality: Cardinality::ToMany, .. }));
+        let mut heads = render::heads(&shown, &state);
+        // One sort key at a time: the dialog is for choosing a row, not for studying the table.
+        heads.iter_mut().for_each(|h| h.add_href = None);
         PickTmpl {
             many,
             search: self.search,
             q: state.q.clone(),
             keep: self.keep(&state),
-            heads: render::heads(&shown, &state),
+            heads,
             // No links and no formatters here: a click in the picker's list chooses a row, and a
             // link a formatter drew would take the browser away from the form being filled in.
-            rows: render::rows(
-                &page,
-                &shown,
-                None,
-                None,
-                &state,
-                &tz,
-                None,
-                None,
-            ),
+            rows: render::rows(&page, &shown, &state, &tz, &render::Decor::default()),
             pager: render::pager(&page, &state),
+            per_page_options: Vec::new(),
         }
         .render()
         .map_err(render_err)
+    }
+
+    /// The rows a listing shows, read for this request — refused before any row is read when the
+    /// caller may not list the entity, or (for a dialog over it, any mode but the list) may not
+    /// read one. **The read enforcement point**: with no JSON API behind the UI, a caller who may
+    /// not list this entity must not receive its rows in an HTML page either — so this is a
+    /// refusal, not a matter of which buttons get drawn.
+    async fn listing(&self, cols: &[Column], headers: &HeaderMap, state: &ViewState) -> Result<Listing> {
+        authorize(self.engine, Operation::List, &self.slug, headers).await?;
+        if *state.mode() != Mode::List {
+            authorize(self.engine, Operation::Read, &self.slug, headers).await?;
+        }
+        let tz = Tz::from_headers(headers);
+        let state = self.effective_state(state, cols)?;
+        let page = self.engine.list(&self.slug, &self.list_query(&state, cols, &tz)?, false).await?;
+        let shown = self.shown_columns(cols)?;
+        Ok(Listing { state, tz, page, shown })
     }
 
     /// Apply a posted form. See [`Outcome`], and the module docs for the two-handler shape.
@@ -667,6 +672,17 @@ impl<'a> Table<'a> {
         headers: &HeaderMap,
         client_ip: IpAddr,
         body: &[u8],
+        state: &ViewState,
+    ) -> Result<Outcome> {
+        self.submit_posted(headers, client_ip, &Posted::read(headers, body)?, state).await
+    }
+
+    /// [`submit`](Table::submit) of a body already read — `Admin` reads it to find the entity.
+    pub(super) async fn submit_posted(
+        &self,
+        headers: &HeaderMap,
+        client_ip: IpAddr,
+        posted: &Posted,
         state: &ViewState,
     ) -> Result<Outcome> {
         let cols = self.engine.columns(&self.slug)?;
@@ -681,7 +697,7 @@ impl<'a> Table<'a> {
             pins: pins.clone(),
             writes: self.writes(),
         };
-        apply(&surface, &cols, headers, client_ip, body, &state).await
+        apply(&surface, &cols, headers, client_ip, posted, &state).await
     }
 
     /// This view as CSV — the same rows, filters, sort and search, unpaginated, with datetimes in the
@@ -712,7 +728,7 @@ impl<'a> Table<'a> {
         // tells how its values compare.
         out.sort.retain(|(name, _)| {
             cols.iter().any(|c| {
-                render::name_of(c) == name
+                c.name() == name
                     && render::sortable(c)
                     && !matches!(c, Column::Field { write_only: true, .. })
             })
@@ -822,62 +838,65 @@ impl<'a> Table<'a> {
         self.columns
             .iter()
             .map(|want| {
-                cols.iter()
-                    .find(|c| render::name_of(c) == want)
+                find(cols, want)
                     .cloned()
                     .ok_or_else(|| {
                         Error::BadRequest(format!(
                             "crud({}): cannot show column '{want}': no such column or relation \
                              — known: {}",
                             self.slug,
-                            cols.iter().map(render::name_of).collect::<Vec<_>>().join(", ")
+                            cols.iter().map(Column::name).collect::<Vec<_>>().join(", ")
                         ))
                     })
             })
             .collect()
     }
 
-    /// The filter controls for the toolbar and the chips above the table, in one pass — they ask
-    /// the same questions ("what is this filter set to, and what does that value mean?") and the
-    /// answer costs a query.
+    /// The filter controls for the toolbar and the chips above the table. A chip says what a
+    /// filter's value *means*: a relation's cells show labels, so a chip reading "Author: 7" next
+    /// to rows reading "Ada Lovelace" is the table talking about itself in two languages.
     async fn filter_views(
         &self,
         cols: &[Column],
         state: &ViewState,
         tz: &Tz,
     ) -> Result<(Vec<ControlV>, Vec<RangeV>, Vec<Chip>)> {
-        let mut controls = Vec::new();
+        let mut chips = self.set_chips(cols).await?;
+        let ranges = self.range_views(cols, state, tz, &mut chips)?;
+        self.undeclared_chips(cols, state, &mut chips).await?;
+        let controls = self.filter_controls(cols, state, &mut chips).await?;
+        Ok((controls, ranges, chips))
+    }
+
+    /// A set pin narrows the table as much as a single-value one, so it gets a chip too — with
+    /// no ✕, since it isn't the operator's to lift.
+    async fn set_chips(&self, cols: &[Column]) -> Result<Vec<Chip>> {
         let mut chips = Vec::new();
-
-        // A set pin narrows the table as much as a single-value one, so it gets a chip too — with
-        // no ✕, since it isn't the operator's to lift.
         for (name, allowed) in self.applicable_sets(cols)? {
-            let col = cols.iter().find(|c| render::name_of(c) == name);
-            let value = match (col, allowed.is_empty()) {
-                (_, true) => "none".to_string(),
-                (Some(Column::Relation { target, .. }), false) => {
-                    self.labels_of(target, &allowed).await?.join(", ")
-                }
-                (Some(col), false) => {
-                    allowed.iter().map(|v| render::option_label(col, v)).collect::<Vec<_>>().join(", ")
-                }
-                _ => allowed.join(", "),
+            let col = find(cols, &name);
+            let value = match allowed.is_empty() {
+                true => "none".to_string(),
+                false => self.shown_values(col, &allowed).await?.join(", "),
             };
-            chips.push(Chip {
-                label: col.map(render::label_of).unwrap_or_else(|| name.clone()),
-                value,
-                clear_href: None,
-            });
+            chips.push(Chip { label: column_label(col, &name), value, clear_href: None });
         }
+        Ok(chips)
+    }
 
-        // The ranges: two inputs each, and a chip for whichever bounds are in force. A bound the
-        // column can't read (a date that isn't one) applies nothing, so it gets no chip either —
-        // a chip claiming a filter the query isn't using is worse than none.
+    /// The ranges: two inputs each, and a chip for whichever bounds are in force. A bound the
+    /// column can't read (a date that isn't one) applies nothing, so it gets no chip either —
+    /// a chip claiming a filter the query isn't using is worse than none.
+    fn range_views(
+        &self,
+        cols: &[Column],
+        state: &ViewState,
+        tz: &Tz,
+        chips: &mut Vec<Chip>,
+    ) -> Result<Vec<RangeV>> {
         let mut ranges = Vec::new();
         for name in &self.ranges {
             let kind = range_kind(&self.slug, cols, name)?;
-            let col = cols.iter().find(|c| render::name_of(c) == name);
-            let label = col.map(render::label_of).unwrap_or_else(|| name.clone());
+            let label = column_label(find(cols, name), name);
             let (from, to) = state.range_of(name);
             let (lo, hi) = range_bounds(kind, &from, &to, tz);
             let shown = match (lo.is_some(), hi.is_some()) {
@@ -906,33 +925,47 @@ impl<'a> Table<'a> {
                 to,
             });
         }
+        Ok(ranges)
+    }
 
-        // A filter can reach a table without the table declaring a control for it — an `Admin`
-        // shared one, or a hand-written URL. It still narrows what is on screen, so it still needs
-        // a chip: a filtered table that looked unfiltered is how someone concludes their rows are
-        // gone. (`effective_state` has already dropped the ones this entity can't honour.)
+    /// A filter can reach a table without the table declaring a control for it — an `Admin`
+    /// shared one, or a hand-written URL. It still narrows what is on screen, so it still needs
+    /// a chip: a filtered table that looked unfiltered is how someone concludes their rows are
+    /// gone. (`effective_state` has already dropped the ones this entity can't honour.)
+    async fn undeclared_chips(
+        &self,
+        cols: &[Column],
+        state: &ViewState,
+        chips: &mut Vec<Chip>,
+    ) -> Result<()> {
         let declared: Vec<&str> = self.filters.iter().map(|f| f.name.as_str()).collect();
         let undeclared = state.filters.iter().filter(|(n, _)| !declared.contains(&n.as_str()));
         for (name, value) in undeclared {
             if value.is_empty() {
                 continue;
             }
-            let col = cols.iter().find(|c| render::name_of(c) == name);
-            let shown = match col {
-                Some(Column::Relation { target, .. }) => self.label_of(target, value).await?,
-                Some(col) => render::option_label(col, value).to_string(),
-                None => value.clone(),
-            };
+            let col = find(cols, name);
             chips.push(Chip {
-                label: col.map(render::label_of).unwrap_or_else(|| name.clone()),
-                value: shown,
+                label: column_label(col, name),
+                value: self.shown_value(col, value).await?,
                 clear_href: Some(state.href_filter(name, "")),
             });
         }
+        Ok(())
+    }
 
+    /// The declared filters: a chip for each one in force, and a `<select>` for each one that isn't
+    /// pinned.
+    async fn filter_controls(
+        &self,
+        cols: &[Column],
+        state: &ViewState,
+        chips: &mut Vec<Chip>,
+    ) -> Result<Vec<ControlV>> {
+        let mut controls = Vec::new();
         for f in self.applicable_filters(cols)? {
-            let col = cols.iter().find(|c| render::name_of(c) == f.name);
-            let label = col.map(render::label_of).unwrap_or_else(|| f.name.clone());
+            let col = find(cols, &f.name);
+            let label = column_label(col, &f.name);
             let chosen = match &f.fixed {
                 Some(pinned) => pinned.clone(),
                 None => state
@@ -942,17 +975,7 @@ impl<'a> Table<'a> {
                     .map(|(_, v)| v.clone())
                     .unwrap_or_default(),
             };
-
-            // What the value *means*, for the chip: a relation's cells show labels, so a chip
-            // reading "Author: 7" next to rows reading "Ada Lovelace" is the table talking about
-            // itself in two languages.
-            let chosen_label = match (col, chosen.is_empty()) {
-                (Some(Column::Relation { target, .. }), false) => {
-                    self.label_of(target, &chosen).await?
-                }
-                (Some(col), false) => render::option_label(col, &chosen).to_string(),
-                _ => chosen.clone(),
-            };
+            let chosen_label = self.shown_value(col, &chosen).await?;
 
             if !chosen.is_empty() {
                 let pinned = f.fixed.is_some() || f.shared;
@@ -998,50 +1021,34 @@ impl<'a> Table<'a> {
             // selected: with nothing selected the browser shows "all", and the control would claim
             // a filter the table isn't using.
             if !chosen.is_empty() && !options.iter().any(|o| o.selected) {
-                options.push(Opt { value: chosen.clone(), label: chosen_label.clone(), selected: true });
+                options.push(Opt { value: chosen.clone(), label: chosen_label, selected: true });
             }
 
             controls.push(ControlV { name: f.name, label, options });
         }
-        Ok((controls, ranges, chips))
+        Ok(controls)
     }
 
-    /// The labels of several target rows, in the order of `ids` — one lookup, as `label_of`'s.
-    async fn labels_of(&self, target: &str, ids: &[String]) -> Result<Vec<String>> {
-        let q = ListQuery { pk_in: ids.to_vec(), all: true, ..Default::default() };
-        let found = match self.engine.list(target, &q, true).await {
-            Ok(page) => page.data,
-            Err(Error::BadRequest(_)) => Vec::new(),
-            Err(e) => return Err(e),
-        };
-        Ok(ids
-            .iter()
-            .map(|id| {
-                found
-                    .iter()
-                    .find(|it| render::text(Some(&it.id)) == *id)
-                    .map(|it| it.label.clone())
-                    .unwrap_or_else(|| id.clone())
-            })
-            .collect())
+    /// What `values` of the column `col` mean, as its cells show them: a relation's target labels
+    /// (one lookup for the lot), a field's option labels, else the values themselves.
+    async fn shown_values(&self, col: Option<&Column>, values: &[String]) -> Result<Vec<String>> {
+        Ok(match col {
+            Some(Column::Relation { target, .. }) => render::lookup(self.engine, target, values)
+                .await?
+                .into_iter()
+                .map(|(id, label)| label.unwrap_or(id))
+                .collect(),
+            Some(col) => values.iter().map(|v| render::option_label(col, v).to_string()).collect(),
+            None => values.to_vec(),
+        })
     }
 
-    /// One target row's label, for a filter value. `ids=` is an exact primary-key lookup, so this
-    /// costs one row however large the target is.
-    pub(super) async fn label_of(&self, target: &str, value: &str) -> Result<String> {
-        let q = ListQuery {
-            pk_in: vec![value.to_string()],
-            per_page: 1,
-            ..Default::default()
-        };
-        Ok(self
-            .engine
-            .list(target, &q, true)
-            .await?
-            .data
-            .first()
-            .map(|it| it.label.clone())
-            .unwrap_or_else(|| value.to_string()))
+    /// [`shown_values`](Self::shown_values) of one value; blank stays blank.
+    async fn shown_value(&self, col: Option<&Column>, value: &str) -> Result<String> {
+        if value.is_empty() {
+            return Ok(String::new());
+        }
+        Ok(self.shown_values(col, &[value.to_string()]).await?.remove(0))
     }
 
     /// The create/edit dialog for the row the URL names.
@@ -1077,7 +1084,7 @@ impl<'a> Table<'a> {
             &widgets::Presets { initial: &self.initial, sets: &pins.sets },
         )
         .await?;
-        let title = self.title.clone().unwrap_or_else(|| self.slug.clone());
+        let title = self.heading();
         let errors = banner(state, &fields);
         DialogTmpl {
             rejected: state.rejected.is_some(),
@@ -1146,7 +1153,7 @@ impl<'a> Table<'a> {
             })
             .collect();
         DetailTmpl {
-            title: format!("{} #{id}", self.title.clone().unwrap_or_else(|| self.slug.clone())),
+            title: format!("{} #{id}", self.heading()),
             framed: chrome.close.is_some(),
             cancel_href: chrome.close.unwrap_or_default(),
             edit_href: chrome.edit,
@@ -1161,7 +1168,7 @@ impl<'a> Table<'a> {
     /// urlencoded body either way.
     fn import_dialog(&self, cols: &[Column], state: &ViewState, csrf: &str) -> Result<String> {
         ImportTmpl {
-            title: self.title.clone().unwrap_or_else(|| self.slug.clone()),
+            title: self.heading(),
             csrf: csrf.to_string(),
             header: csv_header(cols),
             cancel_href: state.href_list(),
@@ -1191,10 +1198,6 @@ impl<'a> Table<'a> {
         Ok(out)
     }
 
-    fn renders(&self, name: &str) -> bool {
-        renders(&self.fields, &self.omit, name)
-    }
-
     /// The [`fixed_in`](Table::fixed_in) sets, each checked against the entity like a filter: a
     /// column it doesn't have is an error naming it, not a pin silently dropped.
     fn applicable_sets(&self, cols: &[Column]) -> Result<Vec<(String, Vec<String>)>> {
@@ -1222,19 +1225,11 @@ impl<'a> Table<'a> {
         })
     }
 
-    /// Whether the form renders `name`: as [`renders`](Self::renders), except a column pinned to one
-    /// value, which isn't the operator's to change — the write path supplies it.
+    /// Whether the form renders `name`: one of [`fields`](Table::fields) and not
+    /// [`omit`](Table::omit)ted, and not a column pinned to one value, which isn't the operator's
+    /// to change — the write path supplies it.
     fn form_renders(&self, pins: &Pins, name: &str) -> bool {
-        self.renders(name) && !pins.fixes(name)
-    }
-
-    /// Refuse a row the pins leave out, as not found: `?edit=` or `?show=` with another parent's id
-    /// must not open it here.
-    async fn in_view(&self, pins: &Pins, id: &str) -> Result<()> {
-        match self.engine.outside(&self.slug, pins, &[id.to_string()]).await?.is_empty() {
-            true => Ok(()),
-            false => Err(Error::NotFound),
-        }
+        renders(&self.fields, &self.omit, name) && !pins.fixes(name)
     }
 }
 
@@ -1261,4 +1256,9 @@ fn range_bounds(kind: RangeKind, from: &str, to: &str, tz: &Tz) -> (Option<Strin
         }
     };
     (read(from, false), read(to, true))
+}
+
+/// A column's label, or `name` when this entity has no such column (a shared filter's).
+fn column_label(col: Option<&Column>, name: &str) -> String {
+    col.map(render::label_of).unwrap_or_else(|| name.to_string())
 }

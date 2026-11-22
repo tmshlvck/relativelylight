@@ -5,6 +5,7 @@
 use super::render;
 use super::state::ViewState;
 use super::widgets::{self, FieldV};
+use crate::crud::engine::find;
 use crate::crud::{Column, Error, Result};
 
 /// What goes in a form's banner: the cross-field messages, plus any field message naming a column
@@ -35,7 +36,7 @@ pub(crate) fn is_filterable(cols: &[Column], name: &str) -> bool {
 /// `.sort("zone")` would look like it worked.
 pub(crate) fn check_sort(slug: &str, cols: &[Column], sort: &[(String, bool)]) -> Result<()> {
     for (want, _) in sort {
-        match cols.iter().find(|c| render::name_of(c) == want) {
+        match find(cols, want) {
             Some(c) if render::sortable(c) => {}
             Some(_) => {
                 return Err(Error::BadRequest(format!(
@@ -76,11 +77,11 @@ pub(crate) fn check_fields(
     pinned: &[String],
     creating: bool,
 ) -> Result<()> {
-    let known: Vec<&str> = cols.iter().map(render::name_of).collect();
+    let known: Vec<&str> = cols.iter().map(Column::name).collect();
     let read_only: Vec<&str> = cols
         .iter()
         .filter(|c| !widgets::writable(c))
-        .map(render::name_of)
+        .map(Column::name)
         .collect();
 
     for name in only.iter().chain(omit.iter()) {
@@ -104,7 +105,7 @@ pub(crate) fn check_fields(
         let missing: Vec<&str> = cols
             .iter()
             .filter(|c| matches!(c, Column::Field { required: true, read_only: false, .. }))
-            .map(render::name_of)
+            .map(Column::name)
             .filter(|name| !renders(only, omit, name) && !pinned.iter().any(|p| p == name))
             .collect();
         if !missing.is_empty() {
@@ -129,11 +130,12 @@ pub(crate) fn check_initial(
     rendered: &dyn Fn(&str) -> bool,
 ) -> Result<()> {
     for (name, _) in initial {
-        match cols.iter().find(|c| render::name_of(c) == name) {
+        match find(cols, name) {
             Some(c) if widgets::writable(c) && rendered(name) => {}
             Some(_) => {
                 return Err(Error::BadRequest(format!(
-                    "crud({slug}): initial value for '{name}', which this form doesn't show —                      an initial value only pre-fills an input, so the field has to be rendered"
+                    "crud({slug}): initial value for '{name}', which this form doesn't show — \
+                     an initial value only pre-fills an input, so the field has to be rendered"
                 )))
             }
             None => {
@@ -177,8 +179,8 @@ pub(crate) fn range_kind(slug: &str, cols: &[Column], name: &str) -> Result<Rang
     let refuse = |why: &str| {
         Error::BadRequest(format!("crud({slug}): cannot range-filter by '{name}': {why}"))
     };
-    match cols.iter().find(|c| render::name_of(c) == name) {
-        Some(Column::Field { display: Some(d), logical_type: T::Int, .. }) if d.is_datetime() => {
+    match find(cols, name) {
+        Some(c @ Column::Field { logical_type: T::Int, .. }) if c.is_datetime() => {
             Ok(RangeKind::Day)
         }
         Some(Column::Field { logical_type, .. }) => match logical_type {
@@ -200,7 +202,7 @@ pub(crate) fn range_kind(slug: &str, cols: &[Column], name: &str) -> Result<Rang
 pub(crate) fn csv_header(cols: &[Column]) -> String {
     cols.iter()
         .filter(|c| !matches!(c, Column::Field { write_only: true, .. }))
-        .map(render::name_of)
+        .map(Column::name)
         .collect::<Vec<_>>()
         .join(",")
 }

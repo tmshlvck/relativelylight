@@ -301,6 +301,25 @@ pub enum Column {
     },
 }
 
+impl Column {
+    /// The field's or relation's name.
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Column::Field { name, .. } | Column::Relation { name, .. } => name,
+        }
+    }
+
+    /// Whether this is an integer field marked `.datetime()` (Unix seconds).
+    pub(crate) fn is_datetime(&self) -> bool {
+        matches!(self, Column::Field { display: Some(d), .. } if d.is_datetime())
+    }
+}
+
+/// The column named `name`, if `cols` has one.
+pub(crate) fn find<'a>(cols: &'a [Column], name: &str) -> Option<&'a Column> {
+    cols.iter().find(|c| c.name() == name)
+}
+
 /// A list / bulk-delete query. **`#[non_exhaustive]`** — start from
 /// [`Default`](ListQuery::default) and assign what you need, so a field added later (a cursor, say)
 /// doesn't break you.
@@ -465,14 +484,6 @@ pub fn default_label(v: &Value) -> String {
     }
 }
 
-/// URL-safe key string for a JSON scalar.
-pub(crate) fn value_key(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
 
 /// What a model says about the entity as a whole, beyond its [`Column`]s: where its rows have a
 /// page of the app's own, how "+ New" treats it, and a CSS class per row. Reported by
@@ -554,14 +565,16 @@ pub trait Accessor: Send + Sync {
     async fn write_batch(&self, rows: Vec<(Option<String>, Value)>) -> Result<BatchApplied> {
         let mut applied = BatchApplied::default();
         for (i, (pk, body)) in rows.iter().enumerate() {
-            let outcome = match pk {
-                Some(pk) => self.update(pk, body).await.map(|_| false),
-                None => self.create(body).await.map(|_| true),
-            };
-            match outcome {
-                Ok(true) => applied.created += 1,
-                Ok(false) => applied.updated += 1,
-                Err(e) => return Err(Error::BatchRejected(vec![(i, e)])),
+            let reject = |e| Error::BatchRejected(vec![(i, e)]);
+            match pk {
+                Some(pk) => {
+                    self.update(pk, body).await.map_err(reject)?;
+                    applied.updated += 1;
+                }
+                None => {
+                    self.create(body).await.map_err(reject)?;
+                    applied.created += 1;
+                }
             }
         }
         Ok(applied)
@@ -579,6 +592,7 @@ pub struct BatchApplied {
 
 // ===================== The Engine =====================
 
+#[derive(Default)]
 pub struct Engine {
     accessors: BTreeMap<String, Arc<dyn Accessor>>,
     /// The authorization gate for each model, keyed by slug (set at registration; `Open` = ungated).
@@ -616,13 +630,7 @@ impl Engine {
     /// An empty registry. There is no mount path: a [`Table`](crate::crud::Table)-style component renders
     /// links relative to whatever URL the app serves it on, so nothing here needs to know that URL.
     pub fn new() -> Self {
-        Self {
-            accessors: BTreeMap::new(),
-            authz: BTreeMap::new(),
-            observer: None,
-            csrf: None,
-            ui: UiDefaults::default(),
-        }
+        Self::default()
     }
 
     /// The path the app serves [`crud::Picker`](crate::crud::Picker) on. Usually set via
@@ -710,10 +718,6 @@ impl Engine {
         }
     }
 
-    /// The gate governing `slug` (or `None` for an unregistered slug).
-    fn authz_for(&self, slug: &str) -> Option<&Arc<dyn crate::authz::Authz>> {
-        self.authz.get(slug)
-    }
 
     /// The model's gate [`Decision`](crate::authz::Decision) for `op` on this request — an unregistered
     /// slug is `Denied`. Use this over [`permits`](Engine::permits) when the difference between
@@ -725,7 +729,7 @@ impl Engine {
         op: crate::authz::Operation,
         headers: &::http::HeaderMap,
     ) -> crate::authz::Decision {
-        match self.authz_for(slug) {
+        match self.authz.get(slug) {
             Some(gate) => gate.authorize(op, headers).await,
             None => crate::authz::Decision::Denied,
         }
@@ -752,7 +756,7 @@ impl Engine {
         self.accessors.insert(slug, acc);
     }
 
-    /// Every registered slug, in registration order.
+    /// Every registered slug, in alphabetical order.
     pub fn tables(&self) -> Vec<String> {
         self.accessors.keys().cloned().collect()
     }
@@ -765,13 +769,13 @@ impl Engine {
         Ok(self.accessor(slug)?.columns())
     }
 
-    /// The entity's (single) primary-key field name.
     /// What `slug`'s model says about the entity as a whole: its rows' own page, "+ New", a row's
     /// class.
     pub fn meta(&self, slug: &str) -> Result<EntityMeta> {
         Ok(self.accessor(slug)?.meta())
     }
 
+    /// The entity's (single) primary-key field name.
     pub fn pk(&self, slug: &str) -> Result<String> {
         Ok(self.accessor(slug)?.pk())
     }
@@ -863,11 +867,6 @@ impl Engine {
     }
 }
 
-impl Default for Engine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 // ===================== HTTP error mapping =====================
 

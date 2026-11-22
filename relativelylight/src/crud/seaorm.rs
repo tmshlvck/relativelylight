@@ -4,7 +4,7 @@
 use crate::crud::{RowClass, RowCtx};
 use crate::crud::engine::{
     BatchApplied,
-    coerce, default_label, slugify, value_key, Accessor, Cardinality, Column, EntityMeta,
+    coerce, default_label, slugify, Accessor, Cardinality, Column, EntityMeta,
     Error, ListQuery, LogicalType, Page, Result, RowItem, ValidationErrors,
 };
 use async_trait::async_trait;
@@ -36,6 +36,7 @@ impl From<DbErr> for Error {
 }
 
 use super::meta::*;
+use crate::crud::fmt::text;
 
 // ---- Introspection helpers ----
 
@@ -88,10 +89,9 @@ fn table_ref_name(t: &TableRef) -> String {
     }
 }
 
-fn pk_names<E: EntityTrait>() -> Vec<String> {
-    <E::PrimaryKey as Iterable>::iter()
-        .map(|k| k.into_column().as_str().to_string())
-        .collect()
+/// The primary-key column. The crate needs a single-column key, so the first is the key.
+fn pk_column<E: EntityTrait>() -> Option<E::Column> {
+    <E::PrimaryKey as Iterable>::iter().next().map(|k| k.into_column())
 }
 
 fn column<E: EntityTrait>(name: &str) -> Option<E::Column> {
@@ -99,20 +99,8 @@ fn column<E: EntityTrait>(name: &str) -> Option<E::Column> {
 }
 
 fn pk_condition<E: EntityTrait>(pk: &str) -> Result<Condition> {
-    let cols: Vec<E::Column> = <E::PrimaryKey as Iterable>::iter().map(|k| k.into_column()).collect();
-    let parts: Vec<&str> = pk.split(',').collect();
-    if parts.len() != cols.len() {
-        return Err(Error::BadRequest(format!(
-            "expected {} primary-key part(s), got {}",
-            cols.len(),
-            parts.len()
-        )));
-    }
-    let mut cond = Condition::all();
-    for (c, part) in cols.iter().zip(parts) {
-        cond = cond.add(c.eq(str_to_db(c.def().get_column_type(), part)));
-    }
-    Ok(cond)
+    let c = pk_column::<E>().ok_or_else(|| Error::Backend("no primary-key column".into()))?;
+    Ok(Condition::all().add(c.eq(str_to_db(c.def().get_column_type(), pk))))
 }
 
 /// An integer → the ORM value variant matching the column's *actual* width/signedness, so a value
@@ -178,12 +166,7 @@ struct Label {
 impl Label {
     /// The label of a row, as shown.
     fn of(&self, row: &Value) -> String {
-        let part = |c: &String| match row.get(c) {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Null) | None => String::new(),
-            Some(other) => other.to_string(),
-        };
-        self.cols.iter().map(part).collect::<Vec<_>>().join(&self.sep)
+        self.cols.iter().map(|c| text(row.get(c))).collect::<Vec<_>>().join(&self.sep)
     }
 
     /// The same text in SQL, on `table`'s columns: `COALESCE(CAST(c AS TEXT), '')`, joined by `sep`.
@@ -256,15 +239,8 @@ fn key_to_db(v: &Value) -> DbValue {
     } else if v.is_null() {
         DbValue::Int(None)
     } else {
-        DbValue::from(value_key(v))
+        DbValue::from(text(Some(v)))
     }
-}
-
-fn pk_string(pk: &[String], full: &Value) -> String {
-    pk.iter()
-        .map(|c| value_key(full.get(c).unwrap_or(&Value::Null)))
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 // ---- N:M read resolver (typed find_with_related) ----
@@ -279,7 +255,7 @@ const INVERSE_SHOWN: usize = 100;
 
 #[async_trait]
 trait NmResolver: Send + Sync {
-    /// The target rows linked to each source key, as `(value_key(source pk), raw target rows)`.
+    /// The target rows linked to each source key, as `(text(source pk), raw target rows)`.
     async fn read_many(&self, db: &DatabaseConnection, keys: &[Value]) -> Result<Vec<(String, Vec<Value>)>>;
 }
 
@@ -297,7 +273,7 @@ where
     T::Model: Serialize + Send + Sync,
 {
     async fn read_many(&self, db: &DatabaseConnection, keys: &[Value]) -> Result<Vec<(String, Vec<Value>)>> {
-        let Some(c) = <E::PrimaryKey as Iterable>::iter().next().map(|k| k.into_column()) else {
+        let Some(c) = pk_column::<E>() else {
             return Ok(vec![]);
         };
         let mut out = Vec::with_capacity(keys.len());
@@ -306,7 +282,7 @@ where
             let rows = E::find().filter(c.is_in(vals)).find_with_related(self.target).all(db).await?;
             for (src, targets) in rows {
                 let src = serde_json::to_value(&src).unwrap();
-                let key = value_key(src.get(c.as_str()).unwrap_or(&Value::Null));
+                let key = text(src.get(c.as_str()));
                 out.push((key, targets.iter().map(|m| serde_json::to_value(m).unwrap()).collect()));
             }
         }
@@ -319,6 +295,17 @@ struct Nm {
     junction: String,
     source_col: String,
     target_col: String,
+}
+
+impl Nm {
+    /// Delete the junction rows whose source column `sources` matches: this relation's links from
+    /// one row (`|c| c.eq(key)`) or from every row of a subquery.
+    fn unlink(&self, sources: impl FnOnce(Expr) -> Expr) -> sea_orm::sea_query::DeleteStatement {
+        Query::delete()
+            .from_table(Alias::new(&self.junction))
+            .and_where(sources(Expr::col(Alias::new(&self.source_col))))
+            .to_owned()
+    }
 }
 
 // ---- Cross-entity registry (keeps relations resolvable inside the backend) ----
@@ -405,7 +392,8 @@ pub struct MetaModel<E: EntityTrait> {
     fields: Vec<MetaField>,
     relations: Vec<MetaRelation>,
     nm: HashMap<String, Nm>,
-    pk: Vec<String>,
+    /// The primary-key column's name.
+    pk: String,
     /// The entity-wide settings: `view_path`, `picker_create`, `picker_create_fields`, `row_class`.
     meta: EntityMeta,
     entity: E,
@@ -415,7 +403,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
     pub fn new(entity: E) -> Self {
         let table = entity.table_name().to_string();
         let slug = slugify(&table);
-        let pk = pk_names::<E>();
+        let pk = pk_column::<E>().map(|c| c.as_str().to_string()).unwrap_or_default();
 
         let raw = introspect_relations::<E>();
         let fk_cols: Vec<String> = raw.iter().filter(|r| r.owns_fk).map(|r| r.from_col.clone()).collect();
@@ -423,7 +411,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
         let fields = <E::Column as Iterable>::iter()
             .map(|c| {
                 let name = c.as_str().to_string();
-                let is_pk = pk.contains(&name);
+                let is_pk = name == pk;
                 let is_fk = fk_cols.contains(&name);
                 let def = c.def();
                 MetaField {
@@ -463,20 +451,10 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
             .map(|r| MetaRelation {
                 fk_column: r.owns_fk.then(|| r.from_col.clone()),
                 read_only: !r.owns_fk,
-                hidden: false,
-                label: None,
-                description: None,
-                links: None,
-                create: None,
-                picker_threshold: None,
-                searchable: true,
-                name: r.name,
-                target: r.target,
-                cardinality: r.cardinality,
                 owns_fk: r.owns_fk,
                 from_col: r.from_col,
                 to_col: r.to_col,
-                is_nm: false,
+                ..MetaRelation::base(r.name, r.target, r.cardinality)
             })
             .collect();
 
@@ -675,22 +653,9 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
             },
         );
         self.relations.push(MetaRelation {
-            name: other.slug.clone(),
-            target: other.table.clone(),
-            cardinality: Cardinality::ToMany,
-            owns_fk: false,
-            fk_column: None,
-            read_only: false,
-            hidden: false,
-            label: None,
-            description: None,
-            links: None,
-            create: None,
-            picker_threshold: None,
-            searchable: true,
-            from_col: self.pk.first().cloned().unwrap_or_default(),
-            to_col: String::new(),
+            from_col: self.pk.clone(),
             is_nm: true,
+            ..MetaRelation::base(other.slug.clone(), other.table.clone(), Cardinality::ToMany)
         });
         self
     }
@@ -757,12 +722,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
     }
 
     /// Coerce + validate writable scalar fields; split out relation ops (to-one FK / N:M ids).
-    #[allow(clippy::type_complexity)]
-    fn prepare_write(
-        &self,
-        obj: &Map<String, Value>,
-        is_create: bool,
-    ) -> Result<(Vec<(String, Value)>, Vec<(String, Value)>, Vec<(String, Vec<Value>)>)> {
+    fn prepare_write(&self, obj: &Map<String, Value>, is_create: bool) -> Result<Prepared> {
         let mut errs = ValidationErrors::new();
         let (mut scalars, mut to_one, mut nm_ops) = (Vec::new(), Vec::new(), Vec::new());
 
@@ -850,7 +810,9 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
         }
 
         if errs.is_empty() {
-            Ok((scalars, to_one, nm_ops))
+            // The row validator saw the scalars alone; the foreign keys are written as columns too.
+            scalars.extend(to_one);
+            Ok((scalars, nm_ops))
         } else {
             Err(Error::Validation(errs))
         }
@@ -993,6 +955,15 @@ where
             .and_then(|r| r.fk_column.clone())
     }
 
+    /// The column a filter names: a to-one relation's FK, else the column itself. A filter may
+    /// name a *relation* — `filter[zone]=7` on a record table is the FK match its user means,
+    /// spelled in the vocabulary the columns publish, so a caller never has to know the column is
+    /// called `zone_id`.
+    fn filter_column(&self, name: &str) -> Result<E::Column> {
+        let col_name = self.fk_column_of(name).unwrap_or_else(|| name.to_string());
+        column::<E>(&col_name).ok_or_else(|| Error::BadRequest(format!("unknown column: {name}")))
+    }
+
     /// The fields the search box looks in: searchable, and shown (never a hidden or write-only one,
     /// which a search would turn into an oracle on its value).
     fn searchable_fields(&self) -> impl Iterator<Item = &MetaField> {
@@ -1092,12 +1063,7 @@ where
             });
         }
         for (name, val) in &q.eq {
-            // A filter may name a *relation* rather than a column — `filter[zone]=7` on a record table
-            // is the FK match its user means, spelled in the vocabulary `_meta` publishes, so a caller
-            // never has to know the column is called `zone_id`.
-            let col_name = self.fk_column_of(name).unwrap_or_else(|| name.clone());
-            let c = column::<E>(&col_name)
-                .ok_or_else(|| Error::BadRequest(format!("unknown column: {name}")))?;
+            let c = self.filter_column(name)?;
             // An empty value means "no value" — `filter[zone]=` finds the rows with no zone, which an
             // equality can't otherwise express. Clearing a filter in the UI drops the key entirely, so
             // the two stay distinct.
@@ -1114,33 +1080,28 @@ where
             });
         }
         for (name, from, to) in &q.range {
-            let col_name = self.fk_column_of(name).unwrap_or_else(|| name.clone());
-            let c = column::<E>(&col_name)
-                .ok_or_else(|| Error::BadRequest(format!("unknown column: {name}")))?;
-            let ct = c.def().get_column_type().clone();
+            let c = self.filter_column(name)?;
+            let def = c.def();
             if let Some(from) = from {
-                cond = cond.add(c.gte(str_to_db(&ct, from)));
+                cond = cond.add(c.gte(str_to_db(def.get_column_type(), from)));
             }
             if let Some(to) = to {
-                cond = cond.add(c.lte(str_to_db(&ct, to)));
+                cond = cond.add(c.lte(str_to_db(def.get_column_type(), to)));
             }
         }
         for (name, values) in &q.one_of {
-            let col_name = self.fk_column_of(name).unwrap_or_else(|| name.clone());
-            let c = column::<E>(&col_name)
-                .ok_or_else(|| Error::BadRequest(format!("unknown column: {name}")))?;
-            let ct = c.def().get_column_type().clone();
+            let c = self.filter_column(name)?;
+            let def = c.def();
+            let ct = def.get_column_type();
             // An empty set allows nothing. Said outright rather than left to how a backend renders
             // `IN ()`, which is a syntax error on some and "no condition" in a careless builder.
             cond = cond.add(match values.is_empty() {
                 true => Expr::cust("1 = 0"),
-                false => c.is_in(values.iter().map(|v| str_to_db(&ct, v)).collect::<Vec<DbValue>>()),
+                false => c.is_in(values.iter().map(|v| str_to_db(ct, v)).collect::<Vec<DbValue>>()),
             });
         }
         if !q.pk_in.is_empty() {
-            let name = self.model.pk.first().cloned().unwrap_or_default();
-            let c = column::<E>(&name)
-                .ok_or_else(|| Error::BadRequest(format!("unknown column: {name}")))?;
+            let c = pk_column::<E>().ok_or_else(|| Error::Backend("no primary-key column".into()))?;
             let def = c.def();
             let vals: Vec<DbValue> =
                 q.pk_in.iter().map(|v| str_to_db(def.get_column_type(), v)).collect();
@@ -1151,20 +1112,19 @@ where
 
     /// Turn raw model rows into listing items, finished (relations resolved) unless `terse`.
     async fn rows_to_items(&self, rows: &[E::Model], terse: bool, cut: bool) -> Result<Vec<RowItem>> {
-        let pk_col = self.model.pk.first().cloned().unwrap_or_default();
+        let pk_col = &self.model.pk;
         let raws: Vec<Value> = rows.iter().map(|m| serde_json::to_value(m).unwrap()).collect();
         let mut finished = if terse { Vec::new() } else { self.finish_many(&raws, cut).await? }.into_iter();
         Ok(raws
             .iter()
             .map(|raw| RowItem {
-                id: raw.get(&pk_col).cloned().unwrap_or(Value::Null),
+                id: raw.get(pk_col).cloned().unwrap_or(Value::Null),
                 label: (self.model.row_label)(raw),
                 row: finished.next(),
             })
             .collect())
     }
 
-    /// The finished, ready-to-send row: visible scalars (`on_read` applied) + resolved relations.
     /// Coerce + validate one write body into the pieces a row insert/update needs. Pure: no database, so
     /// a batch can run this for every row before opening a transaction.
     fn prepare(&self, body: &Value, is_create: bool) -> Result<Prepared> {
@@ -1172,6 +1132,7 @@ where
         self.model.prepare_write(obj, is_create)
     }
 
+    /// The finished, ready-to-send row: visible scalars (`on_read` applied) + resolved relations.
     async fn finish(&self, raw: &Value) -> Result<Value> {
         Ok(self.finish_many(std::slice::from_ref(raw), true).await?.remove(0))
     }
@@ -1194,11 +1155,11 @@ where
     async fn resolve_many(&self, r: &MetaRelation, raws: &[Value], cut: bool) -> Result<Vec<Value>> {
         let target = self.registry.by_table(&r.target);
         // The distinct non-null keys this relation joins on, in first-seen order.
-        let key_col = if r.is_nm { self.model.pk.first().cloned().unwrap_or_default() } else { r.from_col.clone() };
-        let keys_of = |raw: &Value| raw.get(&key_col).filter(|k| !k.is_null()).cloned();
+        let key_col = if r.is_nm { &self.model.pk } else { &r.from_col };
+        let keys_of = |raw: &Value| raw.get(key_col).filter(|k| !k.is_null()).cloned();
         let mut seen = std::collections::HashSet::new();
         let keys: Vec<Value> =
-            raws.iter().filter_map(keys_of).filter(|k| seen.insert(value_key(k))).collect();
+            raws.iter().filter_map(keys_of).filter(|k| seen.insert(text(Some(k)))).collect();
 
         if r.is_nm {
             let mut by_key: HashMap<String, Vec<Value>> = HashMap::new();
@@ -1210,7 +1171,7 @@ where
             return Ok(raws
                 .iter()
                 .map(|raw| {
-                    let k = keys_of(raw).map(|k| value_key(&k)).unwrap_or_default();
+                    let k = text(keys_of(raw).as_ref());
                     Value::Array(by_key.remove(&k).unwrap_or_default())
                 })
                 .collect());
@@ -1228,13 +1189,13 @@ where
         if r.owns_fk {
             let pk = t.map(|t| t.pk_col()).unwrap_or_default();
             let by_pk: HashMap<String, &Value> =
-                rows.iter().map(|tr| (value_key(tr.get(&pk).unwrap_or(&Value::Null)), tr)).collect();
+                rows.iter().map(|tr| (text(tr.get(&pk)), tr)).collect();
             return Ok(raws
                 .iter()
                 .map(|raw| match keys_of(raw) {
                     None => Value::Null,
                     Some(fk) => {
-                        let id = value_key(&fk);
+                        let id = text(Some(&fk));
                         match by_pk.get(&id) {
                             Some(tr) => link(t, tr),
                             None => json!({ "id": fk, "label": format!("#{id}") }),
@@ -1247,14 +1208,14 @@ where
         // Inverse (has_many / has_one): the target rows whose `to_col` holds this row's `from_col`.
         let mut by_key: HashMap<String, Vec<Value>> = HashMap::new();
         for tr in &rows {
-            let k = value_key(tr.get(&r.to_col).unwrap_or(&Value::Null));
+            let k = text(tr.get(&r.to_col));
             by_key.entry(k).or_default().push(link(t, tr));
         }
         Ok(raws
             .iter()
             .map(|raw| {
                 let mut links =
-                    keys_of(raw).and_then(|k| by_key.get(&value_key(&k)).cloned()).unwrap_or_default();
+                    keys_of(raw).and_then(|k| by_key.get(&text(Some(&k))).cloned()).unwrap_or_default();
                 if r.cardinality == Cardinality::ToOne {
                     return links.into_iter().next().unwrap_or(Value::Null);
                 }
@@ -1268,24 +1229,22 @@ where
             .collect())
     }
 
-    async fn write_nm<C: ConnectionTrait>(&self, db: &C, rel: &str, source_pk: &str, ids: &[Value]) -> Result<()> {
-        let Some(nm) = self.model.nm.get(rel) else {
-            return Ok(());
-        };
+    /// Replace a just-written row's N:M link sets on `db`: for each relation, its junction rows
+    /// from the row deleted, then one inserted per id.
+    async fn write_links<C: ConnectionTrait>(&self, db: &C, full: &Value, links: &[(String, Vec<Value>)]) -> Result<()> {
         use sea_orm::sea_query::ExprTrait; // Expr's comparisons; scoped so it can't shadow serde_json's is_null
-        let src = key_to_db(&json_key(source_pk));
-        let del = Query::delete()
-            .from_table(Alias::new(&nm.junction))
-            .and_where(Expr::col(Alias::new(&nm.source_col)).eq(src.clone()))
-            .to_owned();
-        db.execute(&del).await?;
-        for id in ids {
-            let ins = Query::insert()
-                .into_table(Alias::new(&nm.junction))
-                .columns([Alias::new(&nm.source_col), Alias::new(&nm.target_col)])
-                .values_panic([src.clone().into(), key_to_db(id).into()])
-                .to_owned();
-            db.execute(&ins).await?;
+        let src = key_to_db(full.get(&self.model.pk).unwrap_or(&Value::Null));
+        for (rel, ids) in links {
+            let Some(nm) = self.model.nm.get(rel) else { continue };
+            db.execute(&nm.unlink(|c| c.eq(src.clone()))).await?;
+            for id in ids {
+                let ins = Query::insert()
+                    .into_table(Alias::new(&nm.junction))
+                    .columns([Alias::new(&nm.source_col), Alias::new(&nm.target_col)])
+                    .values_panic([src.clone().into(), key_to_db(id).into()])
+                    .to_owned();
+                db.execute(&ins).await?;
+            }
         }
         Ok(())
     }
@@ -1302,7 +1261,7 @@ where
         &self.model.slug
     }
     fn pk_col(&self) -> String {
-        self.model.pk.first().cloned().unwrap_or_else(|| "id".into())
+        self.model.pk.clone()
     }
     fn label_of(&self, raw: &Value) -> String {
         (self.model.row_label)(raw)
@@ -1316,8 +1275,8 @@ where
         for chunk in vals.chunks(IN_CHUNK) {
             let dbv: Vec<DbValue> = chunk.iter().map(|v| json_to_db(c.def().get_column_type(), v)).collect();
             let mut sel = E::find().filter(c.is_in(dbv));
-            for k in <E::PrimaryKey as Iterable>::iter() {
-                sel = sel.order_by(k.into_column(), Order::Asc);
+            if let Some(pk) = pk_column::<E>() {
+                sel = sel.order_by(pk, Order::Asc);
             }
             out.extend(sel.all(&self.db).await?.iter().map(|m| serde_json::to_value(m).unwrap()));
         }
@@ -1325,9 +1284,9 @@ where
     }
 }
 
-/// One write body, coerced and validated into the pieces a row insert/update needs: scalar columns,
-/// to-one foreign keys, and N:M link sets.
-type Prepared = (Vec<(String, Value)>, Vec<(String, Value)>, Vec<(String, Vec<Value>)>);
+/// One write body, coerced and validated into the pieces a row insert/update needs: its columns
+/// (scalars and to-one foreign keys), and its N:M link sets.
+type Prepared = (Vec<(String, Value)>, Vec<(String, Vec<Value>)>);
 
 /// The write helpers, which need the same bounds as the `Accessor` impl (a default `ActiveModel` to insert
 /// into, and a `Model` that can become one to update).
@@ -1346,16 +1305,11 @@ where
         txn: &sea_orm::DatabaseTransaction,
         prepared: Prepared,
     ) -> Result<Value> {
-        let (scalars, to_one, nm_ops) = prepared;
+        let (columns, links) = prepared;
         let mut am = <E::ActiveModel as Default>::default();
-        set_columns::<E>(&mut am, &scalars)?;
-        set_columns::<E>(&mut am, &to_one)?;
-        let model: E::Model = am.insert(txn).await?;
-        let full = serde_json::to_value(&model).unwrap();
-        let pk = pk_string(&self.model.pk, &full);
-        for (rel, ids) in &nm_ops {
-            self.write_nm(txn, rel, &pk, ids).await?;
-        }
+        set_columns::<E>(&mut am, &columns)?;
+        let full = serde_json::to_value(am.insert(txn).await?).unwrap();
+        self.write_links(txn, &full, &links).await?;
         Ok(full)
     }
 
@@ -1367,22 +1321,16 @@ where
         pk: &str,
         prepared: Prepared,
     ) -> Result<Option<Value>> {
-        let (scalars, to_one, nm_ops) = prepared;
+        let (columns, links) = prepared;
         let Some(model) = E::find().filter(pk_condition::<E>(pk)?).one(txn).await? else {
             return Ok(None);
         };
         let mut am = model.into_active_model();
-        set_columns::<E>(&mut am, &scalars)?;
-        set_columns::<E>(&mut am, &to_one)?;
-        let model: E::Model = am.update(txn).await?;
-        let full = serde_json::to_value(&model).unwrap();
-        let pks = pk_string(&self.model.pk, &full);
-        for (rel, ids) in &nm_ops {
-            self.write_nm(txn, rel, &pks, ids).await?;
-        }
+        set_columns::<E>(&mut am, &columns)?;
+        let full = serde_json::to_value(am.update(txn).await?).unwrap();
+        self.write_links(txn, &full, &links).await?;
         Ok(Some(full))
     }
-
 }
 
 #[async_trait]
@@ -1396,7 +1344,7 @@ where
         &self.model.slug
     }
     fn pk(&self) -> String {
-        self.model.pk.first().cloned().unwrap_or_else(|| "id".into())
+        self.model.pk.clone()
     }
     fn meta(&self) -> EntityMeta {
         self.model.meta.clone()
@@ -1469,8 +1417,8 @@ where
         // tie up to the database, and nothing obliges it to choose the same one for the query that
         // fetches page 1 and the query that fetches page 2. Rows then duplicate across pages and
         // others are never shown at all. Unique key last = every ordering total, every page stable.
-        for k in <E::PrimaryKey as Iterable>::iter() {
-            sel = sel.order_by(k.into_column(), Order::Asc);
+        if let Some(pk) = pk_column::<E>() {
+            sel = sel.order_by(pk, Order::Asc);
         }
         if q.all {
             let rows = sel.all(&self.db).await?;
@@ -1536,17 +1484,17 @@ where
         let txn = self.db.begin().await?;
         let mut applied = BatchApplied::default();
         for (i, (pk, p)) in prepared.into_iter().enumerate() {
-            let outcome = match &pk {
-                Some(pk) => self.update_prepared(&txn, pk, p).await.map(|o| o.map(|_| false)),
-                None => self.insert_prepared(&txn, p).await.map(|_| Some(true)),
-            };
-            match outcome {
-                Ok(Some(true)) => applied.created += 1,
-                Ok(Some(false)) => applied.updated += 1,
-                Ok(None) => {
-                    return Err(Error::BatchRejected(vec![(i, Error::NotFound)]))
+            let reject = |e| Error::BatchRejected(vec![(i, e)]);
+            match &pk {
+                Some(pk) => {
+                    let found = self.update_prepared(&txn, pk, p).await.map_err(reject)?;
+                    found.ok_or_else(|| reject(Error::NotFound))?;
+                    applied.updated += 1;
                 }
-                Err(e) => return Err(Error::BatchRejected(vec![(i, e)])),
+                None => {
+                    self.insert_prepared(&txn, p).await.map_err(reject)?;
+                    applied.created += 1;
+                }
             }
         }
         txn.commit().await?;
@@ -1567,13 +1515,9 @@ where
         // Then delete atomically: clear N:M junction rows, then the row itself.
         let txn = self.db.begin().await?;
         use sea_orm::sea_query::ExprTrait; // Expr's comparisons; scoped so it can't shadow serde_json's is_null
-        let src = key_to_db(&json_key(pk));
+        let src = key_to_db(raw.get(&self.model.pk).unwrap_or(&Value::Null));
         for nm in self.model.nm.values() {
-            let del = Query::delete()
-                .from_table(Alias::new(&nm.junction))
-                .and_where(Expr::col(Alias::new(&nm.source_col)).eq(src.clone()))
-                .to_owned();
-            txn.execute(&del).await?;
+            txn.execute(&nm.unlink(|c| c.eq(src.clone()))).await?;
         }
         let res = E::delete_many().filter(pk_condition::<E>(pk)?).exec(&txn).await?;
         txn.commit().await?;
@@ -1584,15 +1528,15 @@ where
     }
 
     async fn delete_many(&self, q: &ListQuery) -> Result<Vec<Value>> {
-        let pk_c = column::<E>(&self.pk())
-            .ok_or_else(|| Error::Backend("no primary-key column".into()))?;
+        let pk_c = pk_column::<E>().ok_or_else(|| Error::Backend("no primary-key column".into()))?;
+        let cond = self.build_condition(q)?;
 
         // Snapshot the rows *before* the transaction, for the same two reasons the single-row
         // `delete` above does it: `finish` resolves relations through the pool, which would need a
         // second connection while a write transaction holds one (deadlocking a single-connection
         // pool), and once the rows are gone there is nothing left to describe. This is what lets an
         // observer answer "which parent just changed?" for a bulk delete — see `observe::WriteEvent`.
-        let models = E::find().filter(self.build_condition(q)?).all(&self.db).await?;
+        let models = E::find().filter(cond.clone()).all(&self.db).await?;
         let raws: Vec<Value> = models.iter().map(|m| serde_json::to_value(m).unwrap()).collect();
         let deleted = self.finish_many(&raws, true).await?;
 
@@ -1600,18 +1544,10 @@ where
         use sea_orm::sea_query::ExprTrait; // Expr's comparisons; scoped so it can't shadow serde_json's is_null
         // Clear N:M junction rows for the matching source rows (subquery) BEFORE deleting parents.
         for nm in self.model.nm.values() {
-            let sub = E::find()
-                .filter(self.build_condition(q)?)
-                .select_only()
-                .column(pk_c)
-                .into_query();
-            let del = Query::delete()
-                .from_table(Alias::new(&nm.junction))
-                .and_where(Expr::col(Alias::new(&nm.source_col)).in_subquery(sub))
-                .to_owned();
-            txn.execute(&del).await?;
+            let sub = E::find().filter(cond.clone()).select_only().column(pk_c).into_query();
+            txn.execute(&nm.unlink(|c| c.in_subquery(sub))).await?;
         }
-        E::delete_many().filter(self.build_condition(q)?).exec(&txn).await?;
+        E::delete_many().filter(cond).exec(&txn).await?;
         txn.commit().await?;
         Ok(deleted)
     }
@@ -1634,12 +1570,6 @@ where
     if errs.is_empty() { Ok(()) } else { Err(Error::Validation(errs)) }
 }
 
-fn json_key(s: &str) -> Value {
-    match s.parse::<i64>() {
-        Ok(n) => json!(n),
-        Err(_) => json!(s),
-    }
-}
 
 
 /// A tiny entity for the metadata tests: one NOT NULL and one nullable text column, plus a nullable
@@ -1698,7 +1628,7 @@ mod nullable_tests {
     /// Coerce + normalize one write body, returning the scalars that would be written.
     fn scalars(mm: &MetaModel<thing::Entity>, body: Value) -> Vec<(String, Value)> {
         let obj = body.as_object().unwrap().clone();
-        let (scalars, _, _) = mm.prepare_write(&obj, true).expect("no validation errors");
+        let (scalars, _) = mm.prepare_write(&obj, true).expect("no validation errors");
         scalars
     }
 

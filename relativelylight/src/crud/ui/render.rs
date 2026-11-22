@@ -163,6 +163,40 @@ pub(crate) struct Pager {
 
 pub(crate) use crate::crud::text::text;
 
+/// The rows of `target` that `ids` name, in the order of `ids`: each id with its row's label, or
+/// `None` when no row has it. One lookup for the lot — `pk_in` is an exact primary-key match, so
+/// this reads at most as many rows as there are ids. Ungated: the caller decides who may see
+/// labels.
+pub(crate) async fn lookup(
+    engine: &crate::crud::Engine,
+    target: &str,
+    ids: &[String],
+) -> crate::crud::Result<Vec<(String, Option<String>)>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let q = crate::crud::ListQuery { pk_in: ids.to_vec(), all: true, ..Default::default() };
+    let found = match engine.list(target, &q, true).await {
+        Ok(page) => page.data,
+        // `BadRequest`: an id that can't even be a key of the target (text for an integer key).
+        Err(crate::crud::Error::BadRequest(_)) => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    Ok(ids
+        .iter()
+        .map(|id| {
+            let label = found.iter().find(|it| text(Some(&it.id)) == *id).map(|it| it.label.clone());
+            (id.clone(), label)
+        })
+        .collect())
+}
+
+/// One row's label ([`lookup`]), or `id` itself when no row has it.
+pub(crate) async fn label(engine: &crate::crud::Engine, target: &str, id: &str) -> crate::crud::Result<String> {
+    let found = lookup(engine, target, &[id.to_string()]).await?;
+    Ok(found.into_iter().next().and_then(|(_, label)| label).unwrap_or_else(|| id.to_string()))
+}
+
 /// How `col` shows a stored `value`: its option label (`MetaField::option_labels`), else the
 /// value itself. Display only — what is posted, linked and exported stays `value`.
 pub(crate) fn option_label<'a>(col: &'a Column, value: &'a str) -> &'a str {
@@ -183,7 +217,7 @@ pub(crate) fn cell(
     tz: &Tz,
     links: Option<&Links>,
 ) -> Cell {
-    let name = name_of(col);
+    let name = col.name();
     let raw = row.get(name);
     if let Some((f, headers)) = fmt {
         return Cell::Raw(f.call(&FmtCtx::new(raw.unwrap_or(&Value::Null), row, headers)));
@@ -196,11 +230,9 @@ pub(crate) fn cell(
             Cell::Bool(raw.and_then(Value::as_bool))
         }
         // An int column flagged `datetime` holds Unix seconds: render it in the caller's zone.
-        Column::Field { display: Some(d), .. } if d.is_datetime() => match raw.and_then(Value::as_i64)
-        {
-            Some(secs) => Cell::Text(tz.format(secs)),
-            None => Cell::Text(String::new()),
-        },
+        Column::Field { .. } if col.is_datetime() => {
+            Cell::Text(raw.and_then(Value::as_i64).map(|secs| tz.format(secs)).unwrap_or_default())
+        }
         Column::Field { .. } => Cell::Text(option_label(col, &text(raw)).to_string()),
         // The backend already resolved relations to `{id, label}` — there is nothing to fetch.
         Column::Relation { cardinality: Cardinality::ToOne, .. } => {
@@ -238,12 +270,6 @@ pub(crate) fn format_view(col: &Column) -> Option<&Fmt> {
     }
 }
 
-pub(crate) fn name_of(col: &Column) -> &str {
-    match col {
-        Column::Field { name, .. } | Column::Relation { name, .. } => name,
-    }
-}
-
 pub(crate) fn label_of(col: &Column) -> String {
     match col {
         Column::Field { name, label, .. } | Column::Relation { name, label, .. } => {
@@ -258,21 +284,22 @@ pub(crate) fn sortable(col: &Column) -> bool {
     }
 }
 
-/// Every row of the page, with its edit link — and its View link from `show`, if it has one.
-/// `formatted`: the request the fields' `format_cell` and the entity's `row_class` render for;
-/// `None` shows every value plain and classes no row (a picker's list, where a click chooses the
-/// row and a link in a cell would leave the form).
-#[allow(clippy::too_many_arguments)] // one page's context, passed straight through
-pub(crate) fn rows(
-    page: &Page,
-    cols: &[Column],
-    formatted: Option<&HeaderMap>,
-    row_class: Option<&crate::crud::RowClass>,
-    state: &ViewState,
-    tz: &Tz,
-    show: Option<&dyn Fn(&str) -> String>,
-    links: Option<&Links>,
-) -> Vec<RowV> {
+/// What dresses a page's rows beyond their values. [`Default`] is none of it: every value plain,
+/// no class, no View link, no relation links — a picker's list, where a click chooses the row and
+/// a link in a cell would leave the form.
+#[derive(Default)]
+pub(crate) struct Decor<'a> {
+    /// The request the fields' `format_cell` and the entity's `row_class` render for; `None`
+    /// shows every value plain and classes no row.
+    pub formatted: Option<&'a HeaderMap>,
+    pub row_class: Option<&'a crate::crud::RowClass>,
+    /// Each row's View link, from its id.
+    pub show: Option<&'a dyn Fn(&str) -> String>,
+    pub links: Option<&'a Links>,
+}
+
+/// Every row of the page, with its edit link, dressed as `decor` says.
+pub(crate) fn rows(page: &Page, cols: &[Column], state: &ViewState, tz: &Tz, decor: &Decor) -> Vec<RowV> {
     page.data
         .iter()
         .map(|item| {
@@ -280,16 +307,17 @@ pub(crate) fn rows(
             let row = item.row.clone().unwrap_or(Value::Null);
             RowV {
                 edit_href: state.href_edit(&id),
-                show_href: show.map(|f| f(&id)).unwrap_or_default(),
-                class: row_class
-                    .zip(formatted)
+                show_href: decor.show.map(|f| f(&id)).unwrap_or_default(),
+                class: decor
+                    .row_class
+                    .zip(decor.formatted)
                     .and_then(|(f, h)| f.call(&crate::crud::RowCtx::new(&row, h)))
                     .unwrap_or_default(),
                 cells: cols
                     .iter()
                     .map(|c| {
-                        let fmt = formatted.and_then(|h| format_cell(c).map(|f| (f, h)));
-                        cell(c, &row, fmt, tz, links)
+                        let fmt = decor.formatted.and_then(|h| format_cell(c).map(|f| (f, h)));
+                        cell(c, &row, fmt, tz, decor.links)
                     })
                     .collect(),
                 label: item.label.clone(),
@@ -305,7 +333,7 @@ pub(crate) fn heads(cols: &[Column], state: &ViewState) -> Vec<HeadV> {
     let sorted_already = !state.sort.is_empty();
     cols.iter()
         .map(|c| {
-            let name = name_of(c);
+            let name = c.name();
             let rank = state.sort.iter().position(|(col, _)| col == name);
             let desc = rank.map(|i| state.sort[i].1).unwrap_or(false);
             HeadV {

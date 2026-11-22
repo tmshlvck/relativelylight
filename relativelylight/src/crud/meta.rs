@@ -291,15 +291,6 @@ impl MetaField {
         }
     }
 
-    /// Attach a string [validator](crate::validate) — sugar over setting [`validate`](Self::validate)
-    /// via [`validate::field::str_field`](crate::validate::field::str_field):
-    ///
-    /// ```ignore
-    /// use relativelylight::validate;
-    /// model.field("value").validate_str(validate::ipv4);
-    /// model.field("target").validate_str(validate::all_of(vec![
-    ///     Box::new(validate::non_empty), Box::new(validate::fqdn)]));
-    /// ```
     /// The membership error for an enum column, if the submitted value isn't one of [`options`]. `None`
     /// when the column is not an enumeration, or the value is `null` (absence is
     /// [`required`](MetaField::required)'s business, not this one).
@@ -358,6 +349,15 @@ impl MetaField {
         self
     }
 
+    /// Attach a string [validator](crate::validate) — sugar over setting [`validate`](Self::validate)
+    /// via [`validate::field::str_field`](crate::validate::field::str_field):
+    ///
+    /// ```ignore
+    /// use relativelylight::validate;
+    /// model.field("value").validate_str(validate::ipv4);
+    /// model.field("target").validate_str(validate::all_of(vec![
+    ///     Box::new(validate::non_empty), Box::new(validate::fqdn)]));
+    /// ```
     pub fn validate_str<F>(&mut self, f: F) -> &mut Self
     where
         F: Fn(&str) -> std::result::Result<(), String> + Send + Sync + 'static,
@@ -378,8 +378,7 @@ impl MetaField {
     }
 }
 
-/// A relation of an entity (config the user may tweak via `MetaModel::relation`).
-/// Per-relation config. **`#[non_exhaustive]`** — reach one through
+/// A relation of an entity, as the app configures it. **`#[non_exhaustive]`** — reach one through
 /// [`MetaModel::relation`](crate::crud::MetaModel::relation) and assign, as with [`MetaField`].
 #[non_exhaustive]
 pub struct MetaRelation {
@@ -409,6 +408,29 @@ pub struct MetaRelation {
 }
 
 impl MetaRelation {
+    /// A relation with every setting at its default: writable, shown, searchable, owning no FK and
+    /// joining on no column — what introspection and [`relate`](super::MetaModel::relate) start from.
+    pub(super) fn base(name: String, target: String, cardinality: Cardinality) -> Self {
+        Self {
+            name,
+            target,
+            cardinality,
+            owns_fk: false,
+            fk_column: None,
+            read_only: false,
+            hidden: false,
+            searchable: true,
+            label: None,
+            description: None,
+            links: None,
+            create: None,
+            picker_threshold: None,
+            from_col: String::new(),
+            to_col: String::new(),
+            is_nm: false,
+        }
+    }
+
     /// Link this relation's labels to their rows (a dialog with the row, and Edit), or not —
     /// whatever `Crud::picker_view` says for the rest. `true` turns it on for this relation alone,
     /// with the app-wide switch off; `false` keeps it off here while it is on elsewhere. Either way

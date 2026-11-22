@@ -49,11 +49,10 @@ pub(crate) async fn apply(
     cols: &[Column],
     headers: &HeaderMap,
     client_ip: IpAddr,
-    body: &[u8],
+    posted: &Posted,
     state: &ViewState,
 ) -> Result<Outcome> {
-    let posted = Posted::read(headers, body)?;
-    let op = Op::of(&posted)?;
+    let op = Op::of(posted)?;
     if !s.engine.csrf_ok(headers, posted.one("_csrf")) {
         return Err(Error::Csrf);
     }
@@ -63,99 +62,51 @@ pub(crate) async fn apply(
     authorize(s.engine, op.operation(), s.slug, headers).await?;
 
     let tz = Tz::from_headers(headers);
-    let mut anchor = String::new();
-    let mut done: Option<Done> = None;
-    // Every row a delete removed, whichever of the three delete paths it took — see
-    // `observe::WriteEvent::before_rows`. Empty for anything that is not a delete.
-    let mut gone: Vec<Value> = Vec::new();
-    let (before, after, key) = match &op {
+    // The one error that isn't an error: re-render the dialog with the messages and the operator's
+    // input still in it.
+    let reject = |errors: ValidationErrors, mode: Mode| {
+        Ok(Outcome::Invalid(state.with_rejection(errors, posted.values(), mode)))
+    };
+    let applied = match &op {
         Op::Create | Op::Update => {
+            let creating = matches!(op, Op::Create);
             let id = posted.one("_id").unwrap_or("").to_string();
-            let mut write_body = decode::to_write_body(cols, s.renders, &posted, &tz);
-            if matches!(op, Op::Update) {
-                // The edit form doesn't render a create-only field; whatever was posted for one is
-                // dropped rather than refused, so a stale or hand-made form still saves the rest.
-                if let Some(body) = write_body.as_object_mut() {
-                    for c in cols {
-                        if let Column::Field { name, create_only: true, .. } = c {
-                            body.remove(name);
-                        }
-                    }
-                }
-            }
-            s.pins.apply(&mut write_body, cols, &tz);
-            if matches!(op, Op::Update) {
-                in_view(s, &id).await?;
-            }
-            let mode = if matches!(op, Op::Create) {
-                Mode::New
-            } else {
-                Mode::Edit(id.clone())
-            };
-            // A set pin refuses a value outside it the way a validator would: beside the field,
-            // with the operator's input kept. Checked before the backend sees the body, so a
-            // write that would move a row out of the view never happens.
-            let outside = s.pins.refusals(&write_body, cols, matches!(op, Op::Create));
-            if !outside.is_empty() {
-                let mut errors = ValidationErrors::new();
-                for (name, message) in outside {
-                    errors.field(&name, message);
-                }
-                return Ok(Outcome::Invalid(state.with_rejection(errors, posted.values(), mode)));
-            }
-            let unknown = unknown_references(s.engine, cols, &write_body, &posted).await?;
-            if !unknown.is_empty() {
-                return Ok(Outcome::Invalid(state.with_rejection(unknown, posted.values(), mode)));
-            }
-            let outcome = match &op {
-                Op::Create => s.engine.create(s.slug, &write_body).await.map(|row| (None, row)),
-                _ => {
-                    let before = s.engine.get(s.slug, &id).await.ok();
-                    s.engine.update(s.slug, &id, &write_body).await.map(|row| (before, row))
-                }
-            };
-            match outcome {
-                Ok((before, row)) => {
-                    anchor = render::text(row.get(&s.engine.pk(s.slug)?));
-                    (before, Some(row), Some(anchor.clone()))
-                }
-                // The one error that isn't an error: re-render the dialog with the messages and the
-                // operator's input still in it.
-                Err(Error::Validation(errors)) => {
-                    return Ok(Outcome::Invalid(state.with_rejection(
-                        errors,
-                        posted.values(),
-                        mode,
-                    )))
-                }
-                Err(e) => return Err(e),
+            let mode = if creating { Mode::New } else { Mode::Edit(id.clone()) };
+            match save(s, cols, posted, &tz, creating, &id).await {
+                Err(Error::Validation(errors)) => return reject(errors, mode),
+                other => other?,
             }
         }
         Op::DeleteOne(id) => {
-            in_view(s, id).await?;
+            in_view(s.engine, s.slug, &s.pins, id).await?;
             let row = s.engine.delete(s.slug, id).await?;
-            done = Some(Done::Deleted(1));
-            // Also as `before_rows`, so an observer reads one field for every delete.
-            gone = vec![row.clone()];
-            (Some(row), None, Some(id.clone()))
-        }
-        Op::DeleteSelected => {
-            let ids: Vec<String> = posted.all("ids").iter().map(|s| s.to_string()).collect();
-            if ids.is_empty() {
-                return Ok(Outcome::Done(format!("?{}", state.to_query())));
+            Applied {
+                // Also as `gone`, so an observer reads one field for every delete.
+                gone: vec![row.clone()],
+                before: Some(row),
+                after: None,
+                key: Some(id.clone()),
+                done: Some(Done::Deleted(1)),
             }
-            let mut q = s.query.clone();
-            q.pk_in = ids;
-            gone = s.engine.delete_where(s.slug, &q).await?;
-            done = Some(Done::Deleted(gone.len() as u64));
-            (None, Some(serde_json::json!({ "deleted": gone.len() })), None)
         }
-        Op::DeleteAll => {
+        Op::DeleteSelected | Op::DeleteAll => {
             let mut q = s.query.clone();
-            q.all = true; // this view's filters still apply — the button says "matching"
-            gone = s.engine.delete_where(s.slug, &q).await?;
-            done = Some(Done::Deleted(gone.len() as u64));
-            (None, Some(serde_json::json!({ "deleted": gone.len() })), None)
+            if matches!(op, Op::DeleteAll) {
+                q.all = true; // this view's filters still apply — the button says "matching"
+            } else {
+                q.pk_in = posted.all("ids").iter().map(|s| s.to_string()).collect();
+                if q.pk_in.is_empty() {
+                    return Ok(Outcome::Done(format!("?{}", state.to_query())));
+                }
+            }
+            let gone = s.engine.delete_where(s.slug, &q).await?;
+            Applied {
+                before: None,
+                after: Some(serde_json::json!({ "deleted": gone.len() })),
+                key: None,
+                done: Some(Done::Deleted(gone.len() as u64)),
+                gone,
+            }
         }
         Op::Import => {
             // The file the operator chose, read as bytes on the server — or, if they pasted
@@ -166,11 +117,7 @@ pub(crate) async fn apply(
                     Err(why) => {
                         let mut errors = ValidationErrors::new();
                         errors.general(why);
-                        return Ok(Outcome::Invalid(state.with_rejection(
-                            errors,
-                            posted.values(),
-                            Mode::Import,
-                        )));
+                        return reject(errors, Mode::Import);
                     }
                 },
                 None => posted.one("csv").unwrap_or("").to_string(),
@@ -186,33 +133,122 @@ pub(crate) async fn apply(
                 values.insert("csv".to_string(), vec![text]);
                 return Ok(Outcome::Invalid(state.with_rejection(errors, values, Mode::Import)));
             }
-            done = Some(Done::Imported {
-                created: report.get("created").and_then(Value::as_u64).unwrap_or(0),
-                updated: report.get("updated").and_then(Value::as_u64).unwrap_or(0),
-            });
-            (None, Some(report), None)
+            Applied {
+                done: Some(Done::Imported {
+                    created: report.get("created").and_then(Value::as_u64).unwrap_or(0),
+                    updated: report.get("updated").and_then(Value::as_u64).unwrap_or(0),
+                }),
+                before: None,
+                after: Some(report),
+                key: None,
+                gone: Vec::new(),
+            }
         }
     };
-    notify(s.engine, op.operation(), s.slug, key.as_deref(), before.as_ref(), after.as_ref(), &gone, headers, client_ip)
+    s.engine
+        .observe(crate::observe::WriteEvent {
+            source: "autocrud",
+            op: op.operation(),
+            entity: s.slug,
+            key: applied.key.clone(),
+            before: applied.before,
+            after: applied.after,
+            before_rows: &applied.gone,
+            actor: None, // the gate resolved the caller; `crud` never names one
+            headers,
+            client_ip,
+        })
         .await;
 
     // Back to the list the write came from: the view's own query, plus either a one-shot report of
     // what happened or an anchor onto the row that changed.
     let mut target = format!("?{}", state.to_query());
-    if let Some(done) = done {
+    if let Some(done) = applied.done {
         let separator = if target.ends_with('?') { "" } else { "&" };
         target.push_str(&format!("{separator}done={}", done.query()));
     }
-    if !anchor.is_empty() {
-        target.push_str(&format!("#row-{anchor}"));
+    // A saved row is still on the list; a deleted one isn't.
+    let saved = applied.key.filter(|k| matches!(op, Op::Create | Op::Update) && !k.is_empty());
+    if let Some(key) = saved {
+        target.push_str(&format!("#row-{key}"));
     }
     Ok(Outcome::Done(target))
 }
 
-/// Refuse a one-row write to a row the surface's pinned filters leave out — a `404`, as the row
-/// isn't there as far as this view is concerned.
-async fn in_view(s: &Surface<'_>, id: &str) -> Result<()> {
-    match s.engine.outside(s.slug, &s.pins, &[id.to_string()]).await?.is_empty() {
+/// What a write did: for the observer, and for the redirect back to the list.
+struct Applied {
+    before: Option<Value>,
+    after: Option<Value>,
+    /// Every row a delete removed, whichever of the three delete paths it took — see
+    /// `observe::WriteEvent::before_rows`. Empty for anything that is not a delete.
+    gone: Vec<Value>,
+    /// The row written or deleted; a saved one is also the anchor the redirect scrolls to.
+    key: Option<String>,
+    done: Option<Done>,
+}
+
+/// A create (`creating`) or an update of row `id`, from the posted form. A refusal beside the
+/// fields — a value outside a set pin, a relation naming no row, the engine's own validation — is
+/// `Err(Error::Validation)`, which [`apply`] turns into the re-rendered dialog.
+async fn save(
+    s: &Surface<'_>,
+    cols: &[Column],
+    posted: &Posted,
+    tz: &Tz,
+    creating: bool,
+    id: &str,
+) -> Result<Applied> {
+    let mut write_body = decode::to_write_body(cols, s.renders, posted, tz);
+    if !creating {
+        // The edit form doesn't render a create-only field; whatever was posted for one is
+        // dropped rather than refused, so a stale or hand-made form still saves the rest.
+        if let Some(body) = write_body.as_object_mut() {
+            for c in cols {
+                if let Column::Field { name, create_only: true, .. } = c {
+                    body.remove(name);
+                }
+            }
+        }
+    }
+    s.pins.apply(&mut write_body, cols, tz);
+    if !creating {
+        in_view(s.engine, s.slug, &s.pins, id).await?;
+    }
+    // A set pin refuses a value outside it the way a validator would: beside the field, with the
+    // operator's input kept. Checked before the backend sees the body, so a write that would move
+    // a row out of the view never happens.
+    let outside = s.pins.refusals(&write_body, cols, creating);
+    if !outside.is_empty() {
+        let mut errors = ValidationErrors::new();
+        for (name, message) in outside {
+            errors.field(&name, message);
+        }
+        return Err(Error::Validation(errors));
+    }
+    let unknown = unknown_references(s.engine, cols, &write_body, posted).await?;
+    if !unknown.is_empty() {
+        return Err(Error::Validation(unknown));
+    }
+    let (before, row) = match creating {
+        true => (None, s.engine.create(s.slug, &write_body).await?),
+        false => {
+            let before = s.engine.get(s.slug, id).await.ok();
+            (before, s.engine.update(s.slug, id, &write_body).await?)
+        }
+    };
+    let key = render::text(row.get(&s.engine.pk(s.slug)?));
+    Ok(Applied { before, after: Some(row), gone: Vec::new(), key: Some(key), done: None })
+}
+
+/// Refuse a row a view's pins leave out — a `404`, as the row isn't there as far as this view is
+/// concerned: a one-row write, or `?edit=`/`?show=` with another parent's id.
+pub(crate) async fn in_view(
+    engine: &Engine,
+    slug: &str,
+    pins: &crate::crud::text::Pins,
+    id: &str,
+) -> Result<()> {
+    match engine.outside(slug, pins, &[id.to_string()]).await?.is_empty() {
         true => Ok(()),
         false => Err(Error::NotFound),
     }
@@ -241,7 +277,11 @@ async fn unknown_references(
         if ids.is_empty() {
             continue;
         }
-        let missing = missing_ids(engine, target, &ids).await?;
+        let missing: Vec<String> = render::lookup(engine, target, &ids)
+            .await?
+            .into_iter()
+            .filter_map(|(id, label)| label.is_none().then_some(id))
+            .collect();
         if !missing.is_empty() {
             // A to-one says what was typed; a to-many names the ids, since nothing was typed.
             let shown = match cardinality {
@@ -252,23 +292,6 @@ async fn unknown_references(
         }
     }
     Ok(errors)
-}
-
-/// Those of `ids` that name no row of `target`, in order — the check behind "no tag matches '99'",
-/// shared with [`RelationField::read`](super::RelationField::read). One lookup for the lot: `pk_in`
-/// is an exact primary-key match, so this reads at most as many rows as were posted.
-pub(crate) async fn missing_ids(engine: &Engine, target: &str, ids: &[String]) -> Result<Vec<String>> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let q = ListQuery { pk_in: ids.to_vec(), all: true, ..Default::default() };
-    let found: Vec<String> = match engine.list(target, &q, true).await {
-        Ok(page) => page.data.iter().map(|it| render::text(Some(&it.id))).collect(),
-        // `BadRequest`: an id that can't even be a key of the target (text for an integer key).
-        Err(Error::BadRequest(_)) => Vec::new(),
-        Err(e) => return Err(e),
-    };
-    Ok(ids.iter().filter(|id| !found.contains(id)).cloned().collect())
 }
 
 /// An uploaded file's bytes as CSV text: a UTF-8 BOM (what a spreadsheet writes) is dropped, and
@@ -364,34 +387,6 @@ pub(crate) async fn authorize(
         Decision::NeedsLogin => Err(Error::Unauthorized),
         Decision::Denied => Err(Error::Forbidden),
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn notify(
-    engine: &Engine,
-    op: Operation,
-    entity: &str,
-    key: Option<&str>,
-    before: Option<&Value>,
-    after: Option<&Value>,
-    before_rows: &[Value],
-    headers: &HeaderMap,
-    client_ip: IpAddr,
-) {
-    engine
-        .observe(crate::observe::WriteEvent {
-            source: "autocrud",
-            op,
-            entity,
-            key: key.map(str::to_string),
-            before: before.cloned(),
-            after: after.cloned(),
-            before_rows,
-            actor: None, // the gate resolved the caller; `crud` never names one
-            headers,
-            client_ip,
-        })
-        .await;
 }
 
 /// The hidden `_csrf` value, or empty when this engine enforces no token. The **cookie** must already

@@ -101,7 +101,7 @@ impl<'a> Admin<'a> {
         self
     }
 
-    /// Append every registered entity, in registration order, with default `Table` config.
+    /// Append every registered entity, in alphabetical order of slug, with default `Table` config.
     pub fn entities(mut self) -> Self {
         for slug in self.engine.tables() {
             self.items.push(AdminItem::Entity(Table::new(self.engine, slug)));
@@ -168,7 +168,7 @@ impl<'a> Admin<'a> {
             Some(slug) => self.table(&slug).ok_or(Error::NotFound)?,
             None => self.active(state)?,
         };
-        match table.submit(headers, client_ip, body, &self.table_state(state)).await? {
+        match table.submit_posted(headers, client_ip, &posted, &self.table_state(state)).await? {
             // Re-rendered through this panel, which needs to know the entity again.
             Outcome::Invalid(mut rejected) => {
                 rejected.entity = state.entity.clone();
@@ -238,7 +238,7 @@ impl<'a> Admin<'a> {
             .iter()
             .map(|item| match item {
                 AdminItem::Entity(t) => NavV::Entity {
-                    label: t.title.clone().unwrap_or_else(|| t.slug.clone()),
+                    label: t.heading(),
                     // A nav link carries a filter only if this panel *shares* it and the entity it
                     // points at has a column for it. Everything else — a table's own filter, a
                     // shared one the target knows nothing about — stays behind: a link that
