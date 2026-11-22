@@ -388,7 +388,8 @@ The rejection paths are pinned by `cargo test --all-features`, which drives the 
 in-memory SQLite:
 
 - **`auth/security_tests.rs`** — sessions (expired, idle, half-authenticated, deactivated, forged and
-  bearer-presented tokens all resolve to anonymous), login, TOTP and its replay guard, recovery codes,
+  bearer-presented tokens all resolve to anonymous), login, TOTP and its replay guard, recovery codes
+  (and break-glass clearing them),
   the profile and manager pages, re-authentication, the password policy, lockout (including the proxy
   flag, the whitelist, a locked key ignoring further failures and a lock that ran out counting
   again), the accounts panel's search, filters and sort never reaching a secret, session rotation and revocation, CSRF on every unsafe route, the gate
@@ -412,10 +413,12 @@ in-memory SQLite:
 - **`auth/sso_tests.rs`** (feature `sso`) — the OIDC callback against a **fake IdP** on a loopback
   port (real discovery, real RSA signatures): missing or forged state, wrong key, audience, issuer,
   nonce, an expired token, missing claims, auto-registration off, disabled, local and
-  other-provider accounts. Re-authentication through the provider: a confirmation is needed, works
+  other-provider accounts; a sign-in rotates the CSRF token. Re-authentication through the provider: a confirmation is needed, works
   once and expires; it is refused as another account, as an account the site doesn't have (which it
   doesn't register), for a session that ended, and in strict mode without a recent `auth_time`; it
   needs a session to start, and a restricted one can make one.
+- **`csrf.rs`** — the token found in a header, a urlencoded body (after a bare key too) and a
+  multipart body; a wrong, missing or oversized one refused.
 - **`crud/gate_tests.rs`** — every UI write asks its gate with the right `Operation` and a refused one
   never reaches the backend; CSRF on every write.
 

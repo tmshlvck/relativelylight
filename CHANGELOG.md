@@ -326,6 +326,23 @@ is easy to miss in a diff.
 
 ### Fixed
 
+- **Break-glass left the recovery codes valid.** `auth::reset_admin_access` discarded the TOTP
+  enrolment but kept the account's recovery codes and replay guard, so an old code still passed the
+  second step after the admin re-enrolled. It now clears both, in the same write.
+- **The SSO callback didn't rotate the CSRF token**, unlike every other way in. It does now.
+- **`csrf::enforce` refused a valid form with a bare key** (`flag&_csrf=…`): it stopped reading the
+  body at the first pair without `=`.
+- **The password policy missed a run that started at a turn**: `2123456` passed the "no run of six"
+  check. It is refused now.
+- **A manager turning someone's 2FA off** is audited with `"by"`, like the other manager actions,
+  and every manager event names the account by its id rather than by the URL's spelling of it.
+- **Tall View and Import dialogs scroll** inside themselves, as the edit dialog does.
+- **The View dialog shows an empty value as the table does** (blank, not "—"), and the picker's
+  search waits and submits on Enter like the table's.
+- **A text primary key containing a comma** can be viewed and edited (it was split as if composite);
+  `"1,2"` against an integer key is a `404` rather than a `400`.
+- **The "initial value … isn't shown" error** is one line (it carried a run of spaces).
+
 - **Links carry only what the operator chose**
   ([CRUD.md → The URL is the view](docs/CRUD.md#the-url-is-the-view)): a table's default sort and
   page size and its pinned filters no longer appear in its links, its redirects or the toolbar

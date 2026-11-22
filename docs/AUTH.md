@@ -271,8 +271,8 @@ Three helpers with deliberately different blast radii
 - **`make_admin`** is the **boot-time seeder** (what the examples call on every start): idempotent, and
   it never strips an existing admin's `is_active` flag or authenticator.
 - **`reset_admin_access`** is **break-glass recovery**, for an operator-invoked `--set-admin-pw` flag:
-  it re-activates the account and **discards its TOTP enrolment** so a locked-out admin can get back in
-  and re-enrol from `/profile`. Destructive by design — don't call it on every start. It **refuses an
+  it re-activates the account and **discards its TOTP enrolment**, its recovery codes and the replay
+  guard with it, so a locked-out admin can get back in and re-enrol from `/profile`. Destructive by design — don't call it on every start. It **refuses an
   SSO account** (`Err` naming the provider); point break-glass at a local username instead.
 
 Re-enabling a disabled *non-admin* account stays an explicit `is_active` edit (e.g. in the admin UI).
@@ -451,7 +451,7 @@ engine:
 | adding or removing one of your passkeys (§5l): `Create` / `Delete` on `auth_passkey`; removing your password | `auth-profile` |
 | a manager's reset (`POST /profile/{id}`), a manager removing someone's passkeys | `auth-admin` |
 | turning your 2FA on or off: `{"totp_enabled": true}` / `false` on `auth_user` | `auth-profile` |
-| a manager turning someone's 2FA off | `auth-admin` |
+| a manager turning someone's 2FA off: `{"by": "<manager>", "totp_enabled": false}` | `auth-admin` |
 | a completed sign-in, by any way in: `{"signed_in": "password+totp"}` on `auth_user`, the session's method (§5m) | `auth-login` |
 
 Each event carries the headers, the resolved `client_ip`, **`actor`** (the username who acted — read
@@ -608,7 +608,8 @@ a session **id** happens inside a POST handler that already owns its response.
 **Rotation on privilege gain.** Password login always mints a new row with a server-generated id, and
 confirming the second factor issues **another new id** and deletes the half-authenticated one, so a
 planted session cookie is never elevated by the victim's own login
-([why](AUTH-SECURITY.md#sessions-and-cookies)). The CSRF token rotates with it.
+([why](AUTH-SECURITY.md#sessions-and-cookies)). The CSRF token rotates with it, on every way in:
+password, second factor, passkey and the SSO callback.
 
 **A password change signs out everything else** ([why](AUTH-SECURITY.md#sessions-and-cookies)).
 `POST /profile` mints one fresh session for the caller and **deletes every other session they hold**,
