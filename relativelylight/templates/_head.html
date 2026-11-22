@@ -1,0 +1,9 @@
+{#- One column header (`render::HeadV`, as `h`): a link cycling the sort when the column is
+    sortable, and "+" adding it as a secondary key once something is sorted. -#}
+<th aria-sort="{{ h.aria }}">
+  {%- match h.sort_href %}
+  {%- when Some with (href) %}<a class="text-body text-decoration-none" href="{{ href }}">{{ h.label }}{{ h.mark }}</a>
+  {%- when None %}{{ h.label }}
+  {%- endmatch %}
+  {%- match h.add_href %}{% when Some with (href) %} <a href="{{ href }}" class="rl-add text-muted text-decoration-none" title="Add as a secondary sort key">+</a>{% when None %}{% endmatch %}
+</th>

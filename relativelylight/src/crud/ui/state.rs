@@ -194,7 +194,7 @@ impl ViewState {
     }
 
     /// The **list** state as a query string, no leading `?`: everything except the dialog (`new` /
-    /// `edit` / `import`), `format`, and the one-shot `imported` report — so it is also the URL a
+    /// `edit` / `import`), `format`, and the one-shot `done` report — so it is also the URL a
     /// finished write returns to.
     pub fn to_query(&self) -> String {
         urlform::query(&self.pairs())
@@ -328,10 +328,7 @@ impl ViewState {
     pub(crate) fn href_import(&self) -> String {
         self.href(&[("import", "1")])
     }
-    /// This view with the import report cleared — where the alert's dismiss link points.
-    pub(crate) fn href_dismiss(&self) -> String {
-        self.href_list()
-    }
+
     pub(crate) fn href_edit(&self, id: &str) -> String {
         self.href(&[("edit", id)])
     }
@@ -343,13 +340,9 @@ impl ViewState {
     pub(crate) fn href_csv(&self) -> String {
         self.href(&[("format", "csv"), ("page", ""), ("per_page", "")])
     }
+    /// This view with `filter[name]` set to `value` (cleared when empty), from the first page.
     pub(crate) fn href_filter(&self, name: &str, value: &str) -> String {
-        let mut pairs = self.pairs();
-        pairs.retain(|(k, _)| k != &format!("filter[{name}]") && k != "page");
-        if !value.is_empty() {
-            pairs.push((format!("filter[{name}]"), value.to_string()));
-        }
-        format!("?{}", urlform::query(&pairs))
+        self.href(&[(&format!("filter[{name}]"), value), ("page", "")])
     }
 
     /// The link a sortable header points at. Clicking cycles ascending → descending → unsorted on

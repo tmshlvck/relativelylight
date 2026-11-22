@@ -1,0 +1,14 @@
+{#- One value as `render::cell` shaped it, wherever a row is shown: a table's cell, a picker's, the
+    View dialog's. Expects `cell` (a `Cell`) and `pick_for`: a picker row's id, whose text is a
+    `<label>` for the row's radio or checkbox, else empty. `Cell::Raw` is a field formatter's output
+    (`MetaField::format_cell` / `format_view`) — the one place app-supplied HTML is inserted
+    verbatim. -#}
+{%- match cell %}
+{%- when Cell::Text with (s) %}{% if pick_for.is_empty() %}{{ s }}{% else %}<label class="d-block" for="pick-{{ pick_for }}">{{ s }}</label>{% endif %}
+{%- when Cell::Bool with (Some(true)) %}<span class="badge text-bg-success">Yes</span>
+{%- when Cell::Bool with (Some(false)) %}<span class="badge text-bg-danger">No</span>
+{%- when Cell::Bool with (None) %}<span class="text-muted">—</span>
+{%- when Cell::Badges with (labels) %}{% for l in labels %}<span class="badge text-bg-secondary">{{ l }}</span> {% endfor %}
+{%- when Cell::Links with { links, badges } %}{% include "_links.html" %}
+{%- when Cell::Raw with (html) %}{{ html|safe }}
+{%- endmatch -%}

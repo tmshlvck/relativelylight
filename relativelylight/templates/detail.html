@@ -1,7 +1,8 @@
 {#- One row, read-only (`?show=7`, or bare inside a picker's dialog for a linked row): every published column, including the ones a form never shows —
     a generated id, a hook-stamped `created_at`, a column the listing leaves out. The
-    values come from the same renderer as the table's cells, so a datetime is in the caller's zone,
-    a relation shows its label, a bool shows its badge, and a `Table::format` closure applies. -#}
+    values come from the same renderer and template as the table's cells, so a datetime is in the
+    caller's zone, a relation shows its label, a bool shows its badge, and the field's
+    `MetaField::format_view` applies. -#}
 {%- if framed %}
 <dialog open class="rl-dialog">
   <div class="card">
@@ -17,19 +18,11 @@
       {%- when None %}
       {%- endmatch %}
       <dl class="row mb-0">
+        {%- let pick_for = "" %}
         {%- for f in fields %}
         <dt class="col-sm-4 text-body-secondary fw-normal">{{ f.label }}</dt>
-        <dd class="col-sm-8">
-          {%- match f.value %}
-          {%- when Cell::Text with (s) %}{% if s.is_empty() %}<span class="text-body-tertiary">—</span>{% else %}{{ s }}{% endif %}
-          {%- when Cell::Bool with (Some(true)) %}<span class="badge text-bg-success">Yes</span>
-          {%- when Cell::Bool with (Some(false)) %}<span class="badge text-bg-danger">No</span>
-          {%- when Cell::Bool with (None) %}<span class="text-body-tertiary">—</span>
-          {%- when Cell::Badges with (labels) %}{% for l in labels %}<span class="badge text-bg-secondary">{{ l }}</span> {% endfor %}
-          {%- when Cell::Links with { links, badges } %}{% include "_links.html" %}
-          {%- when Cell::Raw with (html) %}{{ html|safe }}
-          {%- endmatch -%}
-        </dd>
+        {%- let cell = f.value %}
+        <dd class="col-sm-8">{% include "_cell.html" %}</dd>
         {%- endfor %}
       </dl>
     </div>

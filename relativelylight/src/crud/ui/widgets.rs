@@ -188,27 +188,11 @@ async fn within(
         }
         Column::Relation { target, .. } => {
             let chosen = relation_values(name, row, state, presets);
-            let labels = match engine.permits(target, Operation::List, rel.headers).await {
-                true => {
-                    let q = ListQuery { pk_in: set.to_vec(), all: true, ..Default::default() };
-                    match engine.list(target, &q, true).await {
-                        Ok(page) => page.data,
-                        Err(crate::crud::Error::BadRequest(_)) => Vec::new(),
-                        Err(e) => return Err(e),
-                    }
-                }
-                false => Vec::new(),
-            };
-            set.iter()
-                .map(|id| Opt {
-                    selected: chosen.contains(id),
-                    label: labels
-                        .iter()
-                        .find(|it| super::render::text(Some(&it.id)) == *id)
-                        .map(|it| it.label.clone())
-                        .unwrap_or_else(|| id.clone()),
-                    value: id.clone(),
-                })
+            let listable = engine.permits(target, Operation::List, rel.headers).await;
+            labelled(engine, target, set, listable)
+                .await?
+                .into_iter()
+                .map(|(value, label)| Opt { selected: chosen.contains(&value), label, value })
                 .collect()
         }
     };
@@ -403,27 +387,32 @@ async fn chosen_options(
     if let Some(linked) = linked {
         return Ok(linked);
     }
-    let opt = |value: String, label: String| Opt { value, label, selected: true };
-    if ids.is_empty() || !listable {
-        return Ok(ids.iter().map(|id| opt(id.clone(), id.clone())).collect());
-    }
-    let q = ListQuery { pk_in: ids.to_vec(), all: true, ..Default::default() };
-    let found = match engine.list(target, &q, true).await {
-        Ok(page) => page.data,
-        // An id that can't be a key of the target (text for an integer key): the write check
-        // reports it beside the field; here it just shows as typed.
-        Err(crate::crud::Error::BadRequest(_)) => Vec::new(),
-        Err(e) => return Err(e),
+    // An id that names no row (or can't be a key of the target): the write check reports it beside
+    // the field; here it just shows as typed.
+    Ok(labelled(engine, target, ids, listable)
+        .await?
+        .into_iter()
+        .map(|(value, label)| Opt { value, label, selected: true })
+        .collect())
+}
+
+/// `(id, label)` for each of `ids`: the target row's label when the caller may list the target
+/// (`listable`), else — and for an id that names no row — the id itself.
+async fn labelled(
+    engine: &Engine,
+    target: &str,
+    ids: &[String],
+    listable: bool,
+) -> Result<Vec<(String, String)>> {
+    let found = match listable {
+        true => super::render::lookup(engine, target, ids).await?,
+        false => ids.iter().map(|id| (id.clone(), None)).collect(),
     };
-    Ok(ids
-        .iter()
-        .map(|id| {
-            let label = found
-                .iter()
-                .find(|it| super::render::text(Some(&it.id)) == *id)
-                .map(|it| it.label.clone())
-                .unwrap_or_else(|| id.clone());
-            opt(id.clone(), label)
+    Ok(found
+        .into_iter()
+        .map(|(id, label)| {
+            let label = label.unwrap_or_else(|| id.clone());
+            (id, label)
         })
         .collect())
 }

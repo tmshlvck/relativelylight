@@ -4,7 +4,6 @@ use super::checks::render_err;
 use super::decode::Posted;
 use super::render;
 use super::widgets::{self, FieldV, Widget};
-use super::write::missing_ids;
 use crate::crud::engine::find;
 use crate::crud::{Cardinality, Column, Engine, Error, Result, ValidationErrors};
 use askama::Template;
@@ -201,7 +200,11 @@ impl<'a> RelationField<'a> {
     pub async fn read(&self, headers: &HeaderMap, body: &[u8]) -> Result<Vec<String>> {
         let (target, ..) = self.column()?;
         let ids = self.posted(headers, body)?;
-        let missing = missing_ids(self.engine, &target, &ids).await?;
+        let missing: Vec<String> = render::lookup(self.engine, &target, &ids)
+            .await?
+            .into_iter()
+            .filter_map(|(id, label)| label.is_none().then_some(id))
+            .collect();
         if !missing.is_empty() {
             let mut errors = ValidationErrors::new();
             errors.field(self.input_name(), format!("no {target} matches '{}'", missing.join("', '")));

@@ -1,0 +1,24 @@
+{#- Under a listing: the total, the page, the page sizes on offer (`per_page_options`, empty for
+    none) and the pager's links (`render::Pager`, as `pager`). -#}
+<div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+  <small class="text-muted">
+    Total: {{ pager.total }}
+    {%- if pager.pages > 1 %} · Page {{ pager.page }} / {{ pager.pages }}{% endif %}
+    {%- if !per_page_options.is_empty() %} · Rows:
+      {%- for o in per_page_options %}
+      {% if o.active %}<strong>{{ o.label }}</strong>{% else %}<a href="{{ o.href }}">{{ o.label }}</a>{% endif %}
+      {%- endfor %}
+    {%- endif %}
+  </small>
+  {%- if !pager.links.is_empty() %}
+  <nav aria-label="Pagination">
+    <ul class="pagination pagination-sm mb-0">
+      {%- for l in pager.links %}
+      <li class="page-item{% if l.active %} active{% endif %}{% if l.disabled %} disabled{% endif %}">
+        <a class="page-link" href="{{ l.href }}">{{ l.label }}</a>
+      </li>
+      {%- endfor %}
+    </ul>
+  </nav>
+  {%- endif %}
+</div>

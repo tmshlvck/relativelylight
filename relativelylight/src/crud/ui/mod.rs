@@ -72,7 +72,7 @@ pub(crate) use checks::{
     banner, check_fields, check_initial, check_sort, check_widgets, csv_header, is_filterable,
     range_kind, render_err, renders, RangeKind,
 };
-pub(crate) use write::{apply, authorize, csrf_token, Surface, Writes};
+pub(crate) use write::{apply, authorize, csrf_token, in_view, Surface, Writes};
 
 
 /// The stylesheet the components need beyond Bootstrap 5 (mostly `<dialog>`).

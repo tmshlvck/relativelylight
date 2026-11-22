@@ -5,10 +5,10 @@ use super::decode::Posted;
 use super::state::ViewState;
 use super::widgets::{self, FieldV, Widget};
 use super::{
-    apply, banner, check_fields, check_initial, check_widgets, csrf_token, render_err, renders,
-    Outcome, Surface, Writes,
+    apply, authorize, banner, check_fields, check_initial, check_widgets, csrf_token, render_err,
+    renders, Outcome, Surface, Writes,
 };
-use crate::authz::{Decision, Operation};
+use crate::authz::Operation;
 use crate::crud::{Engine, Error, ListQuery, Result};
 use crate::time::Tz;
 use askama::Template;
@@ -196,11 +196,7 @@ impl<'a> Form<'a> {
     /// `?saved=1` in your redirect target shows the saved message.
     pub async fn render_for(&self, headers: &HeaderMap, state: &ViewState) -> Result<String> {
         let op = if self.edit_id.is_some() { Operation::Update } else { Operation::Create };
-        match self.engine.decide(&self.slug, op, headers).await {
-            Decision::Allow => {}
-            Decision::NeedsLogin => return Err(Error::Unauthorized),
-            Decision::Denied => return Err(Error::Forbidden),
-        }
+        authorize(self.engine, op, &self.slug, headers).await?;
         let cols = self.engine.columns(&self.slug)?;
         check_widgets(&self.slug, &cols)?;
         check_fields(&self.slug, &cols, &self.fields, &self.omit, &[], self.edit_id.is_none())?;
@@ -261,8 +257,9 @@ impl<'a> Form<'a> {
         body: &[u8],
         state: &ViewState,
     ) -> Result<Outcome> {
+        let posted = Posted::read(headers, body)?;
         if let Some(id) = &self.edit_id {
-            if Posted::read(headers, body)?.one("_id") != Some(id.as_str()) {
+            if posted.one("_id") != Some(id.as_str()) {
                 return Err(Error::BadRequest(format!(
                     "crud::Form({}): the posted row is not the one this form edits",
                     self.slug
@@ -287,7 +284,7 @@ impl<'a> Form<'a> {
                 import: false,
             },
         };
-        match apply(&surface, &cols, headers, client_ip, body, state).await? {
+        match apply(&surface, &cols, headers, client_ip, &posted, state).await? {
             Outcome::Done(to) => Ok(Outcome::Done(match &self.redirect {
                 // `to` is `?…#row-{id}` — the id is what a redirect template wants.
                 Some(url) => url.replace("{id}", to.rsplit("#row-").next().unwrap_or_default()),
