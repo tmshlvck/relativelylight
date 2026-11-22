@@ -37,7 +37,7 @@ const DEFAULT_COOKIE: &str = "rl_csrf";
 pub(crate) fn random_token() -> String {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).expect("the OS random source failed");
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    crate::hex(&bytes)
 }
 
 /// Constant-time byte comparison (the length is not secret — tokens are fixed-width). Shared with

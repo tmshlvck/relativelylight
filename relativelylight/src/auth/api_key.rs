@@ -192,21 +192,7 @@ pub fn hash(raw: &str) -> String {
 
 /// A fresh raw key: `prefix` and [`BODY_LEN`] OS-random alphanumerics.
 fn fresh(prefix: &str) -> String {
-    // Rejection sampling, as for recovery codes: a byte at or above the largest multiple of the
-    // alphabet's length is redrawn, so every character is exactly uniform.
-    let limit = (256 / ALPHABET.len() * ALPHABET.len()) as u8;
-    let mut out = String::with_capacity(prefix.len() + BODY_LEN);
-    out.push_str(prefix);
-    while out.len() < prefix.len() + BODY_LEN {
-        let mut buf = [0u8; 32];
-        getrandom::fill(&mut buf).expect("the OS random source failed");
-        for b in buf {
-            if b < limit && out.len() < prefix.len() + BODY_LEN {
-                out.push(ALPHABET[b as usize % ALPHABET.len()] as char);
-            }
-        }
-    }
-    out
+    format!("{prefix}{}", super::random_chars(ALPHABET, BODY_LEN))
 }
 
 /// Mint a key for `user_id` and return its row and the raw key, which exists **only** in this return
@@ -511,64 +497,33 @@ pub(super) async fn mint_submit(
     req: Parts,
     crate::middleware::RealIp(client_ip): crate::middleware::RealIp,
     Form(form): Form<MintForm>,
-) -> Response {
+) -> Result<Response, Response> {
     let Some(cfg) = inner.api_keys.clone() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return Err(StatusCode::NOT_FOUND.into_response());
     };
-    let (who, user, csrf) = match super::self_post(&inner, &req, form.csrf.as_deref()).await {
-        Ok(v) => v,
-        Err(res) => return res,
-    };
+    let cx = super::self_post(&inner, &req, form.csrf.as_deref()).await?;
     // A restricted session (below the sign-in policy, §5m) can't mint: a key would carry the account
     // past the policy for good.
-    if inner.restricted(&who) {
+    if inner.restricted(&cx.who) {
         let msg = "Add the second factor this site needs before creating an API key.";
-        return super::profile_reply(
-            &inner,
-            (&who, &user, &csrf, &req),
-            StatusCode::FORBIDDEN,
-            Err(msg),
-        )
-        .await;
+        return Err(cx.reply(StatusCode::FORBIDDEN, Err(msg)).await);
     }
-    if let Err(msg) = inner.reauth(&user, &who, &form.reauth).await {
-        return super::profile_reply(
-            &inner,
-            (&who, &user, &csrf, &req),
-            StatusCode::FORBIDDEN,
-            Err(&msg),
-        )
-        .await;
+    if let Err(msg) = inner.reauth(&cx.user, &cx.who, &form.reauth).await {
+        return Err(cx.reply(StatusCode::FORBIDDEN, Err(&msg)).await);
     }
     let now = super::now_secs();
     let fields =
         clean_name(&form.name).and_then(|n| clean_expiry(&form.expires_days, now).map(|e| (n, e)));
     let (name, expires_at) = match fields {
         Ok(v) => v,
-        Err(msg) => {
-            return super::profile_reply(
-                &inner,
-                (&who, &user, &csrf, &req),
-                StatusCode::BAD_REQUEST,
-                Err(msg),
-            )
-            .await
-        }
+        Err(msg) => return Err(cx.reply(StatusCode::BAD_REQUEST, Err(msg)).await),
     };
-    let (key, raw) = match mint(&inner.db, user.id, cfg.prefix(), &name, expires_at).await {
+    let (key, raw) = match mint(&inner.db, cx.user.id, cfg.prefix(), &name, expires_at).await {
         Ok(v) => v,
         Err(e) => {
-            inner
-                .report("auth-api-key", "key mint", &e, client_ip)
-                .await;
+            inner.report("auth-api-key", "key mint", &e, client_ip).await;
             let msg = "Could not create the key.";
-            return super::profile_reply(
-                &inner,
-                (&who, &user, &csrf, &req),
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Err(msg),
-            )
-            .await;
+            return Err(cx.reply(StatusCode::INTERNAL_SERVER_ERROR, Err(msg)).await);
         }
     };
     // Never the key or its hash: an audit table is readable, and a credential in it would be a leak.
@@ -576,7 +531,7 @@ pub(super) async fn mint_submit(
         .notify_event(super::Event {
             source: "auth-profile",
             op: crate::authz::Operation::Create,
-            actor: &who.username,
+            actor: &cx.who.username,
             entity: "auth_api_key",
             key: Some(key.id.to_string()),
             before: None,
@@ -586,7 +541,7 @@ pub(super) async fn mint_submit(
         })
         .await;
     let frag = super::pages::api_key_minted_html(&key.name, &raw);
-    inner.page(&who, &frag, &req).into_response()
+    Ok(inner.page(&cx.who, &frag, &req).into_response())
 }
 
 use super::CsrfOnlyForm as RevokeForm;
@@ -599,25 +554,22 @@ pub(super) async fn revoke_submit(
     crate::middleware::RealIp(client_ip): crate::middleware::RealIp,
     Path(id): Path<String>,
     Form(form): Form<RevokeForm>,
-) -> Response {
+) -> Result<Response, Response> {
     if inner.api_keys.is_none() {
-        return StatusCode::NOT_FOUND.into_response();
+        return Err(StatusCode::NOT_FOUND.into_response());
     }
-    let (who, user, csrf) = match super::self_post(&inner, &req, form.csrf.as_deref()).await {
-        Ok(v) => v,
-        Err(res) => return res,
-    };
+    let cx = super::self_post(&inner, &req, form.csrf.as_deref()).await?;
     let gone = match id.parse::<i32>() {
-        Ok(id) => revoke(&inner.db, user.id, id).await,
+        Ok(id) => revoke(&inner.db, cx.user.id, id).await,
         Err(_) => Ok(None),
     };
-    let (status, error, success) = match gone {
+    match gone {
         Ok(Some(key)) => {
             inner
                 .notify_event(super::Event {
                     source: "auth-profile",
                     op: crate::authz::Operation::Delete,
-                    actor: &who.username,
+                    actor: &cx.who.username,
                     entity: "auth_api_key",
                     key: Some(key.id.to_string()),
                     before: Some(describe(&key)),
@@ -626,39 +578,15 @@ pub(super) async fn revoke_submit(
                     client_ip,
                 })
                 .await;
-            (
-                StatusCode::OK,
-                None,
-                Some(format!("Key “{}” revoked.", key.name)),
-            )
+            let msg = format!("Key “{}” revoked.", key.name);
+            Ok(cx.reply(StatusCode::OK, Ok(&msg)).await)
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Some("No such key.".to_string()),
-            None,
-        ),
+        Ok(None) => Err(cx.reply(StatusCode::NOT_FOUND, Err("No such key.")).await),
         Err(e) => {
-            inner
-                .report("auth-api-key", "key revoke", &e, client_ip)
-                .await;
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Some("Could not revoke the key.".to_string()),
-                None,
-            )
+            inner.report("auth-api-key", "key revoke", &e, client_ip).await;
+            Err(cx.reply(StatusCode::INTERNAL_SERVER_ERROR, Err("Could not revoke the key.")).await)
         }
-    };
-    let page = super::profile_page(
-        &inner,
-        &who,
-        &user,
-        error.as_deref(),
-        success.as_deref(),
-        &csrf,
-        &req,
-    )
-    .await;
-    (status, page).into_response()
+    }
 }
 
 /// A key as the audit trail sees it: label, prefix, expiry. Never the hash.
@@ -680,9 +608,8 @@ impl Auth {
     /// ```
     ///
     /// [`identify_key`](Auth::identify_key) works with or without this, for keys an app mints itself.
-    pub fn api_keys(mut self, keys: ApiKeys) -> Self {
-        Arc::get_mut(&mut self.inner).unwrap().api_keys = Some(keys);
-        self
+    pub fn api_keys(self, keys: ApiKeys) -> Self {
+        self.with(|i| i.api_keys = Some(keys))
     }
 
     /// The caller behind an **API key**: its owner's [`Identity`], with the groups they hold now, and

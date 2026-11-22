@@ -107,6 +107,33 @@ impl Method {
     }
 }
 
+/// A second factor added to a session's first step, for [`Method::plus`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Second {
+    Totp,
+    Recovery,
+    Passkey,
+}
+
+impl Method {
+    /// The method a session authenticated by `self` stands for once it adds `second`; `None` when the
+    /// pair isn't a way to sign in (a passkey after a passkey or after SSO, anything after a method
+    /// that already has its second factor).
+    pub(crate) fn plus(self, second: Second) -> Option<Method> {
+        use Method as M;
+        Some(match (self, second) {
+            (M::Password, Second::Totp) => M::PasswordTotp,
+            (M::Password, Second::Recovery) => M::PasswordRecovery,
+            (M::Password, Second::Passkey) => M::PasswordPasskey,
+            (M::Passkey, Second::Totp) => M::PasskeyTotp,
+            (M::Passkey, Second::Recovery) => M::PasskeyRecovery,
+            (M::Sso, Second::Totp) => M::SsoTotp,
+            (M::Sso, Second::Recovery) => M::SsoRecovery,
+            _ => return None,
+        })
+    }
+}
+
 impl Model {
     /// How this session was authenticated; `None` for a row from before the column existed.
     pub fn method(&self) -> Option<Method> {

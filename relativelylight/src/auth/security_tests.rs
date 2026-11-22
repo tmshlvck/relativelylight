@@ -316,7 +316,7 @@ async fn create_session_row_seen(
     last_seen_at: i64,
     awaiting_totp: bool,
 ) -> String {
-    let token = new_token();
+    let token = crate::csrf::random_token();
     session::ActiveModel {
         id: Set(token.clone()),
         user_id: Set(user_id),
@@ -4134,7 +4134,9 @@ async fn enabling_and_disabling_2fa_is_audited_and_a_refused_attempt_is_not() {
     assert_eq!(events.take(), vec![], "a refused disable is no event");
     fx.post(&path, &reauth_form(&[]), Some(&admin)).await;
     assert!(fx.row("alice").await.totp_secret.is_none());
-    assert_eq!(events.take(), vec![("auth-admin", "admin".into(), id, off.into())]);
+    // Every manager action names its manager in `by`, as the reset and the passkey removal do.
+    let by_admin = r#"{"by":"admin","totp_enabled":false}"#;
+    assert_eq!(events.take(), vec![("auth-admin", "admin".into(), id, by_admin.into())]);
 }
 
 // ===================== Passkeys: the schema (phase 1) =====================
@@ -4161,7 +4163,7 @@ async fn passkey_row(db: &DatabaseConnection, user_id: i32, credential_id: &str)
 
 /// A challenge row for `user_id`, expiring at `expires_at`; returns its id.
 async fn challenge_row(db: &DatabaseConnection, user_id: Option<i32>, expires_at: i64) -> String {
-    let id = new_token();
+    let id = crate::csrf::random_token();
     passkey::challenge::ActiveModel {
         id: Set(id.clone()),
         purpose: Set("login".into()),

@@ -27,7 +27,7 @@ use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrai
 pub const SET_SIZE: usize = 10;
 
 /// Characters in a code. Crockford-style: no `I`, `L`, `O` or `U`, so nothing is misread as `1`/`0` and
-/// no code can spell an unfortunate word. 32 symbols → 5 bits each.
+/// no code can spell an unfortunate word. 30 symbols → log2(30) ≈ 4.9 bits each.
 const ALPHABET: &[u8] = b"abcdefghjkmnpqrstvwxyz23456789";
 /// Characters per code. 10 × log2(30) ≈ 49 bits — far beyond guessing, short enough to retype.
 const CODE_LEN: usize = 10;
@@ -97,17 +97,7 @@ pub fn display(code: &str) -> String {
 
 /// A fresh set of [`SET_SIZE`] codes, in the plaintext form to show the user **once**.
 fn fresh_codes() -> Vec<String> {
-    // Rejection sampling over OS-random bytes: a byte at or above the largest multiple of the
-    // alphabet's length is redrawn, so every character is exactly uniform.
-    let limit = (256 / ALPHABET.len() * ALPHABET.len()) as u8;
-    let pick = || loop {
-        let mut b = [0u8; 1];
-        getrandom::fill(&mut b).expect("the OS random source failed");
-        if b[0] < limit {
-            return ALPHABET[b[0] as usize % ALPHABET.len()] as char;
-        }
-    };
-    (0..SET_SIZE).map(|_| (0..CODE_LEN).map(|_| pick()).collect()).collect()
+    (0..SET_SIZE).map(|_| super::random_chars(ALPHABET, CODE_LEN)).collect()
 }
 
 /// Issue a new set for `user_id`, **replacing** any existing one, and return the plaintext codes to

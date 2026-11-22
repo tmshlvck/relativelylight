@@ -383,7 +383,7 @@ impl FilePart<'_> {
         match self.inner.pull(self.state.max_bytes).await {
             Ok(Some(chunk)) => Ok(Some(chunk)),
             Ok(None) => {
-                self.sha256 = Some(hex(&self.inner.hasher.clone().finalize()));
+                self.sha256 = Some(crate::hex(&self.inner.hasher.clone().finalize()));
                 Ok(None)
             }
             Err(e) => {
@@ -417,8 +417,4 @@ impl FilePart<'_> {
 
 fn malformed(e: multer::Error) -> UploadError {
     UploadError::Malformed(e.to_string())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
