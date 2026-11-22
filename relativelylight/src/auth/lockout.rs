@@ -164,10 +164,9 @@ pub mod ip_entity {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-/// The locked-accounts table for an accounts panel (feature `crud`): the counter and its time
+/// The locked-accounts table for an accounts panel: the counter and its time
 /// read-only, so the one thing an operator does is delete a row, which is the unlock. Show it with
 /// `Table::create(false).edit(false)`; a row made by hand would lock someone out.
-#[cfg(feature = "crud")]
 pub fn username_meta_model() -> crate::crud::seaorm::MetaModel<username_entity::Entity> {
     use sea_orm::IdenStatic;
     use username_entity::Column as C;
@@ -178,7 +177,6 @@ pub fn username_meta_model() -> crate::crud::seaorm::MetaModel<username_entity::
 }
 
 /// The locked-addresses table for an accounts panel; see [`username_meta_model`].
-#[cfg(feature = "crud")]
 pub fn ip_meta_model() -> crate::crud::seaorm::MetaModel<ip_entity::Entity> {
     use ip_entity::Column as C;
     use sea_orm::IdenStatic;
@@ -188,7 +186,6 @@ pub fn ip_meta_model() -> crate::crud::seaorm::MetaModel<ip_entity::Entity> {
     m
 }
 
-#[cfg(feature = "crud")]
 fn counter_fields<E: sea_orm::EntityTrait>(
     m: &mut crate::crud::seaorm::MetaModel<E>,
     failures: &str,

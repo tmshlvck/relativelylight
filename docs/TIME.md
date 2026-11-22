@@ -54,7 +54,7 @@ three in the caller's zone, all three on the server.
 `ChronoUnixTimestamp` (SeaORM's `sea_orm::prelude`) is a `DateTime<Utc>` in Rust and a `BIGINT` of
 seconds in the database: date arithmetic in Rust without hand-rolled `i64` maths, and nothing changes
 in the schema or for the crate, which reads it as the integer it is. It serializes as that integer
-through SeaORM's `serde` feature, which the `crud` feature turns on. Use seconds, not
+through SeaORM's `serde` feature, which the crate turns on. Use seconds, not
 `ChronoUnixTimestampMillis`: `.datetime()` reads seconds. A plain `i64` field works the same.
 
 ### Calendar dates: a native `DATE`

@@ -185,7 +185,6 @@ async fn delete_all_matching_deletes_only_the_range() {
     assert_eq!(left, "alpha,delta,echo", "bravo and charlie were the view; the rest stays");
 }
 
-#[cfg(feature = "csv")]
 #[tokio::test]
 async fn the_export_is_the_ranged_view() {
     let (e, _db) = fixture().await;

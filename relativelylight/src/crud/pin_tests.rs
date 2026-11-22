@@ -250,7 +250,6 @@ async fn a_row_outside_the_pin_does_not_open_in_a_dialog() {
     assert!(html.contains("www"), "{html}");
 }
 
-#[cfg(feature = "csv")]
 #[tokio::test]
 async fn an_import_is_written_with_the_pin_and_cannot_update_a_row_outside_it() {
     let (e, db) = fixture().await;
@@ -420,7 +419,6 @@ async fn a_set_on_a_column_the_entity_lacks_is_refused_by_name() {
     assert!(err.to_string().contains("'nope'"), "{err}");
 }
 
-#[cfg(feature = "csv")]
 #[tokio::test]
 async fn an_import_through_a_set_pin_stays_inside_it() {
     let (e, db) = fixture().await;

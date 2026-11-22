@@ -205,7 +205,7 @@ is refused with `422`. It is for a value whose later changes belong to a page of
 `auth::user::meta_model` sets an account's first password this way, and the manager's reset at
 `/profile/{id}` owns every later one.
 
-**Password helper (feature `auth`).** For the common password case, `MetaField::password()` does that
+**Password helper.** For the common password case, `MetaField::password()` does that
 whole write-only-secret setup in one call — write-only, labelled `"Password"`, argon2id-hashed on
 write, blank by default:
 
@@ -537,8 +537,9 @@ Every form the UI renders then carries a hidden `_csrf` input, and `submit` refu
 matching one — checked *before* the gate, so a forged write reaches neither the session lookup nor the
 database. Reads need no token, and requests carrying an `Authorization` header are exempt (a Bearer
 credential isn't ambient). The **cookie must already exist** when the page renders: `auth`'s login
-issues it; an app without `auth` calls `Csrf::ensure` in its page handler. Off by default only because
-a `crud` build without `auth` may have no cookies at all; full design in [AUTH.md §7](AUTH.md).
+issues it; an app that signs its users in some other way calls `Csrf::ensure` in its page handler.
+Off by default only because an app whose writes carry no cookie (a gate over another credential)
+needs no token; full design in [AUTH.md §7](AUTH.md).
 
 ## Validation & transforms
 
@@ -953,7 +954,7 @@ Writes post back to that same path:
 |---|---|
 | `render_for(&headers, &state) -> Result<String>` | the fragment. Consults the model's gate: `401`/`403` rather than rows a caller may not read, and write controls only for a caller who may write |
 | `submit(&headers, ip, &body, &state) -> Result<Outcome>` | CSRF → gate → apply → audit. `Outcome::Done(url)` to redirect to, or `Outcome::Invalid(state)` to re-render. `body` is **raw bytes** (`axum::body::Bytes`), because a CSV upload is a file |
-| `csv(&headers, &state) -> Result<String>` | the view as CSV, when `state.csv` is set (feature `csv`) |
+| `csv(&headers, &state) -> Result<String>` | the view as CSV, when `state.csv` is set |
 
 Both are `async`, and both take the request's headers — which is how the timezone cookie, the session
 cookie and the CSRF token reach the render. The full worked shape is in the [README's quick start](../README.md#quick-start)

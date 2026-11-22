@@ -226,7 +226,7 @@ columns by what each value means.
   ```
 
   Your own code then builds the value with `ChronoUnixTimestamp::from(dt)` and reads `.0`. The
-  `crud` feature turns on SeaORM's `serde`, which the wrapper needs to serialize as its integer.
+  crate turns on SeaORM's `serde`, which the wrapper needs to serialize as its integer.
 - **A date stored as midnight seconds** (a `valid_until`, a date of supply) moves to a `DATE` column
   and a `Date` field. Shown in a viewer's zone, midnight UTC is the previous day west of UTC. This is
   a schema change with a data conversion, e.g. on PostgreSQL:
@@ -362,23 +362,30 @@ invoice.row_class(|cx| match cx.row()["status"].as_str() {
 6. **An app with its own `Accessor`** reports these by overriding `Accessor::meta` (default: none).
    `Engine::set_view_path` and `Engine::set_picker_create_except` are gone with the `Crud` methods.
 
-## 15. `axum` and `csrf` are always on, `ui` is a default
+## 15. Only `sso`, `passkeys` and `files` are features
 
-The `axum` and `csrf` features are gone: what they gated is always compiled. The defaults are now
-`crud` and `ui`. Cargo refuses a feature that doesn't exist, so a manifest naming one fails to build
-until it is updated:
+The engine, its admin UI, CSV, timezones, `auth`, the regex and base64 validators, CSRF and the axum
+plumbing are always compiled ([why](DESIGN.md#principles)). The features `crud`, `ui`, `csv`, `tz`,
+`auth`, `axum`, `csrf`, `validate-regex` and `validate-base64` are gone; there are no default
+features. Cargo refuses a feature that doesn't exist, so a manifest naming one fails to build until it
+is updated:
 
 ```toml
 # 0.4
-relativelylight = { version = "0.4", features = ["ui", "csv", "auth"] }
+relativelylight = { version = "0.4", features = ["crud", "axum", "ui", "csv", "auth", "sso", "validate-base64"] }
 relativelylight = { version = "0.4", default-features = false, features = ["files", "csrf"] }
 
 # 0.5
-relativelylight = { version = "0.5", features = ["csv", "auth"] }
-relativelylight = { version = "0.5", default-features = false, features = ["files"] }
+relativelylight = { version = "0.5", features = ["sso"] }
+relativelylight = { version = "0.5", features = ["files"] }
 ```
 
-1. **Remove `"axum"` and `"csrf"`** from `features`.
-2. **`"ui"` may go too**: it is a default. Keep it where you set `default-features = false`.
-3. **A build without the admin** (`auth` alone, `files` alone) sets `default-features = false`, or
-   it now compiles `crud` and `ui` with SeaORM and askama.
+1. **Keep only `"sso"`, `"passkeys"` and `"files"`** in `features`; remove every other name.
+2. **Drop `default-features = false`**: there is nothing to turn off. A build that used it to leave
+   out the admin (`auth` alone, `files` alone) now compiles the whole crate; it uses what it calls
+   and nothing else changes.
+3. **Code behind `#[cfg(feature = "csv")]`** or similar in your app, keyed to this crate's features,
+   is now always on: remove the attribute and any fallback branch.
+4. Nothing changes in the API: the CSV import and export are drawn whenever `Table::import` /
+   `Table::export` are on, as they were with `csv`, and the API-key page shows times in the caller's
+   zone, as it did with `tz`.

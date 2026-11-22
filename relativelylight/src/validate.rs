@@ -7,8 +7,7 @@
 //! [`field`](crate::validate::field), which lift a typed predicate into a [`crud::Validator`](crate::crud::seaorm::Validator).
 //!
 //! The core (addresses, ranges, lengths, enums, hostnames, hex, uuid, url, email) is **std-only** and
-//! always compiled. `regex_match` needs the `validate-regex` feature; `base64`/`base64_url` need
-//! `validate-base64` (both reuse crates already in the tree).
+//! always compiled, as are `regex_match` and `base64`/`base64_url` (over crates already in the tree).
 //!
 //! ```
 //! use relativelylight::validate;
@@ -593,7 +592,6 @@ pub fn dns_name(s: &str) -> Result<(), String> {
 
 /// Match a regular expression. Compiles the pattern **once**; panics at construction on an invalid
 /// pattern (it is developer input, not user input). The escape hatch for anything not covered above.
-#[cfg(feature = "validate-regex")]
 pub fn regex_match(pattern: &str) -> impl Fn(&str) -> Result<(), String> {
     let re = regex::Regex::new(pattern).expect("validate::regex_match: invalid regex pattern");
     move |s| {
@@ -606,7 +604,6 @@ pub fn regex_match(pattern: &str) -> impl Fn(&str) -> Result<(), String> {
 }
 
 /// Standard-alphabet base64 with valid padding (e.g. a DNSKEY public key).
-#[cfg(feature = "validate-base64")]
 pub fn base64(s: &str) -> Result<(), String> {
     use ::base64::Engine;
     ::base64::engine::general_purpose::STANDARD
@@ -616,7 +613,6 @@ pub fn base64(s: &str) -> Result<(), String> {
 }
 
 /// URL-safe-alphabet base64 with valid padding.
-#[cfg(feature = "validate-base64")]
 pub fn base64_url(s: &str) -> Result<(), String> {
     use ::base64::Engine;
     ::base64::engine::general_purpose::URL_SAFE
@@ -698,11 +694,10 @@ pub mod normalize {
 
 /// Adapters that lift a typed predicate/normalizer into the `serde_json::Value`-shaped hooks the CRUD
 /// engine expects ([`Validator`](crate::crud::seaorm::Validator) /
-/// [`WriteTransform`](crate::crud::seaorm::WriteTransform)). Compiled only with the `crud` feature.
+/// [`WriteTransform`](crate::crud::seaorm::WriteTransform)).
 ///
 /// Most callers should prefer the [`MetaField::validate_str`](crate::crud::seaorm::MetaField::validate_str)
 /// / [`validate_int`](crate::crud::seaorm::MetaField::validate_int) builder sugar, which wraps these.
-#[cfg(feature = "crud")]
 pub mod field {
     use crate::crud::seaorm::{Validator, WriteTransform};
     use serde_json::Value;
@@ -974,7 +969,6 @@ mod tests {
         assert_eq!(normalize::canonical_ip("bad"), "bad");
     }
 
-    #[cfg(feature = "crud")]
     #[test]
     fn crud_adapters() {
         use serde_json::{json, Value};
@@ -993,7 +987,6 @@ mod tests {
         assert_eq!(t(json!(5)), json!(5)); // non-string passes through
     }
 
-    #[cfg(feature = "validate-base64")]
     #[test]
     fn base64_checks() {
         assert!(base64("aGVsbG8=").is_ok());
@@ -1001,7 +994,6 @@ mod tests {
         assert!(base64_url("aGVsbG8=").is_ok());
     }
 
-    #[cfg(feature = "validate-regex")]
     #[test]
     fn regex_checks() {
         let v = regex_match(r"^\d{3}$");

@@ -1,4 +1,4 @@
-//! `relativelylight::time` — timezone-aware **presentation** of timestamps (feature `tz`).
+//! `relativelylight::time` — timezone-aware **presentation** of timestamps.
 //!
 //! The contract across relativelylight is: an **instant** is stored as **integer Unix seconds, UTC**
 //! (a calendar date is a native `DATE`, which has no zone; `docs/TIME.md` §1).

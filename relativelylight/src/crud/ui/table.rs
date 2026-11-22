@@ -317,12 +317,12 @@ impl<'a> Table<'a> {
         self.bulk_delete = on;
         self
     }
-    /// **Import CSV…** and its dialog (with the `csv` feature).
+    /// **Import CSV…** and its dialog.
     pub fn import(mut self, on: bool) -> Self {
         self.import = on;
         self
     }
-    /// **Export CSV** (with the `csv` feature); off, [`csv`](Table::csv) refuses with `403`.
+    /// **Export CSV**; off, [`csv`](Table::csv) refuses with `403`.
     /// Not a write, so [`read_only`](Table::read_only) leaves it alone.
     pub fn export(mut self, on: bool) -> Self {
         self.export = on;
@@ -340,7 +340,7 @@ impl<'a> Table<'a> {
             update: on(self.edit),
             delete: on(self.delete),
             bulk_delete: on(self.delete && self.bulk_delete),
-            import: on(self.import) && cfg!(feature = "csv") && room,
+            import: on(self.import) && room,
         }
     }
 
@@ -356,7 +356,7 @@ impl<'a> Table<'a> {
             delete: permits(w.delete, Operation::Delete).await,
             bulk_delete: permits(w.bulk_delete, Operation::Delete).await,
             import: permits(w.import, Operation::Create).await,
-            export: self.export && cfg!(feature = "csv"),
+            export: self.export,
         }
     }
     /// Offer a **View** action per row, opening a read-only dialog (`?show=<id>`) with every
@@ -687,7 +687,6 @@ impl<'a> Table<'a> {
     /// This view as CSV — the same rows, filters, sort and search, unpaginated, with datetimes in the
     /// caller's zone so the file matches the screen. Serve it from your read handler when
     /// [`ViewState::csv`] is set (that is what the toolbar's Export link asks for).
-    #[cfg(feature = "csv")]
     pub async fn csv(&self, headers: &HeaderMap, state: &ViewState) -> Result<String> {
         if !self.export {
             return Err(Error::Forbidden);
@@ -1159,11 +1158,8 @@ impl<'a> Table<'a> {
     }
 
     /// The CSV import dialog: a file picker (read in the browser) and a paste box, posting the same
-    /// urlencoded body either way. Empty without the `csv` feature — there would be nothing to do.
+    /// urlencoded body either way.
     fn import_dialog(&self, cols: &[Column], state: &ViewState, csrf: &str) -> Result<String> {
-        if !cfg!(feature = "csv") {
-            return Ok(String::new());
-        }
         ImportTmpl {
             title: self.title.clone().unwrap_or_else(|| self.slug.clone()),
             csrf: csrf.to_string(),

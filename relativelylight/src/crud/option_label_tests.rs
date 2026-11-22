@@ -166,7 +166,6 @@ async fn the_value_not_the_label_is_what_is_stored_posted_and_exported() {
     let list = render(&Table::new(&e, "workorder").filter("state"), "filter[state]=in_progress").await;
     assert!(list.contains("filter[state]") && list.contains("in_progress"), "{list}");
 
-    #[cfg(feature = "csv")]
     {
         let csv = Table::new(&e, "workorder").csv(&h(), &ViewState::default()).await.unwrap();
         assert!(csv.contains(",in_progress") && !csv.contains("In-Progress"), "{csv}");

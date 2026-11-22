@@ -302,15 +302,9 @@ fn import_rejection(report: &Value) -> Option<ValidationErrors> {
     Some(errors)
 }
 
-#[cfg(feature = "csv")]
 async fn import_csv(s: &Surface<'_>, cols: &[Column], text: &str, tz: &Tz) -> Result<Value> {
     let report = crate::crud::csv_io::import_pinned(s.engine, s.slug, cols, text, tz, &s.pins).await?;
     serde_json::to_value(&report).map_err(|e| Error::Backend(e.to_string()))
-}
-
-#[cfg(not(feature = "csv"))]
-async fn import_csv(_s: &Surface<'_>, _cols: &[Column], _text: &str, _tz: &Tz) -> Result<Value> {
-    Err(Error::BadRequest("CSV import needs the `csv` feature".into()))
 }
 
 /// The operations a posted body can ask for. `_del=<id>` is its own key rather than an `_op` value

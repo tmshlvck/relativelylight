@@ -286,7 +286,6 @@ pub fn table_create_statement(backend: DbBackend) -> TableCreateStatement {
 /// ```ignore
 /// crud.register(auth::api_key::meta_model(), Arc::new(GroupReadWrite::new(&auth, ["admin"])));
 /// ```
-#[cfg(feature = "crud")]
 pub fn meta_model() -> crate::crud::seaorm::MetaModel<entity::Entity> {
     use entity::Column as C;
     use sea_orm::IdenStatic;
@@ -456,28 +455,10 @@ pub(super) async fn card(db: &DatabaseConnection, keys: &ApiKeys, user_id: i32, 
     Card { rows, zone, placeholder: keys.name_placeholder.clone() }
 }
 
-/// The caller's display zone and a formatter for it: their timezone cookie with feature `tz`, UTC
-/// without it.
-#[cfg(feature = "tz")]
+/// The caller's display zone (their timezone cookie) and a formatter for it.
 pub(super) fn clock(headers: &HeaderMap) -> (String, impl Fn(i64) -> String) {
     let tz = crate::time::Tz::from_headers(headers);
     (tz.name().to_string(), move |t| tz.format(t))
-}
-
-#[cfg(not(feature = "tz"))]
-pub(super) fn clock(_headers: &HeaderMap) -> (String, impl Fn(i64) -> String) {
-    let fmt = |t: i64| match time::OffsetDateTime::from_unix_timestamp(t) {
-        Ok(d) => format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}",
-            d.year(),
-            u8::from(d.month()),
-            d.day(),
-            d.hour(),
-            d.minute()
-        ),
-        Err(_) => t.to_string(),
-    };
-    ("UTC".to_string(), fmt)
 }
 
 #[derive(serde::Deserialize)]
@@ -787,7 +768,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "crud")]
     #[test]
     fn the_panel_model_hides_the_hash_and_pins_the_owner() {
         let mut m = meta_model();

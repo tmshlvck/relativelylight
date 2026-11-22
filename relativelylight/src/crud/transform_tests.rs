@@ -155,7 +155,6 @@ async fn an_untouched_edit_form_saves_what_was_stored() {
     assert_eq!(stored(&db).await["phone"], json!("420123456789"));
 }
 
-#[cfg(feature = "csv")]
 #[tokio::test]
 async fn a_csv_cell_means_what_a_form_input_does() {
     use crate::crud::csv_io;
@@ -495,7 +494,6 @@ async fn dates_are_written_in_one_form_and_instants_as_seconds() {
     // CSV: a date leaves as the text it is and comes back as the same date. The file carries the
     // read-only native timestamp too, which the import leaves alone; a malformed date in a cell is
     // that row's error, as on the form.
-    #[cfg(feature = "csv")]
     {
         use crate::crud::csv_io;
         use crate::time::Tz;

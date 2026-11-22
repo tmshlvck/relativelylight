@@ -1,6 +1,6 @@
 # `relativelylight::auth` — authentication and authorization
 
-Feature `auth`, usable without `crud`. It provides:
+Always compiled, beside the admin it gates. It provides:
 
 - users, groups and server-side sessions (SeaORM tables), argon2id password hashing;
 - login/logout, a self-service profile page (password, TOTP 2FA, recovery codes) and a manager reset
@@ -53,16 +53,16 @@ else is the app's ([APP.md → Your URL namespace](APP.md#your-url-namespace)):
 
 ## 2. Features
 
+`auth` is always compiled, with the admin it gates ([why](DESIGN.md#principles)). Two features add
+to it:
+
 | Feature | Adds | Pulls |
 |---|---|---|
-| (always) | `authz`: the `Authz` trait, `Operation`, `Decision`, `Open` | `http`, `async-trait` |
-| `auth` | users, groups, sessions, login, profile pages, 2FA, lockout, gate presets | `sea-orm`, `argon2`, `totp-rs`, `askama` |
-| `sso` | `auth::sso`: OIDC sign-in and group mapping (§5b) | `openidconnect`, `regex`, `base64` |
-| `passkeys` | passkeys: sign-in, a second factor, re-authentication, the profile section (§5l) | `webauthn-rs`, `base64`; implies `auth` |
+| `sso` | `auth::sso`: OIDC sign-in and group mapping (§5b) | `openidconnect` |
+| `passkeys` | passkeys: sign-in, a second factor, re-authentication, the profile section (§5l) | `webauthn-rs` |
 
-`auth` works without `crud`: `default-features = false, features = ["auth"]` for login alone,
-`features = ["auth"]` (beside the default `crud` and `ui`) for a gated admin, plus `"sso"` for single
-sign-on.
+The gate trait itself (`authz`: `Authz`, `Operation`, `Decision`, `Open`) is separate from `auth`, so
+an app can write a gate of its own over any credential.
 
 ## 3. Identity mechanism: server-side session
 
@@ -1164,7 +1164,7 @@ audience. A caller who could satisfy a write once logged in gets `NeedsLogin`; a
 lacking the group gets `Denied`.
 
 - **`authz::Open`** — public read + write (no auth); the Public/Public corner. Pass it when a model
-  needs no gating (also the only preset available when the `auth` feature is off).
+  needs no gating.
 - **`auth::UserReadWrite::new(&auth)`** — any authenticated user may read + write; anonymous → `NeedsLogin`.
 - **`auth::UserReadGroupWrite::new(&auth, ["editors"])`** — any authenticated user may read; a
   write needs membership in one of the groups (else `Denied`); anonymous → `NeedsLogin`.

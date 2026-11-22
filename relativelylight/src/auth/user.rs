@@ -171,7 +171,7 @@ impl ActiveModelBehavior for ActiveModel {
     }
 }
 
-/// The table for an accounts panel (feature `crud`), configured once here so every panel gets the
+/// The table for an accounts panel, configured once here so every panel gets the
 /// same rules (docs/AUTH.md §5j):
 ///
 /// - **`password_hash`** is the write-only, argon2-hashed "Password" field, screened by `auth`'s own
@@ -197,7 +197,6 @@ impl ActiveModelBehavior for ActiveModel {
 /// crud.register(auth::user::meta_model(&auth), gate.clone());
 /// crud.register(auth::group::meta_model(), gate.clone());
 /// ```
-#[cfg(feature = "crud")]
 pub fn meta_model(auth: &super::Auth) -> crate::crud::seaorm::MetaModel<Entity> {
     use sea_orm::IdenStatic;
     use Column as C;
@@ -259,7 +258,6 @@ pub fn meta_model(auth: &super::Auth) -> crate::crud::seaorm::MetaModel<Entity> 
 }
 
 /// An account's id as a link to its credentials page, `{profile_path}/{id}`.
-#[cfg(feature = "crud")]
 fn credentials_link(
     profile_path: &str,
 ) -> impl Fn(&crate::crud::fmt::FmtCtx) -> String + Clone + Send + Sync + 'static {

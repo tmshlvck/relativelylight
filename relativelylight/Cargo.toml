@@ -22,20 +22,22 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 http = "1"                       # the `authz` gate trait takes `http::HeaderMap` (no axum needed)
-sea-orm = { workspace = true, optional = true }
+# `with-chrono` binds a `Date` as a date; `serde` makes SeaORM's `ChronoUnixTimestamp` (an instant as
+# Unix seconds) serialize as an `i64`, which the engine reads every model through (docs/TIME.md §1).
+sea-orm = { workspace = true, features = ["with-chrono", "serde"] }
 axum = "0.8"                     # always on: every surface is an axum handler or extractor
-askama = { version = "0.16", default-features = false, features = ["derive", "std"], optional = true } # no `config`: it reads askama.toml with the unmaintained basic-toml
-csv = { version = "1", optional = true }
-jiff = { version = "0.2", optional = true }   # IANA tz database: render a UTC epoch in the user's zone, and read a `datetime-local` back
-argon2 = { version = "0.6", optional = true }
+askama = { version = "0.16", default-features = false, features = ["derive", "std"] } # no `config`: it reads askama.toml with the unmaintained basic-toml
+csv = "1"                        # the table's import and export
+jiff = "0.2"                    # IANA tz database: render a UTC epoch in the user's zone, and read a `datetime-local` back
+argon2 = "0.6"                   # password hashing
 getrandom = "0.4"                # the OS CSPRNG: CSRF/session tokens, recovery codes
 axum-extra = { version = "0.12", features = ["cookie"] } # the CSRF and session cookies
 time = "0.3"                     # a cookie's `Max-Age` (axum-extra's cookie type)
-totp-rs = { version = "6", features = ["qr", "gen_secret"], optional = true } # TOTP 2FA: secret, otpauth URL, QR
-sha2 = { version = "0.11", optional = true }       # hash TOTP recovery codes (high-entropy → a fast hash, see auth::recovery)
+totp-rs = { version = "6", features = ["qr", "gen_secret"] } # TOTP 2FA: secret, otpauth URL, QR
+sha2 = "0.11"                                       # hash TOTP recovery codes (high-entropy → a fast hash, see auth::recovery)
 openidconnect = { version = "4", optional = true } # OIDC relying-party (SSO); default async reqwest + rustls
-regex = { version = "1", optional = true }         # SSO username → group mapping rules
-base64 = { version = "0.23", optional = true }     # decode the verified ID-token payload; txn cookie
+regex = "1"                                        # validate::regex_match; SSO username → group mapping rules
+base64 = "0.23"                                    # validate::base64; the SSO ID-token payload and txn cookie
 webauthn-rs = { version = "0.6.2", optional = true, features = ["conditional-ui", "danger-allow-state-serialisation", "danger-credential-internals"] } # passkeys
 webauthn-rs-proto = { version = "0.6.2", optional = true } # its wire types: asking for a discoverable credential
 ipnet = "2"                      # CIDR allow-lists (net::parse_nets / in_nets, the lockout's ip_allow)
@@ -63,25 +65,16 @@ rand_core = { version = "0.6", features = ["getrandom"] } # the RNG rsa 0.9 gene
 chrono = "0.4"
 
 [features]
-# The engine and its admin UI: what almost every app is here for. `axum` and the CSRF token are not
-# features: every surface is an axum handler, and every cookie-authenticated write needs the token.
-default = ["crud", "ui"]
-# the CRUD engine + SeaORM backend (the `crud` module). `with-chrono` binds a `Date` as a date;
-# `serde` makes SeaORM's `ChronoUnixTimestamp` (an instant as Unix seconds) serialize as an `i64`,
-# which the engine reads every model through (docs/TIME.md §1).
-crud = ["dep:sea-orm", "sea-orm/with-chrono", "sea-orm/serde"]
-ui = ["dep:askama", "crud", "tz"]  # the server-rendered admin components (Table, Form, Admin)
-csv = ["dep:csv", "crud", "tz"]  # export formats datetime columns in the caller's zone, so it needs `tz`
-tz = ["dep:jiff"]             # timezone-aware rendering of integer-UTC timestamps (the `time` module)
-auth = ["dep:askama", "dep:sea-orm", "dep:argon2", "dep:totp-rs", "dep:sha2"] # sessions/login + TOTP 2FA + Authz gate
-sso = ["auth", "dep:openidconnect", "dep:regex", "dep:base64"] # OIDC single sign-on (Google / Okta / corporate) + group mapping
-# Files on a page: the streaming upload reader, the response builder and the upload/preview/thumbnail
-# components (docs/FILES.md). Storage, naming and listing are the app's, so this needs neither `crud`
-# nor a database.
-files = ["dep:tokio", "dep:sha2", "dep:tokio-util", "dep:multer"]
+# The crate is the CRUD engine, its admin UI, CSV, timezones and `auth`: an admin of structured data
+# needs users and gates, and the users live in the database the admin shows. What stays optional
+# brings a large dependency tree or a module an app may well not use.
+default = []
+# OIDC single sign-on (Google / Okta / corporate) + group mapping: an HTTP client stack of its own.
+sso = ["dep:openidconnect"]
 # Passkeys (WebAuthn): enrolment on /profile, sign-in, a second factor, re-authentication (docs/AUTH.md
 # §5l). The tables are `auth`'s and exist without it. `webauthn-rs` is pure Rust; the features keep a
 # ceremony's state in our database row and read a credential's backup flags.
-passkeys = ["auth", "dep:webauthn-rs", "dep:webauthn-rs-proto", "dep:base64"]
-validate-regex = ["dep:regex"]   # validate::regex_match (reuses the regex dep)
-validate-base64 = ["dep:base64"] # validate::base64 / base64_url (reuses the base64 dep)
+passkeys = ["dep:webauthn-rs", "dep:webauthn-rs-proto"]
+# Files on a page: the streaming upload reader, the response builder and the upload/preview/thumbnail
+# components (docs/FILES.md). Storage, naming and listing are the app's.
+files = ["dep:tokio", "dep:tokio-util", "dep:multer"]

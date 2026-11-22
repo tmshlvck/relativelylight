@@ -1,6 +1,6 @@
 //! The authorization gate — the seam between the `crud` engine (which enforces) and `auth` (which
-//! resolves identities). **Always compiled**, independent of the `auth` feature, so a model
-//! can be registered with a gate in any build (`Open` when nothing needs gating).
+//! resolves identities). Separate from `auth`, so an app can write a gate over any credential (or
+//! pass `Open` when nothing needs gating).
 //!
 //! A gate is attached **per model** (so it takes no model argument), is handed the request headers,
 //! and returns a [`Decision`](crate::authz::Decision). The engine maps `Allow`/`NeedsLogin`/`Denied` → `200`/`401`/`403`; a

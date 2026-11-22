@@ -2626,7 +2626,6 @@ async fn a_locked_key_ignores_further_failures_and_an_expired_one_starts_over() 
 /// The accounts panel's search, filters and sort reach only what it shows. A hidden or write-only
 /// text column (the TOTP secret, the password hash) answered "is this in it?" through which rows came
 /// back, so a reader of the panel could spell out another user's TOTP secret a few characters at a time.
-#[cfg(feature = "ui")]
 #[tokio::test]
 async fn the_accounts_panel_never_searches_filters_or_sorts_by_a_secret() {
     use crate::crud::seaorm::Crud;
@@ -4519,7 +4518,6 @@ async fn a_maximum_age_makes_an_old_password_due() {
 /// The accounts panel's model (`user::meta_model`): the first password is set on create, screened by
 /// `Auth`'s policy and flagged for change by the row hook; no update can set one (that is the
 /// credentials page's, which also signs the account out); the secrets never leave in a read.
-#[cfg(feature = "crud")]
 #[tokio::test]
 async fn the_accounts_panel_sets_a_first_password_and_no_later_one() {
     use crate::crud::seaorm::Crud;

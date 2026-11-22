@@ -141,9 +141,7 @@ fn writes() -> Vec<(&'static str, String, Operation)> {
         ("delete selected", "_op=delete_selected&ids=1".to_string(), Operation::Delete),
         ("delete all", "_op=delete_all".to_string(), Operation::Delete),
     ];
-    if cfg!(feature = "csv") {
-        w.push(("import", "_op=import&csv=name%0Ax%0A".to_string(), Operation::Create));
-    }
+    w.push(("import", "_op=import&csv=name%0Ax%0A".to_string(), Operation::Create));
     w
 }
 
@@ -298,7 +296,6 @@ async fn a_form_writes_only_what_it_is() {
     assert_eq!(calls.snapshot().1, 2, "only the create and the update of row 1 landed");
 }
 
-#[cfg(feature = "csv")]
 #[tokio::test]
 async fn an_export_switched_off_is_refused_and_read_only_leaves_it_on() {
     let (engine, calls) = engine_with(Fixed::new(Decision::Allow), None);

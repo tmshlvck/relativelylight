@@ -1044,11 +1044,7 @@ fn drawn(html: &str) -> Vec<&'static str> {
 #[tokio::test]
 async fn each_switch_removes_its_own_controls_and_only_those() {
     let (e, _) = engine();
-    let csv = |names: &[&'static str]| -> Vec<&'static str> {
-        let has = |n: &&str| cfg!(feature = "csv") || !["export", "import"].contains(n);
-        names.iter().copied().filter(has).collect()
-    };
-    let all = csv(&[
+    let all = vec![
         "create",
         "edit",
         "delete",
@@ -1057,7 +1053,7 @@ async fn each_switch_removes_its_own_controls_and_only_those() {
         "delete all",
         "export",
         "import",
-    ]);
+    ];
     let without = |gone: &[&str]| -> Vec<&'static str> {
         all.iter().copied().filter(|c| !gone.contains(c)).collect()
     };
@@ -1072,7 +1068,7 @@ async fn each_switch_removes_its_own_controls_and_only_those() {
         ("bulk_delete(false)", t().bulk_delete(false), without(&bulk)),
         ("import(false)", t().import(false), without(&["import"])),
         ("export(false)", t().export(false), without(&["export"])),
-        ("read_only(true)", t().read_only(true), csv(&["export"])),
+        ("read_only(true)", t().read_only(true), vec!["export"]),
     ] {
         assert_eq!(drawn(&render(&table, &list()).await), expect, "{switch}");
     }
@@ -1087,9 +1083,7 @@ async fn a_dialog_switched_off_is_not_opened_by_typing_its_url() {
         ("edit=7", t(), t().edit(false)),
         ("import=1", t(), t().import(false)),
     ] {
-        if url != "import=1" || cfg!(feature = "csv") {
-            assert!(render(&on, &ViewState::from_query(url)).await.contains("<dialog"), "{url}");
-        }
+        assert!(render(&on, &ViewState::from_query(url)).await.contains("<dialog"), "{url}");
         assert!(!render(&off, &ViewState::from_query(url)).await.contains("<dialog"), "{url}");
     }
 }
@@ -1109,9 +1103,7 @@ async fn each_control_follows_its_own_operations_permission() {
     }
     let (e, _) = engine_with(Arc::new(UpdateOnly));
     let on = drawn(&render(&Table::new(&e, "post"), &list()).await);
-    let expect: Vec<&str> =
-        ["edit", "export"].into_iter().filter(|c| *c == "edit" || cfg!(feature = "csv")).collect();
-    assert_eq!(on, expect);
+    assert_eq!(on, ["edit", "export"]);
 }
 
 // ---------- decoding a posted form ----------
@@ -1271,7 +1263,6 @@ async fn the_toolbar_form_carries_only_what_the_operator_chose() {
     assert!(hidden(toolbar).is_empty(), "{toolbar}");
 }
 
-#[cfg(feature = "csv")]
 #[tokio::test]
 async fn the_export_link_is_the_view_without_its_page() {
     let (e, _) = engine();
@@ -1920,7 +1911,6 @@ async fn delete_all_is_a_table_operation_in_the_menu_posting_the_rows_form() {
     assert!(!html.contains("delete_all"), "{html}");
 }
 
-#[cfg(feature = "csv")]
 #[tokio::test]
 async fn csv_lives_in_a_menu_that_needs_no_javascript_to_open() {
     let (e, _) = engine();
@@ -1937,7 +1927,6 @@ async fn csv_lives_in_a_menu_that_needs_no_javascript_to_open() {
     assert!(!html.contains("Import CSV"), "but importing is a write: {html}");
 }
 
-#[cfg(feature = "csv")]
 #[tokio::test]
 async fn the_import_dialog_offers_a_file_and_a_paste_box() {
     let (e, _) = engine();
@@ -1963,7 +1952,6 @@ async fn the_import_dialog_offers_a_file_and_a_paste_box() {
 }
 
 /// A body shaped the way a browser posts the dialog's upload form.
-#[cfg(feature = "csv")]
 fn upload(file: &[u8]) -> (HeaderMap, Vec<u8>) {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -1980,7 +1968,6 @@ fn upload(file: &[u8]) -> (HeaderMap, Vec<u8>) {
     (headers, body)
 }
 
-#[cfg(feature = "csv")]
 #[tokio::test]
 async fn a_file_is_uploaded_to_the_server_and_applied() {
     let (e, log) = engine();
@@ -1993,7 +1980,6 @@ async fn a_file_is_uploaded_to_the_server_and_applied() {
     assert!(to.contains("done=imported:2,0"), "and the page says so: {to}");
 }
 
-#[cfg(feature = "csv")]
 #[tokio::test]
 async fn an_uploaded_file_that_is_not_utf8_is_refused_by_name() {
     // The operator can't see the file before it applies, so guessing an encoding would put mojibake
@@ -2018,7 +2004,6 @@ async fn an_uploaded_file_that_is_not_utf8_is_refused_by_name() {
     assert_eq!(log.count(), 1);
 }
 
-#[cfg(feature = "csv")]
 #[tokio::test]
 async fn a_refused_import_comes_back_with_its_report_and_the_text_still_in_it() {
     // `title` is rejected by this mock, so every row fails — and an import is all-or-nothing, so
@@ -2043,7 +2028,6 @@ async fn a_refused_import_comes_back_with_its_report_and_the_text_still_in_it() 
     assert!(html.contains("alpha,a"), "and the text is still there to fix: {html}");
 }
 
-#[cfg(feature = "csv")]
 #[tokio::test]
 async fn a_good_import_applies_and_returns_to_the_list() {
     let (e, log) = engine();

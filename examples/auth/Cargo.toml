@@ -6,11 +6,9 @@ publish = false
 
 # Playground for relativelylight's `auth` module: login, 2FA, recovery, re-auth, lockout, SSO — plus the
 # **accounts panel** an operator provisions users from, because the library ships no registration page.
-# `ui` is on for that panel only (it pulls in `crud` + `axum` + `tz`); everything else here is `auth`.
-# That auth compiles and runs *without* `crud` is proven by the feature matrix in CLAUDE.md, not by an
-# example. See docs/AUTH.md.
+# With the optional `sso` and `passkeys` on, so every sign-in path can be tried. See docs/AUTH.md.
 [dependencies]
-relativelylight = { path = "../../relativelylight", default-features = false, features = ["auth", "sso", "ui", "passkeys"] }
+relativelylight = { path = "../../relativelylight", features = ["sso", "passkeys"] }
 sea-orm = { workspace = true, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 axum = "0.8"
 tokio = { workspace = true, features = ["net"] }

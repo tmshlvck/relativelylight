@@ -3,7 +3,8 @@
 **relativelylight** turns SeaORM entities into a back-office stack — a typed CRUD engine, a
 server-rendered admin, authentication/authorization and file uploads/downloads — with **no per-model
 code**.
-One crate of feature-gated modules; take the pieces you need.
+One crate: the engine, the admin, `auth` and timezones are always there; `sso`, `passkeys` and `files`
+are features.
 
 This is the design: what each module is for and the decisions an addition should have to argue with.
 Usage lives in the guides; open work is in [TODO.md](TODO.md).
@@ -27,15 +28,20 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
    opt-in exception, mounted where the app chooses.
 2. **The contract in the middle is typed and in-process** — `Vec<Column>` + `Page`, not a wire format.
    An app wanting a JSON API writes it over `Engine`, where its versioning belongs.
-3. **No mandatory coupling between modules.** `auth` works without `crud`; `files` needs neither; an
-   unused feature costs no dependencies. The one required piece is `middleware::resolve_real_ip`, so
-   the lockout, audit events and the app's log agree about who called. **A feature must name a real
-   build that leaves it out.** What every surface needs is not a feature: axum (every module is
-   handlers and extractors) and the CSRF token (every cookie-authenticated write) are always
-   compiled. Their switches caught nobody's build and cost a cfg pair at each use, two code paths
-   per switch, and an "implies" note in every feature that needed them. `ui` is a default with
-   `crud`, the main product; it stays a switch for `auth`- or `files`-only builds, which skip SeaORM
-   and askama with `default-features = false`.
+3. **A feature must name a real build that leaves it out.** The crate is for an admin of structured
+   data, and that admin needs everything it is made of: the engine and its UI, CSV, timezones, the
+   CSRF token, axum, and `auth` — the data needs gates, the gates need users, and the users live in
+   the database the admin shows, so an admin without `auth` and an `auth` without the admin are
+   builds nobody makes. None of those is a feature. Their switches caught nobody's build and cost a
+   cfg pair at each use, two code paths per switch (a CSV-less import that answered "needs the `csv`
+   feature", a UTC-only clock beside the zoned one), an "implies" note in every feature that needed
+   another, and a release matrix of a dozen builds. Three switches are left, each for a build that
+   exists: **`sso`** (an OIDC client and its HTTP stack, some 120 crates), **`passkeys`**
+   (`webauthn-rs`, some 130 crates, and the MSRV) and **`files`** (a module an admin of records often
+   doesn't use). None of them needs another. Modules stay decoupled in the code all the same: the
+   engine reaches identity only through the `authz` gate, and `files` touches neither the engine nor
+   the database. The one required piece of wiring is `middleware::resolve_real_ip`, so the lockout,
+   audit events and the app's log agree about who called.
 4. **Authorization is a per-model gate handed the request headers.** It resolves identity itself, so
    it needs no middleware and works for credentials this crate doesn't know.
    Row-level access is out of scope; an app expresses it by shape (a table per document kind) or in

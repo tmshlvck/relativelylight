@@ -6,7 +6,7 @@ workflows.
 
 The library contributes fragments and a write path. *You* own the router, the `<html>`, and every
 decision about layout. This document is the worked example of that division, using
-`relativelylight = { version = "0.5", features = ["csv", "auth"] }`.
+`relativelylight = "0.5"` (plus `features = ["sso"]` or `["passkeys"]` if you want them).
 
 - [1. The skeleton](#1-the-skeleton) — one shell, one state, one layer
 - [2. The page shell and the nav bar](#2-the-page-shell-and-the-nav-bar)

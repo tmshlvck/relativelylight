@@ -1,8 +1,8 @@
 //! **Passkeys (WebAuthn)**: the tables. See `docs/DESIGN.md` → auth and `docs/TODO.md` for the plan.
 //!
 //! The entities here need no WebAuthn library: a credential is stored as the JSON its library
-//! serialises to, and a ceremony's state likewise. So they are compiled with `auth` alone, and an
-//! app's schema is the same whether or not it turns the `passkeys` feature on.
+//! serialises to, and a ceremony's state likewise. So they are compiled without the `passkeys`
+//! feature, and an app's schema is the same whether or not it turns the `passkeys` feature on.
 //!
 //! - [`entity`](crate::auth::passkey::entity) — `auth_passkey`, one row per registered credential.
 //! - [`challenge`](crate::auth::passkey::challenge) — `auth_webauthn_challenge`, one row per ceremony in flight: single-use, short-lived,
@@ -200,7 +200,6 @@ pub async fn remove_all(db: &DatabaseConnection, user_id: i32) -> Result<u64, Db
 /// ```ignore
 /// crud.register(auth::passkey::meta_model(), Arc::new(GroupReadWrite::new(&auth, ["admin"])));
 /// ```
-#[cfg(feature = "crud")]
 pub fn meta_model() -> crate::crud::seaorm::MetaModel<entity::Entity> {
     use entity::Column as C;
     use sea_orm::IdenStatic;
@@ -246,7 +245,6 @@ pub(super) async fn prune_challenges(db: &DatabaseConnection) -> Result<u64, DbE
 mod tests {
     use super::*;
 
-    #[cfg(feature = "crud")]
     #[test]
     fn the_panel_model_hides_the_credential_and_reads_only() {
         let mut m = meta_model();

@@ -22,7 +22,6 @@
 
 /// One part of a posted form, owned. Only the UI needs every part; `csrf` wants one field and is
 /// served by [`field`], which copies nothing else.
-#[cfg(feature = "ui")]
 pub(crate) struct Part {
     pub(crate) name: String,
     /// Present when the part came from a file input — even when the file was empty, which is how an
@@ -56,7 +55,6 @@ struct Raw<'a> {
 }
 
 /// Split a buffered body into its parts.
-#[cfg(feature = "ui")]
 pub(crate) fn parse(body: &[u8], boundary: &str) -> Result<Vec<Part>, String> {
     Ok(scan(body, boundary)?
         .into_iter()
@@ -147,7 +145,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-#[cfg(all(test, feature = "ui"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

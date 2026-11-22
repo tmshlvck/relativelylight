@@ -144,7 +144,7 @@ pub struct MetaField {
 }
 
 impl MetaField {
-    /// Configure this field as a **password** (requires the `auth` feature). In one call it becomes
+    /// Configure this field as a **password**. In one call it becomes
     /// write-only (accepted on write, never returned in reads), labelled `"Password"` (unless you've
     /// already set a label), blank by default, and hashed with argon2id via an `on_write` hook — so
     /// the column stores a hash while the form takes plaintext. In the admin it renders as a masked
@@ -158,7 +158,6 @@ impl MetaField {
     /// let mut user = MetaModel::new(auth::user::Entity);
     /// user.field("password_hash").password();
     /// ```
-    #[cfg(feature = "auth")]
     pub fn password(&mut self) -> &mut Self {
         self.write_only = true;
         self.label.get_or_insert_with(|| "Password".into());
@@ -2161,8 +2160,8 @@ impl Crud {
     ///
     /// Writes then answer `403` unless the posted form echoes the cookie (or the request carries an
     /// `Authorization` header, which is exempt). Any app whose writes are cookie-authenticated wants
-    /// this; it is off by default only because a `crud` build without `auth` may have no cookies at
-    /// all. See `docs/AUTH.md` §7.
+    /// this; it is off by default only because an app whose writes carry no cookie needs no token.
+    /// See `docs/AUTH.md` §7.
     pub fn csrf(&mut self, csrf: crate::csrf::Csrf) -> &mut Self {
         self.engine.set_csrf(csrf);
         self
@@ -2171,7 +2170,6 @@ impl Crud {
     /// Where the app serves [`crud::ui::Picker`](crate::crud::ui::Picker): the dialog that edits a
     /// relation too large for a `<select>`. The crate adds no route — mount one `GET` handler on this
     /// path (see `docs/CRUD.md`). Without it, every relation stays a `<select>` however large it is.
-    #[cfg(feature = "ui")]
     pub fn picker_path(&mut self, path: impl Into<String>) -> &mut Self {
         self.engine.set_picker_path(path);
         self
@@ -2180,7 +2178,6 @@ impl Crud {
     /// How many target rows a relation's form input may list as a `<select>` before it uses the
     /// picker (default 50). A relation's own
     /// [`MetaRelation::picker_threshold`](MetaRelation::picker_threshold) overrides it.
-    #[cfg(feature = "ui")]
     pub fn picker_threshold(&mut self, n: u64) -> &mut Self {
         self.engine.set_picker_threshold(n);
         self
@@ -2191,7 +2188,6 @@ impl Crud {
     /// [`MetaModel::picker_create`] and a relation's [`MetaRelation::create`] override it. Needs [`picker_path`](Crud::picker_path),
     /// and the picker route must answer `POST` too ([`Picker::submit`](crate::crud::ui::Picker::submit))
     /// — see `docs/CRUD.md` → "Creating the missing row".
-    #[cfg(feature = "ui")]
     pub fn picker_create(&mut self, on: bool) -> &mut Self {
         self.engine.set_picker_create(on);
         self
@@ -2203,7 +2199,6 @@ impl Crud {
     /// [`picker_path`](Crud::picker_path), whose route serves those pages and (for Edit) answers
     /// `POST`. A link is drawn only when the caller may read the target — see `docs/CRUD.md` →
     /// "Viewing the linked row".
-    #[cfg(feature = "ui")]
     pub fn picker_view(&mut self, on: bool) -> &mut Self {
         self.engine.set_picker_view(on);
         self
@@ -2569,7 +2564,6 @@ mod nullable_tests {
         assert_eq!(stamped_count(&db).await, 3);
     }
 
-    #[cfg(feature = "csv")]
     #[tokio::test]
     async fn a_csv_import_is_all_or_nothing() {
         // The same guarantee through the CSV surface, which is where it matters to a user.
@@ -2762,7 +2756,7 @@ mod nullable_tests {
     }
 }
 
-#[cfg(all(test, feature = "auth"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::verify_password;

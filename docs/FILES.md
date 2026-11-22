@@ -9,7 +9,8 @@ see it and how a page lists files. Nothing here reads, writes, lists or deletes 
 camera), a listing with thumbnails, preview, download and delete. Its storage (`src/store.rs`) and
 thumbnail cache (`src/thumbs.rs`) are app code, written to be copied.
 
-`files` needs neither `crud`, `auth` nor a database (`default-features = false, features = ["files"]`).
+Feature `files` (`features = ["files"]`). The module uses neither the engine, `auth` nor the
+database.
 
 ## 1. Upload — `Upload`
 

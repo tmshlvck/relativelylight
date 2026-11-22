@@ -190,7 +190,6 @@ impl<'a> Admin<'a> {
     }
 
     /// The CSV export of the active table — see [`Table::csv`].
-    #[cfg(feature = "csv")]
     pub async fn csv(&self, headers: &HeaderMap, state: &ViewState) -> Result<String> {
         self.active(state)?.csv(headers, &self.table_state(state)).await
     }

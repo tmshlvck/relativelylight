@@ -13,13 +13,14 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
-- **`axum` and `csrf` are no longer features; `ui` is a default.** The axum plumbing
-  (`middleware`, the `IntoResponse` impls) and the CSRF token (`csrf`, `Crud::csrf`,
-  `Upload::csrf`) are always compiled: every surface is an axum handler and every
-  cookie-authenticated write needs the token. The defaults are now `crud` and `ui`. **Upgrade:**
-  remove `"axum"`, `"csrf"` (and a now-default `"ui"`) from your `features`; a build of `auth` or
-  `files` alone adds `default-features = false`
-  ([MIGRATION-0.5.md §15](docs/MIGRATION-0.5.md#15-axum-and-csrf-are-always-on-ui-is-a-default)).
+- **Only `sso`, `passkeys` and `files` are features.** The engine, the admin UI, CSV, timezones,
+  `auth`, the regex and base64 validators, the CSRF token and the axum plumbing are always compiled:
+  an admin of structured data needs all of it, and its users live in the database it shows
+  ([DESIGN.md principle 3](docs/DESIGN.md#principles)). The features `crud`, `ui`, `csv`, `tz`,
+  `auth`, `axum`, `csrf`, `validate-regex` and `validate-base64` are removed, and there are no
+  defaults. **Upgrade:** keep only `"sso"`, `"passkeys"` and `"files"` in `features` and drop
+  `default-features = false`
+  ([MIGRATION-0.5.md §15](docs/MIGRATION-0.5.md#15-only-sso-passkeys-and-files-are-features)).
 - **A row's page, "+ New" per target and the row class belong to the model**
   ([CRUD.md → The entity as a whole](docs/CRUD.md#entity-wide-settings)):
   `MetaModel::view_path(template)` replaces both `Table::detail_href` and `Crud::view_path(slug, …)`,

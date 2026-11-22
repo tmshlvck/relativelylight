@@ -17,13 +17,8 @@ mx.field("target").validate_str(validate::all_of(vec![Box::new(validate::non_emp
 validate::ipv4(&myip).map_err(ApiError::Validation)?;
 ```
 
-The module is always compiled and std-only at its core. Two opt-in features reuse crates already in
-the dependency tree:
-
-| Feature | Gates |
-|---|---|
-| `validate-regex` | `regex_match` |
-| `validate-base64` | `base64`, `base64_url` |
+The module is always compiled; `regex_match` and `base64` reuse the `regex` and `base64` crates the
+rest of the crate depends on.
 
 `url`, `idna` and `email_address` are deliberately avoided: the pragmatic `email` and `url` checks catch
 typos, which is what field validation is for. Use `regex_match` or your own handler for anything stricter.
@@ -66,10 +61,10 @@ address is the network's first.
 | `length` | `fn(min: usize, max: usize) -> impl Fn(&str) -> Result<(),String>` | counts **Unicode scalar values** (`chars().count()`), not bytes — the count a user sees. A `length_bytes` variant exists for byte-bounded columns (DNS labels ≤ 63 **octets**). |
 | `one_of` | `fn(&'static [&'static str]) -> impl Fn(&str) -> Result<(),String>` | membership; case-sensitive. `one_of_ci` for ASCII-case-insensitive (CAA `tag`: `issue`/`issuewild`/`iodef`). Message lists the allowed set. |
 | `hex` | `fn(&str) -> Result<(),String>` | `[0-9a-fA-F]+`, even length. `hex_len(n)` factory pins an exact **byte** length (DS digest, SSHFP fingerprint). |
-| `regex_match` | `fn(&str) -> impl Fn(&str) -> Result<(),String>` *(feature `validate-regex`)* | compiles once (panics at construction on a bad pattern — it is developer input, not user input); the escape hatch for anything not covered. |
+| `regex_match` | `fn(&str) -> impl Fn(&str) -> Result<(),String>` | compiles once (panics at construction on a bad pattern — it is developer input, not user input); the escape hatch for anything not covered. |
 | `email` | `fn(&str) -> Result<(),String>` | pragmatic `local@domain` check (one `@`, non-whitespace non-empty local, hostname-shaped domain with a dot). Std-only (reuses `hostname`). **Not** RFC 5322. |
 | `url` | `fn(&str) -> Result<(),String>` | scheme + `://` + authority, restricted to `http`/`https` by default; `url_scheme(&[..])` factory to widen. Hand-rolled, std-only. |
-| `base64` | `fn(&str) -> Result<(),String>` *(feature `validate-base64`)* | standard alphabet, valid padding (DNSKEY `public_key`). `base64_url` variant. |
+| `base64` | `fn(&str) -> Result<(),String>` | standard alphabet, valid padding (DNSKEY `public_key`). `base64_url` variant. |
 | `uuid` | `fn(&str) -> Result<(),String>` | 8-4-4-4-12 hex; std-only, no `uuid` crate needed. |
 
 ### Passwords

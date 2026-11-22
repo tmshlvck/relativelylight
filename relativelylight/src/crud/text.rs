@@ -61,7 +61,6 @@ impl Pins {
     }
 
     /// Whether `name` is pinned to one value — and so not the form's to render.
-    #[cfg(feature = "ui")]
     pub(crate) fn fixes(&self, name: &str) -> bool {
         self.eq.iter().any(|(n, _)| n == name)
     }

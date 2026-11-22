@@ -44,11 +44,10 @@ impl ActiveModelBehavior for ActiveModel {
     }
 }
 
-/// The table for an accounts panel (feature `crud`): the name checked with
+/// The table for an accounts panel: the name checked with
 /// [`valid_group_name`](super::valid_group_name), the timestamps read-only, and the members edited
 /// through the N:M relation `auth_user`. Registered next to
 /// [`user::meta_model`](super::user::meta_model).
-#[cfg(feature = "crud")]
 pub fn meta_model() -> crate::crud::seaorm::MetaModel<Entity> {
     use sea_orm::IdenStatic;
     use Column as C;

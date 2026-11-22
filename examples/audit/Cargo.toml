@@ -10,7 +10,7 @@ publish = false
 # (`observe::WriteObserver`), and what you print or persist is yours. This example is both, in about
 # sixty lines: a request log (in its two shapes) and an audit trail over `auth` **and** `crud` writes.
 [dependencies]
-relativelylight = { path = "../../relativelylight", default-features = false, features = ["auth", "ui"] }
+relativelylight = { path = "../../relativelylight" }
 model = { path = "../model" }        # something ordinary to edit, so there are CRUD writes to audit
 sea-orm = { workspace = true, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 axum = "0.8"

@@ -6,11 +6,10 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
 
 ## The crate
 
-- [ ] **Finish the feature and module review.** `axum` and `csrf` are now always on and `ui` is a
-  default (DESIGN.md principle 3). Still open: whether `crud` without `ui` earns its switch (the
-  engine's tests run without `ui`, so it builds and works; the question is whether anyone wants an
-  engine with no admin), and whether `tz` stands alone or folds into `ui`/`csv`. Also: whether `crud::ui` nested under `crud`
-  matches the code.
+- [ ] **The module structure.** The features are settled (only `sso`, `passkeys`, `files`; DESIGN.md
+  principle 3); the module paths still follow the old feature lines: whether `crud::ui` nested under
+  `crud` matches the code now that the two always come together, and where `time` and `csv_io`
+  belong.
 
 ## crud / crud::ui
 

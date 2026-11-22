@@ -68,7 +68,7 @@ in the docs: before adding a second way, or a second explanation, find the first
 
 ## Working on the library
 
-A Cargo workspace: the crate is `relativelylight/` (`crud/` with `ui/` as the renderer, `auth/`,
+A Cargo workspace: the crate (features only `sso`, `passkeys`, `files`) is `relativelylight/` (`crud/` with `ui/` as the renderer, `auth/`,
 `files/`, `authz.rs`, `observe.rs`, `time.rs`, `validate.rs`; Askama templates in `templates/`; CSS and
 the picker's script in `assets/`), with runnable examples in `examples/` sharing `examples/model`.
 Deps: SeaORM 2.0, axum 0.8, askama 0.16, jiff 0.2, totp-rs 6, argon2 0.6, webauthn-rs 0.6. MSRV 1.89
@@ -78,16 +78,17 @@ Deps: SeaORM 2.0, axum 0.8, askama 0.16, jiff 0.2, totp-rs 6, argon2 0.6, webaut
 cargo build --all-features && cargo test --all-features && cargo clippy --all-features --all-targets
 ```
 
-**`--all-features` is not enough.** It can't catch a feature that forgets to enable what it uses, or
-a helper that is dead code in a narrower build. Before a release, check the matrix for **warnings**
-as well as errors:
+**`--all-features` is not enough.** It can't catch code a feature uses without gating it, or a
+helper that is dead code without one. The features are only `sso`, `passkeys` and `files`, none
+needing another ([DESIGN.md principle 3](docs/DESIGN.md#principles) says why the rest are not
+features); before a release, check each build for **warnings** as well as errors:
 
 ```bash
-for f in "" crud tz csv auth auth,sso passkeys crud,ui crud,ui,csv files files,auth; do
+for f in "" sso passkeys files; do
   cargo build -p relativelylight --no-default-features ${f:+--features $f} 2>&1 \
     | grep -E "^(error|warning: )" | grep -v "the following packages"
 done
-cargo build --workspace      # the examples pin their own narrow feature sets
+cargo build --workspace      # the examples pick their own features
 ```
 
 Don't run `rustfmt` over the whole repo; format only what you touch.

@@ -1,4 +1,4 @@
-//! `relativelylight::crud::csv_io` — CSV import/export for the admin UI (feature `csv`).
+//! `relativelylight::crud::csv_io` — CSV import/export for the admin UI.
 //!
 //! CSV is the one exchange format the UI can't render, so it lives here as a thin layer over the
 //! backend-agnostic [`Engine`]: export reads via [`Engine::list`], import writes via

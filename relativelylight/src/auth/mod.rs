@@ -1,6 +1,6 @@
 //! `relativelylight::auth` — authentication (users, sessions, login, argon2id) + authorization
-//! (a small [`Authz`] gate trait + presets). Usable on its own (feature `auth`, no `crud`): it gates
-//! any axum app. See `docs/AUTH.md` for the full design.
+//! (a small [`Authz`] gate trait + presets). Its presets gate the
+//! `crud` engine, and any route of the app. See `docs/AUTH.md` for the full design.
 //!
 //! There is **no middleware and no injected request context**. Authn is a handful of on-demand
 //! lookups on [`Auth`]: given a request's headers, [`Auth::identify`] resolves the session cookie →

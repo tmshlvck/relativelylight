@@ -588,13 +588,11 @@ pub struct Engine {
     /// Optional CSRF checker; when set, every write must carry a valid token (see [`crate::csrf`]).
     csrf: Option<crate::csrf::Csrf>,
     /// The app-wide defaults of the admin UI's relation fields (set through `Crud::picker_*`).
-    #[cfg(feature = "ui")]
     ui: UiDefaults,
 }
 
 /// The app-wide defaults of the admin UI's relation fields, one field on [`Engine`] so a new one is
 /// added in one place. A relation or target model that makes its own choice overrides them.
-#[cfg(feature = "ui")]
 struct UiDefaults {
     /// Where the app serves [`crud::ui::Picker`](crate::crud::ui::Picker) — the one absolute URL the
     /// UI renders. `None`: no picker, so a relation too large for its threshold stays a `<select>`.
@@ -608,7 +606,6 @@ struct UiDefaults {
     picker_view: bool,
 }
 
-#[cfg(feature = "ui")]
 impl Default for UiDefaults {
     fn default() -> Self {
         Self { picker_path: None, picker_threshold: 50, picker_create: false, picker_view: false }
@@ -624,32 +621,27 @@ impl Engine {
             authz: BTreeMap::new(),
             observer: None,
             csrf: None,
-            #[cfg(feature = "ui")]
             ui: UiDefaults::default(),
         }
     }
 
     /// The path the app serves [`crud::ui::Picker`](crate::crud::ui::Picker) on. Usually set via
     /// `Crud::picker_path`.
-    #[cfg(feature = "ui")]
     pub fn set_picker_path(&mut self, path: impl Into<String>) {
         self.ui.picker_path = Some(path.into());
     }
 
-    #[cfg(feature = "ui")]
     pub(crate) fn picker_path(&self) -> Option<&str> {
         self.ui.picker_path.as_deref()
     }
 
     /// How many target rows a relation's input lists before it uses the picker, where the relation
     /// sets none. Usually set via `Crud::picker_threshold`.
-    #[cfg(feature = "ui")]
     pub fn set_picker_threshold(&mut self, n: u64) {
         self.ui.picker_threshold = n;
     }
 
     /// A relation's threshold: its own (`explicit`), else the app-wide one.
-    #[cfg(feature = "ui")]
     pub(crate) fn picker_threshold(&self, explicit: Option<u64>) -> u64 {
         explicit.unwrap_or(self.ui.picker_threshold)
     }
@@ -657,21 +649,18 @@ impl Engine {
     /// Offer "+ New" on relation fields: a new target row, created in a dialog over the form. Needs
     /// a picker path, and the app's picker route to answer `POST` as well. Usually set via
     /// `Crud::picker_create`.
-    #[cfg(feature = "ui")]
     pub fn set_picker_create(&mut self, on: bool) {
         self.ui.picker_create = on;
     }
 
     /// Link each relation's label to the linked row, opened in a dialog over the page. Usually set
     /// via `Crud::picker_view`.
-    #[cfg(feature = "ui")]
     pub fn set_picker_view(&mut self, on: bool) {
         self.ui.picker_view = on;
     }
 
     /// The picker path, when a relation's labels link to their rows: its own choice (`explicit`),
     /// else the app-wide `picker_view`.
-    #[cfg(feature = "ui")]
     pub(crate) fn picker_view_path(&self, explicit: Option<bool>) -> Option<&str> {
         self.picker_path().filter(|_| explicit.unwrap_or(self.ui.picker_view))
     }
@@ -679,7 +668,6 @@ impl Engine {
     /// The path "+ New" opens for a new row of `target`, through a relation whose own choice is
     /// `explicit`: that choice when it made one, else the target's ([`EntityMeta::picker_create`]),
     /// else the app-wide `picker_create`. `None` when off, or without a picker path.
-    #[cfg(feature = "ui")]
     pub(crate) fn picker_create_path(&self, target: &str, explicit: Option<bool>) -> Option<&str> {
         let on = explicit
             .or_else(|| self.accessors.get(target).and_then(|a| a.meta().picker_create))
@@ -702,7 +690,6 @@ impl Engine {
 
     /// Whether this request satisfies the CSRF check (always `true` when CSRF isn't configured).
     /// `form_token` is the `_csrf` field of a posted form — the carrier the UI's own forms use.
-    #[cfg(feature = "ui")]
     pub(crate) fn csrf_ok(&self, headers: &::http::HeaderMap, form_token: Option<&str>) -> bool {
         match &self.csrf {
             Some(csrf) => csrf.verify(headers, form_token),
@@ -711,14 +698,12 @@ impl Engine {
     }
 
     /// The CSRF checker this engine enforces, if any — the UI renders its hidden `_csrf` input from it.
-    #[cfg(feature = "ui")]
     pub(crate) fn csrf(&self) -> Option<&crate::csrf::Csrf> {
         self.csrf.as_ref()
     }
 
     /// Hand a committed write to the audit sink, if the app registered one. Called by
     /// [`crud::ui`](crate::crud::ui) after each write it applies.
-    #[cfg(feature = "ui")]
     pub(crate) async fn observe(&self, event: crate::observe::WriteEvent<'_>) {
         if let Some(observer) = self.observer.as_ref() {
             observer.on_write(&event).await;
@@ -852,7 +837,6 @@ impl Engine {
     /// through a pinned view ([`Table::fixed_filter`](crate::crud::ui::Table::fixed_filter),
     /// [`Table::fixed_in`](crate::crud::ui::Table::fixed_in)) on the rows that view shows. No pins,
     /// no query: every id is inside.
-    #[cfg(any(feature = "ui", feature = "csv"))]
     pub(crate) async fn outside(
         &self,
         slug: &str,

@@ -48,13 +48,13 @@ URL, verified (and re-authenticated) before it's on.</sub></td>
   form) in a dialog over the page.
 - **A typed `Engine`** per entity — list/get/create/update/delete, relations by name, validation.
   Publish your own JSON API over it if you need one.
-- **Auth** (`auth`): sessions, login, TOTP 2FA with recovery codes, lockout, CSRF, OIDC SSO, API
+- **Auth**: sessions, login, TOTP 2FA with recovery codes, lockout, CSRF, OIDC SSO, API
   keys for machine endpoints (each acting as its owner, minted on `/profile`), passkeys (feature
   `passkeys`: sign-in without a password, a second factor, an app-wide hardware-binding policy), a
   sign-in policy as one minimum assurance level, "password change required", and a per-model gate.
 - **Files** (`files`): a streaming upload reader (several files, or a phone's camera), safe download
   responses, and upload-form, preview and thumbnail components. Storage, naming and listing stay yours.
-- **Timezones** (`tz`): instants stored as integer UTC seconds (dates as a native `DATE`,
+- **Timezones**: instants stored as integer UTC seconds (dates as a native `DATE`,
   [TIME.md](docs/TIME.md#1-storage-model)), rendered server-side in the operator's zone, and
   `time::picker`, a type-to-search zone selector for a navbar or the profile page (a cookie, set from the
   browser's own zone on a first visit; UTC without one).
@@ -63,7 +63,7 @@ URL, verified (and re-authenticated) before it's on.</sub></td>
 
 ```toml
 [dependencies]
-relativelylight = { version = "0.5", features = ["csv"] }
+relativelylight = "0.5"
 sea-orm = { version = "2.0", features = ["macros", "with-json"] }
 ```
 
@@ -125,22 +125,18 @@ async fn save(headers: HeaderMap, uri: Uri, RealIp(ip): RealIp,
 
 ## Features
 
-| Feature | Default | Adds |
-|---|---|---|
-| `crud` | ✅ | the CRUD engine + SeaORM backend |
-| `ui` | ✅ | `crud::ui`: `Table`, `Form`, `Admin`, `Picker`, `RelationField`; implies `crud` + `tz` |
-| `csv` | | CSV import/export in the UI; implies `tz` |
-| `tz` | | server-side timezone rendering (the `time` module) |
-| `auth` | | sessions, login, TOTP 2FA, lockout, profile pages, API keys, gate presets |
-| `sso` | | OIDC single sign-on + group mapping; implies `auth` |
-| `passkeys` | | passkeys (WebAuthn): sign-in, a second factor, re-authentication; implies `auth` |
-| `files` | | streaming upload reader, download responses, upload form/preview/thumbnail components |
-| `validate-regex`, `validate-base64` | | the regex and base64 validators in `validate` ([docs/DATAINPUT.md](docs/DATAINPUT.md)) |
+The engine, the admin UI (`Table`, `Form`, `Admin`, `Picker`, `RelationField`), CSV import and
+export, timezones (`time`), `auth` (sessions, login, TOTP 2FA, lockout, profile pages, API keys, gate
+presets), `validate`, CSRF and the axum plumbing are the crate: an admin of structured data needs all
+of it ([why](docs/DESIGN.md#principles)). Three features add what a deployment may leave out:
 
-Always on, with no feature: the axum plumbing (`middleware::resolve_real_ip`, `RealIp`), the
-double-submit CSRF token (`csrf`), the gate trait (`authz`), `validate` and `observe`. Every surface is
-an axum handler and every cookie-authenticated write needs the token, so neither earned a switch. A
-build of `auth` or `files` alone sets `default-features = false`.
+| Feature | Adds |
+|---|---|
+| `sso` | OIDC single sign-on + group mapping ([AUTH.md §5b](docs/AUTH.md#5b-sso--openid-connect-feature-sso)) |
+| `passkeys` | passkeys (WebAuthn): sign-in, a second factor, re-authentication ([AUTH.md §5l](docs/AUTH.md#5l-passkeys-feature-passkeys)) |
+| `files` | streaming upload reader, download responses, upload form/preview/thumbnail components ([FILES.md](docs/FILES.md)) |
+
+None is a default, and none needs another.
 
 Registered entities need a **single-column primary key**, **single-column to-one FKs**, and
 `Serialize`/`Deserialize` (SeaORM's `with-json`).

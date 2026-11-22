@@ -2,14 +2,14 @@
 //! admin UI from your ORM entities with no per-model code, and gate it with built-in authentication +
 //! authorization. Composes *into* your app — you keep your router and your page shell.
 //!
-//! Feature-gated modules:
-//! - [`crud`] (default, with its `ui`): the CRUD engine, the SeaORM backend, the admin UI, CSV — see
-//!   `docs/CRUD.md`.
-//! - `auth`: sessions, login, and identity resolution — see `docs/AUTH.md`.
-//! - `files`, `time` (`tz`): uploads and downloads; timestamps in the viewer's zone.
-//!
-//! Always on: [`authz`] (the per-model gate the engine consults), [`csrf`] (the double-submit token
-//! for cookie-authenticated writes), [`middleware`] (`resolve_real_ip`), [`validate`], [`observe`].
+//! Modules:
+//! - [`crud`]: the CRUD engine, the SeaORM backend, the admin UI, CSV — see `docs/CRUD.md`.
+//! - [`auth`]: sessions, login, 2FA, API keys and identity resolution — see `docs/AUTH.md`; SSO and
+//!   passkeys are the features `sso` and `passkeys`.
+//! - [`time`]: timestamps in the viewer's zone — see `docs/TIME.md`.
+//! - `files` (feature `files`): uploads and downloads — see `docs/FILES.md`.
+//! - [`authz`] (the per-model gate the engine consults), [`csrf`] (the double-submit token for
+//!   cookie-authenticated writes), [`middleware`] (`resolve_real_ip`), [`validate`], [`observe`].
 //!
 //! ```ignore
 //! use relativelylight::crud::seaorm::{Crud, MetaModel};
@@ -38,10 +38,8 @@ pub mod middleware;
 
 pub mod observe;
 
-#[cfg(feature = "crud")]
 pub mod crud;
 
-#[cfg(feature = "auth")]
 pub mod auth;
 
 /// Files on a page — a streaming upload reader, download responses and the upload/preview/thumbnail
@@ -71,7 +69,6 @@ pub mod csrf;
 
 /// Server-side rendering of integer-UTC timestamps in the request's zone: [`Tz`](time::Tz) (from a
 /// cookie), [`picker`](time::picker) and [`JS`](time::JS). See `docs/TIME.md`.
-#[cfg(feature = "tz")]
 pub mod time;
 
 /// Typed field validators and normalizers, plus the [`field`](validate::field) adapters for the CRUD
