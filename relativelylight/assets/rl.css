@@ -27,8 +27,9 @@
   background: rgba(0, 0, 0, 0.5);
   z-index: -1;
 }
-/* A form taller than the window scrolls inside the dialog rather than off the bottom of it. */
-.rl-dialog > form { text-align: left; max-height: calc(100vh - 6rem); overflow-y: auto; }
+/* A dialog taller than the window (a form, a row's View, an import) scrolls inside itself rather
+   than off the bottom of it. Each dialog's one child is its card. */
+.rl-dialog > .card { text-align: left; max-height: calc(100vh - 6rem); overflow-y: auto; }
 /* The toolbar's CSV menu: a `<details>` styled as a dropdown, so it opens without JavaScript.
    (Bootstrap's own .dropdown assumes its JS bundle, which these components don't load.) */
 .rl-menu { position: relative; display: inline-block; }

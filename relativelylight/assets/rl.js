@@ -374,7 +374,7 @@
         level.heading.textContent = trail(level);
       }
     }
-    if (level.kind === 'pick') sync(level, doc);
+    if (level.kind === 'pick') sync(level);
     wire(doc);
     level.tracker.reset();
     if (level.kind !== 'pick') focusIn(doc.querySelector('form[method="post"]'), level.dismiss);

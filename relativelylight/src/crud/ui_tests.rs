@@ -1583,6 +1583,7 @@ async fn an_initial_value_for_a_field_the_form_does_not_show_is_refused_by_name(
             .await
             .expect_err("refused");
         assert!(err.to_string().contains(&format!("'{field}'")) && err.to_string().contains(why), "{err}");
+        assert!(!err.to_string().contains("  "), "one line, no source indentation: {err}");
     }
     // A table checks it where it matters — the create dialog — and still lists without one open.
     let table = Table::new(&e, "post").fields(["title", "slug"]).initial("body", "v");

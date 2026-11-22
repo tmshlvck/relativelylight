@@ -134,7 +134,8 @@ pub(crate) fn check_initial(
             Some(c) if widgets::writable(c) && rendered(name) => {}
             Some(_) => {
                 return Err(Error::BadRequest(format!(
-                    "crud({slug}): initial value for '{name}', which this form doesn't show —                      an initial value only pre-fills an input, so the field has to be rendered"
+                    "crud({slug}): initial value for '{name}', which this form doesn't show — \
+                     an initial value only pre-fills an input, so the field has to be rendered"
                 )))
             }
             None => {
