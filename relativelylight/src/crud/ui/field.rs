@@ -5,6 +5,7 @@ use super::decode::Posted;
 use super::render;
 use super::widgets::{self, FieldV, Widget};
 use super::write::missing_ids;
+use crate::crud::engine::find;
 use crate::crud::{Cardinality, Column, Engine, Error, Result, ValidationErrors};
 use askama::Template;
 use http::HeaderMap;
@@ -123,7 +124,7 @@ impl<'a> RelationField<'a> {
     #[allow(clippy::type_complexity)]
     fn column(&self) -> Result<(String, Cardinality, String, String, Option<bool>, Option<u64>)> {
         let cols = self.engine.columns(&self.slug)?;
-        match cols.iter().find(|c| render::name_of(c) == self.relation) {
+        match find(&cols, &self.relation) {
             Some(
                 col @ Column::Relation {
                     target, cardinality, description, create, picker_threshold, ..

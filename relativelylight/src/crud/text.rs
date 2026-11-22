@@ -12,7 +12,7 @@
 //! [`on_write`](crate::crud::MetaField::on_write) — so a rule that belongs to the column, not to
 //! typed text, lives there instead.
 
-use super::engine::{Column, LogicalType};
+use super::engine::{find, Column, LogicalType};
 use crate::time::Tz;
 use serde_json::{json, Value};
 
@@ -32,16 +32,6 @@ pub(crate) fn to_one(raw: &str) -> Value {
     match raw.trim() {
         "" => Value::Null,
         id => id_value(id),
-    }
-}
-
-/// A pinned filter value (`Table::fixed_filter`) as the write value it stands for: the id a
-/// relation filter names, or the column's own reading of the text. Blank is `NULL`, as the filter
-/// means "rows with none".
-pub(crate) fn pinned(col: &Column, raw: &str, tz: &Tz) -> Value {
-    match col {
-        Column::Relation { .. } => to_one(raw),
-        Column::Field { .. } => field_value(col, raw, tz).unwrap_or(Value::Null),
     }
 }
 
@@ -65,9 +55,19 @@ impl Pins {
         self.eq.iter().any(|(n, _)| n == name)
     }
 
-    /// Write the single-value pins into `body` — see [`apply_pins`].
+    /// Write the single-value pins into `body`, over whatever it carried — a crafted value included.
+    /// A pinned value is the write value it stands for: the id a relation filter names, or the
+    /// column's own reading of the text. Blank is `NULL`, as the filter means "rows with none".
     pub(crate) fn apply(&self, body: &mut Value, cols: &[Column], tz: &Tz) {
-        apply_pins(body, cols, &self.eq, tz);
+        let Some(map) = body.as_object_mut() else { return };
+        for (name, raw) in &self.eq {
+            let value = match find(cols, name) {
+                Some(Column::Relation { .. }) => to_one(raw),
+                Some(col) => field_value(col, raw, tz).unwrap_or(Value::Null),
+                None => continue,
+            };
+            map.insert(name.clone(), value);
+        }
     }
 
     /// A message per set-pinned column `body` doesn't hold a value in the set for, as
@@ -84,9 +84,7 @@ impl Pins {
             if value.as_ref().is_some_and(|v| !v.is_empty() && allowed.contains(v)) {
                 continue;
             }
-            let col = cols.iter().find(|c| match c {
-                Column::Field { name: n, .. } | Column::Relation { name: n, .. } => n == name,
-            });
+            let col = find(cols, name);
             let message = match (col, allowed.is_empty()) {
                 (_, true) => "nothing may be written here: this view allows no value".to_string(),
                 (Some(Column::Relation { target, .. }), false) => {
@@ -97,19 +95,6 @@ impl Pins {
             out.push((name.clone(), message));
         }
         out
-    }
-}
-
-/// Write `pins` into a write body, over whatever it carried — a crafted value included.
-pub(crate) fn apply_pins(body: &mut Value, cols: &[Column], pins: &[(String, String)], tz: &Tz) {
-    let Some(map) = body.as_object_mut() else { return };
-    for (name, raw) in pins {
-        let named = |c: &&Column| match c {
-            Column::Field { name: n, .. } | Column::Relation { name: n, .. } => n == name,
-        };
-        if let Some(col) = cols.iter().find(named) {
-            map.insert(name.clone(), pinned(col, raw, tz));
-        }
     }
 }
 
@@ -128,10 +113,10 @@ pub(crate) fn apply_pins(body: &mut Value, cols: &[Column], pins: &[(String, Str
 /// - `Bool` reads `true` / `1` / `yes` / `y` / `t`, any case. (A form's checkbox posts presence, not
 ///   text, and never gets here.)
 pub(crate) fn field_value(col: &Column, raw: &str, tz: &Tz) -> Option<Value> {
-    let Column::Field { logical_type, nullable, write_only, display, .. } = col else {
+    let Column::Field { logical_type, nullable, write_only, .. } = col else {
         return None;
     };
-    let datetime = matches!(display, Some(d) if d.is_datetime());
+    let datetime = col.is_datetime();
     let cell = raw.trim();
     if cell.is_empty() {
         if *write_only {

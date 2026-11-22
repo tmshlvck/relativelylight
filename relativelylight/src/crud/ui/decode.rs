@@ -109,7 +109,7 @@ pub(crate) fn to_write_body(
 ) -> Value {
     let mut body = Map::new();
     for col in cols.iter().filter(|c| super::widgets::writable(c)) {
-        let name = super::render::name_of(col);
+        let name = col.name();
         if !rendered(name) {
             continue;
         }

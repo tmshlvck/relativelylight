@@ -10,6 +10,7 @@ use super::{
     Writes,
 };
 use crate::authz::Operation;
+use crate::crud::engine::find;
 use crate::crud::text::Pins;
 use crate::crud::{Cardinality, Column, Engine, EntityMeta, Error, ListQuery, Result};
 use crate::time::Tz;
@@ -712,7 +713,7 @@ impl<'a> Table<'a> {
         // tells how its values compare.
         out.sort.retain(|(name, _)| {
             cols.iter().any(|c| {
-                render::name_of(c) == name
+                c.name() == name
                     && render::sortable(c)
                     && !matches!(c, Column::Field { write_only: true, .. })
             })
@@ -822,15 +823,14 @@ impl<'a> Table<'a> {
         self.columns
             .iter()
             .map(|want| {
-                cols.iter()
-                    .find(|c| render::name_of(c) == want)
+                find(cols, want)
                     .cloned()
                     .ok_or_else(|| {
                         Error::BadRequest(format!(
                             "crud({}): cannot show column '{want}': no such column or relation \
                              — known: {}",
                             self.slug,
-                            cols.iter().map(render::name_of).collect::<Vec<_>>().join(", ")
+                            cols.iter().map(Column::name).collect::<Vec<_>>().join(", ")
                         ))
                     })
             })
@@ -852,7 +852,7 @@ impl<'a> Table<'a> {
         // A set pin narrows the table as much as a single-value one, so it gets a chip too — with
         // no ✕, since it isn't the operator's to lift.
         for (name, allowed) in self.applicable_sets(cols)? {
-            let col = cols.iter().find(|c| render::name_of(c) == name);
+            let col = find(cols, &name);
             let value = match (col, allowed.is_empty()) {
                 (_, true) => "none".to_string(),
                 (Some(Column::Relation { target, .. }), false) => {
@@ -876,7 +876,7 @@ impl<'a> Table<'a> {
         let mut ranges = Vec::new();
         for name in &self.ranges {
             let kind = range_kind(&self.slug, cols, name)?;
-            let col = cols.iter().find(|c| render::name_of(c) == name);
+            let col = find(cols, name);
             let label = col.map(render::label_of).unwrap_or_else(|| name.clone());
             let (from, to) = state.range_of(name);
             let (lo, hi) = range_bounds(kind, &from, &to, tz);
@@ -917,7 +917,7 @@ impl<'a> Table<'a> {
             if value.is_empty() {
                 continue;
             }
-            let col = cols.iter().find(|c| render::name_of(c) == name);
+            let col = find(cols, name);
             let shown = match col {
                 Some(Column::Relation { target, .. }) => self.label_of(target, value).await?,
                 Some(col) => render::option_label(col, value).to_string(),
@@ -931,7 +931,7 @@ impl<'a> Table<'a> {
         }
 
         for f in self.applicable_filters(cols)? {
-            let col = cols.iter().find(|c| render::name_of(c) == f.name);
+            let col = find(cols, &f.name);
             let label = col.map(render::label_of).unwrap_or_else(|| f.name.clone());
             let chosen = match &f.fixed {
                 Some(pinned) => pinned.clone(),

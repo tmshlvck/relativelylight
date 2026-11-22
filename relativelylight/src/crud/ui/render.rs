@@ -183,7 +183,7 @@ pub(crate) fn cell(
     tz: &Tz,
     links: Option<&Links>,
 ) -> Cell {
-    let name = name_of(col);
+    let name = col.name();
     let raw = row.get(name);
     if let Some((f, headers)) = fmt {
         return Cell::Raw(f.call(&FmtCtx::new(raw.unwrap_or(&Value::Null), row, headers)));
@@ -196,11 +196,9 @@ pub(crate) fn cell(
             Cell::Bool(raw.and_then(Value::as_bool))
         }
         // An int column flagged `datetime` holds Unix seconds: render it in the caller's zone.
-        Column::Field { display: Some(d), .. } if d.is_datetime() => match raw.and_then(Value::as_i64)
-        {
-            Some(secs) => Cell::Text(tz.format(secs)),
-            None => Cell::Text(String::new()),
-        },
+        Column::Field { .. } if col.is_datetime() => {
+            Cell::Text(raw.and_then(Value::as_i64).map(|secs| tz.format(secs)).unwrap_or_default())
+        }
         Column::Field { .. } => Cell::Text(option_label(col, &text(raw)).to_string()),
         // The backend already resolved relations to `{id, label}` — there is nothing to fetch.
         Column::Relation { cardinality: Cardinality::ToOne, .. } => {
@@ -235,12 +233,6 @@ pub(crate) fn format_view(col: &Column) -> Option<&Fmt> {
     match col {
         Column::Field { format_view, .. } => format_view.as_ref(),
         Column::Relation { .. } => None,
-    }
-}
-
-pub(crate) fn name_of(col: &Column) -> &str {
-    match col {
-        Column::Field { name, .. } | Column::Relation { name, .. } => name,
     }
 }
 
@@ -305,7 +297,7 @@ pub(crate) fn heads(cols: &[Column], state: &ViewState) -> Vec<HeadV> {
     let sorted_already = !state.sort.is_empty();
     cols.iter()
         .map(|c| {
-            let name = name_of(c);
+            let name = c.name();
             let rank = state.sort.iter().position(|(col, _)| col == name);
             let desc = rank.map(|i| state.sort[i].1).unwrap_or(false);
             HeadV {

@@ -2,8 +2,9 @@
 //! (with `Crud::picker_create`) the form that creates the row a relation field is missing.
 
 use super::state::{Mode, ViewState};
-use super::{authorize, render, render_err, Form, Outcome, Table};
+use super::{authorize, render_err, Form, Outcome, Table};
 use crate::authz::Operation;
+use crate::crud::engine::find;
 use crate::crud::{Cardinality, Column, Engine, Error, Result};
 use askama::Template;
 use http::HeaderMap;
@@ -203,7 +204,7 @@ impl<'a> Picker<'a> {
             return Err(Error::BadRequest("crud::Picker: no ?pick=<entity>.<relation>".into()));
         };
         let cols = self.engine.columns(slug)?;
-        let found = cols.iter().find(|c| render::name_of(c) == relation);
+        let found = find(&cols, relation);
         let Some(Column::Relation { target, cardinality, links, create, .. }) = found else {
             return Err(Error::BadRequest(format!("crud::Picker: {slug} has no relation '{relation}'")));
         };

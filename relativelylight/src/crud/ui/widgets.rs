@@ -114,12 +114,12 @@ pub(crate) async fn fields(
     presets: &Presets<'_>,
 ) -> Result<Vec<FieldV>> {
     let mut out = Vec::new();
-    for col in cols.iter().filter(|c| writable(c) && rendered(super::render::name_of(c))) {
+    for col in cols.iter().filter(|c| writable(c) && rendered(c.name())) {
         // Set when the row is created; an edit has no say in it (`MetaField::create_only`).
         if row.is_some() && matches!(col, Column::Field { create_only: true, .. }) {
             continue;
         }
-        let name = super::render::name_of(col).to_string();
+        let name = col.name().to_string();
         let (widget, create) = match presets.set_of(&name) {
             // A pinned set is a choice among rows the view already names; a new row isn't one.
             Some(set) => (within(engine, col, row, state, tz, rel, presets, set).await?, String::new()),
@@ -175,7 +175,7 @@ async fn within(
     presets: &Presets<'_>,
     set: &[String],
 ) -> Result<Widget> {
-    let name = super::render::name_of(col);
+    let name = col.name();
     let options = match col {
         Column::Field { display: Some(FieldDisplay::Radio), options, .. } => {
             let value = field_value(col, row, state, tz, presets);
@@ -224,7 +224,7 @@ async fn widget(
     rel: &Relations<'_>,
     presets: &Presets<'_>,
 ) -> Result<Widget> {
-    let name = super::render::name_of(col);
+    let name = col.name();
     match col {
         Column::Field { logical_type, options, display, nullable, required, write_only, .. } => {
             let value = field_value(col, row, state, tz, presets);
@@ -443,34 +443,26 @@ fn choices(col: &Column, options: &[String], value: &str) -> Vec<Opt> {
 /// The value for a scalar input: rejected input → the edited row → the form's initial value → the
 /// column's create-default → empty.
 fn field_value(col: &Column, row: Option<&Value>, state: &ViewState, tz: &Tz, presets: &Presets<'_>) -> String {
-    let name = super::render::name_of(col);
+    let name = col.name();
     if let Some(posted) = state.posted(name) {
         return posted.first().cloned().unwrap_or_default();
     }
-    let datetime = matches!(col, Column::Field { display: Some(d), .. } if d.is_datetime());
+    // A `.datetime()` column's Unix seconds become the picker's wall-clock text in `tz`.
+    let shown = |v: Option<&Value>| match col.is_datetime() {
+        true => v.and_then(Value::as_i64).map(|secs| tz.format_input(secs)).unwrap_or_default(),
+        false => super::render::text(v),
+    };
     if let Some(row) = row {
-        let raw = row.get(name);
-        return match (datetime, raw.and_then(Value::as_i64)) {
-            (true, Some(secs)) => tz.format_input(secs),
-            (true, None) => String::new(),
-            _ => super::render::text(raw),
-        };
+        return shown(row.get(name));
     }
     // Creating: the form's initial value, then `MetaField::default`. Both pre-fill the *input*
     // (neither is applied server-side), which is why a required column still has to be rendered
     // for its value to be sent.
     if let Some(v) = presets.initial_of(name) {
-        return match (datetime, v.as_i64()) {
-            (true, Some(secs)) => tz.format_input(secs),
-            (true, None) => String::new(),
-            _ => super::render::text(Some(v)),
-        };
+        return shown(Some(v));
     }
     match col {
-        Column::Field { default: Some(d), .. } if datetime => {
-            d.as_i64().map(|s| tz.format_input(s)).unwrap_or_default()
-        }
-        Column::Field { default: Some(d), .. } => super::render::text(Some(d)),
+        Column::Field { default: Some(d), .. } => shown(Some(d)),
         _ => String::new(),
     }
 }
