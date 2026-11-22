@@ -587,20 +587,32 @@ pub struct Engine {
     observer: Option<Arc<dyn crate::observe::WriteObserver>>,
     /// Optional CSRF checker; when set, every write must carry a valid token (see [`crate::csrf`]).
     csrf: Option<crate::csrf::Csrf>,
+    /// The app-wide defaults of the admin UI's relation fields (set through `Crud::picker_*`).
+    #[cfg(feature = "ui")]
+    ui: UiDefaults,
+}
+
+/// The app-wide defaults of the admin UI's relation fields, one field on [`Engine`] so a new one is
+/// added in one place. A relation or target model that makes its own choice overrides them.
+#[cfg(feature = "ui")]
+struct UiDefaults {
     /// Where the app serves [`crud::ui::Picker`](crate::crud::ui::Picker) — the one absolute URL the
     /// UI renders. `None`: no picker, so a relation too large for its threshold stays a `<select>`.
-    #[cfg(feature = "ui")]
     picker_path: Option<String>,
     /// How many target rows a relation's input lists before it uses the picker, where the relation
     /// sets none (`MetaRelation::picker_threshold`).
-    #[cfg(feature = "ui")]
     picker_threshold: u64,
     /// Whether a relation field offers "+" — a new target row, made in a dialog over the form.
-    #[cfg(feature = "ui")]
     picker_create: bool,
     /// Whether a relation's label links to the linked row, viewed (and edited) in a dialog.
-    #[cfg(feature = "ui")]
     picker_view: bool,
+}
+
+#[cfg(feature = "ui")]
+impl Default for UiDefaults {
+    fn default() -> Self {
+        Self { picker_path: None, picker_threshold: 50, picker_create: false, picker_view: false }
+    }
 }
 
 impl Engine {
@@ -613,13 +625,7 @@ impl Engine {
             observer: None,
             csrf: None,
             #[cfg(feature = "ui")]
-            picker_path: None,
-            #[cfg(feature = "ui")]
-            picker_threshold: 50,
-            #[cfg(feature = "ui")]
-            picker_create: false,
-            #[cfg(feature = "ui")]
-            picker_view: false,
+            ui: UiDefaults::default(),
         }
     }
 
@@ -627,25 +633,25 @@ impl Engine {
     /// `Crud::picker_path`.
     #[cfg(feature = "ui")]
     pub fn set_picker_path(&mut self, path: impl Into<String>) {
-        self.picker_path = Some(path.into());
+        self.ui.picker_path = Some(path.into());
     }
 
     #[cfg(feature = "ui")]
     pub(crate) fn picker_path(&self) -> Option<&str> {
-        self.picker_path.as_deref()
+        self.ui.picker_path.as_deref()
     }
 
     /// How many target rows a relation's input lists before it uses the picker, where the relation
     /// sets none. Usually set via `Crud::picker_threshold`.
     #[cfg(feature = "ui")]
     pub fn set_picker_threshold(&mut self, n: u64) {
-        self.picker_threshold = n;
+        self.ui.picker_threshold = n;
     }
 
     /// A relation's threshold: its own (`explicit`), else the app-wide one.
     #[cfg(feature = "ui")]
     pub(crate) fn picker_threshold(&self, explicit: Option<u64>) -> u64 {
-        explicit.unwrap_or(self.picker_threshold)
+        explicit.unwrap_or(self.ui.picker_threshold)
     }
 
     /// Offer "+ New" on relation fields: a new target row, created in a dialog over the form. Needs
@@ -653,21 +659,21 @@ impl Engine {
     /// `Crud::picker_create`.
     #[cfg(feature = "ui")]
     pub fn set_picker_create(&mut self, on: bool) {
-        self.picker_create = on;
+        self.ui.picker_create = on;
     }
 
     /// Link each relation's label to the linked row, opened in a dialog over the page. Usually set
     /// via `Crud::picker_view`.
     #[cfg(feature = "ui")]
     pub fn set_picker_view(&mut self, on: bool) {
-        self.picker_view = on;
+        self.ui.picker_view = on;
     }
 
     /// The picker path, when a relation's labels link to their rows: its own choice (`explicit`),
     /// else the app-wide `picker_view`.
     #[cfg(feature = "ui")]
     pub(crate) fn picker_view_path(&self, explicit: Option<bool>) -> Option<&str> {
-        self.picker_path().filter(|_| explicit.unwrap_or(self.picker_view))
+        self.picker_path().filter(|_| explicit.unwrap_or(self.ui.picker_view))
     }
 
     /// The path "+ New" opens for a new row of `target`, through a relation whose own choice is
@@ -677,7 +683,7 @@ impl Engine {
     pub(crate) fn picker_create_path(&self, target: &str, explicit: Option<bool>) -> Option<&str> {
         let on = explicit
             .or_else(|| self.accessors.get(target).and_then(|a| a.meta().picker_create))
-            .unwrap_or(self.picker_create);
+            .unwrap_or(self.ui.picker_create);
         self.picker_path().filter(|_| on)
     }
 

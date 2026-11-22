@@ -10,9 +10,7 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
   default (DESIGN.md principle 3). Still open: whether `crud` without `ui` earns its switch (the
   engine's tests run without `ui`, so it builds and works; the question is whether anyone wants an
   engine with no admin), and whether `tz` stands alone or folds into `ui`/`csv`. Also: whether `crud::ui` nested under `crud`
-  matches the code. The entity-wide settings moved to `MetaModel` (`EntityMeta`), but `Engine` still
-  holds the app-wide UI defaults (`picker_path`, `picker_threshold`, `picker_create`,
-  `picker_view`) as `cfg(ui)` fields; one `ui` settings struct on it would be one field instead.
+  matches the code.
 
 ## crud / crud::ui
 
