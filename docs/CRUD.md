@@ -1264,7 +1264,7 @@ same idea without an `Admin` at all, one entity per page at `/post`, `/tag`, `/e
 not nine hidden panels. (The previous design rendered every panel into every response and showed one with
 `x-show`; a nine-entity page cost 9,441 lines of HTML, where this costs about 500.)
 
-`entities()` appends every registered entity in registration order. `submit` writes to the entity a
+`entities()` appends every registered entity, in alphabetical order of slug. `submit` writes to the entity a
 posted body names, **provided this panel lists it** — an entity it doesn't list is refused before any
 gate is consulted, so a panel's contents are part of what it permits and not merely of what it shows.
 

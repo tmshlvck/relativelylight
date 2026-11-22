@@ -126,7 +126,7 @@ pub enum LogicalType {
 }
 
 /// Optional presentation hint overriding how the UI renders a field (the default is derived from the
-/// [`LogicalType`]). The stored value, validation, and OpenAPI schema are unaffected — only the admin
+/// [`LogicalType`]). The stored value and validation are unaffected — only the admin
 /// table cell and the **form input** change.
 ///
 /// Set it through the [`MetaField`](crate::crud::MetaField) helpers rather than by hand:
@@ -240,16 +240,14 @@ pub enum Column {
         /// carrying it is refused. See [`MetaField::create_only`](crate::crud::MetaField::create_only).
         create_only: bool,
         /// Whether the column accepts SQL NULL. Drives the UI's "empty means nothing here" handling
-        /// (an empty input on a nullable column is sent as `null`, not `""`) and the schema's type
-        /// union.
+        /// (an empty input on a nullable column is sent as `null`, not `""`).
         nullable: bool,
         /// Whether a create must carry this field — NOT NULL, no default, writable. The engine enforces
-        /// it (a `422` naming the field, rather than the database's `500`), the form marks it, and OpenAPI
-        /// lists it in the create schema's `required`. See
+        /// it (a `422` naming the field, rather than the database's `500`), and the form marks it. See
         /// [`MetaField::required`](crate::crud::MetaField::required).
         required: bool,
         /// The allowed values when this column is an enumeration, else empty. Drives a `<select>` in the
-        /// form, `enum` in the OpenAPI schema, and a membership check on write. See
+        /// form and a membership check on write. See
         /// [`MetaField::options`](crate::crud::MetaField::options).
         options: Vec<String>,
         /// How options are shown, `(value, label)`; one not listed shows as stored. Display only —
@@ -275,7 +273,7 @@ pub enum Column {
         /// The target entity's **slug** (the backend resolves the table→slug mapping).
         target: String,
         cardinality: Cardinality,
-        /// For an owned to-one, the FK column on this entity (informational; for the UI/OpenAPI).
+        /// For an owned to-one, the FK column on this entity (informational; for the UI).
         fk_column: Option<String>,
         read_only: bool,
         label: Option<String>,
