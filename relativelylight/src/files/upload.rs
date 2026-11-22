@@ -239,7 +239,7 @@ impl<'a> Upload<'a> {
                     buf.extend_from_slice(&chunk);
                 }
                 let value = String::from_utf8_lossy(&buf).into_owned();
-                if name == "_csrf" {
+                if name == crate::csrf::FIELD {
                     if let Some(c) = self.csrf {
                         if !c.verify(self.headers, Some(&value)) {
                             return Err(UploadError::Csrf);

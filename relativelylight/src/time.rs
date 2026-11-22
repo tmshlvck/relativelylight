@@ -75,32 +75,12 @@ impl Tz {
     /// Unix seconds → `YYYY-MM-DD HH:MM` in this zone, for a table cell. Out-of-range input renders
     /// as the raw number rather than a panic or a silently wrong date.
     pub fn format(&self, epoch: i64) -> String {
-        match self.civil(epoch) {
-            Some(dt) => format!(
-                "{:04}-{:02}-{:02} {:02}:{:02}",
-                dt.year(),
-                dt.month(),
-                dt.day(),
-                dt.hour(),
-                dt.minute()
-            ),
-            None => epoch.to_string(),
-        }
+        self.civil_text(epoch, ' ').unwrap_or_else(|| epoch.to_string())
     }
 
     /// Unix seconds → the `YYYY-MM-DDTHH:MM` an `<input type="datetime-local">` wants.
     pub fn format_input(&self, epoch: i64) -> String {
-        match self.civil(epoch) {
-            Some(dt) => format!(
-                "{:04}-{:02}-{:02}T{:02}:{:02}",
-                dt.year(),
-                dt.month(),
-                dt.day(),
-                dt.hour(),
-                dt.minute()
-            ),
-            None => String::new(),
-        }
+        self.civil_text(epoch, 'T').unwrap_or_default()
     }
 
     /// What an `<input type="datetime-local">` posted (`YYYY-MM-DDTHH:MM[:SS]`) → Unix seconds,
@@ -181,6 +161,13 @@ impl Tz {
 
     fn civil(&self, epoch: i64) -> Option<civil::DateTime> {
         Some(Timestamp::from_second(epoch).ok()?.to_zoned(self.zone()).datetime())
+    }
+
+    /// `YYYY-MM-DD{sep}HH:MM` in this zone, or `None` for an instant out of range.
+    fn civil_text(&self, epoch: i64, sep: char) -> Option<String> {
+        let dt = self.civil(epoch)?;
+        let (y, mo, d, h, mi) = (dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute());
+        Some(format!("{y:04}-{mo:02}-{d:02}{sep}{h:02}:{mi:02}"))
     }
 }
 

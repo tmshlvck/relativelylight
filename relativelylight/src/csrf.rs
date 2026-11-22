@@ -127,8 +127,6 @@ impl Csrf {
         self
     }
 
-    /// Token cookie lifetime in seconds (default 7 days). Match your session TTL so a live session
-    /// always has a usable token.
     /// How large a **multipart** body [`enforce`] will buffer to find the token in. Default 16 MiB
     /// (`MAX_BUFFERED_UPLOAD`); a request over it is rejected rather than read.
     ///
@@ -140,6 +138,8 @@ impl Csrf {
         self
     }
 
+    /// Token cookie lifetime in seconds (default 7 days). Match your session TTL so a live session
+    /// always has a usable token.
     pub fn ttl_secs(mut self, secs: i64) -> Self {
         self.ttl_secs = secs;
         self
@@ -324,7 +324,7 @@ pub async fn enforce(
     let content_type =
         parts.headers.get(http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
     let boundary = crate::multipart::boundary(content_type);
-    let cap = match (&boundary, is_urlencoded_form(&parts.headers)) {
+    let cap = match (&boundary, is_urlencoded_form(content_type)) {
         (Some(_), _) => csrf.max_upload,
         (None, true) => MAX_BUFFERED_FORM,
         (None, false) => return csrf.reject(&parts), // nothing we know how to look inside
@@ -349,13 +349,10 @@ pub async fn enforce(
     next.run(axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))).await
 }
 
-/// Whether the body is a URL-encoded form (ignoring any `; charset=…` parameter).
-fn is_urlencoded_form(headers: &HeaderMap) -> bool {
-    headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/x-www-form-urlencoded"))
-        .unwrap_or(false)
+/// Whether `content_type` is a URL-encoded form's (ignoring any `; charset=…` parameter).
+fn is_urlencoded_form(content_type: &str) -> bool {
+    let kind = content_type.split(';').next().unwrap_or("").trim();
+    kind.eq_ignore_ascii_case("application/x-www-form-urlencoded")
 }
 
 /// Pull one field out of a URL-encoded body. Hand-rolled for the same reason as the rest of this crate's
@@ -478,25 +475,13 @@ mod tests {
         assert_eq!(crate::urlform::decode("100%"), "100%", "a trailing % is not an escape");
         assert_eq!(crate::urlform::decode("%zz"), "%zz", "invalid hex is left alone");
 
-        assert!(is_urlencoded_form(&{
-            let mut h = HeaderMap::new();
-            h.insert(http::header::CONTENT_TYPE, "application/x-www-form-urlencoded".parse().unwrap());
-            h
-        }));
-        assert!(is_urlencoded_form(&{
-            let mut h = HeaderMap::new();
-            h.insert(
-                http::header::CONTENT_TYPE,
-                "Application/X-WWW-Form-Urlencoded; charset=utf-8".parse().unwrap(),
-            );
-            h
-        }), "case and parameters must not matter");
-        assert!(!is_urlencoded_form(&{
-            let mut h = HeaderMap::new();
-            h.insert(http::header::CONTENT_TYPE, "multipart/form-data; boundary=x".parse().unwrap());
-            h
-        }));
-        assert!(!is_urlencoded_form(&HeaderMap::new()), "no content-type is not a form");
+        assert!(is_urlencoded_form("application/x-www-form-urlencoded"));
+        assert!(
+            is_urlencoded_form("Application/X-WWW-Form-Urlencoded; charset=utf-8"),
+            "case and parameters must not matter"
+        );
+        assert!(!is_urlencoded_form("multipart/form-data; boundary=x"));
+        assert!(!is_urlencoded_form(""), "no content-type is not a form");
     }
 
     #[tokio::test]

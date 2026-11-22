@@ -592,7 +592,7 @@ pub fn dns_name(s: &str) -> Result<(), String> {
     Ok(())
 }
 
-// ============================== Feature-gated ==============================
+// ============================== Regex and base64 ==============================
 
 /// Match a regular expression. Compiles the pattern **once**; panics at construction on an invalid
 /// pattern (it is developer input, not user input). The escape hatch for anything not covered above.

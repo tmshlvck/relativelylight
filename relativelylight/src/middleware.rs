@@ -1,5 +1,5 @@
 //! `relativelylight::middleware` — one request-pipeline layer: [`resolve_real_ip`](crate::middleware::resolve_real_ip), which decides who
-//! the caller is. Feature `axum`.
+//! the caller is.
 //!
 //! **It is mandatory for any app using this crate.** It resolves the caller's address **once**, at the
 //! edge, into a [`RealIp`](crate::middleware::RealIp) request extension, so the `auth` lockout, the
