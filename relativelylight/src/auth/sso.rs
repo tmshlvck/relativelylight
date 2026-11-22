@@ -39,7 +39,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::auth::{session, session_cookie, user, Auth};
+use crate::auth::{session, user, Auth};
 
 const TXN_COOKIE: &str = "rl_sso_txn"; // short-lived cookie carrying the in-flight login transaction
 
@@ -572,7 +572,8 @@ async fn callback(
     let Ok(token) = super::create_session(inner, user.id, needs_totp, method).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, clear, "session error").into_response();
     };
-    let jar = clear.add(session_cookie(inner, token));
+    // The CSRF token rotates with the new session, as at every other sign-in.
+    let (jar, _) = super::with_session(inner, clear, token);
     if needs_totp {
         return continue_to(jar, "/login/totp", "Signed in. One more step.");
     }

@@ -457,6 +457,30 @@ async fn a_full_sso_login_signs_in_maps_groups_and_marks_the_account_external() 
     assert!(res.clears_txn(), "the transaction cookie must be cleared: {:?}", res.set_cookies());
 }
 
+#[tokio::test]
+async fn an_sso_sign_in_rotates_the_csrf_token() {
+    // A new session is a privilege change: the CSRF token the browser held before signing in (one a
+    // sibling host or a shared machine may know) must not carry over, as at every other sign-in.
+    let fx = Fx::new(true).await;
+    let old = "0".repeat(64);
+    let (txn, state, nonce) = fx.begin_login().await;
+    let mut recipe = Recipe::valid("staff-alice");
+    recipe.nonce = Some(nonce);
+    *fx.idp.recipe.lock().unwrap() = recipe;
+    let cookie = format!("{txn}; rl_csrf={old}");
+    let res = fx.callback(&format!("code=test-code&state={state}"), Some(&cookie)).await;
+    assert!(res.session_token(fx.auth.session_cookie_name()).is_some(), "signed in: {}", res.body);
+    let csrf = res.session_token("rl_csrf").expect("a new CSRF cookie");
+    assert_ne!(csrf, old, "the CSRF token rotates");
+    assert_eq!(csrf.len(), 64);
+
+    // A refused callback signs nobody in, so it has nothing to rotate.
+    let (txn, _, _) = fx.begin_login().await;
+    let res = fx.callback("code=test-code&state=forged", Some(&format!("{txn}; rl_csrf={old}"))).await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    assert!(res.session_token("rl_csrf").is_none(), "no CSRF cookie on a refusal");
+}
+
 /// The audit observer's view of a login: `(source, actor, after)`.
 #[derive(Default)]
 struct Logins(Mutex<Vec<(&'static str, String, String)>>);

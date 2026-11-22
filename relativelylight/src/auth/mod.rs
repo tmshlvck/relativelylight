@@ -3181,6 +3181,14 @@ fn csrf_rejected(inner: &Inner, req: &Parts) -> Response {
     (StatusCode::FORBIDDEN, Html(csrf_rejected_html(&inner.login_path))).into_response()
 }
 
+/// Hand the caller the session `token`: its cookie, and a **rotated** CSRF token with it (a new session
+/// is a privilege change). Every sign-in and session rotation goes through here. Returns the jar and
+/// the new CSRF token, which a page rendered in the same response must carry.
+fn with_session(inner: &Inner, jar: CookieJar, token: String) -> (CookieJar, String) {
+    let (csrf, csrf_cookie) = inner.csrf().issue();
+    (jar.add(session_cookie(inner, token)).add(csrf_cookie), csrf)
+}
+
 /// Build the session cookie: HttpOnly, SameSite Strict or Lax, Path=/, Secure if set, Max-Age.
 fn session_cookie(inner: &Inner, token: String) -> Cookie<'static> {
     Cookie::build((inner.cookie_name.clone(), token))
