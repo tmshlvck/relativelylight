@@ -1,7 +1,6 @@
 # Upgrading from 0.4 to 0.5
 
-**0.5 is not released yet**; this file collects the steps as they land on `main`.
-[CHANGELOG.md](../CHANGELOG.md) has the full list.
+Released as **0.5.0** on 2026-11-22. [CHANGELOG.md](../CHANGELOG.md) has the full list of changes.
 
 ## 1. `Auth`'s page callbacks get the request
 
@@ -293,8 +292,8 @@ post.field("body").format_cell(truncate(60));
 4. **Two tables that formatted one column differently** now share one formatter: keep the one the
    entity should show everywhere. A link to the row's own Edit dialog (`?edit={id}`) is better
    dropped: the row's Edit already does it.
-5. **The accounts panel:** drop `auth::user::credentials_link` and the `format_cell` /
-   `format_view` on `auth_user`'s id; `auth::user::meta_model` sets them.
+5. **The accounts panel:** drop any `format_cell` / `format_view` of your own on `auth_user`'s id;
+   `auth::user::meta_model` links it to the credentials page.
 
 **Picker threshold.** `Table::picker_threshold`, `Form::picker_threshold` and
 `RelationField::picker_threshold` are gone. Set the app-wide one on the `Engine`, and a relation's own
@@ -311,21 +310,16 @@ workorder.relation("aircraft").picker_threshold(200); // this one
 
 ## 14. Entity-wide settings move to the model
 
-Four settings that describe an entity, not one screen, are now declared on its `MetaModel`
+Two settings that describe an entity, not one screen, are now declared on its `MetaModel`
 ([CRUD.md → The entity as a whole](CRUD.md#entity-wide-settings)):
 
 | 0.4 | 0.5 |
 |---|---|
 | `Table::detail_href("/post/{id}")` (`Admin`: `entity_with("post", \|t\| t.detail_href(…))`) | `post.view_path("/post/{id}")` |
-| `crud.view_path("post", "/post/{id}")` | `post.view_path("/post/{id}")` |
-| `crud.picker_create_except(["user"])` | `user.picker_create(false)` |
-| `Picker::new(&e).create_fields("airline", ["name", "hq"])` | `airline.picker_create_fields(["name", "hq"])` |
 | `Table::row_class(\|row\| … -> String)` | `invoice.row_class(\|cx\| … -> Option<String>)` |
 
 ```rust
 // 0.4
-crud.view_path("post", "/post/{id}");
-crud.picker_create_except(["user"]);
 Table::new(&engine, "invoice")
     .detail_href("/invoice/{id}")
     .row_class(|row| match row["status"].as_str() {
@@ -334,30 +328,21 @@ Table::new(&engine, "invoice")
     })
 
 // 0.5, on the models before `register`
-post.view_path("/post/{id}");
 invoice.view_path("/invoice/{id}");
-user.picker_create(false);
 invoice.row_class(|cx| match cx.row()["status"].as_str() {
     Some("overdue") => Some("table-danger".into()),
     _ => None,
 });
 ```
 
-1. **`detail_href` and `view_path` become one `MetaModel::view_path`.** If you set both for an
-   entity, keep one; it now drives every table's View *and* a relation link's `href`.
-2. **Drop a `view_path` that pointed at a table's own `?show=`** (`"/admin/post?show={id}"`, a
-   no-script fallback for relation links): on the model it turns that table's built-in View off.
-   Without it, a link's no-script `href` is the picker's page for the row.
-3. **`picker_create_except([...])`**: call `picker_create(false)` on each listed target's model. A
-   misspelt slug used to be ignored; a model can't be misspelt.
-4. **`Picker::create_fields(target, names)`**: move the list to the target's model. An unknown
-   name now **panics at startup** instead of failing the render.
-5. **`row_class`**: move it to the model, so every table of the entity (`Admin` included) uses it.
+1. **`detail_href` becomes `MetaModel::view_path`**: it now drives every table's View *and* a
+   relation link's `href`. Don't point it at a table's own `?show=`: on the model it turns that
+   table's built-in View off.
+2. **`row_class`**: move it to the model, so every table of the entity (`Admin` included) uses it.
    The closure takes `&RowCtx` (`cx.row()`, `cx.headers()`) and returns `Option<String>`: `None`
    where it returned `String::new()`. A table that wanted a class the others don't should say it
    with data instead, or render its own rows.
-6. **An app with its own `Accessor`** reports these by overriding `Accessor::meta` (default: none).
-   `Engine::set_view_path` and `Engine::set_picker_create_except` are gone with the `Crud` methods.
+3. **An app with its own `Accessor`** reports these by overriding `Accessor::meta` (default: none).
 
 ## 15. Only `sso`, `passkeys` and `files` are features
 
@@ -415,9 +400,8 @@ A search and replace of `crud::seaorm::`, `crud::engine::` and `crud::ui::` with
 
 Three APIs that had a second way to do the same thing keep one:
 
-1. **The `crud` settings are the `Engine`'s.** `Crud::csrf`, `Crud::on_write`, `Crud::picker_path`,
-   `Crud::picker_threshold`, `Crud::picker_create` and `Crud::picker_view` are gone, and so are the
-   `Engine::set_*` methods they forwarded to. Set them on the engine after registering:
+1. **The `crud` settings are the `Engine`'s.** `Crud::csrf`, `Crud::on_write` and
+   `Crud::picker_path` are gone, and so are the `Engine::set_*` methods they forwarded to. Set them on the engine after registering:
 
    ```rust
    // 0.4

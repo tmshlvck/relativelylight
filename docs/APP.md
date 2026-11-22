@@ -548,5 +548,5 @@ Before a deployment goes out:
 - [TIME.md](TIME.md) — the timezone cookie and the picker.
 - [DATAINPUT.md](DATAINPUT.md) — validators you can call from a hand-written form.
 - [SECURITY.md](SECURITY.md) — what an app must get right, in one list.
-- [MIGRATION-0.5.md](MIGRATION-0.5.md) — upgrading an app to 0.5 (unreleased) from 0.4.
+- [MIGRATION-0.5.md](MIGRATION-0.5.md) — upgrading an app to 0.5 from 0.4.
 - [MIGRATION-0.4.md](MIGRATION-0.4.md) — upgrading an app to 0.4.1 from 0.4.0, and to 0.4 from 0.3.

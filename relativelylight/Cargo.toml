@@ -1,6 +1,6 @@
 [package]
 name = "relativelylight"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.89"           # webauthn-rs 0.6 (askama 0.16 and totp-rs 6 need 1.88)
 license = "MIT"

@@ -11,12 +11,14 @@ is easy to miss in a diff.
 
 ## Unreleased
 
+## [0.5.0] — 2026-11-22
+
 ### Changed (breaking)
 
-- **One way to each setting.** The `crud` settings are the `Engine`'s: `Crud::csrf`, `on_write`,
-  `picker_path`, `picker_threshold`, `picker_create` and `picker_view` are gone, and the
-  `Engine::set_*` methods they forwarded to are named like them (`engine.csrf(..)`,
-  `engine.on_write(..)`, chainable). The free `auth::prune(&db, &lockout)` is gone (`Auth::prune`
+- **One way to each setting.** The `crud` settings are the `Engine`'s: `Crud::csrf`, `on_write` and
+  `picker_path` are gone, and the `Engine::set_csrf` / `set_observer` / `set_picker_path` they
+  forwarded to are `engine.csrf(..)` / `on_write(..)` / `picker_path(..)`, chainable, beside the new
+  `picker_threshold`, `picker_create` and `picker_view`. The free `auth::prune(&db, &lockout)` is gone (`Auth::prune`
   also sees the idle clock), and so is `ViewState::mode()` (read `state.mode`). **Upgrade:** set the
   settings after `crud.into_engine()`
   ([MIGRATION-0.5.md §17](docs/MIGRATION-0.5.md#17-one-way-to-each-setting)).
@@ -34,17 +36,13 @@ is easy to miss in a diff.
   defaults. **Upgrade:** keep only `"sso"`, `"passkeys"` and `"files"` in `features` and drop
   `default-features = false`
   ([MIGRATION-0.5.md §15](docs/MIGRATION-0.5.md#15-only-sso-passkeys-and-files-are-features)).
-- **A row's page, "+ New" per target and the row class belong to the model**
+- **A row's page and the row class belong to the model**
   ([CRUD.md → The entity as a whole](docs/CRUD.md#entity-wide-settings)):
-  `MetaModel::view_path(template)` replaces both `Table::detail_href` and `Crud::view_path(slug, …)`,
-  one setting for each table's View and a relation link's `href`, which could disagree.
-  `MetaModel::picker_create(bool)` replaces `Crud::picker_create_except` (relation, then target,
-  then app decide), and `MetaModel::picker_create_fields([…])` replaces `Picker::create_fields`,
-  panicking at startup on an unknown name. `MetaModel::row_class` replaces `Table::row_class`: every
-  table of the entity uses it, and the closure takes `&RowCtx` (row and request headers) and returns
+  `MetaModel::view_path(template)` replaces `Table::detail_href`, one setting for each table's View
+  and a relation link's `href`. `MetaModel::row_class` replaces `Table::row_class`: every table of
+  the entity uses it, and the closure takes `&RowCtx` (row and request headers) and returns
   `Option<String>`. An app with its own `Accessor` reports them from the new `Accessor::meta` as an
-  `EntityMeta`; `Engine::meta(slug)` reads them. `Engine::set_view_path` and
-  `set_picker_create_except` are gone. **Upgrade:**
+  `EntityMeta`; `Engine::meta(slug)` reads them. **Upgrade:**
   [MIGRATION-0.5.md §14](docs/MIGRATION-0.5.md#14-entity-wide-settings-move-to-the-model).
 - **Display formatters belong to the field**
   ([CRUD.md → Display formatters](docs/CRUD.md#display-formatters--how-a-field-is-shown)):
@@ -52,12 +50,12 @@ is easy to miss in a diff.
   once, they show on every table of the entity, its View dialog, **and the dialog a relation's link
   opens** (`picker_view`), which no formatter reached before; a picker's list applies none. The
   closure takes one `&FmtCtx` (`value()`, `row()`, and the request's `headers()`, for the viewer's
-  zone) instead of `(value, row)`. `esc`, `esc_str` and `truncate` are imported from `crud::`. `auth::user::meta_model` now links an account's id to its credentials page itself,
-  with `target="_top"`; `auth::user::credentials_link` is gone. CRUD.md shows how to link a row to
+  zone) instead of `(value, row)`. `esc`, `esc_str` and `truncate` are imported from `crud::`. `auth::user::meta_model` links an account's id to its credentials page itself, with
+  `target="_top"`. CRUD.md shows how to link a row to
   the app's own page through its identifier. **Upgrade:**
   [MIGRATION-0.5.md §13](docs/MIGRATION-0.5.md#13-display-formatters-move-to-the-field-the-picker-threshold-to-the-relation).
 - **The picker threshold belongs to the relation**: `MetaRelation::picker_threshold(n)`, with the
-  app-wide default `Crud::picker_threshold(n)` (50), replace `Table`, `Form` and
+  app-wide default `Engine::picker_threshold(n)` (50), replace `Table`, `Form` and
   `RelationField::picker_threshold`, so every form that edits a relation decides the same way.
   `Column::Field` gains `format_cell` / `format_view` and `Column::Relation` `picker_threshold`, for
   an app with its own `Accessor`. **Upgrade:** the same section.
@@ -270,7 +268,7 @@ is easy to miss in a diff.
   revoke, each audited without the key or its hash. `api_key::meta_model()` registers the table in
   an accounts panel with the hash hidden and the owner read-only. **Schema:** a new table,
   `auth_api_key`, in `table_create_statements`. `auth::migrate` creates it; an app with its own
-  migrations adds `api_key::table_create_statement` when it starts using keys
+  migrations gets it from `upgrade::table_create_statements`
   ([MIGRATION-0.5.md](docs/MIGRATION-0.5.md#2-optional-api-keys-move-into-auth)). `examples/auth`
   mints keys on `/profile` and accepts them on `/api/whoami`.
 - **`Table::range_filter(column)`**: a from/to pair of inputs in the toolbar, `>=` / `<=`, either
@@ -291,7 +289,7 @@ is easy to miss in a diff.
   listing through `Engine::list` itself. `ViewState::ranges` holds a URL's ranges as typed.
 - **`Tz::day_bounds(date)`**: a calendar date's first and last second in the zone.
 - **"+ New" on relation fields: create the missing row without leaving the form**
-  (`Crud::picker_create(true)`). It opens the target's create form in a dialog over the form being
+  (`Engine::picker_create(true)`). It opens the target's create form in a dialog over the form being
   filled in. Saving it chooses the new row, by the id the database gave it: the selected option of a
   `<select>` (the button is below it), or a chip of the picker dialog's selection (the button is in
   that dialog). Dialogs nest (a new airline gets a new
@@ -299,7 +297,7 @@ is easy to miss in a diff.
   target; the form only ever creates, and is gated and CSRF-checked like every write. The picker
   route answers `POST` too, with the new `Picker::submit`; `MetaModel::picker_create_fields` narrows
   the form, and `MetaModel::picker_create(false)` keeps a target out. Off by default ([CRUD.md → Creating the missing row](docs/CRUD.md#creating-the-missing-row)).
-- **Relation labels link to their rows** (`Crud::picker_view(true)`). In a table's cells and View
+- **Relation labels link to their rows** (`Engine::picker_view(true)`). In a table's cells and View
   dialog, a post's author opens that author in a dialog over the page, with Edit for whoever may
   update it. A saved edit renames every link to the row on the page, and closing the dialog
   returns to exactly where you were. The link is drawn only for who may read the target; the edit
@@ -1611,6 +1609,7 @@ Renames the authorization presets to a consistent `<ReadAudience>Read<WriteAudie
 First published release: the `crud` engine + SeaORM backend, the Bootstrap/Alpine admin UI, OpenAPI and
 CSV adapters, and the `auth` module (sessions, login, TOTP 2FA, OIDC SSO, per-model gates).
 
+[0.5.0]: https://github.com/tmshlvck/relativelylight/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/tmshlvck/relativelylight/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/tmshlvck/relativelylight/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/tmshlvck/relativelylight/compare/v0.4.0...v0.4.1
