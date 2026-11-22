@@ -496,6 +496,10 @@ fn is_patterned(password: &str) -> bool {
             if run >= MIN_RUN {
                 return true;
             }
+        } else if d == 1 || d == -1 {
+            // A turn (`2→1→2`): the pair just read starts the next run, it isn't lost.
+            run = 2;
+            step = d;
         } else {
             run = 1;
             step = 0;
@@ -783,6 +787,17 @@ mod tests {
         assert!(p.check("good\0passphrase", &[]).is_err());
         // A maximum exists so an unbounded input can't be handed to argon2 as a CPU bill.
         assert!(p.check(&"a1B2c3!x".repeat(50), &[]).is_err(), "800 characters is refused");
+    }
+
+    #[test]
+    fn a_run_after_a_turn_is_still_a_run() {
+        // The pair that reverses direction starts the next run: `2→1` then `1→2…6`.
+        assert!(is_patterned("123456"));
+        assert!(is_patterned("2123456"), "123456 after a turn");
+        assert!(is_patterned("babcdef"), "abcdef after a turn");
+        assert!(is_patterned("6543234567"), "a descending run turning into an ascending one");
+        assert!(!is_patterned("bAbcdef"), "bcdef is only five");
+        assert!(!is_patterned("2123452"), "turns alone are no run");
     }
 
     #[test]
