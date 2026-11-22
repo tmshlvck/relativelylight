@@ -599,7 +599,7 @@ pub struct Engine {
     observer: Option<Arc<dyn crate::observe::WriteObserver>>,
     /// Optional CSRF checker; when set, every write must carry a valid token (see [`crate::csrf`]).
     csrf: Option<crate::csrf::Csrf>,
-    /// The app-wide defaults of the admin UI's relation fields (set through `Crud::picker_*`).
+    /// The app-wide defaults of the admin UI's relation fields (set through `Engine::picker_*`).
     ui: UiDefaults,
 }
 
