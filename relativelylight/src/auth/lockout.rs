@@ -24,7 +24,7 @@
 //! writes here about never.
 //!
 //! **Nothing here is scheduled.** Expired rows are harmless (they read as absent and reset themselves
-//! on the next failure), so pruning is the app's housekeeping call — see [`crate::auth::prune`](crate::auth::prune).
+//! on the next failure), so pruning is the app's housekeeping call — see [`Auth::prune`](crate::auth::Auth::prune).
 
 use ipnet::IpNet;
 use sea_orm::ActiveValue::Set;

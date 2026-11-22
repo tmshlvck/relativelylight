@@ -40,7 +40,7 @@ struct FieldTmpl {
 /// let ids: Vec<String> = tags(&engine).read(&headers, &body).await?;
 /// ```
 ///
-/// The picker needs what it needs in a `Form`: `Crud::picker_path`, the `GET` route serving
+/// The picker needs what it needs in a `Form`: `Engine::picker_path`, the `GET` route serving
 /// [`Picker`](super::Picker), and [`JS`](super::JS) in the page shell. Without them the field is a
 /// `<select>` of every row, which still works.
 ///

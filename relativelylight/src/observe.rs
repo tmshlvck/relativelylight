@@ -6,7 +6,7 @@
 //! at the HTTP layer). Neither SeaORM's `ActiveModelBehavior` nor a plain tower layer sees both. So
 //! the library fires a [`WriteEvent`] at the points that do — each `crud` write handler and each
 //! mutating `auth` handler — carrying the change **and** the request context ([`headers`] +
-//! [`client_ip`]). The app registers one [`WriteObserver`] (via `Crud::on_write` / `Auth::on_write`),
+//! [`client_ip`]). The app registers one [`WriteObserver`] (via `Engine::on_write` / `Auth::on_write`),
 //! takes the actor from [`actor`](WriteEvent::actor) or resolves it itself
 //! (`auth.identify(ev.headers)`), and persists a row in its own audit
 //! table. The address arrives **already resolved** — see
@@ -43,7 +43,7 @@ pub struct WriteEvent<'a> {
     /// hand-written surfaces.
     ///
     /// Each emitter names **itself** here, because one sink is normally registered with both
-    /// `Crud::on_write` and `Auth::on_write` (and usually takes the app's own events too), so this is
+    /// `Engine::on_write` and `Auth::on_write` (and usually takes the app's own events too), so this is
     /// what tells them apart. It says `autocrud` — this crate's auto-generated CRUD — rather than a
     /// bare `crud`, which in an app that has CRUD screens of its own names nothing in particular.
     pub source: &'static str,
@@ -157,7 +157,7 @@ impl<'a> WriteEvent<'a> {
     }
 }
 
-/// A sink for [`WriteEvent`]s. Register one with `Crud::on_write` and/or `Auth::on_write`; the same
+/// A sink for [`WriteEvent`]s. Register one with `Engine::on_write` and/or `Auth::on_write`; the same
 /// `Arc` can be shared by both (the blanket impl below forwards through `Arc`).
 #[async_trait]
 pub trait WriteObserver: Send + Sync {

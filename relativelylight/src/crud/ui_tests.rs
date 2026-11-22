@@ -698,7 +698,7 @@ async fn nothing_that_reaches_the_page_can_carry_markup() {
 
     // Twice: the author as a `<select>`, then as the id input with the current label beside it.
     for picker in [20, 0] {
-        e.set_picker_threshold(picker);
+        e.picker_threshold(picker);
         let table = Table::new(&e, "post").title(NASTY).description(NASTY).filter("mood");
         for state in [
             ViewState::from_query(&format!("q={NASTY}&filter[mood]={NASTY}")),
@@ -839,7 +839,7 @@ async fn a_filter_is_a_menu_of_every_value_however_large_its_target() {
     );
     e.add(Arc::new(Mock::new("tag", vec![field("id", false, true, None)]).rows(vec![])), Arc::new(Open));
 
-    e.set_picker_threshold(20);
+    e.picker_threshold(20);
     let table = Table::new(&e, "post").filter("author");
     let html = render(&table, &ViewState::from_query("filter[author]=42")).await;
     assert!(html.contains(r#"<option value="*">Author: all</option>"#), "{html}");
@@ -1356,7 +1356,7 @@ impl crate::observe::WriteObserver for Seen {
 async fn every_delete_hands_the_observer_the_rows_it_removed() {
     let seen = Arc::new(Seen::default());
     let (mut e, _log) = engine();
-    e.set_observer(seen.clone());
+    e.on_write(seen.clone());
     let table = Table::new(&e, "post");
 
     table.submit(&no_headers(), IP, b"_del=7", &list()).await.unwrap();
@@ -1991,7 +1991,7 @@ async fn an_uploaded_file_that_is_not_utf8_is_refused_by_name() {
     let Outcome::Invalid(state) = table.submit(&headers, IP, &body, &list()).await.unwrap() else {
         panic!("an unreadable file is a rejection");
     };
-    assert_eq!(*state.mode(), Mode::Import);
+    assert_eq!(state.mode, Mode::Import);
     let html = table.render_for(&no_headers(), &state).await.unwrap();
     assert!(html.contains("isn&#39;t valid UTF-8") || html.contains("isn't valid UTF-8"), "{html}");
     assert_eq!(log.count(), 0, "and nothing was written");
@@ -2021,7 +2021,7 @@ async fn a_refused_import_comes_back_with_its_report_and_the_text_still_in_it() 
     else {
         panic!("a rejected import is a rejection, not a redirect");
     };
-    assert_eq!(*state.mode(), Mode::Import, "the import dialog reopens");
+    assert_eq!(state.mode, Mode::Import, "the import dialog reopens");
 
     let html = table.render_for(&no_headers(), &state).await.unwrap();
     assert!(html.contains("row(s) rejected — nothing was imported."), "{html}");
@@ -2089,14 +2089,14 @@ async fn a_relation_is_a_select_until_its_target_outgrows_the_threshold_then_a_p
 
     // Past the threshold with no picker to open: still every row, rather than a page that broke
     // the day its table grew.
-    e.set_picker_threshold(1);
+    e.picker_threshold(1);
     let capped = Table::new(&e, "post");
     let html = render(&capped, &edit).await;
     assert!(html.contains(r#"<option value="4">Grace</option>"#), "{html}");
     assert!(!html.contains("rl-picked"), "{html}");
 
     // With one: the selection, read-only, posted back as hidden inputs, and the dialog's address.
-    e.set_picker_path("/pick");
+    e.picker_path("/pick");
     let capped = Table::new(&e, "post");
     let html = render(&capped, &edit).await;
     assert!(!html.contains(r#"<option value="4">"#), "no list past the threshold: {html}");
@@ -2132,8 +2132,8 @@ async fn a_relation_naming_no_row_is_a_field_error_before_the_backend() {
     // database would make of a wrong one whatever a dangling foreign key makes. Positive control:
     // `relations_decode_to_ids` (author 3 exists).
     let (mut e, log) = engine();
-    e.set_picker_path("/pick");
-    e.set_picker_threshold(1);
+    e.picker_path("/pick");
+    e.picker_threshold(1);
     let table = Table::new(&e, "post");
     for (posted, field, message) in [
         ("author=Ada", "author", "no author matches 'Ada'"),
@@ -2188,7 +2188,7 @@ fn engine_with_author_gate(author_gate: Arc<dyn Authz>) -> Engine {
         ),
         Arc::new(Open),
     );
-    e.set_picker_path("/pick");
+    e.picker_path("/pick");
     e
 }
 
@@ -2357,10 +2357,10 @@ async fn a_relation_field_is_the_forms_own_field_select_or_picker() {
     let (mut e, _) = engine();
     for picker in [false, true] {
         if picker {
-            e.set_picker_path("/pick");
+            e.picker_path("/pick");
         }
         for threshold in [50, 1] {
-            e.set_picker_threshold(threshold);
+            e.picker_threshold(threshold);
             let row = e.get("post", "7").await.unwrap();
             let form = Form::new(&e, "post").edit("7").fields(["author", "tag"]);
             let form = form.render_for(&no_headers(), &list()).await.unwrap();
@@ -2379,7 +2379,7 @@ async fn a_relation_field_is_the_forms_own_field_select_or_picker() {
         }
     }
     // And it is the picker past the threshold: the selection (labels looked up) and the dialog.
-    e.set_picker_threshold(1);
+    e.picker_threshold(1);
     let html = RelationField::new(&e, "post", "tag").selected([1, 2]);
     let html = html.render_for(&no_headers()).await.unwrap();
     for expect in [
@@ -2394,8 +2394,8 @@ async fn a_relation_field_is_the_forms_own_field_select_or_picker() {
 #[tokio::test]
 async fn a_relation_field_takes_its_own_name_label_and_error() {
     let (mut e, _) = engine();
-    e.set_picker_path("/pick");
-    e.set_picker_threshold(1);
+    e.picker_path("/pick");
+    e.picker_threshold(1);
     let field = RelationField::new(&e, "post", "tag")
         .name("add_tags")
         .label("Tags to add")
@@ -2500,9 +2500,9 @@ async fn a_relation_field_escapes_labels_names_and_messages() {
     );
     for threshold in [50, 0] {
         if threshold == 0 {
-            e.set_picker_path("/pick");
+            e.picker_path("/pick");
         }
-        e.set_picker_threshold(threshold);
+        e.picker_threshold(threshold);
         let html = RelationField::new(&e, "post", "tag")
             .name("t\"><script>")
             .label("<script>l</script>")
@@ -2535,7 +2535,7 @@ async fn a_to_many_lists_every_target_row_so_saving_cannot_unlink_one() {
         Arc::new(Open),
     );
 
-    e.set_picker_threshold(20);
+    e.picker_threshold(20);
     let html = render(&Table::new(&e, "post"), &ViewState::from_query("edit=7")).await;
     assert!(html.contains(r#"<option value="2" selected>tag 2</option>"#), "{html}");
     assert!(html.contains(r#"<option value="45" selected>tag 45</option>"#), "linked past the cap: {html}");

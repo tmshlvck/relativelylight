@@ -215,21 +215,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.register(profile_mm, Open);
     crud.register(tag_mm, Open);
     crud.register(event_mm, Open);
+    let mut engine = crud.into_engine();
     // Where the relation picker is served (the `/_rl/pick` route below). Without it a relation past
     // `picker_threshold` stays a `<select>` of every row.
-    crud.picker_path("/_rl/pick");
+    engine.picker_path("/_rl/pick");
     // And "+ New" for every relation field the operator may create the target of: a new author or
     // tag made in a dialog over the half-filled post form, and chosen in it when saved. Below a
     // `<select>`, or in the picker's dialog for a large relation. The `/_rl/pick` route answers
     // `POST` for it (`pick_write` below).
-    crud.picker_create(true);
+    engine.picker_create(true);
     // And each relation's label is a link: a post's author opens that author in a dialog over the
     // table, with Edit, and closing it is back where you were. Without the script (or in a new
     // tab) the link goes to the row's own page where the model names one (a post's,
     // `post_mm.view_path` above), else to the dialog's page.
-    crud.picker_view(true);
+    engine.picker_view(true);
 
-    let engine = Arc::new(crud.into_engine());
+    let engine = Arc::new(engine);
     let entities = engine.tables();
     let app = Arc::new(App { engine, entities: entities.clone() });
 

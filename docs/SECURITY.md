@@ -15,7 +15,7 @@ Go through the list before a deployment goes out ([APP.md §9](APP.md#9-checklis
       `into_make_service_with_connect_info::<SocketAddr>()`. Behind a CDN, write your own middleware
       inserting `RealIp`; there is no hook. The login routes and the crud writes answer `500` without
       it ([AUTH.md §4](AUTH.md#4-middleware-the-module-provides)).
-- [ ] **Every write carries the CSRF token**: `crud.csrf(auth.csrf())` and `Upload::csrf` are set,
+- [ ] **Every write carries the CSRF token**: `engine.csrf(auth.csrf())` and `Upload::csrf` are set,
       every hand-written `POST` route is behind `csrf::enforce` (a streaming `files::Upload` route
       checks it itself with `Upload::csrf`), and `Csrf::max_upload` is above the largest upload a guarded route takes
       ([AUTH.md §7](AUTH.md#7-csrf-double-submit-token)).

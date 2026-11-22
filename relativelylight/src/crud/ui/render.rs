@@ -36,7 +36,7 @@ pub(crate) struct LinkV {
 }
 
 /// Which of one entity's relations link to their rows, for one caller: those whose target they may
-/// read, when the relation says so (`MetaRelation::links`) or else `Crud::picker_view` does.
+/// read, when the relation says so (`MetaRelation::links`) or else `Engine::picker_view` does.
 /// Resolved once per render, so a page of rows asks each target's gate once, not once per row.
 #[derive(Default)]
 pub(crate) struct Links(Vec<Linked>);

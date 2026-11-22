@@ -3117,7 +3117,7 @@ async fn a_limit_of_zero_switches_a_counter_off_and_prune_clears_expired_rows() 
         last_failure_at: Set(now_secs() - 10_000),
     };
     stale.insert(&fx.db).await.expect("stale row");
-    let removed = prune(&fx.db, &by_account(2, 900)).await.expect("prune");
+    let removed = fx.auth.prune().await.expect("prune");
     assert_eq!(removed, 1, "only the expired row went");
     assert!(fx.lockout_row("alice").await.is_some(), "the live lockout stays");
     fx.try_login("alice").await.assert_locked_out(900);
@@ -3781,7 +3781,7 @@ async fn a_minted_key_identifies_its_owner_with_their_current_groups() {
     assert_eq!(raw.len(), "test_".len() + 40, "{raw}");
 
     let row = &keys(&fx).await[0];
-    assert_eq!(row.hashed_key, api_key::hash(&raw), "only the hash is stored");
+    assert_eq!(row.hashed_key, super::sha256_hex(&raw), "only the hash is stored");
     assert_eq!(row.prefix, raw[..11], "the visible prefix is the app prefix and six more");
     assert_eq!(row.name, "router");
     assert!(row.last_used_at.is_none());
@@ -3854,7 +3854,7 @@ async fn an_unusable_key_is_invalid_and_counted_against_the_address() {
         assert!(fx.auth.identify_key(raw, key_ip()).await.is_ok(), "control");
     }
     let set = |raw: &str, f: fn(&mut api_key::entity::ActiveModel)| {
-        let (db, hash) = (fx.db.clone(), api_key::hash(raw));
+        let (db, hash) = (fx.db.clone(), super::sha256_hex(raw));
         async move {
             let row = api_key::entity::Entity::find()
                 .filter(api_key::entity::Column::HashedKey.eq(hash))

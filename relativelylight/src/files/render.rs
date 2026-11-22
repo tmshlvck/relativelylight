@@ -274,12 +274,6 @@ fn badge(name: &str) -> String {
     }
 }
 
-/// Percent-encode a file name for one URL path segment: everything but the RFC 3986 unreserved
-/// characters is escaped, so `/`, `?`, `#` and `%` in a name can't change which route a link hits.
-pub fn url_segment(s: &str) -> String {
-    crate::urlform::encode_component(s)
-}
-
 /// The upload form — a plain `<form enctype="multipart/form-data">`.
 ///
 /// The hidden `_csrf` input is rendered **first**, and that ordering is load-bearing:

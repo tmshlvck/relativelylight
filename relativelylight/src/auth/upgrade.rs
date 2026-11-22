@@ -1,6 +1,6 @@
 //! **Upgrading an existing database to 0.5's `auth` schema** — see `docs/MIGRATION-0.5.md` §3.
 //!
-//! A database created before 0.5 lacks two tables and six columns. [`migrate`](crate::auth::migrate)
+//! A database created before 0.5 lacks three tables and six columns. [`migrate`](crate::auth::migrate)
 //! creates missing tables but never alters one, so the columns need a migration step of the app's own,
 //! and they are needed **before** the upgraded crate runs, whatever features it uses: every read of an
 //! account selects the new `auth_user` columns, and every login writes `auth_session.method`.
@@ -13,19 +13,26 @@
 //! for stmt in upgrade::index_create_statements() { m.create_index(stmt).await?; }
 //! ```
 
-use super::passkey;
+use super::{api_key, passkey};
 use sea_orm::sea_query::{
     Alias, ColumnDef, Index, IndexCreateStatement, Table, TableAlterStatement, TableCreateStatement,
 };
 use sea_orm::{DbBackend, Schema};
 
-/// The `CREATE TABLE` statements for 0.5's new tables: `auth_passkey` and `auth_webauthn_challenge`.
+/// The `CREATE TABLE IF NOT EXISTS` statements for 0.5's new tables: `auth_api_key`,
+/// `auth_passkey` and `auth_webauthn_challenge`. `IF NOT EXISTS`, so a database that already has one
+/// (an app's own key table renamed to `auth_api_key`, MIGRATION-0.5.md §2) keeps it.
 pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> {
     let schema = Schema::new(backend);
-    vec![
+    let mut stmts = vec![
+        schema.create_table_from_entity(api_key::entity::Entity),
         schema.create_table_from_entity(passkey::entity::Entity),
         schema.create_table_from_entity(passkey::challenge::Entity),
-    ]
+    ];
+    for t in &mut stmts {
+        t.if_not_exists();
+    }
+    stmts
 }
 
 /// The `ALTER TABLE` statements adding 0.5's six columns:

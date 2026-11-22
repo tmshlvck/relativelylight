@@ -327,7 +327,7 @@ impl MetaField {
     }
 
     /// How this field is shown where **one row** is: a table's View dialog, and the dialog a
-    /// relation's link opens (`Crud::picker_view`) — the same closure shape and the same rule
+    /// relation's link opens (`Engine::picker_view`) — the same closure shape and the same rule
     /// (**escape every value**) as [`format_cell`](Self::format_cell), and independent of it.
     ///
     /// A link to the record's own page belongs here, with `target="_top"`: in a linked row's
@@ -394,13 +394,13 @@ pub struct MetaRelation {
     pub label: Option<String>,
     pub description: Option<String>,
     /// Whether this relation's labels link to their rows, viewed in a dialog — see
-    /// [`links`](MetaRelation::links). `None`: as `Crud::picker_view` says.
+    /// [`links`](MetaRelation::links). `None`: as `Engine::picker_view` says.
     pub links: Option<bool>,
     /// Whether this relation's field offers "+ New" — see [`create`](MetaRelation::create).
-    /// `None`: as the target's `MetaModel::picker_create`, else `Crud::picker_create`, says.
+    /// `None`: as the target's `MetaModel::picker_create`, else `Engine::picker_create`, says.
     pub create: Option<bool>,
     /// How many target rows this relation's input lists — see
-    /// [`picker_threshold`](MetaRelation::picker_threshold). `None`: as `Crud::picker_threshold`.
+    /// [`picker_threshold`](MetaRelation::picker_threshold). `None`: as `Engine::picker_threshold`.
     pub picker_threshold: Option<u64>,
     pub(super) from_col: String,
     pub(super) to_col: String,
@@ -432,10 +432,10 @@ impl MetaRelation {
     }
 
     /// Link this relation's labels to their rows (a dialog with the row, and Edit), or not —
-    /// whatever `Crud::picker_view` says for the rest. `true` turns it on for this relation alone,
+    /// whatever `Engine::picker_view` says for the rest. `true` turns it on for this relation alone,
     /// with the app-wide switch off; `false` keeps it off here while it is on elsewhere. Either way
     /// the target's gate still decides per caller (read for the link, update for Edit), and it
-    /// needs `Crud::picker_path`.
+    /// needs `Engine::picker_path`.
     ///
     /// ```ignore
     /// post.relation("author").links(true);   // only a post's author links, nothing else does
@@ -446,10 +446,10 @@ impl MetaRelation {
     }
 
     /// Offer "+ New" on this relation's field, or not — whatever the target's
-    /// [`MetaModel::picker_create`](crate::crud::MetaModel::picker_create) and `Crud::picker_create` say for the rest. `true` turns it on here alone; `false` keeps it off
+    /// [`MetaModel::picker_create`](crate::crud::MetaModel::picker_create) and `Engine::picker_create` say for the rest. `true` turns it on here alone; `false` keeps it off
     /// here (say, an invoicing contact that must be an existing one) while the airline beside it
     /// has it. The target's gate still decides per caller (create and list), and it needs
-    /// `Crud::picker_path` and a `POST` on its route.
+    /// `Engine::picker_path` and a `POST` on its route.
     ///
     /// ```ignore
     /// workorder.relation("airline").create(true);
@@ -462,7 +462,7 @@ impl MetaRelation {
 
     /// How many target rows this relation's form input may list as a `<select>` (a multi-select
     /// for a to-many) before it shows the selection and edits it in the picker's dialog — overriding
-    /// `Crud::picker_threshold` (default 50) for this relation. Without `Crud::picker_path` the
+    /// `Engine::picker_threshold` (default 50) for this relation. Without `Engine::picker_path` the
     /// input stays a `<select>` of every row.
     ///
     /// ```ignore

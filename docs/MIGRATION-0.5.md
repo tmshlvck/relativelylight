@@ -24,12 +24,9 @@ reduced navbar because it had no request can now render the full one.
 ## 2. Optional: API keys move into `auth`
 
 Nothing breaks: `auth_api_key` is a new table and the feature is off until you call
-`Auth::api_keys`. `auth::migrate` creates the table. With your own migrations, add a step when you
-start using keys:
-
-```rust
-m.create_table(relativelylight::auth::api_key::table_create_statement(m.get_database_backend())).await?;
-```
+`Auth::api_keys`. `auth::migrate` creates the table, and so does §3's
+`upgrade::table_create_statements` for an app with its own migrations (`IF NOT EXISTS`, so a key
+table you already renamed to `auth_api_key` stays).
 
 **An app that kept its own key table** (teleddns's `api_key`, the same shape) can move onto the
 crate's and delete its resolver and profile card ([AUTH.md §5k](AUTH.md#5k-api-keys)). Existing keys
@@ -54,11 +51,11 @@ keep working: the stored hash is the SHA-256 hex of the raw key, as before.
 - `auth_user` gains `passkey_handle` (§5l), `password_changed_at` and `must_change_password` (§5m).
 - `auth_session` gains `method`, `passkey_class` and `reauth_until` (an SSO account's confirmation,
   §5h).
-- Two new tables: `auth_passkey` and `auth_webauthn_challenge`.
+- Three new tables: `auth_api_key` (§2), `auth_passkey` and `auth_webauthn_challenge`.
 
 Every read of an account selects the new columns, and every write of a password sets two of them,
 so an unmigrated database can neither sign anyone in nor create an account. `auth::migrate` creates
-the two tables but never alters one: an app that relies on it alone still needs the columns added.
+the tables but never alters one: an app that relies on it alone still needs the columns added.
 
 The crate ships the statements, in `auth::upgrade`:
 
@@ -87,7 +84,7 @@ ALTER TABLE auth_user ADD COLUMN must_change_password boolean NOT NULL DEFAULT F
 ALTER TABLE auth_session ADD COLUMN method varchar NOT NULL DEFAULT '';
 ALTER TABLE auth_session ADD COLUMN passkey_class varchar NULL;
 ALTER TABLE auth_session ADD COLUMN reauth_until bigint NULL;
--- and the two tables, from upgrade::table_create_statements
+-- and the three tables, from upgrade::table_create_statements
 ```
 
 **Code that builds the rows itself.** `auth::user::Model` gains `passkey_handle`,
@@ -300,11 +297,11 @@ post.field("body").format_cell(truncate(60));
    `format_view` on `auth_user`'s id; `auth::user::meta_model` sets them.
 
 **Picker threshold.** `Table::picker_threshold`, `Form::picker_threshold` and
-`RelationField::picker_threshold` are gone. Set the app-wide one on `Crud`, and a relation's own on
-its model:
+`RelationField::picker_threshold` are gone. Set the app-wide one on the `Engine`, and a relation's own
+on its model:
 
 ```rust
-crud.picker_threshold(100);                           // every relation (default 50)
+engine.picker_threshold(100);                           // every relation (default 50)
 workorder.relation("aircraft").picker_threshold(200); // this one
 ```
 
@@ -413,3 +410,30 @@ use relativelylight::crud::{esc, Admin, Crud, Engine, ListQuery, MetaModel, Outc
 | `{{ relativelylight::crud::ui::CSS }}` in a template | `{{ relativelylight::crud::CSS }}` (and `JS`) |
 
 A search and replace of `crud::seaorm::`, `crud::engine::` and `crud::ui::` with `crud::` does it; then merge the `use` lines the compiler calls duplicates.
+
+## 17. One way to each setting
+
+Three APIs that had a second way to do the same thing keep one:
+
+1. **The `crud` settings are the `Engine`'s.** `Crud::csrf`, `Crud::on_write`, `Crud::picker_path`,
+   `Crud::picker_threshold`, `Crud::picker_create` and `Crud::picker_view` are gone, and so are the
+   `Engine::set_*` methods they forwarded to. Set them on the engine after registering:
+
+   ```rust
+   // 0.4
+   crud.csrf(auth.csrf());
+   crud.on_write(audit.clone());
+   crud.picker_path("/_rl/pick");
+   let engine = Arc::new(crud.into_engine());
+
+   // 0.5
+   let mut engine = crud.into_engine();
+   engine.csrf(auth.csrf()).on_write(audit.clone()).picker_path("/_rl/pick");
+   let engine = Arc::new(engine);
+   ```
+
+   On a bare `Engine`, `set_csrf` / `set_observer` / `set_picker_path` become `csrf` / `on_write` /
+   `picker_path`.
+2. **The free `auth::prune(&db, &lockout)` is gone**: call `auth.prune()`, which also sees the idle
+   clock.
+3. **`ViewState::mode()` is gone**: read the public field, `state.mode`.

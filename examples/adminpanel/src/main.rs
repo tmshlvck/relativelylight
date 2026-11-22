@@ -310,24 +310,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a bespoke endpoint: an operator sees who is locked out and deletes the row.
     crud.register(auth::lockout::username_meta_model(), admin_gate.clone());
     crud.register(auth::lockout::ip_meta_model(), admin_gate.clone());
+    let mut engine = crud.into_engine();
     // CSRF: these writes are cookie-authenticated, so every posted form must echo the double-submit
     // token. Sharing `auth.csrf()` puts the panel's forms and the login/profile forms on one token
     // cookie; the library renders the hidden `_csrf` input itself. See docs/AUTH.md §7.
-    crud.csrf(auth.csrf());
+    engine.csrf(auth.csrf());
     // A post's author and tags outnumber `picker_threshold` (50), so the form edits them in a dialog
     // over this route. Its rows are the target's own table, so they answer to the target's gate.
-    crud.picker_path("/_rl/pick");
+    engine.picker_path("/_rl/pick");
     // "+ New" for a relation whose target doesn't have the row yet: a new author made in a dialog
     // over the half-filled post, and chosen in it. The target's gate decides, so the editor
     // (read-only) never sees the button, and the `user` model says no for itself (above).
-    crud.picker_create(true);
+    engine.picker_create(true);
     // Each relation's label links to its row, opened in a dialog (with Edit for the admin). Without
     // the script, or in a new tab, the link is that dialog's page.
-    crud.picker_view(true);
+    engine.picker_view(true);
 
     // One shared engine, rendered from *per request*, so write controls hide for users who can't
     // write — and a forged write is refused by the same gate regardless.
-    let engine = Arc::new(crud.into_engine());
+    let engine = Arc::new(engine);
 
     let app = Arc::new(App { engine: engine.clone(), auth: auth.clone(), accounts: admin_gate });
 

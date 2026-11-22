@@ -40,7 +40,8 @@ mod upload;
 #[cfg(test)]
 mod tests;
 
-pub use render::{url_segment, Preview, Thumbnail, UploadForm, TEXT_PREVIEW_MAX};
+pub use crate::urlform::encode_component as url_segment;
+pub use render::{Preview, Thumbnail, UploadForm, TEXT_PREVIEW_MAX};
 pub use response::{to_inline_response, to_response, Download};
 pub use sniff::{human_size, sniff_mime, SNIFF_BYTES};
 pub use upload::{FilePart, Part, Upload, UploadError};

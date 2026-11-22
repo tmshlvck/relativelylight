@@ -41,7 +41,7 @@
 //! domain name, and browsers refuse one for a bare IP address.
 //!
 //! It also shows the two housekeeping duties the library leaves to the app: it schedules
-//! `auth::prune` (expired sessions + expired lockout rows), and it registers the two lockout
+//! `Auth::prune` (expired sessions + expired lockout rows), and it registers the two lockout
 //! entities in the panel, so an operator sees who is locked out and clears a row by deleting it.
 
 use axum::body::Bytes;
@@ -215,9 +215,8 @@ from this site. Reload the page and try again.</div>
         ));
 
     // Housekeeping is the **app's** job — the library schedules nothing. `Auth::prune` deletes dead
-    // sessions (absolute *and* idle expiry — it knows this `Auth`'s configuration, which the free
-    // `auth::prune(&db, &lockout)` can't) plus expired lockout rows; run it once at startup and then on
-    // whatever loop the app already has. Skipping it is safe, just untidy: a dead session never
+    // sessions (absolute *and* idle expiry — it knows this `Auth`'s configuration) plus expired
+    // lockout rows; run it once at startup and then on whatever loop the app already has. Skipping it is safe, just untidy: a dead session never
     // authenticates and an expired lockout row reads as unlocked.
     let prune_auth = auth.clone();
     tokio::spawn(async move {
@@ -508,8 +507,9 @@ fn accounts_engine(db: DatabaseConnection, auth: &Auth) -> Arc<Engine> {
     crud.register(auth::lockout::ip_meta_model(), gate);
     // These writes are cookie-authenticated, so they must carry the double-submit token — the same
     // handle `auth`'s own forms and `csrf::enforce` use, so one cookie serves the whole app.
-    crud.csrf(auth.csrf());
-    Arc::new(crud.into_engine())
+    let mut engine = crud.into_engine();
+    engine.csrf(auth.csrf());
+    Arc::new(engine)
 }
 
 /// The panel's shape. Built per request (it borrows the engine), which is also what lets it be

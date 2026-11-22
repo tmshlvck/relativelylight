@@ -106,7 +106,7 @@ shows the entity reads it ([why](DESIGN.md#crud)):
 | | What | Where it shows |
 |---|---|---|
 | `view_path("/post/{id}")` | the row's **page of the app's own**; `{id}` is the row's id, percent-encoded | each table's **View** links there, and the built-in dialog is not offered ([your own view page](#your-own-view-page)); a [relation's link](#viewing-the-linked-row) to the row uses it as its `href` without the script |
-| `picker_create(bool)` | whether [**"+ New"**](#creating-the-missing-row) may create one of these rows, over `Crud::picker_create` | every relation field pointing here; a relation's own [`create`](#per-relation-one-switch-each) still wins |
+| `picker_create(bool)` | whether [**"+ New"**](#creating-the-missing-row) may create one of these rows, over `Engine::picker_create` | every relation field pointing here; a relation's own [`create`](#per-relation-one-switch-each) still wins |
 | `picker_create_fields([…])` | the fields "+ New"'s create form shows, in order (default: every writable one) | every relation pointing here; an unknown name panics, like `field` |
 | `row_class(closure)` | a **CSS class per row**, from the row | the `<tr>` of every table of the entity (its `Table`s, `Admin`), not a picker's list |
 
@@ -365,9 +365,9 @@ pub struct MetaRelation {
     pub hidden: bool,
     pub label: Option<String>,
     pub description: Option<String>,
-    pub links: Option<bool>,         // label links to the row; None = as Crud::picker_view says
-    pub create: Option<bool>,        // "+ New" on the field; None = as Crud::picker_create says
-    pub picker_threshold: Option<u64>, // rows a <select> lists; None = as Crud::picker_threshold says
+    pub links: Option<bool>,         // label links to the row; None = as Engine::picker_view says
+    pub create: Option<bool>,        // "+ New" on the field; None = as Engine::picker_create says
+    pub picker_threshold: Option<u64>, // rows a <select> lists; None = as Engine::picker_threshold says
     pub searchable: bool,            // the search box matches its labels (default true)
 }
 ```
@@ -392,6 +392,10 @@ and none between your handlers and the engine either.
 | `delete_where(slug, &ListQuery)` | `Vec<Value>` | one set-based `DELETE … WHERE`, not a loop; returns **the rows it removed** (count = `.len()`) |
 | `write_batch(slug, rows)` | `BatchApplied` | many writes as one transaction (what CSV import uses) |
 | `decide(slug, op, &headers)` | `Decision` | the model's gate — `Allow` / `NeedsLogin` / `Denied` |
+
+**The app-wide settings are the engine's**, set once after `Crud::into_engine()` (or on a bare
+`Engine` over your own `Accessor`): `csrf(auth.csrf())`, `on_write(sink)`, and for relations
+`picker_path`, `picker_threshold`, `picker_create`, `picker_view`. `Crud` only registers models.
 
 These are also how you publish your own JSON API if you want one: a handler per route, your choice of
 shape, your versioning policy.
@@ -528,7 +532,8 @@ can re-render with the messages in place.
 Cookie-authenticated writes are a CSRF target, so the engine can require a double-submit token:
 
 ```rust
-crud.csrf(auth.csrf());   // share the auth module's token cookie
+let mut engine = crud.into_engine();
+engine.csrf(auth.csrf());   // share the auth module's token cookie
 ```
 
 Every form the UI renders then carries a hidden `_csrf` input, and `submit` refuses a body without a
@@ -1015,7 +1020,7 @@ the threshold depends on data, so failing past it would break a working page the
 A to-many always lists **every** row it lists at all, because a posted multi-select replaces the
 relation set and a linked row the list left out would be unlinked by an unchanged save.
 
-The threshold is `Crud::picker_threshold(n)` (default 50) for every relation, and a relation's own
+The threshold is `Engine::picker_threshold(n)` (default 50) for every relation, and a relation's own
 `MetaRelation::picker_threshold(n)` overrides it. It belongs to the relation, so every form that
 edits it (a `Table`'s dialog, a `Form`, a `RelationField`) decides the same way.
 
@@ -1299,7 +1304,7 @@ The crate adds no route, so you serve the picker's page yourself: one `GET` hand
 declare once.
 
 ```rust
-crud.picker_path("/_rl/pick");               // where Table, Form and Admin point the dialog
+engine.picker_path("/_rl/pick");               // where Table, Form and Admin point the dialog
 // …
 .route("/_rl/pick", get(pick))
 
@@ -1336,8 +1341,8 @@ Where the button is depends on the field:
   field; the row itself stays).
 
 ```rust
-crud.picker_path("/_rl/pick");
-crud.picker_create(true);                // "+ New" for relation fields; off by default
+engine.picker_path("/_rl/pick");
+engine.picker_create(true);                // "+ New" for relation fields; off by default
 // …
 .route("/_rl/pick", get(pick).post(pick_write))
 
@@ -1420,8 +1425,8 @@ author on the page shows the new name. Close, and you are where you were: same p
 nothing reloaded.
 
 ```rust
-crud.picker_path("/_rl/pick");
-crud.picker_view(true);                              // relation labels link to their rows
+engine.picker_path("/_rl/pick");
+engine.picker_view(true);                              // relation labels link to their rows
 author.view_path("/author/{id}");                   // optional: a page of your own, the href without the script
 // …
 .route("/_rl/pick", get(pick).post(pick_write))          // the same two handlers as "+ New"
@@ -1475,8 +1480,8 @@ workorder.relation("airline").links(true).create(true);
 
 // Everything links and offers "+ New", except this one field: the invoicing contact must be
 // an existing one.
-crud.picker_view(true);
-crud.picker_create(true);
+engine.picker_view(true);
+engine.picker_create(true);
 workorder.relation("invoice_contact").create(false);
 
 // Registrations are quick to scan: a menu of up to 200 rather than the picker past 50.
@@ -1583,7 +1588,7 @@ hand-written forms and multi-step workflows.
 
 ## Write observer (audit)
 
-Register a [`WriteObserver`](../relativelylight/src/observe.rs) with `Crud::on_write` to be notified after every
+Register a [`WriteObserver`](../relativelylight/src/observe.rs) with `Engine::on_write` to be notified after every
 **committed** write (create / update / delete / bulk-delete) through the engine — the hook for audit
 logging. Each write handler fires a `WriteEvent` carrying the change *and* the request context:
 
@@ -1603,7 +1608,8 @@ pub struct WriteEvent<'a> {
 
 let mut crud = Crud::new(db);
 crud.register(post_mm, gate);
-crud.on_write(my_audit_sink.clone());   // Arc<dyn WriteObserver>
+let mut engine = crud.into_engine();
+engine.on_write(my_audit_sink.clone());   // Arc<dyn WriteObserver>
 ```
 
 Notes: the observer runs **after commit** (a failed write fires nothing); `before` on update is a

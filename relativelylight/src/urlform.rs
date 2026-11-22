@@ -48,8 +48,9 @@ pub(crate) fn encode(s: &str) -> String {
 
 /// Percent-encode one URI component (RFC 3986): the unreserved characters (`~` included) stay, and
 /// everything else is escaped, a space as `%20`. Good for a path segment, a query value, and an RFC 5987
-/// `filename*`; `/`, `?`, `#` and `%` in the input can't change which route a link hits.
-pub(crate) fn encode_component(s: &str) -> String {
+/// `filename*`; `/`, `?`, `#` and `%` in the input can't change which route a link hits. Public as
+/// `files::url_segment`, for putting a file name into a URL.
+pub fn encode_component(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         match b {

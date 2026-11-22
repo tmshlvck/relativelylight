@@ -13,6 +13,13 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
+- **One way to each setting.** The `crud` settings are the `Engine`'s: `Crud::csrf`, `on_write`,
+  `picker_path`, `picker_threshold`, `picker_create` and `picker_view` are gone, and the
+  `Engine::set_*` methods they forwarded to are named like them (`engine.csrf(..)`,
+  `engine.on_write(..)`, chainable). The free `auth::prune(&db, &lockout)` is gone (`Auth::prune`
+  also sees the idle clock), and so is `ViewState::mode()` (read `state.mode`). **Upgrade:** set the
+  settings after `crud.into_engine()`
+  ([MIGRATION-0.5.md §17](docs/MIGRATION-0.5.md#17-one-way-to-each-setting)).
 - **Everything in `crud` is imported from `crud::`.** The submodules `seaorm`, `engine`, `ui`, `fmt`
   and `csv_io` are private and their items re-exported flat, so one `use` line sets up an admin
   ([DESIGN.md → crud](docs/DESIGN.md#crud)); `csv_io::export` / `import` are `crud::export_csv` /

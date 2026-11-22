@@ -13,7 +13,7 @@
 //!   id is a real row (the picker's hidden inputs are as editable as a typed id);
 //! - the **write**, its own: here one `Engine::write_batch`, so the whole retag commits or none of
 //!   it does — after asking the `post` gate whether this caller may update posts at all;
-//! - the picker's **plumbing**, as for a `Form`: `Crud::picker_path("/_rl/pick")`, a `GET /_rl/pick`
+//! - the picker's **plumbing**, as for a `Form`: `Engine::picker_path("/_rl/pick")`, a `GET /_rl/pick`
 //!   serving `crud::Picker` in a bare shell, and `crud::JS` in the page shell.
 //!
 //! Below the form a read-only `Table` pinned to the chosen author shows the result.
@@ -55,10 +55,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.register(author_mm, Open);
     crud.register(post_mm, Open);
     crud.register(tag_mm, Open);
+    let mut engine = crud.into_engine();
     // Where the picker is served — the `/_rl/pick` route below. Without it a relation past the
     // threshold stays a `<select>` of every row, which still works.
-    crud.picker_path("/_rl/pick");
-    let engine = Arc::new(crud.into_engine());
+    engine.picker_path("/_rl/pick");
+    let engine = Arc::new(engine);
 
     let router = Router::new()
         .route("/", get(page).post(apply))

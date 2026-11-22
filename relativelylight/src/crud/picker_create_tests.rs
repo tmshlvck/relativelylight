@@ -1,9 +1,9 @@
 //! The picker's two ways past choosing, over a real database. **"+ New"** on a relation field
-//! (`Crud::picker_create`): the button is offered only
+//! (`Engine::picker_create`): the button is offered only
 //! when switched on and when the caller may create **and** list the target; the picker's create form
 //! is the target's own, refused by the same gates, only ever creates, and checks CSRF; a save lands
 //! on a page that reports the new row's id and label; and the form inside the dialog has its own
-//! "+", which is how the dialogs nest. **Relation links** (`Crud::picker_view`): a relation's label
+//! "+", which is how the dialogs nest. **Relation links** (`Engine::picker_view`): a relation's label
 //! links to the row when the caller may read it; the row's page shows it with Edit only for who may
 //! update it; the edit updates exactly the row the URL names and reports its new label. Each
 //! refusal has a control that passes.
@@ -133,7 +133,7 @@ struct Setup {
     airline_links: Option<bool>,
     airline_create: Option<bool>,
     airline_gate: Gate,
-    /// `Crud::picker_threshold`, and `workorder.airline`'s own (`MetaRelation::picker_threshold`).
+    /// `Engine::picker_threshold`, and `workorder.airline`'s own (`MetaRelation::picker_threshold`).
     threshold: Option<u64>,
     airline_threshold: Option<u64>,
     /// `airline.name` links to the airline's own page, in the cells and where one row is shown.
@@ -175,15 +175,6 @@ async fn fixture(setup: Setup) -> (Engine, DatabaseConnection) {
         db.execute_unprepared(stmt).await.unwrap();
     }
     let mut crud = Crud::new(db.clone());
-    crud.picker_path("/pick");
-    crud.picker_create(setup.on);
-    crud.picker_view(setup.view);
-    if let Some(n) = setup.threshold {
-        crud.picker_threshold(n);
-    }
-    if let Some(csrf) = setup.csrf {
-        crud.csrf(csrf);
-    }
     crud.register(MetaModel::new(address::Entity), Open);
     let mut airline = MetaModel::new(airline::Entity);
     airline.field("name").validate_str(|s| if s.trim().is_empty() { Err("required".into()) } else { Ok(()) });
@@ -215,7 +206,15 @@ async fn fixture(setup: Setup) -> (Engine, DatabaseConnection) {
         workorder.relation("airline").picker_threshold(n);
     }
     crud.register(workorder, Open);
-    (crud.into_engine(), db)
+    let mut engine = crud.into_engine();
+    engine.picker_path("/pick").picker_create(setup.on).picker_view(setup.view);
+    if let Some(n) = setup.threshold {
+        engine.picker_threshold(n);
+    }
+    if let Some(csrf) = setup.csrf {
+        engine.csrf(csrf);
+    }
+    (engine, db)
 }
 
 fn h() -> HeaderMap {

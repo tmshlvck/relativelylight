@@ -101,6 +101,7 @@ pub struct ViewState {
     /// for the column applies one, since turning a date into stored seconds needs the column's type
     /// and the viewer's zone; so [`to_list_query`](ViewState::to_list_query) leaves them out.
     pub ranges: Vec<(String, String, String)>,
+    /// What the page is showing — the list, or a dialog over it.
     pub mode: Mode,
     /// `?format=csv` — the app's read handler exports instead of rendering (see `Table::csv`).
     pub csv: bool,
@@ -388,11 +389,6 @@ impl ViewState {
         mode: Mode,
     ) -> Self {
         Self { rejected: Some(errors), posted, mode, ..self.clone() }
-    }
-
-    /// What the page is showing — the list, or a dialog over it.
-    pub fn mode(&self) -> &Mode {
-        &self.mode
     }
 
     pub(crate) fn field_error(&self, name: &str) -> Option<&str> {

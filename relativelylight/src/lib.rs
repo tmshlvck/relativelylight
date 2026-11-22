@@ -68,7 +68,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 mod multipart;
 
 /// Double-submit CSRF protection for cookie-authenticated writes ([`Csrf`](csrf::Csrf)). Enforced on
-/// `auth`'s forms; opt-in for `crud` via `Crud::csrf`. See `docs/AUTH.md` §7.
+/// `auth`'s forms; opt-in for `crud` via `Engine::csrf`. See `docs/AUTH.md` §7.
 pub mod csrf;
 
 /// Server-side rendering of integer-UTC timestamps in the request's zone: [`Tz`](time::Tz) (from a

@@ -288,7 +288,7 @@ pub(crate) async fn relation(
     ids: Vec<String>,
     linked: Option<Vec<Opt>>,
 ) -> Result<Widget> {
-    let threshold = engine.picker_threshold(threshold);
+    let threshold = engine.threshold_for(threshold);
     let listable = rel.permits(engine, target, Operation::List).await;
     let as_options = |page: &crate::crud::Page| -> Vec<Opt> {
         page.data
@@ -312,7 +312,7 @@ pub(crate) async fn relation(
     };
     // One capped listing answers "is it small?" — `total` counts past the cap.
     let probe = if listable { Some(engine.list(target, &query(false), true).await?) } else { None };
-    let picker = engine.picker_path();
+    let picker = engine.picker_route();
     match (&probe, picker) {
         (Some(page), _) if page.total <= threshold => Ok(select(as_options(page))),
         // No picker to open: the whole list, however long. A page that errored once its
@@ -336,7 +336,7 @@ pub(crate) async fn relation(
 }
 
 /// Where a relation field's "+" opens, or empty for none. Offered only when the relation turned it
-/// on (`MetaRelation::create`, `explicit`) or else the app did (`Crud::picker_create`), and the
+/// on (`MetaRelation::create`, `explicit`) or else the app did (`Engine::picker_create`), and the
 /// caller may both **create** the target and **list** it — the page that reports the new row
 /// shows its label, which is a read. Each nested form asks again for
 /// its own relations, so how deep the dialogs go is the gates' answer (and the script's cap).

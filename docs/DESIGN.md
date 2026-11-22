@@ -75,6 +75,10 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
   module grew to the shape it will keep, about 60 names, which one list holds. Inside, `seaorm`
   (introspection, queries, `MetaModel`) is apart from `meta` (the field and relation settings, no
   SeaORM) and `registry` (`Crud`).
+- **`Crud` registers, `Engine` holds the settings.** CSRF, the audit sink and the picker defaults
+  are set on the `Engine`, once, after `Crud::into_engine()`. `Crud` used to forward each one to an
+  `Engine::set_*` twin; a bare `Engine` over an app's own `Accessor` needs the settings too, so they
+  live there alone.
 - **`Accessor` stays public.** An app may want its own UI or JSON API over `Engine`, or a backend
   of its own; the trait names no ORM types.
 - **Introspection first, configuration as a layer.** Every column, key and to-one relation comes from

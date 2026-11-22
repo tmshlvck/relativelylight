@@ -1,5 +1,5 @@
 //! [`Picker`] — the page inside the dialog that edits a relation too large for a `<select>`, and
-//! (with `Crud::picker_create`) the form that creates the row a relation field is missing.
+//! (with `Engine::picker_create`) the form that creates the row a relation field is missing.
 
 use super::state::{Mode, ViewState};
 use super::{authorize, render, render_err, Form, Outcome, Table};
@@ -23,7 +23,7 @@ struct CreatedTmpl {
 /// field opens when its target has more rows than `picker_threshold`.
 ///
 /// The crate adds no route: serve this from one `GET` handler of your own, on the path you gave
-/// `Crud::picker_path`, wrapped in a **bare** shell (no navigation; Bootstrap and [`CSS`](super::CSS)).
+/// `Engine::picker_path`, wrapped in a **bare** shell (no navigation; Bootstrap and [`CSS`](super::CSS)).
 /// The page that opened the dialog reads its inputs directly, so this page needs no script.
 ///
 /// ```ignore
@@ -41,7 +41,7 @@ struct CreatedTmpl {
 /// can be browsed, and the rows are a `Table` render of the target: refused (`401`/`403`) when the
 /// caller may not list it, whatever they may do to the source.
 ///
-/// **Creating the missing row.** With `Crud::picker_create(true)` a relation field also gets a
+/// **Creating the missing row.** With `Engine::picker_create(true)` a relation field also gets a
 /// "+ New" (below its `<select>`, or in this picker's dialog) that opens this page as the target's
 /// **create form** (`?pick=post.author&new=1`). It posts back
 /// to the same URL — route `POST` to [`submit`](Picker::submit) — and a saved row lands on
@@ -49,7 +49,7 @@ struct CreatedTmpl {
 /// underneath. That form's own relations get their "+" too, so the dialogs nest (the script stops
 /// at four forms deep).
 ///
-/// **Viewing the linked row.** With `Crud::picker_view(true)` a relation's label in a table (and in
+/// **Viewing the linked row.** With `Engine::picker_view(true)` a relation's label in a table (and in
 /// its View dialog) links to the row: `?pick=post.author&show=3` is that author, read-only, with
 /// relation links of its own and an Edit (`&edit=3`) when the caller may update it. The edit form
 /// posts to [`submit`](Picker::submit) as well, and a saved edit lands back on the row with
@@ -175,7 +175,7 @@ impl<'a> Picker<'a> {
     async fn open(&self, p: &Picked, on: bool, op: Operation, headers: &HeaderMap) -> Result<()> {
         if !on {
             return Err(Error::BadRequest(format!(
-                "crud::Picker: {}.{} offers no such page (Crud::picker_create / picker_view, \
+                "crud::Picker: {}.{} offers no such page (Engine::picker_create / picker_view, \
                  MetaModel::picker_create, MetaRelation::create / links)",
                 p.slug, p.relation
             )));

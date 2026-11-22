@@ -552,7 +552,7 @@ impl<'a> Table<'a> {
         let pins = self.pins(&cols)?;
         let links = render::Links::resolve(self.engine, &self.slug, &cols, headers).await;
 
-        let dialog = match state.mode() {
+        let dialog = match &state.mode {
             // A read-only row is a *read*: a caller who may not write still gets it.
             Mode::Show(id) if self.detail_dialog_on(&meta) => {
                 in_view(self.engine, &self.slug, &pins, id).await?;
@@ -561,11 +561,11 @@ impl<'a> Table<'a> {
                 self.detail_view(&cols, id, headers, &tz, &links, chrome).await?
             }
             Mode::New if can.create => {
-                self.dialog(&cols, &pins, state.mode(), &state, headers, &csrf).await?
+                self.dialog(&cols, &pins, &state.mode, &state, headers, &csrf).await?
             }
             Mode::Edit(id) if can.update => {
                 in_view(self.engine, &self.slug, &pins, id).await?;
-                self.dialog(&cols, &pins, state.mode(), &state, headers, &csrf).await?
+                self.dialog(&cols, &pins, &state.mode, &state, headers, &csrf).await?
             }
             Mode::Import if can.import => self.import_dialog(&cols, &state, &csrf)?,
             // The list, or a dialog this caller isn't offered here: a typed URL opens nothing.
@@ -656,7 +656,7 @@ impl<'a> Table<'a> {
     /// refusal, not a matter of which buttons get drawn.
     async fn listing(&self, cols: &[Column], headers: &HeaderMap, state: &ViewState) -> Result<Listing> {
         authorize(self.engine, Operation::List, &self.slug, headers).await?;
-        if *state.mode() != Mode::List {
+        if state.mode != Mode::List {
             authorize(self.engine, Operation::Read, &self.slug, headers).await?;
         }
         let tz = Tz::from_headers(headers);

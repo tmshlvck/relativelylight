@@ -150,7 +150,7 @@ fn engine_with(gate: Arc<dyn Authz>, csrf: Option<crate::csrf::Csrf>) -> (Engine
     let mut engine = Engine::new();
     engine.add(Arc::new(Stub { calls: calls.clone() }), gate);
     if let Some(csrf) = csrf {
-        engine.set_csrf(csrf);
+        engine.csrf(csrf);
     }
     (engine, calls)
 }

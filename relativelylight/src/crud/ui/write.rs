@@ -393,6 +393,6 @@ pub(crate) async fn authorize(
 /// exist — `auth`'s login issues it; an app without `auth` calls `Csrf::ensure` when rendering the
 /// page (see `docs/AUTH.md` §7).
 pub(crate) fn csrf_token(engine: &Engine, headers: &HeaderMap) -> String {
-    engine.csrf().and_then(|c| c.token(headers)).unwrap_or_default()
+    engine.csrf_checker().and_then(|c| c.token(headers)).unwrap_or_default()
 }
 

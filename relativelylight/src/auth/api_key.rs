@@ -20,11 +20,10 @@ use axum::extract::{Form, Path, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use sea_orm::sea_query::TableCreateStatement;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait, QueryFilter,
-    QueryOrder, Schema,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter,
+    QueryOrder,
 };
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -185,11 +184,6 @@ impl std::fmt::Display for KeyError {
 
 impl std::error::Error for KeyError {}
 
-/// SHA-256 of a raw key, lowercase hex: what `hashed_key` stores and the lookup matches.
-pub fn hash(raw: &str) -> String {
-    super::sha256_hex(raw)
-}
-
 /// A fresh raw key: `prefix` and [`BODY_LEN`] OS-random alphanumerics.
 fn fresh(prefix: &str) -> String {
     format!("{prefix}{}", super::random_chars(ALPHABET, BODY_LEN))
@@ -210,7 +204,7 @@ pub async fn mint(
     let row = entity::ActiveModel {
         user_id: Set(user_id),
         name: Set(name.to_string()),
-        hashed_key: Set(hash(&raw)),
+        hashed_key: Set(super::sha256_hex(&raw)),
         prefix: Set(raw.chars().take(prefix.len() + VISIBLE_BODY).collect()),
         created_at: Set(super::now_secs()),
         expires_at: Set(expires_at),
@@ -255,12 +249,6 @@ pub async fn revoke(
         .await?
         .rows_affected;
     Ok((gone == 1).then_some(row))
-}
-
-/// The `CREATE TABLE` for `auth_api_key` alone — the migration step for an app that already applied
-/// [`table_create_statements`](super::table_create_statements) before keys existed.
-pub fn table_create_statement(backend: DbBackend) -> TableCreateStatement {
-    Schema::new(backend).create_table_from_entity(entity::Entity)
 }
 
 /// The table for an accounts panel, with the rules that keep the panel from becoming a way around
@@ -353,7 +341,7 @@ pub(super) async fn identify(
 /// The lookup behind [`identify`], ignoring the lockout: `Ok(None)` for every way a key can be no good.
 async fn lookup(inner: &Inner, token: &str) -> Result<Option<KeyIdentity>, DbErr> {
     let Some(key) = entity::Entity::find()
-        .filter(entity::Column::HashedKey.eq(hash(token)))
+        .filter(entity::Column::HashedKey.eq(super::sha256_hex(token)))
         .one(&inner.db)
         .await?
     else {
@@ -657,10 +645,10 @@ mod tests {
     fn the_hash_is_sha256_hex_of_the_whole_key() {
         // The compatibility promise: the same digest an app's own table stored (teleddns).
         assert_eq!(
-            hash("abc"),
+            crate::auth::sha256_hex("abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        assert_ne!(hash("abc"), hash("abd"));
+        assert_ne!(crate::auth::sha256_hex("abc"), crate::auth::sha256_hex("abd"));
     }
 
     #[test]

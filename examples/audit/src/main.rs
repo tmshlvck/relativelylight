@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     auth::make_admin(&db, ADMIN_GROUP, "admin", "password").await?;
 
     // **The audit sink, registered on both write paths.** One `Arc`, handed to `Auth::on_write` and
-    // `Crud::on_write`, so a password change and a post edit land in the same place in the same
+    // `Engine::on_write`, so a password change and a post edit land in the same place in the same
     // shape — which is the point of `WriteEvent::source` naming the emitter.
     //
     // The `OnceLock` is the chicken and the egg: the observer wants to name the actor, and naming
@@ -134,9 +134,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crud.register(auth::api_key::meta_model(), admins.clone());
     crud.register(auth::lockout::username_meta_model(), admins.clone());
     crud.register(auth::lockout::ip_meta_model(), admins.clone());
-    crud.csrf(auth.csrf());
-    crud.on_write(audit.clone());
-    let engine = Arc::new(crud.into_engine());
+    let mut engine = crud.into_engine();
+    engine.csrf(auth.csrf());
+    engine.on_write(audit.clone());
+    let engine = Arc::new(engine);
 
     let state = AppState { auth: auth.clone(), engine, audit: audit.clone(), accounts: admins };
     let app = Router::new()

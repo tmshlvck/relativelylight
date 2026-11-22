@@ -15,7 +15,7 @@
 //!   [`_csrf`](crate::csrf::FIELD) field, and each `POST` verifies it before anything else (before the password
 //!   check, before any DB work). The token cookie is issued/refreshed when a form page is rendered and
 //!   rotated at login.
-//! - **`crud`'s writes** — opt-in per engine: `Crud::csrf(auth.csrf())`. Once set, its forms carry
+//! - **`crud`'s writes** — opt-in per engine: `Engine::csrf(auth.csrf())`. Once set, its forms carry
 //!   the hidden field and `submit` checks it before the gate.
 //! - **your own handlers** — call [`Csrf::verify`](crate::csrf::Csrf::verify) yourself, and [`Csrf::ensure`](crate::csrf::Csrf::ensure) to hand a token to a
 //!   page you render.
@@ -60,7 +60,7 @@ pub(crate) type RejectFn = std::sync::Arc<
 
 /// The double-submit CSRF checker: a cookie name + the cookie attributes to issue it with. Cheap to
 /// clone; hold one per app (`Auth::csrf()` builds the one `auth` uses, so handing that to
-/// `Crud::csrf` keeps both surfaces on the same cookie).
+/// `Engine::csrf` keeps both surfaces on the same cookie).
 #[derive(Clone)]
 pub struct Csrf {
     /// See [`Csrf::max_upload`].

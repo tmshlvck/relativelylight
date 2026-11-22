@@ -286,15 +286,15 @@ pub enum Column {
         sortable: bool,
         /// This relation's own choice about linking its labels to their rows
         /// ([`MetaRelation::links`](crate::crud::MetaRelation::links)); `None` follows
-        /// `Crud::picker_view`.
+        /// `Engine::picker_view`.
         links: Option<bool>,
         /// This relation's own choice about "+ New"
         /// ([`MetaRelation::create`](crate::crud::MetaRelation::create)); `None` follows
-        /// the target's [`EntityMeta::picker_create`], then `Crud::picker_create`.
+        /// the target's [`EntityMeta::picker_create`], then `Engine::picker_create`.
         create: Option<bool>,
         /// How many target rows this relation's form input lists before it opens the picker
         /// ([`MetaRelation::picker_threshold`](crate::crud::MetaRelation::picker_threshold));
-        /// `None` follows `Crud::picker_threshold`.
+        /// `None` follows `Engine::picker_threshold`.
         picker_threshold: Option<u64>,
     },
 }
@@ -497,7 +497,7 @@ pub struct EntityMeta {
     pub view_path: Option<String>,
     /// Whether "+ New" on a relation field pointing here may create one of these rows
     /// ([`MetaModel::picker_create`](crate::crud::MetaModel::picker_create)); `None`
-    /// follows `Crud::picker_create`.
+    /// follows `Engine::picker_create`.
     pub picker_create: Option<bool>,
     /// The fields that "+ New"'s create form shows, in order; empty for every writable one
     /// ([`MetaModel::picker_create_fields`](crate::crud::MetaModel::picker_create_fields)).
@@ -631,44 +631,85 @@ impl Engine {
         Self::default()
     }
 
-    /// The path the app serves [`crud::Picker`](crate::crud::Picker) on. Usually set via
-    /// `Crud::picker_path`.
-    pub fn set_picker_path(&mut self, path: impl Into<String>) {
-        self.ui.picker_path = Some(path.into());
+    // ---- Settings: the app configures them once, after `Crud::into_engine` (or on a bare engine) ----
+
+    /// Register an audit sink fired after each committed write (create/update/delete/bulk-delete)
+    /// through this engine — see [`crate::observe`]. Share one `Arc` with `Auth::on_write` to capture
+    /// both the auto-CRUD and auth surfaces in one place.
+    pub fn on_write(&mut self, observer: Arc<dyn crate::observe::WriteObserver>) -> &mut Self {
+        self.observer = Some(observer);
+        self
     }
 
-    pub(crate) fn picker_path(&self) -> Option<&str> {
+    /// Require a valid **CSRF token** on every write through this engine — the double-submit token
+    /// from [`crate::csrf`]. Pass the app's checker so the UI's forms and the `auth` login/profile
+    /// forms share one token cookie:
+    ///
+    /// ```ignore
+    /// engine.csrf(auth.csrf());   // the UI's forms now carry a hidden `_csrf`, and writes check it
+    /// ```
+    ///
+    /// Writes then answer `403` unless the posted form echoes the cookie (or the request carries an
+    /// `Authorization` header, which is exempt). Any app whose writes are cookie-authenticated wants
+    /// this; it is off by default only because an app whose writes carry no cookie needs no token.
+    /// See `docs/AUTH.md` §7.
+    pub fn csrf(&mut self, csrf: crate::csrf::Csrf) -> &mut Self {
+        self.csrf = Some(csrf);
+        self
+    }
+
+    /// Where the app serves [`crud::Picker`](crate::crud::Picker): the dialog that edits a
+    /// relation too large for a `<select>`. The crate adds no route — mount one `GET` handler on this
+    /// path (see `docs/CRUD.md`). Without it, every relation stays a `<select>` however large it is.
+    pub fn picker_path(&mut self, path: impl Into<String>) -> &mut Self {
+        self.ui.picker_path = Some(path.into());
+        self
+    }
+
+    /// How many target rows a relation's form input may list as a `<select>` before it uses the
+    /// picker (default 50). A relation's own
+    /// [`MetaRelation::picker_threshold`](crate::crud::MetaRelation::picker_threshold) overrides it.
+    pub fn picker_threshold(&mut self, n: u64) -> &mut Self {
+        self.ui.picker_threshold = n;
+        self
+    }
+
+    /// Offer **"+ New"** on relation fields: create the missing target row in a dialog over the
+    /// form, and come back with it chosen. Off by default; a target's own
+    /// [`MetaModel::picker_create`](crate::crud::MetaModel::picker_create) and a relation's
+    /// [`MetaRelation::create`](crate::crud::MetaRelation::create) override it. Needs
+    /// [`picker_path`](Engine::picker_path), and the picker route must answer `POST` too
+    /// ([`Picker::submit`](crate::crud::Picker::submit)) — see `docs/CRUD.md` → "Creating the missing
+    /// row".
+    pub fn picker_create(&mut self, on: bool) -> &mut Self {
+        self.ui.picker_create = on;
+        self
+    }
+
+    /// Make each relation's label a **link to the linked row**: in a table's cells and its View
+    /// dialog, a post's author opens that author's details in a dialog over the page, with Edit when
+    /// the caller may update it, and closing it returns to where they were. Off by default. Needs
+    /// [`picker_path`](Engine::picker_path), whose route serves those pages and (for Edit) answers
+    /// `POST`. A link is drawn only when the caller may read the target — see `docs/CRUD.md` →
+    /// "Viewing the linked row".
+    pub fn picker_view(&mut self, on: bool) -> &mut Self {
+        self.ui.picker_view = on;
+        self
+    }
+
+    pub(crate) fn picker_route(&self) -> Option<&str> {
         self.ui.picker_path.as_deref()
     }
 
-    /// How many target rows a relation's input lists before it uses the picker, where the relation
-    /// sets none. Usually set via `Crud::picker_threshold`.
-    pub fn set_picker_threshold(&mut self, n: u64) {
-        self.ui.picker_threshold = n;
-    }
-
     /// A relation's threshold: its own (`explicit`), else the app-wide one.
-    pub(crate) fn picker_threshold(&self, explicit: Option<u64>) -> u64 {
+    pub(crate) fn threshold_for(&self, explicit: Option<u64>) -> u64 {
         explicit.unwrap_or(self.ui.picker_threshold)
-    }
-
-    /// Offer "+ New" on relation fields: a new target row, created in a dialog over the form. Needs
-    /// a picker path, and the app's picker route to answer `POST` as well. Usually set via
-    /// `Crud::picker_create`.
-    pub fn set_picker_create(&mut self, on: bool) {
-        self.ui.picker_create = on;
-    }
-
-    /// Link each relation's label to the linked row, opened in a dialog over the page. Usually set
-    /// via `Crud::picker_view`.
-    pub fn set_picker_view(&mut self, on: bool) {
-        self.ui.picker_view = on;
     }
 
     /// The picker path, when a relation's labels link to their rows: its own choice (`explicit`),
     /// else the app-wide `picker_view`.
     pub(crate) fn picker_view_path(&self, explicit: Option<bool>) -> Option<&str> {
-        self.picker_path().filter(|_| explicit.unwrap_or(self.ui.picker_view))
+        self.picker_route().filter(|_| explicit.unwrap_or(self.ui.picker_view))
     }
 
     /// The path "+ New" opens for a new row of `target`, through a relation whose own choice is
@@ -678,20 +719,7 @@ impl Engine {
         let on = explicit
             .or_else(|| self.accessors.get(target).and_then(|a| a.meta().picker_create))
             .unwrap_or(self.ui.picker_create);
-        self.picker_path().filter(|_| on)
-    }
-
-    /// Register an audit sink fired after each committed write (create/update/delete). See
-    /// [`crate::observe`]. Usually set via `Crud::on_write`.
-    pub fn set_observer(&mut self, observer: Arc<dyn crate::observe::WriteObserver>) {
-        self.observer = Some(observer);
-    }
-
-    /// Require a valid CSRF token on every write through this engine — see [`crate::csrf`]. Pass the
-    /// app's checker (`auth.csrf()`) so the API and the auth forms share one token cookie. Usually set
-    /// via `Crud::csrf`.
-    pub fn set_csrf(&mut self, csrf: crate::csrf::Csrf) {
-        self.csrf = Some(csrf);
+        self.picker_route().filter(|_| on)
     }
 
     /// Whether this request satisfies the CSRF check (always `true` when CSRF isn't configured).
@@ -704,7 +732,7 @@ impl Engine {
     }
 
     /// The CSRF checker this engine enforces, if any — the UI renders its hidden `_csrf` input from it.
-    pub(crate) fn csrf(&self) -> Option<&crate::csrf::Csrf> {
+    pub(crate) fn csrf_checker(&self) -> Option<&crate::csrf::Csrf> {
         self.csrf.as_ref()
     }
 

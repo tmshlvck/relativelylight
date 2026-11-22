@@ -534,7 +534,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
     /// replaced with the row's id (percent-encoded). Every surface that shows a row points there:
     /// a table's **View** (the built-in dialog is then not offered: `?show=` opens nothing), and a
     /// relation's link to one of these rows, as its `href` without the script (with it, the link
-    /// still opens the row in a dialog over the page — see `Crud::picker_view`).
+    /// still opens the row in a dialog over the page — see `Engine::picker_view`).
     ///
     /// The page is the app's route, so its gate is the app's check: `Engine` is ungated, so ask
     /// `Engine::decide(slug, Operation::Read, &headers)` before `Engine::get`, as a table does
@@ -550,7 +550,7 @@ impl<E: EntityTrait + EntityName> MetaModel<E> {
     }
 
     /// Whether "+ New" on a relation field pointing at this entity may create one of its rows —
-    /// whatever `Crud::picker_create` says for the rest. `false` for a table your own pages show
+    /// whatever `Engine::picker_create` says for the rest. `false` for a table your own pages show
     /// read-only, or rows that need more than a form to make; `true` to offer it for this target
     /// alone. A relation's own [`MetaRelation::create`] still wins, and the gate still decides per
     /// caller. Its button isn't drawn when off, and the picker's create URLs for it answer `400`.

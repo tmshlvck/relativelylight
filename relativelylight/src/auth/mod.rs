@@ -400,35 +400,6 @@ pub fn table_create_statements(backend: DbBackend) -> Vec<TableCreateStatement> 
     ]
 }
 
-/// Housekeeping: delete expired sessions and expired lockout rows. **Nothing in this crate schedules
-/// it** — call it from the app's own periodic loop (and once at startup), the way you'd run any other
-/// retention job. Skipping it is safe: an expired session never authenticates and an expired lockout
-/// row reads as unlocked (and resets itself on the next failure); the rows just accumulate.
-///
-/// Returns how many rows were deleted, in total.
-///
-/// **Prefer [`Auth::prune`]** if you have an `Auth` to hand. This function sees only the **absolute**
-/// session deadline; it takes no `Auth`, so it cannot know your
-/// [`session_idle_secs`](Auth::session_idle_secs) and will leave idle-expired rows in place until their
-/// absolute deadline passes. Those rows never authenticate either way — it's a tidiness difference, not
-/// a security one.
-pub async fn prune(db: &DatabaseConnection, lockout: &lockout::Lockout) -> Result<u64, DbErr> {
-    let sessions = session::Entity::delete_many()
-        .filter(session::Column::ExpiresAt.lt(now_secs()))
-        .exec(db)
-        .await?
-        .rows_affected;
-    let usernames =
-        lockout::UsernameLockout::new(db.clone(), lockout.username_after, lockout.username_duration_secs)
-            .prune()
-            .await?;
-    let ips = lockout::IpLockout::new(db.clone(), lockout.ip_after, lockout.ip_duration_secs, vec![])
-        .prune()
-        .await?;
-    let challenges = passkey::prune_challenges(db).await?;
-    Ok(sessions + usernames + ips + challenges)
-}
-
 /// Create the auth tables **if they don't already exist** — a bootstrap convenience for a fresh DB or
 /// the examples. Safe to call on every start.
 ///
@@ -1535,7 +1506,7 @@ impl Auth {
     }
 
     /// Register an audit sink fired from the mutating auth handlers (password change, manager reset)
-    /// — see [`crate::observe`]. Share one `Arc` with `Crud::on_write` to capture both surfaces.
+    /// — see [`crate::observe`]. Share one `Arc` with `Engine::on_write` to capture both surfaces.
     pub fn on_write(self, observer: Arc<dyn crate::observe::WriteObserver>) -> Self {
         self.with(|i| i.observer = Some(observer))
     }
@@ -1690,7 +1661,7 @@ impl Auth {
     }
 
     /// The CSRF checker these routes use — hand it to the API so both surfaces share one token
-    /// cookie: `crud.csrf(auth.csrf())`. Also usable in your own handlers ([`csrf::Csrf::ensure`] to
+    /// cookie: `engine.csrf(auth.csrf())`. Also usable in your own handlers ([`csrf::Csrf::ensure`] to
     /// hand a token to a page you render, [`csrf::Csrf::verify`] to check a post).
     ///
     /// [`csrf::Csrf::ensure`]: crate::csrf::Csrf::ensure
@@ -1834,9 +1805,10 @@ impl Auth {
     /// Housekeeping for **this** `Auth`'s configuration: delete dead sessions — on either clock, so
     /// idle-expired rows go too — expired lockout rows and expired WebAuthn challenges. Returns the total deleted.
     ///
-    /// Prefer this over the free [`prune`] function, which knows only the absolute deadline (it takes no
-    /// `Auth`, so it can't see [`session_idle_secs`](Auth::session_idle_secs)). **Nothing here is
-    /// scheduled** — call it at startup and from your own periodic loop.
+    /// **Nothing here is scheduled** — call it at startup and from your own periodic loop, the way
+    /// you'd run any other retention job. Skipping it is safe: an expired session never authenticates
+    /// and an expired lockout row reads as unlocked (and resets itself on the next failure); the rows
+    /// just accumulate.
     pub async fn prune(&self) -> Result<u64, DbErr> {
         let now = now_secs();
         let mut cond = sea_orm::Condition::any().add(session::Column::ExpiresAt.lt(now));

@@ -459,13 +459,13 @@ it rather than calling `identify`, since a password change has already rotated t
 and an `after` (and, for a delete, a `before`) describing what changed with no secret in it
 (`{"password_changed": true}`). A sign-in fires once, when it completes: the password step of a 2FA
 account is not one yet, and a refused attempt fires nothing (the lockout counters and the error
-observer hold those). Share one `Arc` with `Crud::on_write` so a single sink covers both:
+observer hold those). Share one `Arc` with `Engine::on_write` so a single sink covers both:
 
 ```rust
 let audit = Arc::new(MyAuditSink::new(db.clone()));
 let auth = Auth::new(db.clone(), lockout).on_write(audit.clone());
-let mut crud = Crud::new(db);
-crud.on_write(audit.clone());
+let mut engine = crud.into_engine();     // after registering the models
+engine.on_write(audit.clone());
 ```
 
 The app owns the audit table and its retention. [`examples/audit`](../examples/audit/src/main.rs)
@@ -577,9 +577,8 @@ CSRF-checked and audited like any other write.
 
 **Housekeeping is the app's.** Nothing in this crate schedules anything — no background task, no timer.
 `Auth::prune()` deletes dead sessions *and* expired lockout rows from both tables; call
-it at startup and from whatever periodic loop the app already has (both examples do). Prefer it over the
-free `auth::prune(&db, lockout)`, which takes no `Auth` and so can only see the absolute session deadline,
-not the idle one (§5f). Skipping either is safe; the rows just accumulate.
+it at startup and from whatever periodic loop the app already has (both examples do). Skipping it is
+safe; the rows just accumulate.
 
 **The trade-off.** Someone who knows an account name can keep it locked by failing on purpose; the
 lock is short, lifts on its own, and can be cleared from the admin panel
@@ -937,8 +936,8 @@ key, as the session idle clock is (§5f).
 
 **Schema.** `auth_api_key`: `id`, `user_id` (FK `auth_user`, **cascade**: a key is its owner and
 goes with it), `name`, `hashed_key` (unique), `prefix`, `created_at`, `expires_at`, `last_used_at`,
-`disabled`. It is in `table_create_statements`, so `auth::migrate` creates it. An app with its own
-migrations adds a step when it starts using keys (`api_key::table_create_statement`). Expired keys are
+`disabled`. It is in `table_create_statements`, so `auth::migrate` creates it, and in
+`upgrade::table_create_statements` for an app upgrading with its own migrations. Expired keys are
 not pruned. They stay listed as expired until their owner or an administrator deletes them.
 
 **In the accounts panel** ([§5j](#the-accounts-panel)), `api_key::meta_model()` hides the hash and
@@ -1217,7 +1216,7 @@ An unsafe request presents it in either:
 | Surface | Enforcement | Rejection |
 |---|---|---|
 | `Auth::routes()` — `/login`, `/login/totp`, `/profile*` | **always on** | `403` + a bare "Security check failed" page |
-| the `crud` admin UI's writes | **opt-in**: `crud.csrf(auth.csrf())` | `403`, before the gate or the database |
+| the `crud` admin UI's writes | **opt-in**: `engine.csrf(auth.csrf())` | `403`, before the gate or the database |
 | your own unsafe routes | **`csrf::enforce`** as a layer (it reads a multipart body too, below) | the shared page (see below) |
 
 On the auth routes the check runs **first** — before the password comparison, before any DB work.
@@ -1268,7 +1267,8 @@ checker so both surfaces share one cookie:
 let auth = Auth::new(db.clone(), Lockout::default()).secure_cookies(false); // configure Auth fully first
 let mut crud = Crud::new(db);
 crud.register(post, gate);
-crud.csrf(auth.csrf());          // every rendered form now carries `_csrf`, and writes check it
+let mut engine = crud.into_engine();
+engine.csrf(auth.csrf());          // every rendered form now carries `_csrf`, and writes check it
 ```
 
 `Table`/`Form`/`Admin` then render a hidden `_csrf` input in every form they emit, and `submit` checks

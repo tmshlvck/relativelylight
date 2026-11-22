@@ -55,8 +55,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let admins = Arc::new(GroupReadWrite::new(&auth, ["admin"]));
     crud.register(auth::user::meta_model(&auth), admins.clone());
     crud.register(auth::group::meta_model(), admins.clone());
-    crud.csrf(auth.csrf());                              // cookie-authenticated writes → one token
-    let engine = Arc::new(crud.into_engine());
+    let mut engine = crud.into_engine();                 // registration done; now its settings
+    engine.csrf(auth.csrf());                              // cookie-authenticated writes → one token
+    let engine = Arc::new(engine);
 
     let app = Arc::new(App { engine, auth: auth.clone(), admins, db: db.clone() });
 
@@ -88,7 +89,7 @@ Three things are load-bearing:
 
 1. **`resolve_real_ip` must be the outermost layer.** The write path reads `RealIp` for the audit
    trail, and `auth`'s lockout counts by it; without the layer those routes answer `500` and say so.
-2. **`crud.csrf(auth.csrf())`** puts the admin's forms and the login/profile forms on one token
+2. **`engine.csrf(auth.csrf())`** puts the admin's forms and the login/profile forms on one token
    cookie. Skip it and the admin's writes are unprotected against cross-site posts.
 3. **One `Arc<App>`** holding the engine, the `Auth` handle and your database — every handler below
    takes it as `State`.
@@ -538,7 +539,7 @@ Before a deployment goes out:
       you can read them.
 - [ ] Your shell loads Bootstrap 5's stylesheet, `crud::CSS`, `crud::JS` and `time::JS`
       ([CRUD.md → What to put in your shell](CRUD.md#web-ui)), and a `/_rl/pick` route with
-      `Crud::picker_path` if any relation outgrows `picker_threshold`.
+      `Engine::picker_path` if any relation outgrows `picker_threshold`.
 
 ## See also
 
