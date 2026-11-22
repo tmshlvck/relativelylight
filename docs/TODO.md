@@ -14,12 +14,6 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
 
 ## crud / crud::ui
 
-- [ ] **`docs/SECURITY.md`: what an app must get right**, collected in one place after the model-level
-  formatters ship: escaping in formatters (their HTML is inserted verbatim), `on_read` never masking a
-  value, the mandatory `resolve_real_ip`, gating a direct `Engine` call, registering `auth_*` only
-  through `meta_model()`, and the like. The guides keep each rule where it applies and link there;
-  `AUTH-SECURITY.md` keeps the crate's own reasoning.
-
 - [ ] **An app's own search** per entity: full-text (a `tsvector`) or an external index, beside the
   built-in substring search (CRUD.md → Search). Additive: a `MetaModel` hook returning a condition
   (or, for an index, matching keys).
@@ -53,7 +47,9 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
   - browser autofill of passkeys on the login page;
   - a username-first sign-in, for security keys with no free slot for a discoverable credential;
   - device names from FIDO metadata;
-  - an AAGUID allowlist.
+  - an AAGUID allowlist at any class: today `attestation_ca(pem, aaguid, …)` pins models only under
+    `Class::Attested`, so a synced or device-bound passkey can't be limited to (or barred from)
+    particular authenticator models.
 - [ ] **Notifications** (discuss and design first, no implementation yet). Should `auth`, and the
   crate in general, have a way to hand the app pending messages for a user? The app would render
   them, e.g. a bell in the navbar. The first uses: the password-change notice

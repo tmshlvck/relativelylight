@@ -531,18 +531,9 @@ What makes this work:
 
 Before a deployment goes out:
 
-- [ ] `resolve_real_ip` is the **outermost** layer, and `serve` uses
-      `into_make_service_with_connect_info::<SocketAddr>()`.
-- [ ] `crud.csrf(auth.csrf())` is set, and every hand-written POST route is behind `csrf::enforce`
-      (a multipart one also checks the token itself). If a guarded route accepts uploads,
-      `Csrf::max_upload` is set above the largest one.
-- [ ] `secure_cookies(true)` in production; the app is behind TLS.
-- [ ] Every model is registered with a real gate — `Open` is public, including writes.
+- [ ] Everything in **[SECURITY.md](SECURITY.md)**: the real-IP layer, CSRF, cookies, gates, the
+      `auth` tables, formatters and the app's own credential handling.
 - [ ] `auth.prune()` runs on a schedule (the crate spawns nothing).
-- [ ] Secrets are `write_only` / `hidden`; `auth`'s tables are registered only through their
-      `meta_model()`, and `auth::recovery::entity` not at all ([AUTH.md §5j](AUTH.md)).
-- [ ] A password policy is configured on `Auth` (the accounts panel reads it from there), and any
-      form of the app's own that sets a password applies it too ([AUTH.md §5g](AUTH.md)).
 - [ ] A `WriteObserver` is registered if you need an audit trail, and its rows are retained somewhere
       you can read them.
 - [ ] Your shell loads Bootstrap 5's stylesheet, `crud::ui::CSS` and `crud::ui::JS`
@@ -555,5 +546,6 @@ Before a deployment goes out:
 - [AUTH.md](AUTH.md) — sessions, 2FA, SSO, the gate presets, CSRF, lockout.
 - [TIME.md](TIME.md) — the timezone cookie, the picker, configuring the offered zones.
 - [DATAINPUT.md](DATAINPUT.md) — validators you can call from a hand-written form.
+- [SECURITY.md](SECURITY.md) — what an app must get right, in one list.
 - [MIGRATION-0.5.md](MIGRATION-0.5.md) — upgrading an app to 0.5 (unreleased) from 0.4.
 - [MIGRATION-0.4.md](MIGRATION-0.4.md) — upgrading an app to 0.4.1 from 0.4.0, and to 0.4 from 0.3.

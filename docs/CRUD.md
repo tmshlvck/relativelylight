@@ -12,7 +12,8 @@ An app that wants to publish a JSON API writes those handlers itself over the sa
 deliberately doesn't make.
 
 New here? **[APP.md](APP.md)** builds a whole app end to end (shell, nav bar, login, admin, your own
-pages); this document is the reference for the parts. Upgrading? **[MIGRATION-0.5.md](MIGRATION-0.5.md)** (and from 0.3, [MIGRATION-0.4.md](MIGRATION-0.4.md)).
+pages); this document is the reference for the parts; what the app itself must get right is collected in
+[SECURITY.md](SECURITY.md). Upgrading? **[MIGRATION-0.5.md](MIGRATION-0.5.md)** (and from 0.3, [MIGRATION-0.4.md](MIGRATION-0.4.md)).
 
 - [Install & quick start](#install--quick-start)
 - [Configuring a model](#configuring-a-model) — `MetaModel` and its [entity-wide settings](#entity-wide-settings), `MetaField` and its [display formatters](#display-formatters--how-a-field-is-shown), `MetaRelation`
@@ -301,7 +302,8 @@ needs while it formats another column) and the request's `headers()`.
 
 > **The output is inserted into the page verbatim. Escape every value** with `crud::fmt::esc`
 > (a JSON value) or `esc_str` (a `&str`). A formatter that writes `format!("<b>{}</b>", cx.value())`
-> lets anyone who can store a value run a script in every viewer's browser: a stored XSS.
+> lets anyone who can store a value run a script in every viewer's browser: a stored XSS. (One of
+> the rules in [SECURITY.md](SECURITY.md).)
 > Formatters are the one place app-supplied HTML enters the crate's pages; everything else is escaped
 > by the template engine, and tested against `<script>`-bearing data in every cell, label, chip,
 > option and input value (`crud/ui_tests.rs`).

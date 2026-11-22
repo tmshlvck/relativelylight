@@ -3,7 +3,8 @@
 [AUTH.md](AUTH.md) says what each part of `auth` does and how to use it. This file says why it
 behaves that way: what each rule defends against, what it deliberately doesn't, and why a choice
 went the way it did. The sections follow AUTH.md's order and each links back to the part it explains.
-The module-level decisions are in [DESIGN.md → auth](DESIGN.md#auth).
+The module-level decisions are in [DESIGN.md → auth](DESIGN.md#auth); what an app must get right
+itself is [SECURITY.md](SECURITY.md).
 
 ## Sessions and cookies
 

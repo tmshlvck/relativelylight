@@ -137,6 +137,10 @@ is easy to miss in a diff.
 
 ### Added
 
+- **[docs/SECURITY.md](docs/SECURITY.md): what an app must get right**, as one checklist: the real-IP
+  layer, CSRF, gates around a direct `Engine` call, escaping in formatters, registering the `auth`
+  tables, the app's own credential handling, files. Each line links to the guide that owns the rule;
+  APP.md's deployment checklist now points there for its security items.
 - **docs.rs documents every feature**: it built only the defaults, which left out `crud::ui`, `auth`,
   `files` and `time`. Each item is labelled with the feature it needs.
 - **`ApiKeys::name_placeholder`**: the hint in the API-key label field, for what a key is for in your

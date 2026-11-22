@@ -22,7 +22,8 @@ The pages are plain `<form>` posts with no JavaScript (the enrolment QR is an in
 renders fragments; the app wraps them with `Auth::login_shell` / `Auth::profile_shell`. See
 [APP.md](APP.md) for the whole composition and [DESIGN.md](DESIGN.md#auth) for why it is built this
 way. This file is the usage guide; the reasoning behind each security rule — what it defends
-against, and why it is that way — is in [AUTH-SECURITY.md](AUTH-SECURITY.md).
+against, and why it is that way — is in [AUTH-SECURITY.md](AUTH-SECURITY.md); the rules only the app
+can keep are listed in [SECURITY.md](SECURITY.md).
 
 ## 1. How it fits
 

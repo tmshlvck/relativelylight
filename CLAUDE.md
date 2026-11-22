@@ -11,7 +11,7 @@ Start with [README.md](README.md) (features, quick start, examples) and [docs/AP
 (its security reasoning in [docs/AUTH-SECURITY.md](docs/AUTH-SECURITY.md); trying SSO by hand in
 [docs/SSO_TESTING_KEYCLOAK.md](docs/SSO_TESTING_KEYCLOAK.md)),
 [docs/TIME.md](docs/TIME.md), [docs/DATAINPUT.md](docs/DATAINPUT.md) and
-[docs/FILES.md](docs/FILES.md); upgrading is [docs/MIGRATION-0.5.md](docs/MIGRATION-0.5.md) (unreleased) and
+[docs/FILES.md](docs/FILES.md); what an app must get right is [docs/SECURITY.md](docs/SECURITY.md); upgrading is [docs/MIGRATION-0.5.md](docs/MIGRATION-0.5.md) (unreleased) and
 [docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md);
 the design is [docs/DESIGN.md](docs/DESIGN.md) and open work [docs/TODO.md](docs/TODO.md).
 
@@ -111,7 +111,8 @@ with a positive control so the negatives can't pass vacuously.
   breaking items first with the upgrade step — and, for a breaking change, a step in the current
   `docs/MIGRATION-x.y.md`.
 - Each document has one job, and a fact lives in the one whose job it is; the others link to it:
-  `DESIGN.md` the design and its decisions (why), `AUTH-SECURITY.md` the security reasoning, the
+  `DESIGN.md` the design and its decisions (why), `AUTH-SECURITY.md` the security reasoning,
+  `SECURITY.md` the rules an app must keep (one line each, linking to the guide), the
   guides what ships and how to use it, `APP.md` one whole app built from them, `TODO.md` open work
   and future ideas (the only place), `MIGRATION-x.y.md` upgrade steps. `README.md` is the starting
   point; this file is orientation. A guide's "why" is a `[why]` link, not a copy.
