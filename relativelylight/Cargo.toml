@@ -11,8 +11,8 @@ readme = "../README.md"
 keywords = ["crud", "admin", "seaorm", "axum", "auth"]
 categories = ["web-programming", "database", "authentication"]
 
-# docs.rs builds the default features unless told otherwise, which left out `crud::ui`, `auth`,
-# `files` and `time`. `docsrs` turns on `doc_cfg`, which labels each item with the feature it needs.
+# docs.rs builds the default features unless told otherwise, which left out `sso`, `passkeys` and
+# `files`. `docsrs` turns on `doc_cfg`, which labels each item with the feature it needs.
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

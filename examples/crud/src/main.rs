@@ -4,7 +4,7 @@
 //! (`/post/new`, `/post/{id}/edit`), a row's own page behind View (`/post/{id}`), a table *about one value* at `/author/{id}/posts`,
 //! a table pinned to a *set* of values at `/queue`, date-range filters on `/event`, CSV export,
 //! and a create/edit `<dialog>` that opens from the URL. No JavaScript framework, no JSON API: the
-//! only script is `crud::JS`, the relation picker's — a post's `author` and `tag` have more rows
+//! scripts are `crud::JS` (dialogs, the relation picker) and `time::JS` — a post's `author` and `tag` have more rows
 //! than `picker_threshold` (50), so the form shows the selection and edits it in a dialog served by
 //! `/_rl/pick`. Delete six authors and `author` is a plain `<select>` again. Beside each relation is
 //! a "+": the author you need doesn't exist yet, so create it in a dialog over the half-filled post

@@ -1130,8 +1130,8 @@ upgrade statements (`auth::upgrade`,
 
 ## 6. authz — the gate
 
-The gate trait lives in **`relativelylight::authz`** — always compiled, independent of the `auth`
-feature, so a model can be registered with a gate (`Open`) even in a build with no auth:
+The gate trait lives in **`relativelylight::authz`** — kept apart from `auth`, so a gate of your
+own needs nothing from it:
 
 ```rust
 // relativelylight::authz
@@ -1217,7 +1217,7 @@ An unsafe request presents it in either:
 |---|---|---|
 | `Auth::routes()` — `/login`, `/login/totp`, `/profile*` | **always on** | `403` + a bare "Security check failed" page |
 | the `crud` admin UI's writes | **opt-in**: `crud.csrf(auth.csrf())` | `403`, before the gate or the database |
-| your own unsafe routes | **`csrf::enforce`** as a layer (a multipart route checks it itself, below) | the shared page (see below) |
+| your own unsafe routes | **`csrf::enforce`** as a layer (it reads a multipart body too, below) | the shared page (see below) |
 
 On the auth routes the check runs **first** — before the password comparison, before any DB work.
 Same in the engine: the CSRF check precedes the gate ([why](AUTH-SECURITY.md#csrf)). Safe methods
@@ -1245,11 +1245,12 @@ is the point, and so does not belong in front of an endpoint meant for non-brows
 exempt anyway, being `Authorization`-bearing).
 
 It checks, in order: safe methods pass; `Authorization`-bearing requests pass; the `X-CSRF-Token` header;
-and failing that, for `application/x-www-form-urlencoded` bodies **under 64 KiB**, the `_csrf` field — the
-body is buffered, checked, and handed to the handler intact, so a plain MPA `<form>` post needs nothing
-from the handler. A **multipart** body is deliberately *not* parsed ([why](AUTH-SECURITY.md#csrf)):
-send the header there, or check the field in the handler with `Csrf::verify` — the one case for it. `examples/auth` guards its
-`POST /webhook-secret/rotate` this way.
+and failing that, the `_csrf` field of the body — an `application/x-www-form-urlencoded` body **under
+64 KiB**, or a `multipart/form-data` body under `Csrf::max_upload` (16 MiB; set it a little above your
+largest upload), refused if larger or malformed ([why](AUTH-SECURITY.md#csrf)). The body is buffered,
+checked, and handed to the handler intact, so a plain MPA `<form>` post, with or without a file, needs
+nothing from the handler. `examples/auth` guards its `POST /webhook-secret/rotate` this way. A
+streaming `files::Upload` route checks the token itself (`Upload::csrf`), so keep it off the layer.
 
 **Your own rejection page.** The built-in `403` is shell-less and static on purpose: nothing about the
 caller is rendered and no cookies are set ([why](AUTH-SECURITY.md#csrf)).

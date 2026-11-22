@@ -6,8 +6,8 @@ you keep your own router and page shell; `relativelylight` contributes the HTML.
 
 No JavaScript framework, no JSON API in between: the columns it introspects go straight into rendered
 HTML, and writes come back as posted forms (`POST` → `303` → `GET`). Your page needs Bootstrap 5's
-stylesheet, the crate's forty lines of CSS and one small script (modal dialogs, the relation picker;
-everything works without it, only plainer).
+stylesheet, the crate's CSS and two small scripts (`crud::JS` for the dialogs and the relation picker, `time::JS`
+for the zone; everything works without them, only plainer).
 
 ## What it looks like
 
@@ -68,7 +68,7 @@ sea-orm = { version = "2.0", features = ["macros", "with-json"] }
 ```
 
 ```rust
-use relativelylight::crud::{Crud, MetaModel, Admin, Outcome, ViewState};
+use relativelylight::crud::{Admin, Crud, Engine, MetaModel, Outcome, ViewState};
 use relativelylight::authz::Open;           // gate per model; Open = ungated
 
 let author = MetaModel::new(author::Entity); // fields, keys and FK relations are introspected

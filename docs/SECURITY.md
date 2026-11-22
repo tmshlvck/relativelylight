@@ -16,8 +16,8 @@ Go through the list before a deployment goes out ([APP.md §9](APP.md#9-checklis
       inserting `RealIp`; there is no hook. The login routes and the crud writes answer `500` without
       it ([AUTH.md §4](AUTH.md#4-middleware-the-module-provides)).
 - [ ] **Every write carries the CSRF token**: `crud.csrf(auth.csrf())` and `Upload::csrf` are set,
-      every hand-written `POST` route is behind `csrf::enforce` (a multipart one checks the token
-      itself), and `Csrf::max_upload` is above the largest upload a guarded route takes
+      every hand-written `POST` route is behind `csrf::enforce` (a streaming `files::Upload` route
+      checks it itself with `Upload::csrf`), and `Csrf::max_upload` is above the largest upload a guarded route takes
       ([AUTH.md §7](AUTH.md#7-csrf-double-submit-token)).
 - [ ] **`secure_cookies(true)` in production**, behind TLS (the default; `false` is for local http)
       ([AUTH.md §3](AUTH.md#3-identity-mechanism-server-side-session)).

@@ -24,7 +24,7 @@ pages); this document is the reference for the parts; what the app itself must g
 - [Validation & transforms](#validation--transforms)
 - [Columns](#columns) — what the UI renders from
 - [CSV import/export](#csv-importexport)
-- [Web UI](#web-ui-ui) — `Table`, `Form` and `Admin`
+- [Web UI](#web-ui) — `Table`, `Form` and `Admin`
 - [Composing with your app](#composing-with-your-app) — you own the roots
 - [Write observer (audit)](#write-observer-audit)
 - [Extending](#extending) — the `Accessor` seam
@@ -101,7 +101,7 @@ like `field`.
 
 What holds for every row of an entity, wherever it is shown, is declared once on its model, as a
 field's [display formatters](#display-formatters--how-a-field-is-shown) are. Every surface that
-shows the entity reads it ([why](DESIGN.md#decisions)):
+shows the entity reads it ([why](DESIGN.md#crud)):
 
 | | What | Where it shows |
 |---|---|---|
@@ -240,12 +240,8 @@ key.field("expires_at").datetime();    // editable timestamp → datetime picker
 
 For a read-only column this affects only the cell (read-only fields have no form input).
 
-**Dates and native date-times.** A calendar date is a native `Date` column (`NaiveDate`): its input
-is `<input type="date">`, and it is accepted on every surface (form, CSV, `Engine`, filters) only as
-exactly `YYYY-MM-DD`, a real day; anything else is the field's error `expected a date, YYYY-MM-DD`.
-A native `DateTime` / `Timestamp` / `TimestampWithTimeZone` / `Time` column starts **read-only**: it
-is shown as stored and sorted, has no range control, and the engine refuses a write to it even if you
-mark it writable ([TIME.md §1](TIME.md#1-storage-model)).
+**Dates and native date-times.** A calendar date (a native `Date` column) gets `<input type="date">`;
+a native date-time column is read-only. What each accepts is [TIME.md §1](TIME.md#1-storage-model).
 
 ### Widget overrides — picking the form input per field
 
@@ -277,14 +273,12 @@ different input than the model asked for. Both `Form` and `Table` check it, so t
 first render.
 
 **`email`/`url` are conveniences, not controls.** They give you the browser's own check and the right
-mobile keyboard; a caller hitting the JSON API directly meets none of it, so pair them with
+mobile keyboard; a write that doesn't come from the browser (CSV, your own `Engine` call) meets none of it, so pair them with
 [`validate::email`](DATAINPUT.md) / `validate::url`, which is what actually runs. Likewise a `range`
 `step` that doesn't divide an existing value puts the handle at the nearest step while the readout keeps
 showing the exact stored number — the readout is the truthful one, since that's what a save would write.
 
-**On the wire** `display` is a plain lowercase string (`"textarea"`, `"radio"`, …) with any parameters in
-a sibling `widget` object (`{"rows": 8}`, `{"min":0.0,"max":500.0,"step":1.0}`), so a client switches on a
-string rather than unpacking a tagged shape. Adding a widget is one variant in `FieldDisplay`, one case in
+Adding a widget is one variant in `FieldDisplay`, one case in
 the resolver, one branch in the markup.
 
 ### Display formatters — how a field is shown
@@ -374,6 +368,7 @@ pub struct MetaRelation {
     pub links: Option<bool>,         // label links to the row; None = as Crud::picker_view says
     pub create: Option<bool>,        // "+ New" on the field; None = as Crud::picker_create says
     pub picker_threshold: Option<u64>, // rows a <select> lists; None = as Crud::picker_threshold says
+    pub searchable: bool,            // the search box matches its labels (default true)
 }
 ```
 
@@ -424,8 +419,8 @@ same value back.
 ### Write format
 
 Flat object keyed by **writable column names**; relations by name. Absent keys → unchanged (update) /
-defaulted (create). Read-only/hidden fields, the PK on create, and unknown keys are ignored. The UI's
-form decoder ([`ui::decode`](#web-ui-ui)) produces exactly this from a posted body.
+defaulted (create). Read-only/hidden fields, the PK on create, and unknown keys are ignored. The form
+decoder behind `submit` produces exactly this from a posted body.
 
 ```jsonc
 { "title": "Async Rust", "views": 0, "author": 1, "tag": [1, 3] }
@@ -553,7 +548,7 @@ Create/update pipeline (hooks optional):
 3. **Coerce** each field to its logical type (mismatch → field error).
 4. Field `validate(&coerced)` → field errors.
 5. `MetaModel::validate_row(&map)` → cross-field errors.
-6. Any errors → **422**, no write: `{ "error": "validation failed", "fields": {…}, "errors": [ … ] }`.
+6. Any errors → `Error::Validation` (**422**), no write; as a response it is plain text, `field: message; …`.
 7. Apply `on_write` (e.g. hash).
 8. In one transaction: write scalars, then relation ops.
 9. Reload, apply `on_read`, serialize.
@@ -612,7 +607,7 @@ It also decides what an **empty** submitted string means:
 | `NOT NULL` | the empty string | `""` |
 
 The canonicalization happens in the engine (right after coercion, before validators and `on_write`), so
-**every** writer gets it — the admin UI, an API client, a CSV import. Without it a column ends up `NULL`
+**every** writer gets it — the admin UI, your own `Engine` calls, a CSV import. Without it a column ends up `NULL`
 for some rows and `""` for others, and every later `is_some()` check becomes a trap: that is exactly how
 an account created in the admin panel could end up with `sso_provider = ""` and never log in again
 (AUTH.md §5b). Two consequences worth knowing:
@@ -678,9 +673,9 @@ one-timestamp form made the form unable to create anything at all.)
 | Where | Effect |
 |---|---|
 | admin form | a `<select>` instead of a free-text input (with a blank choice where the column is nullable or not required) |
-| metadata | `"options": ["draft","review",…]`, emitted only for columns that have a set |
+| metadata | `Column::Field { options, .. }`, non-empty only for columns that have a set |
 | CSV | an unknown value is rejected on import like any other invalid cell |
-| write path | membership checked before your own validator → `422 {"fields":{"status":"must be one of: …"}}` |
+| write path | membership checked before your own validator → a field error `must be one of: …` (422) |
 
 Values match **exactly** — they are the `string_value`s, not the Rust variant names; database enums are
 case-sensitive.
@@ -780,13 +775,15 @@ pub enum Column {
     Field {
         name: String, logical_type: LogicalType, read_only: bool, write_only: bool,
         create_only: bool, nullable: bool, required: bool, options: Vec<String>,
-        label: Option<String>, description: Option<String>, default: Option<Value>,
-        display: Option<FieldDisplay>, sortable: bool,
+        option_labels: Vec<(String, String)>, label: Option<String>,
+        description: Option<String>, default: Option<Value>, display: Option<FieldDisplay>,
+        sortable: bool, format_cell: Option<Fmt>, format_view: Option<Fmt>,
     },
     Relation {
         name: String, target: String, cardinality: Cardinality,
         fk_column: Option<String>, read_only: bool,
         label: Option<String>, description: Option<String>, sortable: bool,
+        links: Option<bool>, create: Option<bool>, picker_threshold: Option<u64>,
     },
 }
 ```
@@ -801,8 +798,9 @@ previous design dispatched on strings in JavaScript that no compiler read.
 
 ## CSV import/export
 
-Feature `csv`. A thin layer over the `Engine` — every imported row goes through the same
-coerce/validate pipeline as HTTP.
+A thin layer over the `Engine` — every imported row goes through the same coerce/validate pipeline
+as a form. The table's Import and Export use it; an app with its own UI calls `crud::export_csv` /
+`crud::import_csv` with the same columns.
 
 - **Export:** `Table::csv(&headers, &state)`, which the toolbar's Export link asks for by putting
   `?format=csv` on the page's own URL — so your read handler answers it (three lines; see the
@@ -855,9 +853,9 @@ and stops at the first failure — not atomic, and documented as such; the SeaOR
 
 [`Accessor::write_batch`]: https://docs.rs/relativelylight/latest/relativelylight/crud/trait.Accessor.html#method.write_batch
 
-## Web UI (`ui`)
+## Web UI
 
-Feature `ui`. One implementation behind every component:
+One implementation behind every component:
 
 - [`Table`](#table) — one entity: search, sortable headers, filters, a pager, CSV, bulk delete, and a
   create/edit dialog.
@@ -1555,7 +1553,7 @@ picker — **all of them enhancement**: every one has a working path without it.
 | `onclick` on the select-all checkbox | tick the rows individually |
 | `oninput` on a range slider's read-out | the slider still posts its value |
 
-There is one script file (the picker's, about 130 lines), no framework, and nothing generated per
+`crud::JS` is one script file (the dialogs and the picker), no framework, and nothing generated per
 entity. The **Apply** button exists only inside `<noscript>`, because with scripting the search
 submits itself and an always-visible Apply is a button nobody presses; without it, a filter
 `<select>` (which submits itself from `onchange`) would have no way to submit.

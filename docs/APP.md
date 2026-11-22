@@ -536,15 +536,15 @@ Before a deployment goes out:
 - [ ] `auth.prune()` runs on a schedule (the crate spawns nothing).
 - [ ] A `WriteObserver` is registered if you need an audit trail, and its rows are retained somewhere
       you can read them.
-- [ ] Your shell loads Bootstrap 5's stylesheet, `crud::CSS` and `crud::JS`
-      ([CRUD.md → What to put in your shell](CRUD.md#web-ui-ui)), and a `/_rl/pick` route with
+- [ ] Your shell loads Bootstrap 5's stylesheet, `crud::CSS`, `crud::JS` and `time::JS`
+      ([CRUD.md → What to put in your shell](CRUD.md#web-ui)), and a `/_rl/pick` route with
       `Crud::picker_path` if any relation outgrows `picker_threshold`.
 
 ## See also
 
 - [CRUD.md](CRUD.md) — the engine, the columns, the URL as view state, the components' full API.
 - [AUTH.md](AUTH.md) — sessions, 2FA, SSO, the gate presets, CSRF, lockout.
-- [TIME.md](TIME.md) — the timezone cookie, the picker, configuring the offered zones.
+- [TIME.md](TIME.md) — the timezone cookie and the picker.
 - [DATAINPUT.md](DATAINPUT.md) — validators you can call from a hand-written form.
 - [SECURITY.md](SECURITY.md) — what an app must get right, in one list.
 - [MIGRATION-0.5.md](MIGRATION-0.5.md) — upgrading an app to 0.5 (unreleased) from 0.4.

@@ -370,8 +370,9 @@ precedes the gate, so a forged write never reaches a session lookup, let alone t
 **`Authorization`-bearing requests are exempt** because an API credential isn't ambient: a
 cross-site request can't borrow it, so there's nothing to protect.
 
-**A multipart body is not parsed** by `csrf::enforce`: an upload shouldn't be buffered to find a
-token.
+**A multipart body is read up to `Csrf::max_upload`** by `csrf::enforce`: the layer has to hold the
+body to find the token, so the cap bounds what one request can make the server buffer. A streaming
+upload (`files::Upload`) checks the token itself and stays off the layer.
 
 **The rejection page is shell-less and static** because a rejected request hasn't proved it came from
 your site, so nothing about the caller is rendered and no cookies are set.

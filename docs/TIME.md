@@ -2,7 +2,7 @@
 
 How relativelylight stores, renders and reads back timestamps — and where an app plugs in.
 
-Feature **`tz`** (implied by `ui`). One dependency: [`jiff`](https://docs.rs/jiff), for the IANA
+Always compiled. One dependency: [`jiff`](https://docs.rs/jiff), for the IANA
 timezone database.
 
 - [1. Storage model](#1-storage-model)
@@ -224,7 +224,7 @@ The cookie is the mechanism; the policy is yours.
                                                      │
   browser posts the form                             │  "2024-12-01T12:00"
       │                                              ▼
-      └─ ui::decode  ──►  Tz::parse  ──►  1733050800  ──►  the same i64 column
+      └─ the form    ──►  Tz::parse  ──►  1733050800  ──►  the same i64 column
 ```
 
 Runnable: `cargo run -p crud-example`, then open **`/event`**: it renders in your browser's zone, and

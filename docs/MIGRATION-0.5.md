@@ -398,9 +398,8 @@ through a submodule no longer resolves, so each `use` changes, with no change to
 ```rust
 // 0.4
 use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::{Admin, Outcome, Table, ViewState, CSS, JS};
+use relativelylight::crud::ui::{esc, Admin, Outcome, Table, ViewState, CSS, JS};
 use relativelylight::crud::engine::{Engine, ListQuery};
-use relativelylight::crud::fmt::esc;
 
 // 0.5
 use relativelylight::crud::{esc, Admin, Crud, Engine, ListQuery, MetaModel, Outcome, Table, ViewState, CSS, JS};
@@ -408,10 +407,9 @@ use relativelylight::crud::{esc, Admin, Crud, Engine, ListQuery, MetaModel, Outc
 
 | 0.4 | 0.5 |
 |---|---|
-| `crud::seaorm::X`, `crud::engine::X`, `crud::ui::X`, `crud::fmt::X` | `crud::X` |
+| `crud::seaorm::X`, `crud::engine::X`, `crud::ui::X` | `crud::X` |
 | `crud::csv_io::export` / `import` | `crud::export_csv` / `import_csv` |
 | `crud::csv_io::{ImportReport, ImportError}` | `crud::{ImportReport, ImportError}` |
 | `{{ relativelylight::crud::ui::CSS }}` in a template | `{{ relativelylight::crud::CSS }}` (and `JS`) |
 
-A search and replace of `crud::seaorm::`, `crud::engine::`, `crud::ui::` and `crud::fmt::` with `crud::`
-does it; then merge the `use` lines the compiler calls duplicates.
+A search and replace of `crud::seaorm::`, `crud::engine::` and `crud::ui::` with `crud::` does it; then merge the `use` lines the compiler calls duplicates.

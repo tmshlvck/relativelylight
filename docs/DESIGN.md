@@ -13,6 +13,7 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 |---|---|---|
 | `crud` | SeaORM entities → a typed engine (list/read/write/validate/gate) and its web UI: table, form, admin panel, relation picker, CSV | [CRUD.md](CRUD.md) |
 | `auth` | users/groups, sessions, login, TOTP 2FA, OIDC SSO, API keys, gate presets | [AUTH.md](AUTH.md); the reasoning in [AUTH-SECURITY.md](AUTH-SECURITY.md) |
+| `authz` | the per-model gate trait (`Authz`, `Decision`, `Open`), apart from `auth` so a gate can use any credential | [AUTH.md §6](AUTH.md#6-authz--the-gate) |
 | `middleware` | `resolve_real_ip` — required; the caller's address, resolved once | [AUTH.md §4](AUTH.md#4-middleware-the-module-provides) |
 | `csrf` | the double-submit token every cookie-authenticated write checks | [AUTH.md §7](AUTH.md#7-csrf-double-submit-token) |
 | `observe` | the write observer for audit logging, and the error observer for failures a response hides | [CRUD.md → Write observer](CRUD.md#write-observer-audit) |
@@ -50,9 +51,10 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 6. **State and audit are different things.** A table says what something *is*; `observe` says what
    someone *did*.
 7. **Server-rendered, no JavaScript framework, the URL is the state.** Page, sort, filters, search and
-   the open dialog live in the query string. Two small scripts, no framework: `crud::JS` makes the
-   dialogs modal and drives the relation picker (everything works without it, only plainer), and the
-   passkey script reaches a browser API no form can.
+   the open dialog live in the query string. Three small scripts, no framework: `crud::JS` makes the
+   dialogs modal and drives the relation picker (everything works without it, only plainer),
+   `time::JS` sets the zone cookie from the browser, and the passkey script reaches a browser API no
+   form can.
 8. **Policy belongs to the app; mechanism belongs here.** Retention, ownership, registration,
    thumbnails, request logging: the crate can't know, and a wrong default is worse than none. The
    crate spawns no tasks and writes nothing to stdout or stderr.
@@ -118,8 +120,7 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
     no column. It is synchronous: display that needs a query belongs to the app's own view.
   - **Its output is HTML, inserted verbatim.** That is the point of it, and also the risk: a value
     it fails to escape is stored XSS. The docs say so wherever a formatter is introduced.
-    `FmtCtx`, `esc` and `truncate` live in `crud`, because `MetaField` names them and `crud` doesn't
-    depend on `ui`.
+    `FmtCtx`, `esc` and `truncate` live beside `MetaField`, which names them.
   - **Display only:** never the edit form, the CSV export, search or sort, which work on the stored
     value.
   - **The picker's list applies no cell formatter.** There a click chooses a row, and a link in

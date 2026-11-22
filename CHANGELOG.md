@@ -16,8 +16,8 @@ is easy to miss in a diff.
 - **Everything in `crud` is imported from `crud::`.** The submodules `seaorm`, `engine`, `ui`, `fmt`
   and `csv_io` are private and their items re-exported flat, so one `use` line sets up an admin
   ([DESIGN.md → crud](docs/DESIGN.md#crud)); `csv_io::export` / `import` are `crud::export_csv` /
-  `import_csv`. The items are unchanged. **Upgrade:** replace `crud::seaorm::`, `crud::engine::`,
-  `crud::ui::` and `crud::fmt::` with `crud::`
+  `import_csv`. The items are unchanged. **Upgrade:** replace `crud::seaorm::`, `crud::engine::`
+  and `crud::ui::` with `crud::`
   ([MIGRATION-0.5.md §16](docs/MIGRATION-0.5.md#16-import-everything-from-crud)).
 - **Only `sso`, `passkeys` and `files` are features.** The engine, the admin UI, CSV, timezones,
   `auth`, the regex and base64 validators, the CSRF token and the axum plumbing are always compiled:
@@ -45,8 +45,7 @@ is easy to miss in a diff.
   once, they show on every table of the entity, its View dialog, **and the dialog a relation's link
   opens** (`picker_view`), which no formatter reached before; a picker's list applies none. The
   closure takes one `&FmtCtx` (`value()`, `row()`, and the request's `headers()`, for the viewer's
-  zone) instead of `(value, row)`. `esc`, `esc_str` and `truncate` move from `crud::ui` to the new
-  `crud::fmt`. `auth::user::meta_model` now links an account's id to its credentials page itself,
+  zone) instead of `(value, row)`. `esc`, `esc_str` and `truncate` are imported from `crud::`. `auth::user::meta_model` now links an account's id to its credentials page itself,
   with `target="_top"`; `auth::user::credentials_link` is gone. CRUD.md shows how to link a row to
   the app's own page through its identifier. **Upgrade:**
   [MIGRATION-0.5.md §13](docs/MIGRATION-0.5.md#13-display-formatters-move-to-the-field-the-picker-threshold-to-the-relation).
@@ -76,7 +75,7 @@ is easy to miss in a diff.
   - Native date-time columns are read-only, and the engine refuses writes to them (which never
     saved anyway).
   - A blank date is `NULL` (or not sent), not `""`.
-  - The `crud` feature turns on SeaORM's `with-chrono` and `serde`.
+  - The crate turns on SeaORM's `with-chrono` and `serde`.
 
   **Upgrade:** [MIGRATION-0.5.md §11](docs/MIGRATION-0.5.md#11-time-values-one-column-type-per-kind).
 - **A standalone `Form` writes only what it is** ([CRUD.md](docs/CRUD.md#form--a-standalone-createedit-form)):
@@ -148,8 +147,8 @@ is easy to miss in a diff.
   layer, CSRF, gates around a direct `Engine` call, escaping in formatters, registering the `auth`
   tables, the app's own credential handling, files. Each line links to the guide that owns the rule;
   APP.md's deployment checklist now points there for its security items.
-- **docs.rs documents every feature**: it built only the defaults, which left out `crud::ui`, `auth`,
-  `files` and `time`. Each item is labelled with the feature it needs.
+- **docs.rs documents every feature**: it built only the defaults, which left out `sso`, `passkeys`
+  and `files`; each of their items is labelled with its feature.
 - **`ApiKeys::name_placeholder`**: the hint in the API-key label field, for what a key is for in your
   app ([AUTH.md §5k](docs/AUTH.md#5k-api-keys)). The default is now neutral, "what will use it, e.g.
   a script", where it was "router at home".
@@ -170,7 +169,7 @@ is easy to miss in a diff.
 - **`ChronoUnixTimestamp` is the recommended field type for an instant** (TIME.md §1): a
   `DateTime<Utc>` in Rust, a `BIGINT` of seconds in the database. The examples use it, and
   `examples/crud`'s events gain an `RSVP by` date.
-- **Pages cross-fade**: `crud::ui::CSS` turns on cross-document view transitions, off under
+- **Pages cross-fade**: `crud::CSS` turns on cross-document view transitions, off under
   `prefers-reduced-motion` ([CRUD.md](docs/CRUD.md#web-ui-ui)).
 - **Sign-ins and 2FA changes are audited**: `Auth::on_write` gets every completed sign-in
   (`{"signed_in": <method>}`) and 2FA turned on or off
@@ -291,13 +290,13 @@ is easy to miss in a diff.
   that dialog). Dialogs nest (a new airline gets a new
   address), up to four create forms deep. Offered only when the caller may create and list the
   target; the form only ever creates, and is gated and CSRF-checked like every write. The picker
-  route answers `POST` too, with the new `Picker::submit`; `Picker::create_fields` narrows the form
-  per target, and `Crud::picker_create_except` keeps targets out of it. Off by default ([CRUD.md → Creating the missing row](docs/CRUD.md#creating-the-missing-row)).
+  route answers `POST` too, with the new `Picker::submit`; `MetaModel::picker_create_fields` narrows
+  the form, and `MetaModel::picker_create(false)` keeps a target out. Off by default ([CRUD.md → Creating the missing row](docs/CRUD.md#creating-the-missing-row)).
 - **Relation labels link to their rows** (`Crud::picker_view(true)`). In a table's cells and View
   dialog, a post's author opens that author in a dialog over the page, with Edit for whoever may
   update it. A saved edit renames every link to the row on the page, and closing the dialog
   returns to exactly where you were. The link is drawn only for who may read the target; the edit
-  updates only the row its URL names, gated and CSRF-checked. `Crud::view_path(slug, template)`
+  updates only the row its URL names, gated and CSRF-checked. `MetaModel::view_path`
   gives the link's `href` for a new tab or no script. Same picker route, `?show=` and `?edit=`
   ([CRUD.md → Viewing the linked row](docs/CRUD.md#viewing-the-linked-row)).
 - **Per relation: `MetaRelation::links(bool)` and `MetaRelation::create(bool)`.** The two app-wide
@@ -305,7 +304,7 @@ is easy to miss in a diff.
   (`workorder.relation("airline").links(true).create(true)`) or off while the rest have it. The
   target's gate still decides per caller ([CRUD.md → Per relation](docs/CRUD.md#per-relation-one-switch-each)).
   `Column::Relation` gains `links` and `create` (`None`: follow the app).
-- **The table's dialogs are real modals, with Esc.** With `crud::ui::JS` on the page, `?new`,
+- **The table's dialogs are real modals, with Esc.** With `crud::JS` on the page, `?new`,
   `?edit=`, `?show=` and `?import=` open as modals: on top, the page behind out of reach, focus in
   the first field, and Esc does what ✕ does. In every dialog with a form, including those over a
   relation, Esc on a changed form keeps it open with a note and a second Esc within 3 s discards.
