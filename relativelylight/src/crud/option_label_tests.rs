@@ -8,9 +8,7 @@
 //! should read "In-Progress".
 
 use crate::authz::Open;
-use crate::crud::engine::Engine;
-use crate::crud::seaorm::{Crud, MetaModel};
-use crate::crud::ui::{Form, Outcome, Table, ViewState};
+use crate::crud::{Engine, Crud, MetaModel, Form, Outcome, Table, ViewState};
 use http::HeaderMap;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use std::net::{IpAddr, Ipv4Addr};

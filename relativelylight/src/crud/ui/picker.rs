@@ -4,7 +4,7 @@
 use super::state::{Mode, ViewState};
 use super::{authorize, render, render_err, Form, Outcome, Table};
 use crate::authz::Operation;
-use crate::crud::engine::{Cardinality, Column, Engine, Error, Result};
+use crate::crud::{Cardinality, Column, Engine, Error, Result};
 use askama::Template;
 use http::HeaderMap;
 use std::net::IpAddr;
@@ -172,7 +172,7 @@ impl<'a> Picker<'a> {
                     invalid => Ok(invalid),
                 }
             }
-            _ => Err(Error::BadRequest("crud::ui::Picker: a write needs ?new=1 or ?edit=<id>".into())),
+            _ => Err(Error::BadRequest("crud::Picker: a write needs ?new=1 or ?edit=<id>".into())),
         }
     }
 
@@ -181,7 +181,7 @@ impl<'a> Picker<'a> {
     async fn open(&self, p: &Picked, on: bool, op: Operation, headers: &HeaderMap) -> Result<()> {
         if !on {
             return Err(Error::BadRequest(format!(
-                "crud::ui::Picker: {}.{} offers no such page (Crud::picker_create / picker_view, \
+                "crud::Picker: {}.{} offers no such page (Crud::picker_create / picker_view, \
                  MetaModel::picker_create, MetaRelation::create / links)",
                 p.slug, p.relation
             )));
@@ -200,12 +200,12 @@ impl<'a> Picker<'a> {
 
     fn picked(&self, state: &ViewState) -> Result<Picked> {
         let Some((slug, relation)) = &state.pick else {
-            return Err(Error::BadRequest("crud::ui::Picker: no ?pick=<entity>.<relation>".into()));
+            return Err(Error::BadRequest("crud::Picker: no ?pick=<entity>.<relation>".into()));
         };
         let cols = self.engine.columns(slug)?;
         let found = cols.iter().find(|c| render::name_of(c) == relation);
         let Some(Column::Relation { target, cardinality, links, create, .. }) = found else {
-            return Err(Error::BadRequest(format!("crud::ui::Picker: {slug} has no relation '{relation}'")));
+            return Err(Error::BadRequest(format!("crud::Picker: {slug} has no relation '{relation}'")));
         };
         Ok(Picked {
             view: self.engine.picker_view_path(*links).is_some(),

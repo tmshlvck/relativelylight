@@ -48,10 +48,10 @@ impl ActiveModelBehavior for ActiveModel {
 /// [`valid_group_name`](super::valid_group_name), the timestamps read-only, and the members edited
 /// through the N:M relation `auth_user`. Registered next to
 /// [`user::meta_model`](super::user::meta_model).
-pub fn meta_model() -> crate::crud::seaorm::MetaModel<Entity> {
+pub fn meta_model() -> crate::crud::MetaModel<Entity> {
     use sea_orm::IdenStatic;
     use Column as C;
-    let mut m = crate::crud::seaorm::MetaModel::new(Entity);
+    let mut m = crate::crud::MetaModel::new(Entity);
     m.label_column(C::Name.as_str());
     let f = m.field(C::Name.as_str());
     f.label = Some("Group".into());
@@ -63,7 +63,7 @@ pub fn meta_model() -> crate::crud::seaorm::MetaModel<Entity> {
         f.datetime();
     }
     // The relation needs only the other side's identity, not its configuration.
-    m.relate(&crate::crud::seaorm::MetaModel::new(super::user::Entity));
+    m.relate(&crate::crud::MetaModel::new(super::user::Entity));
     m.relation("auth_user").label = Some("Members".into());
     m
 }

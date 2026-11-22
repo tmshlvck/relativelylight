@@ -167,27 +167,27 @@ pub mod ip_entity {
 /// The locked-accounts table for an accounts panel: the counter and its time
 /// read-only, so the one thing an operator does is delete a row, which is the unlock. Show it with
 /// `Table::create(false).edit(false)`; a row made by hand would lock someone out.
-pub fn username_meta_model() -> crate::crud::seaorm::MetaModel<username_entity::Entity> {
+pub fn username_meta_model() -> crate::crud::MetaModel<username_entity::Entity> {
     use sea_orm::IdenStatic;
     use username_entity::Column as C;
-    let mut m = crate::crud::seaorm::MetaModel::new(username_entity::Entity);
+    let mut m = crate::crud::MetaModel::new(username_entity::Entity);
     m.field(C::Username.as_str()).label = Some("Account".into());
     counter_fields(&mut m, C::Failures.as_str(), C::LastFailureAt.as_str());
     m
 }
 
 /// The locked-addresses table for an accounts panel; see [`username_meta_model`].
-pub fn ip_meta_model() -> crate::crud::seaorm::MetaModel<ip_entity::Entity> {
+pub fn ip_meta_model() -> crate::crud::MetaModel<ip_entity::Entity> {
     use ip_entity::Column as C;
     use sea_orm::IdenStatic;
-    let mut m = crate::crud::seaorm::MetaModel::new(ip_entity::Entity);
+    let mut m = crate::crud::MetaModel::new(ip_entity::Entity);
     m.field(C::Ip.as_str()).label = Some("Address".into());
     counter_fields(&mut m, C::Failures.as_str(), C::LastFailureAt.as_str());
     m
 }
 
 fn counter_fields<E: sea_orm::EntityTrait>(
-    m: &mut crate::crud::seaorm::MetaModel<E>,
+    m: &mut crate::crud::MetaModel<E>,
     failures: &str,
     last: &str,
 ) {

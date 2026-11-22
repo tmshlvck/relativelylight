@@ -126,7 +126,7 @@ One askama template, one function, every page. The library never emits `<html>`.
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ title }} · Acme Ops</title>
   <link href="/static/bootstrap.min.css" rel="stylesheet">
-  <style>{{ css|safe }}</style>          {# relativelylight::crud::ui::CSS #}
+  <style>{{ css|safe }}</style>          {# relativelylight::crud::CSS #}
 </head>
 <body class="bg-body-tertiary">
   <nav class="navbar navbar-expand bg-dark" data-bs-theme="dark">
@@ -149,7 +149,7 @@ One askama template, one function, every page. The library never emits `<html>`.
     </div>
   </nav>
   <main class="container-fluid my-4">{{ body|safe }}</main>
-  <script>{{ js|safe }}</script>         {# relativelylight::crud::ui::JS — the relation picker #}
+  <script>{{ js|safe }}</script>         {# relativelylight::crud::JS — the relation picker #}
   <script>{{ tz_js|safe }}</script>      {# relativelylight::time::JS — the timezone picker, §2 #}
 </body>
 </html>
@@ -459,7 +459,7 @@ Two things to carry over from the library's own forms, because they are easy to 
   whichever the account has. See [AUTH.md §5h](AUTH.md#5h-re-authentication-before-sensitive-changes).
 
 A relation in such a form needn't be a hand-rolled `<select>` of every row:
-[`crud::ui::RelationField`](CRUD.md#relationfield--the-relation-input-in-a-form-of-your-own) renders
+[`crud::RelationField`](CRUD.md#relationfield--the-relation-input-in-a-form-of-your-own) renders
 the admin's own input for it — a `<select>`, or the picker dialog once the target is large — and reads
 the chosen ids back, checked to exist. `examples/relationfield` is the worked page.
 
@@ -536,7 +536,7 @@ Before a deployment goes out:
 - [ ] `auth.prune()` runs on a schedule (the crate spawns nothing).
 - [ ] A `WriteObserver` is registered if you need an audit trail, and its rows are retained somewhere
       you can read them.
-- [ ] Your shell loads Bootstrap 5's stylesheet, `crud::ui::CSS` and `crud::ui::JS`
+- [ ] Your shell loads Bootstrap 5's stylesheet, `crud::CSS` and `crud::JS`
       ([CRUD.md → What to put in your shell](CRUD.md#web-ui-ui)), and a `/_rl/pick` route with
       `Crud::picker_path` if any relation outgrows `picker_threshold`.
 

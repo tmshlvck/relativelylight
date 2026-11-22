@@ -1,15 +1,15 @@
 //! Text ↔ typed value, for one column: what a form input or a CSV cell means as a write value, and
 //! what a stored value is as text.
 //!
-//! A form ([`ui`](super::ui)) and a CSV file ([`csv_io`](super::csv_io)) are both typed text, so both
+//! A form (`ui`) and a CSV file (`csv_io`) are both typed text, so both
 //! read it through here — which is what stops them disagreeing about what an empty cell means, or
 //! whether `07` in an integer column is a number. What *differs* between them stays with them: a
 //! checkbox posts presence rather than text, a file carries a to-many as `1|3`, a form only reads the
 //! columns it rendered.
 //!
 //! This is the UI's half of a value's way in. The engine's half follows on every surface — coercion,
-//! [`blank_is_null`](super::seaorm::MetaField::blank_is_null), validators, then
-//! [`on_write`](super::seaorm::MetaField::on_write) — so a rule that belongs to the column, not to
+//! [`blank_is_null`](crate::crud::MetaField::blank_is_null), validators, then
+//! [`on_write`](crate::crud::MetaField::on_write) — so a rule that belongs to the column, not to
 //! typed text, lives there instead.
 
 use super::engine::{Column, LogicalType};

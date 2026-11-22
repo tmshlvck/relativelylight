@@ -1187,7 +1187,7 @@ alongside the model. Pass `Open` for an ungated model, a preset, or a shared `Ar
 implements `Authz`, so the same instance can guard several models). There is no separate default — the
 gate is always explicit at the call site.
 
-**Enforcement.** `crud::ui`'s `render_for` asks the gate before reading and `submit` before writing,
+**Enforcement.** `crud`'s `render_for` asks the gate before reading and `submit` before writing,
 answering **401** (`NeedsLogin`) or **403** (`Denied`) before the database is touched. `render_for`
 also hides the controls the gate would refuse, and a hidden control's write is refused too. A handler
 of yours that calls `Engine` directly must call `Engine::decide` first.
@@ -1279,7 +1279,7 @@ let (token, set) = auth.csrf().ensure(&headers);          // Csrf::hidden_input(
 let jar = if let Some(c) = set { jar.add(c) } else { jar };
 ```
 
-`crud::ui` reads the token from the cookie at request time rather than baking it into the fragment
+`crud`'s components read the token from the cookie at request time rather than baking it into the fragment
 ([why](AUTH-SECURITY.md#csrf)).
 
 A **co-hosted** app sharing the host must use a distinct `csrf_cookie_name` (cookies aren't
@@ -1303,7 +1303,7 @@ port-scoped), exactly as with the session cookie.
   `SSO_OIDC_ISSUER` / `SSO_OIDC_CLIENT_ID` / `SSO_OIDC_CLIENT_SECRET`
   ([SSO_TESTING_KEYCLOAK.md](SSO_TESTING_KEYCLOAK.md) sets up Keycloak for it).
   `--set-admin-pw` is the break-glass path.
-- **[`examples/adminpanel`](../examples/adminpanel/src/main.rs)** — a login-gated `crud::ui::Admin`
+- **[`examples/adminpanel`](../examples/adminpanel/src/main.rs)** — a login-gated `crud::Admin`
   with CSRF on, content models behind `UserReadGroupWrite` (everyone reads, `admin` writes), the
   account tables (the library's `meta_model()`s) behind `GroupReadWrite` and shown only to managers,
   and the password policy from one `PASSWORD_LEVEL` setting. Logins: `admin` and `editor` (read-only).

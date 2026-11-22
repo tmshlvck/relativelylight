@@ -1,5 +1,5 @@
 //! `application/x-www-form-urlencoded` in one place — the codec both [`csrf`](crate::csrf) (finding
-//! `_csrf` in a posted body) and [`crud::ui`](crate::crud::ui) (reading a query string, writing links)
+//! `_csrf` in a posted body) and `crud`'s components (reading a query string, writing links)
 //! need. Always compiled, dependency-free, `pub(crate)`.
 //!
 //! Percent-encoding is the whole of it: there is no need for a URL *parser* anywhere in this crate —

@@ -197,10 +197,10 @@ impl ActiveModelBehavior for ActiveModel {
 /// crud.register(auth::user::meta_model(&auth), gate.clone());
 /// crud.register(auth::group::meta_model(), gate.clone());
 /// ```
-pub fn meta_model(auth: &super::Auth) -> crate::crud::seaorm::MetaModel<Entity> {
+pub fn meta_model(auth: &super::Auth) -> crate::crud::MetaModel<Entity> {
     use sea_orm::IdenStatic;
     use Column as C;
-    let mut m = crate::crud::seaorm::MetaModel::new(Entity);
+    let mut m = crate::crud::MetaModel::new(Entity);
     m.label_column(C::Username.as_str());
     let link = credentials_link(auth.profile_path());
     m.field(C::Id.as_str()).format_cell(link.clone()).format_view(link);
@@ -252,7 +252,7 @@ pub fn meta_model(auth: &super::Auth) -> crate::crud::seaorm::MetaModel<Entity> 
         }
     }
     // The relation needs only the other side's identity, not its configuration.
-    m.relate(&crate::crud::seaorm::MetaModel::new(super::group::Entity));
+    m.relate(&crate::crud::MetaModel::new(super::group::Entity));
     m.relation("auth_group").label = Some("Groups".into());
     m
 }
@@ -260,8 +260,8 @@ pub fn meta_model(auth: &super::Auth) -> crate::crud::seaorm::MetaModel<Entity> 
 /// An account's id as a link to its credentials page, `{profile_path}/{id}`.
 fn credentials_link(
     profile_path: &str,
-) -> impl Fn(&crate::crud::fmt::FmtCtx) -> String + Clone + Send + Sync + 'static {
-    use crate::crud::fmt::{esc, esc_str};
+) -> impl Fn(&crate::crud::FmtCtx) -> String + Clone + Send + Sync + 'static {
+    use crate::crud::{esc, esc_str};
     let base = esc_str(profile_path.trim_end_matches('/'));
     move |cx| {
         let id = esc(cx.value());

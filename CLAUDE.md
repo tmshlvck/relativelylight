@@ -28,7 +28,7 @@ in the docs: before adding a second way, or a second explanation, find the first
 - **The URL is the state.** `ViewState` parses page, sort, filters, search, entity and the open
   dialog; every href the crate renders is relative (`?page=2`), so it needs no route of its own.
 - **Display vs storage.** `MetaField::format_cell` / `format_view` are display only (their output
-  is inserted verbatim — escape with `crud::fmt::esc`). `MetaField::on_read` / `on_write` are a storage
+  is inserted verbatim — escape with `crud::esc`). `MetaField::on_read` / `on_write` are a storage
   codec, an inverse pair that also fills the edit form — never a place to mask a value
   ([CRUD.md → A column's way in and out](docs/CRUD.md#a-columns-way-in-and-out)).
 - **The form and CSV read typed text through one function** (`crud::text`); the engine then applies
@@ -68,7 +68,8 @@ in the docs: before adding a second way, or a second explanation, find the first
 
 ## Working on the library
 
-A Cargo workspace: the crate (features only `sso`, `passkeys`, `files`) is `relativelylight/` (`crud/` with `ui/` as the renderer, `auth/`,
+A Cargo workspace: the crate (features only `sso`, `passkeys`, `files`) is `relativelylight/` (`crud/` — one flat public surface re-exported from `crud/mod.rs`, private submodules: `engine`,
+`seaorm` the backend, `meta`, `registry`, `ui/` the renderer, `csv_io`, `fmt` — `auth/`,
 `files/`, `authz.rs`, `observe.rs`, `time.rs`, `validate.rs`; Askama templates in `templates/`; CSS and
 the picker's script in `assets/`), with runnable examples in `examples/` sharing `examples/model`.
 Deps: SeaORM 2.0, axum 0.8, askama 0.16, jiff 0.2, totp-rs 6, argon2 0.6, webauthn-rs 0.6. MSRV 1.89

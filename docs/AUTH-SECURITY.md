@@ -376,7 +376,7 @@ token.
 **The rejection page is shell-less and static** because a rejected request hasn't proved it came from
 your site, so nothing about the caller is rendered and no cookies are set.
 
-**`crud::ui` reads the token from the cookie at request time** rather than baking it into the
+**`crud`'s components read the token from the cookie at request time** rather than baking it into the
 fragment, so a fragment rendered before a rotation (or cached) can't go stale.
 
 ## Tests — the negative paths

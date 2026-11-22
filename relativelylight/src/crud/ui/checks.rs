@@ -5,7 +5,7 @@
 use super::render;
 use super::state::ViewState;
 use super::widgets::{self, FieldV};
-use crate::crud::engine::{Column, Error, Result};
+use crate::crud::{Column, Error, Result};
 
 /// What goes in a form's banner: the cross-field messages, plus any field message naming a column
 /// this form doesn't show — which would otherwise be a rejection with nothing marked.
@@ -39,12 +39,12 @@ pub(crate) fn check_sort(slug: &str, cols: &[Column], sort: &[(String, bool)]) -
             Some(c) if render::sortable(c) => {}
             Some(_) => {
                 return Err(Error::BadRequest(format!(
-                    "crud::ui({slug}): column '{want}' is not sortable"
+                    "crud({slug}): column '{want}' is not sortable"
                 )))
             }
             None => {
                 return Err(Error::BadRequest(format!(
-                    "crud::ui({slug}): cannot sort by '{want}': no such column or relation"
+                    "crud({slug}): cannot sort by '{want}': no such column or relation"
                 )))
             }
         }
@@ -59,7 +59,7 @@ pub(crate) fn check_widgets(slug: &str, cols: &[Column]) -> Result<()> {
     for c in cols {
         if let Column::Field { name, logical_type, options, display: Some(d), .. } = c {
             if let Err(why) = d.fits(*logical_type, !options.is_empty()) {
-                return Err(Error::BadRequest(format!("crud::ui({slug}): field '{name}': {why}")));
+                return Err(Error::BadRequest(format!("crud({slug}): field '{name}': {why}")));
             }
         }
     }
@@ -86,12 +86,12 @@ pub(crate) fn check_fields(
     for name in only.iter().chain(omit.iter()) {
         if read_only.contains(&name.as_str()) {
             return Err(Error::BadRequest(format!(
-                "crud::ui({slug}): column '{name}' is read-only, so a form can't write it"
+                "crud({slug}): column '{name}' is read-only, so a form can't write it"
             )));
         }
         if !known.contains(&name.as_str()) {
             return Err(Error::BadRequest(format!(
-                "crud::ui({slug}): no column '{name}' — known columns: {}",
+                "crud({slug}): no column '{name}' — known columns: {}",
                 known.join(", ")
             )));
         }
@@ -109,7 +109,7 @@ pub(crate) fn check_fields(
             .collect();
         if !missing.is_empty() {
             return Err(Error::BadRequest(format!(
-                "crud::ui({slug}): creating needs {}, which this form doesn't show — add {} to \
+                "crud({slug}): creating needs {}, which this form doesn't show — add {} to \
                  .fields(), or edit an existing row. A column `default` doesn't help: it pre-fills \
                  the input, so the field still has to be rendered for the value to be sent",
                 missing.join(", "),
@@ -133,12 +133,12 @@ pub(crate) fn check_initial(
             Some(c) if widgets::writable(c) && rendered(name) => {}
             Some(_) => {
                 return Err(Error::BadRequest(format!(
-                    "crud::ui({slug}): initial value for '{name}', which this form doesn't show —                      an initial value only pre-fills an input, so the field has to be rendered"
+                    "crud({slug}): initial value for '{name}', which this form doesn't show —                      an initial value only pre-fills an input, so the field has to be rendered"
                 )))
             }
             None => {
                 return Err(Error::BadRequest(format!(
-                    "crud::ui({slug}): initial value for '{name}': no such column or relation"
+                    "crud({slug}): initial value for '{name}': no such column or relation"
                 )))
             }
         }
@@ -173,9 +173,9 @@ impl RangeKind {
 /// What a range filter on `name` is, or the error naming why it can't be one: an unknown column,
 /// a relation (ids in a row have no order anyone means), or a type with no ordering to give.
 pub(crate) fn range_kind(slug: &str, cols: &[Column], name: &str) -> Result<RangeKind> {
-    use crate::crud::engine::LogicalType as T;
+    use crate::crud::LogicalType as T;
     let refuse = |why: &str| {
-        Error::BadRequest(format!("crud::ui({slug}): cannot range-filter by '{name}': {why}"))
+        Error::BadRequest(format!("crud({slug}): cannot range-filter by '{name}': {why}"))
     };
     match cols.iter().find(|c| render::name_of(c) == name) {
         Some(Column::Field { display: Some(d), logical_type: T::Int, .. }) if d.is_datetime() => {

@@ -7,7 +7,7 @@ use super::render;
 use super::state::{Done, Mode, ViewState};
 use super::Outcome;
 use crate::authz::{Decision, Operation};
-use crate::crud::engine::{Cardinality, Column, Engine, Error, ListQuery, Result, ValidationErrors};
+use crate::crud::{Cardinality, Column, Engine, Error, ListQuery, Result, ValidationErrors};
 use crate::time::Tz;
 use http::HeaderMap;
 use serde_json::Value;
@@ -329,7 +329,7 @@ impl Op {
             "delete_selected" => Ok(Op::DeleteSelected),
             "delete_all" => Ok(Op::DeleteAll),
             "import" => Ok(Op::Import),
-            other => Err(Error::BadRequest(format!("crud::ui: unknown form operation '{other}'"))),
+            other => Err(Error::BadRequest(format!("crud: unknown form operation '{other}'"))),
         }
     }
 

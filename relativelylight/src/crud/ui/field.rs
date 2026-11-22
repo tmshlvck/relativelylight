@@ -5,7 +5,7 @@ use super::decode::Posted;
 use super::render;
 use super::widgets::{self, FieldV, Widget};
 use super::write::missing_ids;
-use crate::crud::engine::{Cardinality, Column, Engine, Error, Result, ValidationErrors};
+use crate::crud::{Cardinality, Column, Engine, Error, Result, ValidationErrors};
 use askama::Template;
 use http::HeaderMap;
 
@@ -17,7 +17,7 @@ struct FieldTmpl {
 
 /// One relation's input, for a `<form>` of the app's own — the same input `Form`, `Table` and `Admin`
 /// render for that relation: a `<select>` (a multi-select for a to-many) while the target has at most
-/// the relation's `picker_threshold` rows ([`MetaRelation::picker_threshold`](crate::crud::seaorm::MetaRelation::picker_threshold)), else the selection as badges plus a
+/// the relation's `picker_threshold` rows ([`MetaRelation::picker_threshold`](crate::crud::MetaRelation::picker_threshold)), else the selection as badges plus a
 /// button opening the [`Picker`](super::Picker) dialog. One function decides that and one template
 /// draws it, for all four, so the field can't drift from the crate's own forms.
 ///
@@ -137,7 +137,7 @@ impl<'a> RelationField<'a> {
                 *picker_threshold,
             )),
             _ => Err(Error::BadRequest(format!(
-                "crud::ui::RelationField: {} has no relation '{}'",
+                "crud::RelationField: {} has no relation '{}'",
                 self.slug, self.relation
             ))),
         }

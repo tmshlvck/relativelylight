@@ -1,4 +1,4 @@
-//! adminpanel example — the `relativelylight::crud::ui::Admin` component, **login-gated** with the
+//! adminpanel example — the `relativelylight::crud::Admin` component, **login-gated** with the
 //! `auth` module. Anonymous requests are redirected to `/login`; each model is gated by an `Authz`
 //! gate (logged-in users may read; only the admin group may write) and the panel is rendered *per
 //! request*, so a reader is offered no write controls and a write they forge is refused anyway. Two
@@ -24,10 +24,9 @@ use axum::routing::get;
 use axum::Router;
 use model::{author, post, profile, tag, user};
 use relativelylight::auth::{self, Auth, GroupReadWrite, Identity, UserReadGroupWrite};
-use relativelylight::crud::engine::Engine;
-use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::fmt::truncate;
-use relativelylight::crud::ui::{Admin, Outcome, Picker, ViewState, CSS, JS};
+use relativelylight::crud::{
+    Engine, Crud, MetaModel, truncate, Admin, Outcome, Picker, ViewState, CSS, JS,
+};
 use relativelylight::middleware::RealIp;
 use relativelylight::time::{picker, Tz};
 use relativelylight::validate;
@@ -49,8 +48,8 @@ struct Shell {
     /// The general "notifications" design (a bell) is open work; this is the one notice there is.
     password_due: bool,
     body: String,
-    css: &'static str, // the library's few CSS rules (crud::ui::CSS)
-    js: &'static str,  // crud::ui::JS: modal dialogs with Esc, and the relation dialogs
+    css: &'static str, // the library's few CSS rules (crud::CSS)
+    js: &'static str,  // crud::JS: modal dialogs with Esc, and the relation dialogs
     tz_picker: String, // the navbar timezone picker (time::picker)
     tz_js: &'static str, // time::JS: sets the zone cookie from the picker, and the browser's on a first visit
 }
@@ -64,7 +63,7 @@ struct Bare {
 }
 
 /// A picker page (the list, a form, a row) in the bare shell, or the library's error.
-fn bare(status: StatusCode, page: relativelylight::crud::engine::Result<String>) -> Response {
+fn bare(status: StatusCode, page: relativelylight::crud::Result<String>) -> Response {
     match page.map(|body| Bare { body, css: CSS }.render()) {
         Ok(Ok(html)) => (status, Html(html)).into_response(),
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),

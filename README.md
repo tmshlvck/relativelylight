@@ -17,7 +17,7 @@ the entities, and the login / 2FA screens come with `auth`. Every shot is a runn
 
 [![Admin panel — many models behind one side panel](docs/img/admin.png)](docs/img/admin.png)
 
-<sub>`crud::ui::Admin` — every registered model behind one side panel, login-gated
+<sub>`crud::Admin` — every registered model behind one side panel, login-gated
 (`examples/adminpanel`).</sub>
 
 <table>
@@ -41,7 +41,7 @@ URL, verified (and re-authenticated) before it's on.</sub></td>
 
 ## What you get
 
-- **A web admin** (`crud::ui`): `Table` (sortable headers, filters, search, pager, bulk delete, CSV,
+- **A web admin** (`crud`): `Table` (sortable headers, filters, search, pager, bulk delete, CSV,
   a create/edit `<dialog>`), `Form` for your own pages, and `Admin` composing many tables behind one
   side panel. Every view is a URL. A relation field can create its missing row in a dialog
   (nesting), without losing the form, and a relation's label opens the linked row (and its edit
@@ -68,8 +68,7 @@ sea-orm = { version = "2.0", features = ["macros", "with-json"] }
 ```
 
 ```rust
-use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::{Admin, Outcome, ViewState};
+use relativelylight::crud::{Crud, MetaModel, Admin, Outcome, ViewState};
 use relativelylight::authz::Open;           // gate per model; Open = ungated
 
 let author = MetaModel::new(author::Entity); // fields, keys and FK relations are introspected

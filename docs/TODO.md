@@ -4,14 +4,7 @@ Open work, highest impact first, and the only place for it. `- [ ]` is work to d
 **decision** (rejected or bounded on purpose), kept so it isn't re-derived. Shipped work goes to
 [CHANGELOG.md](../CHANGELOG.md); the design is [DESIGN.md](DESIGN.md).
 
-## The crate
-
-- [ ] **The module structure.** The features are settled (only `sso`, `passkeys`, `files`; DESIGN.md
-  principle 3); the module paths still follow the old feature lines: whether `crud::ui` nested under
-  `crud` matches the code now that the two always come together, and where `time` and `csv_io`
-  belong.
-
-## crud / crud::ui
+## crud
 
 - [ ] **An app's own search** per entity: full-text (a `tsvector`) or an external index, beside the
   built-in substring search (CRUD.md → Search). Additive: a `MetaModel` hook returning a condition

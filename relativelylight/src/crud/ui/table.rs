@@ -11,7 +11,7 @@ use super::{
 };
 use crate::authz::Operation;
 use crate::crud::text::Pins;
-use crate::crud::engine::{Cardinality, Column, Engine, EntityMeta, Error, ListQuery, Result};
+use crate::crud::{Cardinality, Column, Engine, EntityMeta, Error, ListQuery, Result};
 use crate::time::Tz;
 use askama::Template;
 use http::HeaderMap;
@@ -429,7 +429,7 @@ impl<'a> Table<'a> {
     }
     /// Default sort, used until the URL says otherwise: ascending by `column`. A relation sorts by
     /// the label its cells show, provided the target declares which column that is (see
-    /// [`MetaModel::label_column`](crate::crud::seaorm::MetaModel::label_column)); a column the
+    /// [`MetaModel::label_column`](crate::crud::MetaModel::label_column)); a column the
     /// backend won't sort by is a render-time error naming it. Call again for secondary keys.
     pub fn sort(mut self, column: impl Into<String>) -> Self {
         self.sort.push((column.into(), false));
@@ -695,7 +695,7 @@ impl<'a> Table<'a> {
         let cols = self.engine.columns(&self.slug)?;
         let state = self.effective_state(state, &cols)?;
         let tz = Tz::from_headers(headers);
-        crate::crud::csv_io::export(self.engine, &self.slug, &cols, &self.list_query(&state, &cols, &tz)?, &tz)
+        crate::crud::export_csv(self.engine, &self.slug, &cols, &self.list_query(&state, &cols, &tz)?, &tz)
             .await
     }
 
@@ -827,7 +827,7 @@ impl<'a> Table<'a> {
                     .cloned()
                     .ok_or_else(|| {
                         Error::BadRequest(format!(
-                            "crud::ui({}): cannot show column '{want}': no such column or relation \
+                            "crud({}): cannot show column '{want}': no such column or relation \
                              — known: {}",
                             self.slug,
                             cols.iter().map(render::name_of).collect::<Vec<_>>().join(", ")
@@ -1183,7 +1183,7 @@ impl<'a> Table<'a> {
                 out.push(f.clone());
             } else if !f.shared {
                 return Err(Error::BadRequest(format!(
-                    "crud::ui({}): cannot filter by '{}': no such column or to-one relation",
+                    "crud({}): cannot filter by '{}': no such column or to-one relation",
                     self.slug, f.name
                 )));
             }
@@ -1201,7 +1201,7 @@ impl<'a> Table<'a> {
         for (name, _) in &self.sets {
             if !is_filterable(cols, name) {
                 return Err(Error::BadRequest(format!(
-                    "crud::ui({}): cannot pin '{name}' to a set: no such column or to-one relation",
+                    "crud({}): cannot pin '{name}' to a set: no such column or to-one relation",
                     self.slug
                 )));
             }

@@ -20,8 +20,7 @@
 //! token that authorises the write is a field either way, so nothing downstream has to care which
 //! it was.
 
-use crate::crud::engine::{Cardinality, Column, Error, LogicalType};
-use crate::crud::text;
+use crate::crud::{Cardinality, Column, Error, LogicalType, text};
 use crate::time::Tz;
 use crate::urlform;
 use serde_json::{json, Map, Value};
@@ -55,7 +54,7 @@ impl Posted {
         let mut fields = Vec::new();
         let mut files = Vec::new();
         for part in crate::multipart::parse(body, &boundary)
-            .map_err(|why| Error::BadRequest(format!("crud::ui: {why}")))?
+            .map_err(|why| Error::BadRequest(format!("crud: {why}")))?
         {
             match part.filename {
                 Some(_) => files.push((part.name, part.body)),

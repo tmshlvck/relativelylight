@@ -11,8 +11,7 @@
 //! wire format. They need no `ui`.
 
 use crate::authz::Open;
-use crate::crud::engine::{Engine, ListQuery, Page, Result};
-use crate::crud::seaorm::{Crud, MetaModel};
+use crate::crud::{Engine, ListQuery, Page, Result, Crud, MetaModel};
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 
 // ---- entities ----

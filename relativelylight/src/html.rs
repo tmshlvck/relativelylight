@@ -1,4 +1,4 @@
-//! HTML escaping for the fragments built with `format!` (`auth`, `csrf`, `time`, `crud::ui`'s
+//! HTML escaping for the fragments built with `format!` (`auth`, `csrf`, `time`, `crud`'s components'
 //! renderers). Askama templates escape for themselves.
 
 /// Escape a string for HTML text or a quoted attribute.

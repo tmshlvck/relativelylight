@@ -9,9 +9,7 @@
 //! are read in decides which of them November holds.
 
 use crate::authz::Open;
-use crate::crud::engine::{Engine, Error, ListQuery};
-use crate::crud::seaorm::{Crud, MetaModel};
-use crate::crud::ui::{Outcome, Table, ViewState};
+use crate::crud::{Engine, Error, ListQuery, Crud, MetaModel, Outcome, Table, ViewState};
 use http::HeaderMap;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use std::net::{IpAddr, Ipv4Addr};

@@ -1,14 +1,28 @@
 //! `relativelylight::crud` — auto-generated CRUD/search/relations over ORM entities, with no
-//! per-model code, rendered as a server-side admin UI.
+//! per-model code, rendered as a server-side admin UI. See `docs/CRUD.md`.
 //!
-//! [`engine`] is the backend-agnostic core (the [`Accessor`] seam, the contract types and the
-//! [`Engine`] registry); [`seaorm`] is the SeaORM backend (introspection + `MetaModel` + `Crud`).
-//! [`ui`] renders the tables and forms — plain HTML, no JavaScript framework, no JSON
-//! in between. [`csv_io`] is the CSV adapter. See `docs/CRUD.md`.
+//! **Everything public is here, at `crud::`**; the submodules are private, so an import names what
+//! it uses, never a layer. What there is:
+//!
+//! - **Configuring** — [`Crud`] registers [`MetaModel`]s over one connection; a model holds
+//!   [`MetaField`]s and [`MetaRelation`]s, display formatters ([`Fmt`], [`FmtCtx`], [`esc`]) and
+//!   entity-wide settings ([`EntityMeta`], [`RowClass`]).
+//! - **Rendering** — [`Table`], [`Form`], [`Admin`], [`Picker`], [`RelationField`], driven by
+//!   the URL ([`ViewState`]); a write answers an [`Outcome`]. [`CSS`] and [`JS`] go in the shell.
+//! - **The engine** — [`Engine`] (list/get/create/update/delete and the gate, [`Engine::decide`])
+//!   over one [`Accessor`] per model, speaking [`Column`], [`ListQuery`], [`Page`], [`RowItem`] and
+//!   [`Error`]: what an app's own UI or JSON API is written over. [`export_csv`] / [`import_csv`]
+//!   are CSV over it.
+//!
+//! Inside: `engine` is the backend-agnostic core, `seaorm` the SeaORM backend (introspection,
+//! queries, `MetaModel`), `meta` the field and relation settings, `registry` the `Crud` facade, `ui`
+//! the components, `csv_io` the CSV adapter.
 
-pub mod engine;
-pub mod fmt;
-pub mod seaorm;
+mod engine;
+mod fmt;
+mod meta;
+mod registry;
+mod seaorm;
 
 /// Negative-path tests for gate enforcement on the UI's write path (over `auth`'s presets).
 #[cfg(test)]
@@ -52,19 +66,24 @@ mod option_label_tests;
 #[cfg(test)]
 mod picker_create_tests;
 
-pub mod ui;
+mod ui;
 
 /// Tests for the rendered UI: render-time checks, field selection, gating, escaping, form decoding.
 #[cfg(test)]
 mod ui_tests;
 
-pub mod csv_io;
+mod csv_io;
 
 /// Typed text ↔ value, shared by the form decoder and CSV — one reading of an empty cell.
 mod text;
 
+pub use csv_io::{export_csv, import_csv, ImportError, ImportReport};
 pub use engine::{
-    coerce, default_label, slugify, Accessor, BatchApplied, Cardinality, Column, Engine,
-    EntityMeta, Error, ListQuery,
-    LogicalType, Page, Result, RowItem, ValidationErrors,
+    coerce, default_label, parse_date, slugify, Accessor, BatchApplied, Cardinality, Column, Engine,
+    EntityMeta, Error, FieldDisplay, ListQuery, LogicalType, Page, Result, RowItem, ValidationErrors,
 };
+pub use fmt::{esc, esc_str, truncate, Fmt, FmtCtx, RowClass, RowCtx};
+pub use meta::{MetaField, MetaRelation, ReadTransform, RowLabel, RowValidator, Validator, WriteTransform};
+pub use registry::Crud;
+pub use seaorm::MetaModel;
+pub use ui::{Admin, Done, Form, Mode, Outcome, Picker, RelationField, Table, ViewState, CSS, JS};

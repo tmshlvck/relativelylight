@@ -15,7 +15,7 @@
 //!   [`_csrf`](crate::csrf::FIELD) field, and each `POST` verifies it before anything else (before the password
 //!   check, before any DB work). The token cookie is issued/refreshed when a form page is rendered and
 //!   rotated at login.
-//! - **`crud::ui`'s writes** — opt-in per engine: `Crud::csrf(auth.csrf())`. Once set, its forms carry
+//! - **`crud`'s writes** — opt-in per engine: `Crud::csrf(auth.csrf())`. Once set, its forms carry
 //!   the hidden field and `submit` checks it before the gate.
 //! - **your own handlers** — call [`Csrf::verify`](crate::csrf::Csrf::verify) yourself, and [`Csrf::ensure`](crate::csrf::Csrf::ensure) to hand a token to a
 //!   page you render.
@@ -217,7 +217,7 @@ impl Csrf {
     ///
     /// The hook is shared: set it on the `Csrf` you hand to [`Auth::csrf_rejection`] and it covers the
     /// login/profile pages, [`enforce`] on your own routes, and anywhere you call
-    /// [`reject`](Csrf::reject) directly. `crud::ui`'s `submit` returns `Error::Csrf` instead, which your
+    /// [`reject`](Csrf::reject) directly. `crud`'s `submit` returns `Error::Csrf` instead, which your
     /// handler renders (a plain `403` by default).
     ///
     /// The closure gets the rejected request's [`Parts`](http::request::Parts) — the URI, headers and

@@ -42,7 +42,7 @@ Go through the list before a deployment goes out ([APP.md §9](APP.md#9-checklis
 ## Columns and tables
 
 - [ ] **A display formatter escapes what it shows.** The HTML of `format_cell` / `format_view` is
-      inserted verbatim: pass every value through `crud::fmt::esc`
+      inserted verbatim: pass every value through `crud::esc`
       ([CRUD.md → Display formatters](CRUD.md#display-formatters--how-a-field-is-shown)).
 - [ ] **`on_read` / `on_write` never mask a value.** They are a storage codec, an inverse pair that
       also fills the edit form; a secret is `write_only` or `hidden`, and shown differently by a

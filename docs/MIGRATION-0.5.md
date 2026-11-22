@@ -252,7 +252,7 @@ The timezone picker no longer posts a form to a handler of yours: [`time::JS`](T
 sets the zone cookie in the browser and reloads. Its list is every zone the server's database knows,
 led by UTC and "Browser timezone", and a first visit takes the browser's own zone.
 
-1. **Inline `time::JS` in every page's shell**, once, as `crud::ui::JS`:
+1. **Inline `time::JS` in every page's shell**, once, as `crud::JS`:
    `<script>{relativelylight::time::JS}</script>`. Without it the picker does nothing.
 2. **Remove your timezone route and handler** (`TzPicker::submitted` is gone).
 3. **Render it with the function:** `TzPicker` is gone, `time::picker(&tz)` replaces
@@ -280,7 +280,7 @@ Table::new(&engine, "post")
     .format_cell("body", truncate(60))
 
 // 0.5
-use relativelylight::crud::fmt::{esc, truncate};
+use relativelylight::crud::{esc, truncate};
 post.field("title").format_cell(|cx| {
     format!(r#"<a href="/post/{}" target="_top">{}</a>"#, esc(&cx.row()["id"]), esc(cx.value()))
 });
@@ -290,7 +290,7 @@ post.field("body").format_cell(truncate(60));
 1. **Move each `format_cell` / `format_view` to the field** it names, on the `MetaModel` before
    `register`: `(v, row)` becomes `cx`, with `cx.value()` and `cx.row()`. The same closure passed to
    both is still how one rendering serves the cells and View.
-2. **Import `esc`, `esc_str` and `truncate` from `crud::fmt`**, not `crud::ui`.
+2. **Import `esc`, `esc_str` and `truncate` from `crud::`** (0.5 has no `crud::ui` path).
 3. **Add `target="_top"` to a link a `format_view` draws**: it now also renders in the linked
    row's dialog, an `<iframe>`, where a plain link would load the page inside the dialog.
 4. **Two tables that formatted one column differently** now share one formatter: keep the one the
@@ -389,3 +389,29 @@ relativelylight = { version = "0.5", features = ["files"] }
 4. Nothing changes in the API: the CSV import and export are drawn whenever `Table::import` /
    `Table::export` are on, as they were with `csv`, and the API-key page shows times in the caller's
    zone, as it did with `tz`.
+
+## 16. Import everything from `crud::`
+
+`crud`'s submodules are private; every public item is re-exported at `relativelylight::crud`. A path
+through a submodule no longer resolves, so each `use` changes, with no change to the items themselves:
+
+```rust
+// 0.4
+use relativelylight::crud::seaorm::{Crud, MetaModel};
+use relativelylight::crud::ui::{Admin, Outcome, Table, ViewState, CSS, JS};
+use relativelylight::crud::engine::{Engine, ListQuery};
+use relativelylight::crud::fmt::esc;
+
+// 0.5
+use relativelylight::crud::{esc, Admin, Crud, Engine, ListQuery, MetaModel, Outcome, Table, ViewState, CSS, JS};
+```
+
+| 0.4 | 0.5 |
+|---|---|
+| `crud::seaorm::X`, `crud::engine::X`, `crud::ui::X`, `crud::fmt::X` | `crud::X` |
+| `crud::csv_io::export` / `import` | `crud::export_csv` / `import_csv` |
+| `crud::csv_io::{ImportReport, ImportError}` | `crud::{ImportReport, ImportError}` |
+| `{{ relativelylight::crud::ui::CSS }}` in a template | `{{ relativelylight::crud::CSS }}` (and `JS`) |
+
+A search and replace of `crud::seaorm::`, `crud::engine::`, `crud::ui::` and `crud::fmt::` with `crud::`
+does it; then merge the `use` lines the compiler calls duplicates.

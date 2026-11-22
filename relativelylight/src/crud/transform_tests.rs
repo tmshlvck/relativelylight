@@ -8,9 +8,7 @@
 //!   saving an untouched form stores exactly what was there.
 
 use crate::authz::Open;
-use crate::crud::engine::Engine;
-use crate::crud::seaorm::{Crud, MetaModel};
-use crate::crud::ui::{Form, Outcome, ViewState};
+use crate::crud::{Engine, Crud, MetaModel, Form, Outcome, ViewState};
 use http::HeaderMap;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use serde_json::{json, Value};
@@ -157,8 +155,7 @@ async fn an_untouched_edit_form_saves_what_was_stored() {
 
 #[tokio::test]
 async fn a_csv_cell_means_what_a_form_input_does() {
-    use crate::crud::csv_io;
-    use crate::crud::engine::ListQuery;
+    use crate::crud::{csv_io, ListQuery};
     use crate::time::Tz;
 
     let db = db().await;
@@ -166,16 +163,16 @@ async fn a_csv_cell_means_what_a_form_input_does() {
     let cols = e.columns("contact").unwrap();
 
     // The export carries the logical value, and re-importing it stores the original.
-    let file = csv_io::export(&e, "contact", &cols, &ListQuery::default(), &Tz::UTC).await.unwrap();
+    let file = csv_io::export_csv(&e, "contact", &cols, &ListQuery::default(), &Tz::UTC).await.unwrap();
     assert!(file.contains("+420 123 456 789"), "{file}");
-    let report = csv_io::import(&e, "contact", &cols, &file, &Tz::UTC).await.unwrap();
+    let report = csv_io::import_csv(&e, "contact", &cols, &file, &Tz::UTC).await.unwrap();
     assert_eq!((report.updated, report.failed), (1, 0), "{:?}", report.errors);
     assert_eq!(stored(&db).await, json!({"nickname": "ada", "rank": 3, "phone": "420123456789"}));
 
     // Blank cells: a nullable number is cleared, as a blank form input clears it — the import used to
     // leave it alone — and a nullable text follows `blank_is_null`.
     let blanked = "id,name,nickname,rank,phone\n1,Ada,,,420123456789\n";
-    let report = csv_io::import(&e, "contact", &cols, blanked, &Tz::UTC).await.unwrap();
+    let report = csv_io::import_csv(&e, "contact", &cols, blanked, &Tz::UTC).await.unwrap();
     assert_eq!(report.failed, 0, "{:?}", report.errors);
     assert_eq!(stored(&db).await, json!({"nickname": null, "rank": null, "phone": "420123456789"}));
 
@@ -258,7 +255,7 @@ mod ticket {
 
 #[tokio::test]
 async fn an_enum_column_round_trips_on_sqlite() {
-    use crate::crud::engine::{Column, ListQuery};
+    use crate::crud::{Column, ListQuery};
 
     let db = Database::connect("sqlite::memory:").await.unwrap();
     for stmt in [
@@ -356,7 +353,7 @@ mod dated {
 
 #[tokio::test]
 async fn dates_are_written_in_one_form_and_instants_as_seconds() {
-    use crate::crud::engine::{Column, ListQuery};
+    use crate::crud::{Column, ListQuery};
 
     let db = Database::connect("sqlite::memory:").await.unwrap();
     for stmt in [
@@ -486,7 +483,7 @@ async fn dates_are_written_in_one_form_and_instants_as_seconds() {
     let sorted = ListQuery { sort: vec![("issued_on".into(), false)], ..Default::default() };
     assert_eq!(ids(sorted).await, vec![json!(2), json!(1)]);
     // A native date-time sorts, but has no range control: an instant is ranged as integer seconds.
-    let ranged = |col: &'static str| crate::crud::ui::Table::new(&e, "dated").range_filter(col);
+    let ranged = |col: &'static str| crate::crud::Table::new(&e, "dated").range_filter(col);
     let err = ranged("logged").render_for(&HeaderMap::new(), &ViewState::default()).await.unwrap_err();
     assert!(matches!(&err, crate::crud::Error::BadRequest(m) if m.contains("'logged'")), "{err}");
     ranged("issued_on").render_for(&HeaderMap::new(), &ViewState::default()).await.expect("control: a date ranges");
@@ -498,14 +495,14 @@ async fn dates_are_written_in_one_form_and_instants_as_seconds() {
         use crate::crud::csv_io;
         use crate::time::Tz;
         let cols = e.columns("dated").unwrap();
-        let file = csv_io::export(&e, "dated", &cols, &ListQuery::default(), &Tz::UTC).await.unwrap();
+        let file = csv_io::export_csv(&e, "dated", &cols, &ListQuery::default(), &Tz::UTC).await.unwrap();
         assert!(file.contains("2026-11-06") && file.contains("2026-02-28"), "{file}");
         let before = (stored(1).await, stored(2).await);
-        let report = csv_io::import(&e, "dated", &cols, &file, &Tz::UTC).await.unwrap();
+        let report = csv_io::import_csv(&e, "dated", &cols, &file, &Tz::UTC).await.unwrap();
         assert_eq!((report.updated, report.failed), (2, 0), "{:?}", report.errors);
         assert_eq!((stored(1).await, stored(2).await), before, "the round trip changes nothing");
         let bad = "id,issued_on\n1,5.11.2026\n";
-        let report = csv_io::import(&e, "dated", &cols, bad, &Tz::UTC).await.unwrap();
+        let report = csv_io::import_csv(&e, "dated", &cols, bad, &Tz::UTC).await.unwrap();
         assert_eq!(report.failed, 1, "{:?}", report.errors);
         assert!(report.errors[0].message.contains("YYYY-MM-DD"), "{:?}", report.errors);
         assert_eq!(stored(1).await, before.0, "and nothing was written");

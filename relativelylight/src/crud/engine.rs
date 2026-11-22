@@ -5,7 +5,7 @@
 //! authorization gate, and forwards data to and from accessors. Every backend (SeaORM today; memory /
 //! no-SQL / filesystem later) hands it **finished rows** — already projected (visible fields,
 //! transforms applied) with relations embedded as `{id, label}`. All the heavy lifting lives in the
-//! backend, and all rendering lives in [`crud::ui`](crate::crud::ui).
+//! backend, and all rendering lives in `crud`'s components.
 //!
 //! Everything here is **typed and in-process**: `Vec<Column>` + [`Page`] go straight from the accessor
 //! to the renderer. An app that wants a JSON API writes the handlers over these same methods.
@@ -129,7 +129,7 @@ pub enum LogicalType {
 /// [`LogicalType`]). The stored value, validation, and OpenAPI schema are unaffected — only the admin
 /// table cell and the **form input** change.
 ///
-/// Set it through the [`MetaField`](crate::crud::seaorm::MetaField) helpers rather than by hand:
+/// Set it through the [`MetaField`](crate::crud::MetaField) helpers rather than by hand:
 /// `.datetime()`, `.textarea(rows)`, `.radio()`, `.range(min, max, step)`, `.email()`, `.url()`.
 ///
 /// Every variant but [`DateTime`](FieldDisplay::DateTime) affects **only the form input** — a cell keeps
@@ -220,11 +220,11 @@ pub enum Cardinality {
 }
 
 /// One entry in an entity's published shape — a scalar field or a relation — **backend-agnostic**.
-/// The [`Accessor`] produces these and [`crud::ui`](crate::crud::ui) renders tables and forms straight
+/// The [`Accessor`] produces these and `crud`'s components renders tables and forms straight
 /// from them: one `match` per cell and per form input, checked by the compiler.
 ///
 /// (A to-many relation is not a database column, but it *is* one of these entries.) This is the shape
-/// the engine **reports**; what you *configure* is [`MetaField`](crate::crud::seaorm::MetaField).
+/// the engine **reports**; what you *configure* is [`MetaField`](crate::crud::MetaField).
 ///
 /// `#[non_exhaustive]` covers new variants only: the variants themselves stay open so an out-of-crate
 /// [`Accessor`] can construct them, which makes a new field a source break (see [`Accessor`]).
@@ -237,7 +237,7 @@ pub enum Column {
         read_only: bool,
         write_only: bool,
         /// Written when the row is created and never after: the edit form leaves it out and an update
-        /// carrying it is refused. See [`MetaField::create_only`](crate::crud::seaorm::MetaField::create_only).
+        /// carrying it is refused. See [`MetaField::create_only`](crate::crud::MetaField::create_only).
         create_only: bool,
         /// Whether the column accepts SQL NULL. Drives the UI's "empty means nothing here" handling
         /// (an empty input on a nullable column is sent as `null`, not `""`) and the schema's type
@@ -246,14 +246,14 @@ pub enum Column {
         /// Whether a create must carry this field — NOT NULL, no default, writable. The engine enforces
         /// it (a `422` naming the field, rather than the database's `500`), the form marks it, and OpenAPI
         /// lists it in the create schema's `required`. See
-        /// [`MetaField::required`](crate::crud::seaorm::MetaField::required).
+        /// [`MetaField::required`](crate::crud::MetaField::required).
         required: bool,
         /// The allowed values when this column is an enumeration, else empty. Drives a `<select>` in the
         /// form, `enum` in the OpenAPI schema, and a membership check on write. See
-        /// [`MetaField::options`](crate::crud::seaorm::MetaField::options).
+        /// [`MetaField::options`](crate::crud::MetaField::options).
         options: Vec<String>,
         /// How options are shown, `(value, label)`; one not listed shows as stored. Display only —
-        /// see [`MetaField::option_labels`](crate::crud::seaorm::MetaField::option_labels).
+        /// see [`MetaField::option_labels`](crate::crud::MetaField::option_labels).
         option_labels: Vec<(String, String)>,
         label: Option<String>,
         description: Option<String>,
@@ -264,11 +264,11 @@ pub enum Column {
         /// would happily invent but nobody could predict.
         sortable: bool,
         /// The field's display formatter in a table's cells
-        /// ([`MetaField::format_cell`](crate::crud::seaorm::MetaField::format_cell)); its output is HTML.
-        format_cell: Option<crate::crud::fmt::Fmt>,
+        /// ([`MetaField::format_cell`](crate::crud::MetaField::format_cell)); its output is HTML.
+        format_cell: Option<crate::crud::Fmt>,
         /// The field's display formatter wherever one row is shown: the View dialog, a linked row's
-        /// dialog ([`MetaField::format_view`](crate::crud::seaorm::MetaField::format_view)).
-        format_view: Option<crate::crud::fmt::Fmt>,
+        /// dialog ([`MetaField::format_view`](crate::crud::MetaField::format_view)).
+        format_view: Option<crate::crud::Fmt>,
     },
     Relation {
         name: String,
@@ -283,19 +283,19 @@ pub enum Column {
         /// Whether `?sort=<name>` is accepted — i.e. whether the label shown in the cell can be
         /// expressed as an `ORDER BY` on the target. True only for a to-one that owns its FK *and*
         /// whose target has a known label column (see
-        /// [`MetaModel::label_column`](crate::crud::seaorm::MetaModel::label_column)). A to-many has
+        /// [`MetaModel::label_column`](crate::crud::MetaModel::label_column)). A to-many has
         /// many labels per row, so there is no ordering to give.
         sortable: bool,
         /// This relation's own choice about linking its labels to their rows
-        /// ([`MetaRelation::links`](crate::crud::seaorm::MetaRelation::links)); `None` follows
+        /// ([`MetaRelation::links`](crate::crud::MetaRelation::links)); `None` follows
         /// `Crud::picker_view`.
         links: Option<bool>,
         /// This relation's own choice about "+ New"
-        /// ([`MetaRelation::create`](crate::crud::seaorm::MetaRelation::create)); `None` follows
+        /// ([`MetaRelation::create`](crate::crud::MetaRelation::create)); `None` follows
         /// the target's [`EntityMeta::picker_create`], then `Crud::picker_create`.
         create: Option<bool>,
         /// How many target rows this relation's form input lists before it opens the picker
-        /// ([`MetaRelation::picker_threshold`](crate::crud::seaorm::MetaRelation::picker_threshold));
+        /// ([`MetaRelation::picker_threshold`](crate::crud::MetaRelation::picker_threshold));
         /// `None` follows `Crud::picker_threshold`.
         picker_threshold: Option<u64>,
     },
@@ -476,7 +476,7 @@ pub(crate) fn value_key(v: &Value) -> String {
 
 /// What a model says about the entity as a whole, beyond its [`Column`]s: where its rows have a
 /// page of the app's own, how "+ New" treats it, and a CSS class per row. Reported by
-/// [`Accessor::meta`]; configure it on [`MetaModel`](crate::crud::seaorm::MetaModel).
+/// [`Accessor::meta`]; configure it on [`MetaModel`](crate::crud::MetaModel).
 ///
 /// **`#[non_exhaustive]`** with [`Default`]: an out-of-crate [`Accessor`] starts from
 /// `EntityMeta::default()` and assigns what it has.
@@ -484,18 +484,18 @@ pub(crate) fn value_key(v: &Value) -> String {
 #[non_exhaustive]
 pub struct EntityMeta {
     /// The page where a row is viewed, `{id}` standing for its id
-    /// ([`MetaModel::view_path`](crate::crud::seaorm::MetaModel::view_path)).
+    /// ([`MetaModel::view_path`](crate::crud::MetaModel::view_path)).
     pub view_path: Option<String>,
     /// Whether "+ New" on a relation field pointing here may create one of these rows
-    /// ([`MetaModel::picker_create`](crate::crud::seaorm::MetaModel::picker_create)); `None`
+    /// ([`MetaModel::picker_create`](crate::crud::MetaModel::picker_create)); `None`
     /// follows `Crud::picker_create`.
     pub picker_create: Option<bool>,
     /// The fields that "+ New"'s create form shows, in order; empty for every writable one
-    /// ([`MetaModel::picker_create_fields`](crate::crud::seaorm::MetaModel::picker_create_fields)).
+    /// ([`MetaModel::picker_create_fields`](crate::crud::MetaModel::picker_create_fields)).
     pub picker_create_fields: Vec<String>,
     /// A CSS class for each row of a table
-    /// ([`MetaModel::row_class`](crate::crud::seaorm::MetaModel::row_class)).
-    pub row_class: Option<crate::crud::fmt::RowClass>,
+    /// ([`MetaModel::row_class`](crate::crud::MetaModel::row_class)).
+    pub row_class: Option<crate::crud::RowClass>,
 }
 
 // ===================== The Accessor seam =====================
@@ -594,7 +594,7 @@ pub struct Engine {
 /// The app-wide defaults of the admin UI's relation fields, one field on [`Engine`] so a new one is
 /// added in one place. A relation or target model that makes its own choice overrides them.
 struct UiDefaults {
-    /// Where the app serves [`crud::ui::Picker`](crate::crud::ui::Picker) — the one absolute URL the
+    /// Where the app serves [`crud::Picker`](crate::crud::Picker) — the one absolute URL the
     /// UI renders. `None`: no picker, so a relation too large for its threshold stays a `<select>`.
     picker_path: Option<String>,
     /// How many target rows a relation's input lists before it uses the picker, where the relation
@@ -613,7 +613,7 @@ impl Default for UiDefaults {
 }
 
 impl Engine {
-    /// An empty registry. There is no mount path: a [`crud::ui`](crate::crud::ui) component renders
+    /// An empty registry. There is no mount path: a [`Table`](crate::crud::Table)-style component renders
     /// links relative to whatever URL the app serves it on, so nothing here needs to know that URL.
     pub fn new() -> Self {
         Self {
@@ -625,7 +625,7 @@ impl Engine {
         }
     }
 
-    /// The path the app serves [`crud::ui::Picker`](crate::crud::ui::Picker) on. Usually set via
+    /// The path the app serves [`crud::Picker`](crate::crud::Picker) on. Usually set via
     /// `Crud::picker_path`.
     pub fn set_picker_path(&mut self, path: impl Into<String>) {
         self.ui.picker_path = Some(path.into());
@@ -703,7 +703,7 @@ impl Engine {
     }
 
     /// Hand a committed write to the audit sink, if the app registered one. Called by
-    /// [`crud::ui`](crate::crud::ui) after each write it applies.
+    /// `crud`'s components after each write it applies.
     pub(crate) async fn observe(&self, event: crate::observe::WriteEvent<'_>) {
         if let Some(observer) = self.observer.as_ref() {
             observer.on_write(&event).await;
@@ -717,7 +717,7 @@ impl Engine {
 
     /// The model's gate [`Decision`](crate::authz::Decision) for `op` on this request — an unregistered
     /// slug is `Denied`. Use this over [`permits`](Engine::permits) when the difference between
-    /// "log in" and "not for you" matters: `crud::ui::Form` maps it to `401` vs `403` rather than
+    /// "log in" and "not for you" matters: `crud::Form` maps it to `401` vs `403` rather than
     /// rendering a form the caller could never submit.
     pub async fn decide(
         &self,
@@ -834,8 +834,8 @@ impl Engine {
     }
 
     /// Those of `ids` that are not rows of `slug` matching every pin, in order — what keeps a write
-    /// through a pinned view ([`Table::fixed_filter`](crate::crud::ui::Table::fixed_filter),
-    /// [`Table::fixed_in`](crate::crud::ui::Table::fixed_in)) on the rows that view shows. No pins,
+    /// through a pinned view ([`Table::fixed_filter`](crate::crud::Table::fixed_filter),
+    /// [`Table::fixed_in`](crate::crud::Table::fixed_in)) on the rows that view shows. No pins,
     /// no query: every id is inside.
     pub(crate) async fn outside(
         &self,
@@ -873,7 +873,7 @@ impl Default for Engine {
 
 /// How an engine failure becomes a response, for an app that wants to hand one straight back.
 /// Plain text, deliberately: this crate serves HTML pages now, and a page-level error belongs in the
-/// app's own shell (see [`crud::ui`](crate::crud::ui), whose `submit` returns the `Error` for exactly
+/// app's own shell (see `crud`'s components, whose `submit` returns the `Error` for exactly
 /// that reason).
 impl axum::response::IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {

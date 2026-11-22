@@ -4,7 +4,7 @@ use super::decode::Posted;
 use super::state::ViewState;
 use super::table::FilterSpec;
 use super::{is_filterable, render_err, Outcome, Table};
-use crate::crud::engine::{Engine, Error, Result};
+use crate::crud::{Engine, Error, Result};
 use askama::Template;
 use http::HeaderMap;
 use std::net::IpAddr;
@@ -206,7 +206,7 @@ impl<'a> Admin<'a> {
                     _ => None,
                 })
                 .ok_or_else(|| {
-                    Error::BadRequest("crud::ui(Admin): no entities listed".to_string())
+                    Error::BadRequest("crud(Admin): no entities listed".to_string())
                 })?,
         };
         Ok(chosen)
@@ -274,7 +274,7 @@ impl<'a> Admin<'a> {
             });
             if !known {
                 return Err(Error::BadRequest(format!(
-                    "crud::ui(Admin): cannot filter by '{name}': no listed entity has such a \
+                    "crud(Admin): cannot filter by '{name}': no listed entity has such a \
                      column or to-one relation"
                 )));
             }

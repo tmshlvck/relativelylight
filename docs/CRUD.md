@@ -11,6 +11,9 @@ An app that wants to publish a JSON API writes those handlers itself over the sa
 (see [Reading and writing](#reading-and-writing)); its shape is a product decision this crate
 deliberately doesn't make.
 
+**Everything is imported from `relativelylight::crud`**: `Crud`, `MetaModel`, `Table`, `Form`,
+`Engine`, `esc` and the rest sit side by side there, whichever part of the module they come from.
+
 New here? **[APP.md](APP.md)** builds a whole app end to end (shell, nav bar, login, admin, your own
 pages); this document is the reference for the parts; what the app itself must get right is collected in
 [SECURITY.md](SECURITY.md). Upgrading? **[MIGRATION-0.5.md](MIGRATION-0.5.md)** (and from 0.3, [MIGRATION-0.4.md](MIGRATION-0.4.md)).
@@ -21,7 +24,7 @@ pages); this document is the reference for the parts; what the app itself must g
 - [Validation & transforms](#validation--transforms)
 - [Columns](#columns) — what the UI renders from
 - [CSV import/export](#csv-importexport)
-- [Web UI](#web-ui-ui) — `ui::Table`, `ui::Form` and `ui::Admin`
+- [Web UI](#web-ui-ui) — `Table`, `Form` and `Admin`
 - [Composing with your app](#composing-with-your-app) — you own the roots
 - [Write observer (audit)](#write-observer-audit)
 - [Extending](#extending) — the `Accessor` seam
@@ -300,7 +303,7 @@ and shown whole in View, and for the same rendering in both you pass the same cl
 closure gets a [`FmtCtx`](#a-formatters-context): `value()`, the `row()` (`row()["id"]` is the key a link
 needs while it formats another column) and the request's `headers()`.
 
-> **The output is inserted into the page verbatim. Escape every value** with `crud::fmt::esc`
+> **The output is inserted into the page verbatim. Escape every value** with `crud::esc`
 > (a JSON value) or `esc_str` (a `&str`). A formatter that writes `format!("<b>{}</b>", cx.value())`
 > lets anyone who can store a value run a script in every viewer's browser: a stored XSS. (One of
 > the rules in [SECURITY.md](SECURITY.md).)
@@ -309,7 +312,7 @@ needs while it formats another column) and the request's `headers()`.
 > option and input value (`crud/ui_tests.rs`).
 
 ```rust
-use relativelylight::crud::fmt::{esc, truncate};
+use relativelylight::crud::{esc, truncate};
 
 post.field("body").format_cell(truncate(60));          // a corner in the table, all of it in View
 post.field("notes").format_view(|cx| format!("<pre>{}</pre>", esc(cx.value())));   // keep the line breaks
@@ -880,7 +883,7 @@ let html = Table::new(&engine, "post")
     .render_for(&headers, &state).await?;
 ```
 
-**What to put in your shell:** Bootstrap 5's CSS, and `crud::ui::CSS` — a few dozen lines Bootstrap
+**What to put in your shell:** Bootstrap 5's CSS, and `crud::CSS` — a few dozen lines Bootstrap
 doesn't cover (mostly the `<dialog>`, whose own `.modal` assumes Bootstrap's JavaScript). It also
 turns on **cross-document view transitions**: since every control is a link and every write a
 `POST` → `303` → `GET`, each is a new page, and a browser that supports them cross-fades from one to
@@ -888,15 +891,15 @@ the next instead of flashing white (a rejected save too: what didn't change fade
 messages fade in). It applies to every same-origin page carrying the stylesheet, is off under
 `prefers-reduced-motion`, and an app opts out with `@view-transition { navigation: none; }` after
 it. And, on
-every page with a table or a form, `crud::ui::JS`: it makes the dialogs real modals (see
+every page with a table or a form, `crud::JS`: it makes the dialogs real modals (see
 [Dialogs and Esc](#dialogs-and-esc)) and drives the [picker](#picker--choosing-from-a-large-relation).
 Everything works without it, only plainer:
 
 ```html
 <link href="…/bootstrap.min.css" rel="stylesheet">
-<style>{{ css|safe }}</style>      <!-- pass relativelylight::crud::ui::CSS -->
+<style>{{ css|safe }}</style>      <!-- pass relativelylight::crud::CSS -->
 …
-<script>{{ js|safe }}</script>     <!-- relativelylight::crud::ui::JS, at the end of <body> -->
+<script>{{ js|safe }}</script>     <!-- relativelylight::crud::JS, at the end of <body> -->
 ```
 
 ### How it works
@@ -910,8 +913,8 @@ link you can bookmark, mail, or put in a runbook.
 **Dialogs are `<dialog open>`, rendered server-side.** `?edit=7` renders the list *and* the open
 dialog in one response. A rejected write re-renders the same dialog with the messages beside the
 fields and the operator's input still in them. `<dialog open>` is displayed, not modal: without a
-script there is no Esc and the page behind stays clickable (the backdrop is `crud::ui::CSS`'s).
-`crud::ui::JS` makes it a real modal ([below](#dialogs-and-esc)).
+script there is no Esc and the page behind stays clickable (the backdrop is `crud::CSS`'s).
+`crud::JS` makes it a real modal ([below](#dialogs-and-esc)).
 
 **Writes are POST → 303 → GET.** `submit` returns a relative target (`?page=2#row-7`), so the browser
 lands back on the row that changed.
@@ -924,7 +927,7 @@ redirect already lands on the row it changed, and an alert on every save is nois
 
 ### Dialogs and Esc
 
-With `crud::ui::JS` on the page, every dialog the crate draws is a real modal: the table's own
+With `crud::JS` on the page, every dialog the crate draws is a real modal: the table's own
 (`?new`, `?edit=7`, `?show=7`, `?import=1`) and the ones over a relation (the picker, "+ New", a
 linked row and its Edit). That means:
 
@@ -1289,7 +1292,7 @@ table: search, sort and paging, with a radio (to-one) or a checkbox (to-many) pe
 - **OK** writes the copy back into the field's badges and hidden inputs. **Cancel** (or Esc) drops
   it, so the field is never touched until OK.
 - The copy lives in the page that opened the dialog, so it survives paging and searching inside it.
-- The picker's page is the same origin, so `crud::ui::JS` reads its inputs directly on each load.
+- The picker's page is the same origin, so `crud::JS` reads its inputs directly on each load.
   The picker's page needs no script of its own.
 - **Without JavaScript**, the field still shows its selection and saves it unchanged. The button
   stays hidden.
@@ -1311,7 +1314,7 @@ async fn pick(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Resp
 }
 ```
 
-The bare shell is your page shell without the navigation: Bootstrap and `crud::ui::CSS`, no script.
+The bare shell is your page shell without the navigation: Bootstrap and `crud::CSS`, no script.
 The URL names the **relation** (`/_rl/pick?pick=post.tag`), never the target, so only a real relation can
 be browsed. The rows are a `Table` render of the target, refused (`401`/`403`) when the caller may not
 list it. A picker leaves out the target's to-many columns: a stack of badges per row says nothing
@@ -1362,7 +1365,7 @@ How it works, on the same `/_rl/pick` route as the picker:
 2. `Picker::submit` creates the row. A refused save comes back as `Invalid`: render it, and the
    form reappears in the dialog with its messages and the typed input.
 3. A saved row redirects to `/_rl/pick?pick=workorder.airline&created=<id>`, with the id the database
-   gave it. That page carries the row's id and label, which `crud::ui::JS` reads to choose the row
+   gave it. That page carries the row's id and label, which `crud::JS` reads to choose the row
    as above, and then it closes the dialog.
 
 **Dialogs nest.** The form in the dialog is an ordinary form of the target, so its own relations
@@ -1495,7 +1498,7 @@ is hand-written, and `RelationField` puts one relation input into it: **the same
 `Table` and `Admin` render for that relation, from the same function and the same template. So it is
 a `<select>` (a multi-select for a to-many) up to the relation's
 [threshold](#per-relation-one-switch-each) of target rows (default 50), and the picker past it; the picker needs exactly what it needs for a `Form` — `picker_path`, the `/_rl/pick`
-route, `crud::ui::JS` in the shell.
+route, `crud::JS` in the shell.
 
 It is named by a **relation** of a registered entity, because that is what the picker browses — the
 form around it needn't be about that entity. It writes nothing; define it once and use it in both
@@ -1540,14 +1543,14 @@ fields in a plain form, one `Engine::write_batch`, and a pinned read-only `Table
 
 ### The JavaScript that is left
 
-Inline attributes across the templates, about fifteen lines in total, plus `crud::ui::JS` for the
+Inline attributes across the templates, about fifteen lines in total, plus `crud::JS` for the
 picker — **all of them enhancement**: every one has a working path without it.
 
 | | Without it |
 |---|---|
 | search: `oninput` debounce (2s), `onkeydown` Enter, `onfocus` caret-to-end | the `<noscript>` **Apply** button submits the form |
 | `onchange="this.form.submit()"` on a filter `<select>` | as above |
-| `crud::ui::JS`: the picker dialog | the field shows its selection and saves it unchanged; it can't be changed |
+| `crud::JS`: the picker dialog | the field shows its selection and saves it unchanged; it can't be changed |
 | `onclick="return confirm(…)"` on destructive buttons | the POST still goes, and the server still asks the gate (`confirm(false)` removes it) |
 | `onclick` on the select-all checkbox | tick the rows individually |
 | `oninput` on a range slider's read-out | the slider still posts its value |
@@ -1570,7 +1573,7 @@ this module contributes into them.
   ([AUTH.md §4](AUTH.md#4-middleware-the-module-provides)): `submit` takes the address from the
   `RealIp` extension it inserts, so the audit events, the lockout and your request log agree.
 - **The page shell is yours.** `render_for` returns an **HTML fragment**, never a full page. Your app
-  owns the `<html>`, the navbar, the Bootstrap stylesheet and `crud::ui::CSS`. Your askama templates
+  owns the `<html>`, the navbar, the Bootstrap stylesheet and `crud::CSS`. Your askama templates
   and the library's live in separate crates, so they can't collide.
 - **The API, if you want one, is yours.** Publish whatever endpoints your clients need over
   [`Engine`](#reading-and-writing). Nothing in this module assumes they exist.
@@ -1654,6 +1657,6 @@ request** (after the commit, before the response), so real work belongs on a cha
 The **`Engine`** holds the registered entities and their gates and forwards to one **`Accessor`** per
 entity: `slug` / `pk` / `columns` / `meta` (the [entity-wide settings](#entity-wide-settings), default none) plus `list` / `get` / `create` / `update` / `delete` / `delete_many` /
 `write_batch`, each returning finished rows. The trait names no ORM types; the SeaORM backend
-(`crud::seaorm`) is one implementation, and another backend would reuse the engine and the UI
+(`Crud` and `MetaModel`) is one implementation, and another backend would reuse the engine and the UI
 unchanged. `Accessor` and `Column` may gain members in any release
-([DESIGN.md](DESIGN.md#crud-and-crudui)).
+([DESIGN.md](DESIGN.md#crud)).

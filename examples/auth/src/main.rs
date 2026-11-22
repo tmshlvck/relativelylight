@@ -22,7 +22,7 @@
 //! auto-registration creates it on first login, the boot seeder creates it (`auth::make_admin`), or
 //! the break-glass CLI does. A public signup page is an application decision — who may join, what is
 //! verified, what they are worth on arrival — so an app that wants one writes it, over those same
-//! calls or a `crud::ui::Form`.
+//! calls or a `crud::Form`.
 //!
 //!   cargo run -p auth-example                            # serve; log in as admin / password
 //!   TRUST_PROXY=1 cargo run -p auth-example               # …behind a proxy: believe X-Forwarded-For
@@ -57,9 +57,7 @@ use relativelylight::auth::passkey::Passkeys;
 use relativelylight::middleware::RealIp;
 use relativelylight::auth::sso::{Sso, SsoButton, SsoProvider};
 use relativelylight::auth::{self, Auth, GroupReadWrite, Identity, Level};
-use relativelylight::crud::engine::Engine;
-use relativelylight::crud::seaorm::Crud;
-use relativelylight::crud::ui::{Admin, Outcome, ViewState, CSS};
+use relativelylight::crud::{Engine, Crud, Admin, Outcome, ViewState, CSS};
 use sea_orm::{
     ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait, QueryFilter,
 };
@@ -486,7 +484,7 @@ async fn rotate_webhook_secret(
 //
 // The library has **no registration page** (see the module docs). Somebody has to make the second
 // account, and this is that somebody's screen: `auth`'s own tables — accounts, groups, and the two
-// lockout counters — registered as ordinary models and rendered by `crud::ui::Admin`. Nothing here
+// lockout counters — registered as ordinary models and rendered by `crud::Admin`. Nothing here
 // is special-cased for `auth`; it is the same five calls any other model gets.
 
 /// Register `auth`'s tables and hand back the engine the panel renders from.
@@ -727,7 +725,7 @@ fn unauthorized(why: &str) -> Response {
 /// The shell names the zone times are shown in (the footer), since the picker is only on `/profile`,
 /// and inlines `time::JS`, which sets that zone from the browser on a first visit and from the picker.
 fn shell(title: &str, who: Option<&Identity>, body: &str, headers: &HeaderMap) -> String {
-    let zone = relativelylight::crud::fmt::esc(&serde_json::json!(relativelylight::time::Tz::from_headers(headers).name()));
+    let zone = relativelylight::crud::esc(&serde_json::json!(relativelylight::time::Tz::from_headers(headers).name()));
     let tz_js = relativelylight::time::JS;
     let mut left = String::new();
     let mut right = String::new();

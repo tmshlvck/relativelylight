@@ -5,8 +5,7 @@
 //! statement the backend sends.
 
 use crate::authz::Open;
-use crate::crud::engine::{Engine, ListQuery, Page};
-use crate::crud::seaorm::{Crud, MetaModel};
+use crate::crud::{Engine, ListQuery, Page, Crud, MetaModel};
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -299,8 +298,8 @@ async fn a_long_inverse_list_is_cut_and_says_how_many_it_left_out() {
     assert_eq!(rows(&p)[0]["post"].as_array().unwrap().len(), 2);
 
     {
-        let html = crate::crud::ui::Table::new(&engine, "author")
-            .render_for(&axum::http::HeaderMap::new(), &crate::crud::ui::ViewState::default())
+        let html = crate::crud::Table::new(&engine, "author")
+            .render_for(&axum::http::HeaderMap::new(), &crate::crud::ViewState::default())
             .await
             .unwrap();
         assert!(html.contains(">+6 more</span>"), "the cut is shown, not hidden");

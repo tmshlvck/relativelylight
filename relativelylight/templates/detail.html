@@ -41,7 +41,7 @@
   </div>
 </dialog>
 {%- else if !edit_href.is_empty() %}
-{#- Inside a picker's dialog, which has a card and a footer of its own: `crud::ui::JS` moves these
+{#- Inside a picker's dialog, which has a card and a footer of its own: `crud::JS` moves these
     buttons into that footer (`.rl-foot`). Without the script they stay here, under the fields. -#}
 <div class="rl-foot text-end p-2"><a class="btn btn-primary" href="{{ edit_href }}">Edit</a></div>
 {%- endif %}

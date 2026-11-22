@@ -1,6 +1,6 @@
 //! The rendered fragments: [`UploadForm`], [`Preview`], [`Thumbnail`] — FILES.md §3.
 //!
-//! Bootstrap 5 HTML fragments, never whole pages, like `crud::ui`: the app owns the `<html>`, the
+//! Bootstrap 5 HTML fragments, never whole pages, like `crud`'s components: the app owns the `<html>`, the
 //! stylesheet and the layout — and any listing, which is a table or a grid of its own design with
 //! these inside it. They take plain values the app already has (a name, a type, a URL), so they do
 //! no I/O and take no gate: the page that renders them is gated, and so are the URLs they point at.

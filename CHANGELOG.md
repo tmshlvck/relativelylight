@@ -13,6 +13,12 @@ is easy to miss in a diff.
 
 ### Changed (breaking)
 
+- **Everything in `crud` is imported from `crud::`.** The submodules `seaorm`, `engine`, `ui`, `fmt`
+  and `csv_io` are private and their items re-exported flat, so one `use` line sets up an admin
+  ([DESIGN.md → crud](docs/DESIGN.md#crud)); `csv_io::export` / `import` are `crud::export_csv` /
+  `import_csv`. The items are unchanged. **Upgrade:** replace `crud::seaorm::`, `crud::engine::`,
+  `crud::ui::` and `crud::fmt::` with `crud::`
+  ([MIGRATION-0.5.md §16](docs/MIGRATION-0.5.md#16-import-everything-from-crud)).
 - **Only `sso`, `passkeys` and `files` are features.** The engine, the admin UI, CSV, timezones,
   `auth`, the regex and base64 validators, the CSRF token and the axum plumbing are always compiled:
   an admin of structured data needs all of it, and its users live in the database it shows

@@ -6,7 +6,7 @@
 //! `ids`, `all`, plus `entity`, `new`, `edit`, `show` and `import` for the UI's own navigation, and
 //! `format=csv`.
 
-use crate::crud::engine::{ListQuery, ValidationErrors};
+use crate::crud::{ListQuery, ValidationErrors};
 use crate::urlform;
 use std::collections::BTreeMap;
 

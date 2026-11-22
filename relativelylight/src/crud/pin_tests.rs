@@ -8,9 +8,7 @@
 //! table is `record` pinned to zone 1.
 
 use crate::authz::Open;
-use crate::crud::engine::{Engine, Error};
-use crate::crud::seaorm::{Crud, MetaModel};
-use crate::crud::ui::{Outcome, Table, ViewState};
+use crate::crud::{Engine, Error, Crud, MetaModel, Outcome, Table, ViewState};
 use http::HeaderMap;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use std::net::{IpAddr, Ipv4Addr};
@@ -101,7 +99,7 @@ fn list() -> ViewState {
     ViewState::default()
 }
 
-async fn submit(table: &Table<'_>, body: &str) -> crate::crud::engine::Result<Outcome> {
+async fn submit(table: &Table<'_>, body: &str) -> crate::crud::Result<Outcome> {
     table
         .submit(&HeaderMap::new(), IP, body.as_bytes(), &list())
         .await
@@ -134,7 +132,7 @@ async fn count(db: &DatabaseConnection) -> i64 {
     row.try_get("", "n").unwrap()
 }
 
-fn done(outcome: crate::crud::engine::Result<Outcome>) {
+fn done(outcome: crate::crud::Result<Outcome>) {
     match outcome {
         Ok(Outcome::Done(_)) => {}
         Ok(Outcome::Invalid(state)) => panic!("refused: {:?}", state.row_errors()),
@@ -304,7 +302,7 @@ fn listed(html: &str) -> Vec<&'static str> {
 }
 
 /// The field messages a refused write came back with.
-fn refused(outcome: crate::crud::engine::Result<Outcome>) -> String {
+fn refused(outcome: crate::crud::Result<Outcome>) -> String {
     match outcome {
         Ok(Outcome::Invalid(state)) => {
             let html_of = |name: &str| state.field_error(name).unwrap_or_default().to_string();

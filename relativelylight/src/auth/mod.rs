@@ -18,7 +18,7 @@
 //! `GET/POST /profile/{id}` — see [`Auth::routes`]), admin helpers ([`make_admin`] to seed one,
 //! [`reset_admin_access`] for break-glass recovery, [`set_password`], [`add_to_group`], …), and
 //! per-model enforcement in the `crud` HTTP handlers via
-//! `crud::seaorm::Crud::register`, plus **OIDC single sign-on** (feature `sso`, module [`sso`]:
+//! `crud::Crud::register`, plus **OIDC single sign-on** (feature `sso`, module [`sso`]:
 //! Google / Okta / corporate, with username- and claim-based group mapping and optional
 //! auto-registration), and **API keys** for machine endpoints (module [`api_key`],
 //! [`Auth::identify_key`]). Not yet: PassKeys.

@@ -22,7 +22,7 @@
 use super::fmt::{esc, esc_str, truncate, Fmt, FmtCtx, RowClass};
 use super::ui::{Admin, Form, Mode, Outcome, Picker, RelationField, Table, ViewState};
 use crate::authz::{Authz, Decision, Open, Operation};
-use crate::crud::engine::{
+use crate::crud::{
     Accessor, Cardinality, Column, Engine, EntityMeta, Error, FieldDisplay, ListQuery, LogicalType, Page,
     Result, RowItem, ValidationErrors,
 };
@@ -197,7 +197,7 @@ impl Accessor for Mock {
             .take(if q.all { usize::MAX } else { per_page as usize })
             .map(|r| {
                 let id = r.get("id").cloned().unwrap_or(Value::Null);
-                let label = crate::crud::engine::default_label(r);
+                let label = crate::crud::default_label(r);
                 RowItem::new(id, label, (!terse).then(|| (*r).clone()))
             })
             .collect::<Vec<_>>();
@@ -1846,7 +1846,7 @@ async fn an_unknown_column_is_refused_by_name() {
 /// An `EntityMeta` with a row class.
 fn classed<F>(f: F) -> EntityMeta
 where
-    F: Fn(&crate::crud::fmt::RowCtx) -> Option<String> + Send + Sync + 'static,
+    F: Fn(&crate::crud::RowCtx) -> Option<String> + Send + Sync + 'static,
 {
     EntityMeta { row_class: Some(RowClass::new(f)), ..Default::default() }
 }

@@ -12,7 +12,7 @@
 //!   cookie-authenticated writes), [`middleware`] (`resolve_real_ip`), [`validate`], [`observe`].
 //!
 //! ```ignore
-//! use relativelylight::crud::seaorm::{Crud, MetaModel};
+//! use relativelylight::crud::{Crud, MetaModel};
 //! use relativelylight::authz::Open;
 //! let mut post = MetaModel::new(post::Entity);
 //! post.relate(&tag);                          // declare N:M
@@ -47,10 +47,10 @@ pub mod auth;
 #[cfg(feature = "files")]
 pub mod files;
 
-/// `application/x-www-form-urlencoded` encode/decode, shared by `csrf`, `time` and `crud::ui`.
+/// `application/x-www-form-urlencoded` encode/decode, shared by `csrf`, `time` and `crud`'s components.
 mod urlform;
 
-/// HTML escaping for fragments built without a template, and `crud::fmt::esc`.
+/// HTML escaping for fragments built without a template, and `crud::esc`.
 mod html;
 
 /// Whether `path` is a path on this site (`/…`), safe to redirect to: not `//host` or `/\host`, which a

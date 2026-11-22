@@ -1,7 +1,7 @@
-//! A field's display formatters: [`MetaField::format_cell`](super::seaorm::MetaField::format_cell)
-//! and [`format_view`](super::seaorm::MetaField::format_view), what each is handed ([`FmtCtx`]), and
+//! A field's display formatters: [`MetaField::format_cell`](crate::crud::MetaField::format_cell)
+//! and [`format_view`](crate::crud::MetaField::format_view), what each is handed ([`FmtCtx`]), and
 //! the helpers they are written with ([`esc`], [`esc_str`], [`truncate`]). Also a row's CSS class,
-//! [`MetaModel::row_class`](super::seaorm::MetaModel::row_class) ([`RowClass`], handed a [`RowCtx`]).
+//! [`MetaModel::row_class`](crate::crud::MetaModel::row_class) ([`RowClass`], handed a [`RowCtx`]).
 //!
 //! **A formatter's output is HTML, inserted into the page verbatim.** That is what it is for — a
 //! link, a badge, a `<pre>` — and it is also the one way this crate's pages can carry a script an
@@ -10,7 +10,7 @@
 //! `format!("<b>{}</b>", ctx.value())` is a stored XSS.
 //!
 //! ```ignore
-//! use relativelylight::crud::fmt::{esc, truncate};
+//! use relativelylight::crud::{esc, truncate};
 //!
 //! workorder.field("number").format_view(|cx| format!(
 //!     r#"<a href="/work-orders/{}" target="_top">{}</a> →"#,
@@ -54,7 +54,7 @@ impl<'a> FmtCtx<'a> {
     }
 }
 
-/// A display formatter, `(&FmtCtx) -> HTML`, as [`MetaField`](super::seaorm::MetaField) stores it
+/// A display formatter, `(&FmtCtx) -> HTML`, as [`MetaField`](crate::crud::MetaField) stores it
 /// and [`Column::Field`](super::Column::Field) reports it. Its output is inserted **verbatim**.
 #[derive(Clone)]
 pub struct Fmt(Arc<dyn Fn(&FmtCtx) -> String + Send + Sync>);
@@ -103,8 +103,8 @@ impl<'a> RowCtx<'a> {
     }
 }
 
-/// A row's CSS class, `(&RowCtx) -> Option<class>`, as [`MetaModel`](super::seaorm::MetaModel)
-/// stores it and [`EntityMeta`](super::engine::EntityMeta) reports it. Unlike a [`Fmt`] its output
+/// A row's CSS class, `(&RowCtx) -> Option<class>`, as [`MetaModel`](crate::crud::MetaModel)
+/// stores it and [`EntityMeta`](crate::crud::EntityMeta) reports it. Unlike a [`Fmt`] its output
 /// is not HTML: it lands in the `<tr class>` attribute, escaped.
 #[derive(Clone)]
 pub struct RowClass(Arc<RowClassFn>);
@@ -152,7 +152,7 @@ pub fn esc_str(s: &str) -> String {
 }
 
 /// A ready-made formatter that shortens a value to its first `chars` characters plus `…`, with the
-/// whole of it in the `title` tooltip — for [`format_cell`](super::seaorm::MetaField::format_cell),
+/// whole of it in the `title` tooltip — for [`format_cell`](crate::crud::MetaField::format_cell),
 /// so a listing shows a corner of a long text and the View dialog all of it. Escapes the value; a
 /// value that fits is shown as is.
 ///

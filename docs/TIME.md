@@ -111,12 +111,12 @@ tz.parse("2024-12-01T12:00");          // Some(1_733_050_800)  (what the form po
 tz database doesn't have all render UTC. **A timestamp shown in the wrong zone is worse than one
 labelled UTC**, so there is no guessing and no partial failure.
 
-The `crud::ui` components do this for you — `render_for` takes the headers, so cells and inputs are
+The `crud` components do this for you — `render_for` takes the headers, so cells and inputs are
 already in the caller's zone. You need `Tz` directly only on your own pages.
 
 ## 3. The picker, and the first visit
 
-**[`time::JS`] goes in every page's shell**, once, like `crud::ui::JS`. It does two things:
+**[`time::JS`] goes in every page's shell**, once, like `crud::JS`. It does two things:
 
 - **A first visit takes the browser's zone.** With no `rl_tz` cookie, it sets the browser's own zone
   and reloads once, so from the second page on everything renders in local time. A zone chosen later

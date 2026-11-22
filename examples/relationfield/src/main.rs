@@ -1,7 +1,7 @@
 //! relationfield example — the relation picker in a form the app writes itself.
 //!
-//! `crud::ui::Form` edits one row of one entity. This page's form edits none: "give these tags to
-//! every post by this author". It is plain HTML with two `crud::ui::RelationField`s in it — the same
+//! `crud::Form` edits one row of one entity. This page's form edits none: "give these tags to
+//! every post by this author". It is plain HTML with two `crud::RelationField`s in it — the same
 //! input `Form`, `Table` and `Admin` render for a relation, from the same code: a `<select>` while
 //! the target is small, and past `picker_threshold` (50; the seeded model has 56 authors and 56
 //! tags) the selection as badges and a 🔍 button opening the picker dialog over the target's table.
@@ -14,7 +14,7 @@
 //! - the **write**, its own: here one `Engine::write_batch`, so the whole retag commits or none of
 //!   it does — after asking the `post` gate whether this caller may update posts at all;
 //! - the picker's **plumbing**, as for a `Form`: `Crud::picker_path("/_rl/pick")`, a `GET /_rl/pick`
-//!   serving `crud::ui::Picker` in a bare shell, and `crud::ui::JS` in the page shell.
+//!   serving `crud::Picker` in a bare shell, and `crud::JS` in the page shell.
 //!
 //! Below the form a read-only `Table` pinned to the chosen author shows the result.
 //!
@@ -31,9 +31,9 @@ use axum::routing::get;
 use axum::Router;
 use model::{author, post, tag};
 use relativelylight::authz::{Decision, Open, Operation};
-use relativelylight::crud::engine::{Engine, Error, ListQuery};
-use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::ui::{Picker, RelationField, Table, ViewState, CSS, JS};
+use relativelylight::crud::{
+    Engine, Error, ListQuery, Crud, MetaModel, Picker, RelationField, Table, ViewState, CSS, JS,
+};
 use sea_orm::IdenStatic; // `post::Column::Title.as_str()` — a column name the compiler checks
 use serde_json::{json, Value};
 use std::collections::HashMap;

@@ -4,7 +4,7 @@
 //! (`/post/new`, `/post/{id}/edit`), a row's own page behind View (`/post/{id}`), a table *about one value* at `/author/{id}/posts`,
 //! a table pinned to a *set* of values at `/queue`, date-range filters on `/event`, CSV export,
 //! and a create/edit `<dialog>` that opens from the URL. No JavaScript framework, no JSON API: the
-//! only script is `crud::ui::JS`, the relation picker's — a post's `author` and `tag` have more rows
+//! only script is `crud::JS`, the relation picker's — a post's `author` and `tag` have more rows
 //! than `picker_threshold` (50), so the form shows the selection and edits it in a dialog served by
 //! `/_rl/pick`. Delete six authors and `author` is a plain `<select>` again. Beside each relation is
 //! a "+": the author you need doesn't exist yet, so create it in a dialog over the half-filled post
@@ -29,10 +29,10 @@ use axum::routing::get;
 use axum::Router;
 use model::{author, event, post, profile, tag, user};
 use relativelylight::authz::{Decision, Open, Operation};
-use relativelylight::crud::engine::{Engine, Error, Result as CrudResult};
-use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::fmt::{esc, truncate, FmtCtx};
-use relativelylight::crud::ui::{Form, Outcome, Picker, Table, ViewState, CSS, JS};
+use relativelylight::crud::{
+    Engine, Error, Result as CrudResult, Crud, MetaModel, esc, truncate, FmtCtx, Form, Outcome,
+    Picker, Table, ViewState, CSS, JS,
+};
 use relativelylight::middleware::RealIp;
 use relativelylight::time::{picker, Tz};
 use relativelylight::validate;
@@ -48,7 +48,7 @@ struct Shell {
     current: String,
     body: String,
     css: &'static str,
-    /// `crud::ui::JS` on every page: the dialogs become real modals (Esc closes) and the relation
+    /// `crud::JS` on every page: the dialogs become real modals (Esc closes) and the relation
     /// dialogs (picker, "+ New", linked rows) work.
     js: &'static str,
     /// The navbar timezone picker (`time::picker`), and `time::JS`, which sets the zone cookie from
@@ -578,7 +578,7 @@ async fn queue_write(
     }
 }
 
-// ---- the standalone form on the app's own pages (crud::ui::Form) ----
+// ---- the standalone form on the app's own pages (crud::Form) ----
 //
 // The building block the admin table is assembled from, used directly. Note what *isn't* here: no
 // field list in HTML, no input types, no validation wiring, no relation lookups. The form is built

@@ -1,4 +1,5 @@
-//! `relativelylight::crud::csv_io` — CSV import/export for the admin UI.
+//! CSV import/export for the admin UI ([`export_csv`](crate::crud::export_csv) /
+//! [`import_csv`](crate::crud::import_csv), re-exported at `crud::`).
 //!
 //! CSV is the one exchange format the UI can't render, so it lives here as a thin layer over the
 //! backend-agnostic [`Engine`]: export reads via [`Engine::list`], import writes via
@@ -17,8 +18,7 @@
 //! - On import, a row carrying a primary-key value **updates** that row; a blank/absent PK
 //!   **creates** one. Read-only columns (the PK aside, inverse relations) are ignored.
 
-use crate::crud::engine::{Cardinality, Column, Engine, Error, ListQuery, Result};
-use crate::crud::text;
+use crate::crud::{Cardinality, Column, Engine, Error, ListQuery, Result, text};
 use crate::time::Tz;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -60,7 +60,7 @@ fn is_datetime(col: &Column) -> bool {
 }
 
 /// Export every row matching `q` (search / filters / sort apply; pagination is lifted) as CSV text.
-pub async fn export(
+pub async fn export_csv(
     engine: &Engine,
     slug: &str,
     cols: &[Column],
@@ -101,7 +101,7 @@ fn cell(row: &Value, col: &Column, tz: &Tz) -> String {
 /// 40 leaves the first 39 rows unapplied rather than half-importing a spreadsheet. Validation runs
 /// across every row before the transaction opens, so a file with four bad cells reports all four in
 /// one pass instead of one per re-upload.
-pub async fn import(
+pub async fn import_csv(
     engine: &Engine,
     slug: &str,
     cols: &[Column],

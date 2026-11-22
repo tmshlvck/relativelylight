@@ -11,8 +11,7 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 
 | Module | What it's for | Guide |
 |---|---|---|
-| `crud` | SeaORM entities → a typed engine: list/read/write/validate/gate | [CRUD.md](CRUD.md) |
-| `crud::ui` | the web UI: form, table, admin panel, relation picker, CSV | [CRUD.md → Web UI](CRUD.md#web-ui-ui) |
+| `crud` | SeaORM entities → a typed engine (list/read/write/validate/gate) and its web UI: table, form, admin panel, relation picker, CSV | [CRUD.md](CRUD.md) |
 | `auth` | users/groups, sessions, login, TOTP 2FA, OIDC SSO, API keys, gate presets | [AUTH.md](AUTH.md); the reasoning in [AUTH-SECURITY.md](AUTH-SECURITY.md) |
 | `middleware` | `resolve_real_ip` — required; the caller's address, resolved once | [AUTH.md §4](AUTH.md#4-middleware-the-module-provides) |
 | `csrf` | the double-submit token every cookie-authenticated write checks | [AUTH.md §7](AUTH.md#7-csrf-double-submit-token) |
@@ -51,7 +50,7 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
 6. **State and audit are different things.** A table says what something *is*; `observe` says what
    someone *did*.
 7. **Server-rendered, no JavaScript framework, the URL is the state.** Page, sort, filters, search and
-   the open dialog live in the query string. Two small scripts, no framework: `crud::ui::JS` makes the
+   the open dialog live in the query string. Two small scripts, no framework: `crud::JS` makes the
    dialogs modal and drives the relation picker (everything works without it, only plainer), and the
    passkey script reaches a browser API no form can.
 8. **Policy belongs to the app; mechanism belongs here.** Retention, ownership, registration,
@@ -64,8 +63,18 @@ Usage lives in the guides; open work is in [TODO.md](TODO.md).
    apart: the panel's password field once skipped the sign-out the manager's reset does. When a
    second way turns up, remove one, or make one call the other.
 
-## crud and crud::ui
+## crud
 
+- **One flat public surface.** Everything an app names is at `crud::` (`Crud`, `MetaModel`, `Table`,
+  `Engine`, `Accessor`, `esc`, …); the submodules are private. The paths used to follow the layers
+  (`crud::seaorm`, `crud::engine`, `crud::ui`, `crud::fmt`, `crud::csv_io`), so an app imported
+  from four of them to set up one admin, `seaorm` named a backend that has no alternative, and the
+  docs drifted between two spellings of one item (`esc` was in `crud::ui`, then `crud::fmt`). The
+  module grew to the shape it will keep, about 60 names, which one list holds. Inside, `seaorm`
+  (introspection, queries, `MetaModel`) is apart from `meta` (the field and relation settings, no
+  SeaORM) and `registry` (`Crud`).
+- **`Accessor` stays public.** An app may want its own UI or JSON API over `Engine`, or a backend
+  of its own; the trait names no ORM types.
 - **Introspection first, configuration as a layer.** Every column, key and to-one relation comes from
   the entity; only N:M is declared (`relate`), because SeaORM can't enumerate it.
 - **The `Accessor` seam is type erasure.** `Arc<dyn Accessor>` lets one `Engine` hold entities of

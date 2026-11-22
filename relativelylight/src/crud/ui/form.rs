@@ -9,7 +9,7 @@ use super::{
     Outcome, Surface, Writes,
 };
 use crate::authz::{Decision, Operation};
-use crate::crud::engine::{Engine, Error, ListQuery, Result};
+use crate::crud::{Engine, Error, ListQuery, Result};
 use crate::time::Tz;
 use askama::Template;
 use http::HeaderMap;
@@ -158,7 +158,7 @@ impl<'a> Form<'a> {
         self
     }
     /// Pre-fill `field` in the **create** form with `value`, for this request — what
-    /// [`MetaField::default`](crate::crud::seaorm::MetaField::default) does once for every form,
+    /// [`MetaField::default`](crate::crud::MetaField::default) does once for every form,
     /// but chosen per page: the ticket's author is the caller, a reply's subject is the original's,
     /// the parent is the one the page is about.
     ///
@@ -264,7 +264,7 @@ impl<'a> Form<'a> {
         if let Some(id) = &self.edit_id {
             if Posted::read(headers, body)?.one("_id") != Some(id.as_str()) {
                 return Err(Error::BadRequest(format!(
-                    "crud::ui::Form({}): the posted row is not the one this form edits",
+                    "crud::Form({}): the posted row is not the one this form edits",
                     self.slug
                 )));
             }

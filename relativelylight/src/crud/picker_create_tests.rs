@@ -13,10 +13,9 @@
 //! airline, which means creating its address.
 
 use crate::authz::{Authz, Decision, Open, Operation};
-use crate::crud::engine::{Engine, Error};
-use crate::crud::fmt::{esc, FmtCtx};
-use crate::crud::seaorm::{Crud, MetaModel};
-use crate::crud::ui::{Form, Outcome, Picker, Table, ViewState};
+use crate::crud::{
+    Engine, Error, esc, FmtCtx, Crud, MetaModel, Form, Outcome, Picker, Table, ViewState,
+};
 use async_trait::async_trait;
 use http::HeaderMap;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};

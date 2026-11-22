@@ -1,6 +1,6 @@
 /* relativelylight — the few rules Bootstrap 5's CSS doesn't cover, because the components use a
    native dialog element (whose styling Bootstrap leaves alone, its own .modal assuming its own
-   JavaScript). Inline it once per page inside a style element; see crud::ui::CSS.
+   JavaScript). Inline it once per page inside a style element; see crud::CSS.
    (No closing style tag anywhere in this file, including in a comment: it would end the element.) */
 
 .rl-dialog {
@@ -17,7 +17,7 @@
   z-index: 1055;
 }
 .rl-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
-/* `open` without showModal() means no backdrop pseudo-element, so paint one — until crud::ui::JS
+/* `open` without showModal() means no backdrop pseudo-element, so paint one — until crud::JS
    reopens the dialog as a real modal (`.rl-modal`), when the browser's own ::backdrop takes over. */
 .rl-dialog.rl-modal::before { content: none; }
 .rl-dialog::before {
@@ -67,7 +67,7 @@
 .table-responsive > .table { margin-bottom: 0; }
 
 /* A relation too large to list: its selection, read-only, scrolling past a few lines so a hundred
-   chosen rows still fit. The button beside it opens the picker (crud::ui::JS). */
+   chosen rows still fit. The button beside it opens the picker (crud::JS). */
 .rl-picked-list { min-height: calc(1.5em + 0.75rem + 2px); max-height: 9rem; overflow-y: auto; }
 .rl-picked-list .badge { margin: 0 0.15rem 0.15rem 0; }
 /* The picker dialog: modal (showModal), so it sits above an edit dialog that is merely `open`. */
@@ -78,7 +78,7 @@
   height: min(720px, calc(100vh - 4rem));
   background: transparent;
   /* A dialog opened from one (a "+" inside a create form) sits a step down and right of it, so the
-     stack shows. Set by crud::ui::JS. */
+     stack shows. Set by crud::JS. */
   translate: calc(var(--rl-depth, 0) * 1.25rem) calc(var(--rl-depth, 0) * 1.25rem);
 }
 .rl-picker::backdrop { background: rgba(0, 0, 0, 0.5); }

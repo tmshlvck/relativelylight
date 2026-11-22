@@ -5,8 +5,7 @@
 //! exactly the places that must handle it.
 
 use super::state::ViewState;
-use crate::crud::engine::{Cardinality, Column, LogicalType, Page};
-use crate::crud::fmt::{Fmt, FmtCtx};
+use crate::crud::{Cardinality, Column, LogicalType, Page, Fmt, FmtCtx};
 use http::HeaderMap;
 use crate::time::Tz;
 use serde_json::Value;
@@ -25,7 +24,7 @@ pub(crate) enum Cell {
 }
 
 /// One linked row in a [`Cell::Links`]. `view` is the picker page that shows it in a dialog (what
-/// `crud::ui::JS` opens); `href` is where the link goes without the script: the app's own page for
+/// `crud::JS` opens); `href` is where the link goes without the script: the app's own page for
 /// the target (`MetaModel::view_path`), else that same picker page. `key` (`target:id`) is how the
 /// script finds every link to a row whose label an edit just changed. An empty `href` is no link:
 /// the "+3 more" at the end of a cut list.
@@ -52,7 +51,7 @@ struct Linked {
 
 impl Links {
     pub(crate) async fn resolve(
-        engine: &crate::crud::engine::Engine,
+        engine: &crate::crud::Engine,
         slug: &str,
         cols: &[Column],
         headers: &http::HeaderMap,
@@ -268,7 +267,7 @@ pub(crate) fn rows(
     page: &Page,
     cols: &[Column],
     formatted: Option<&HeaderMap>,
-    row_class: Option<&crate::crud::fmt::RowClass>,
+    row_class: Option<&crate::crud::RowClass>,
     state: &ViewState,
     tz: &Tz,
     show: Option<&dyn Fn(&str) -> String>,
@@ -284,7 +283,7 @@ pub(crate) fn rows(
                 show_href: show.map(|f| f(&id)).unwrap_or_default(),
                 class: row_class
                     .zip(formatted)
-                    .and_then(|(f, h)| f.call(&crate::crud::fmt::RowCtx::new(&row, h)))
+                    .and_then(|(f, h)| f.call(&crate::crud::RowCtx::new(&row, h)))
                     .unwrap_or_default(),
                 cells: cols
                     .iter()

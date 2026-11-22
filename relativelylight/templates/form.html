@@ -1,7 +1,7 @@
 {#- The standalone create/edit form: the same widgets and the same decoding as the table's dialog,
     without the table. For an app's own pages, where the admin's shape is wrong. -#}
 {#- `bare`: inside a picker's dialog, which has its own card — no card here, and the buttons in an
-    `.rl-foot` that `crud::ui::JS` moves into the dialog's footer. -#}
+    `.rl-foot` that `crud::JS` moves into the dialog's footer. -#}
 <div class="{% if bare %}p-2{% else %}card{% endif %} rl-form"{% if !dom_id.is_empty() %} id="{{ dom_id }}"{% endif %}>
   {%- if has_header && !bare %}
   <div class="card-header">

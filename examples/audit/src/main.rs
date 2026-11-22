@@ -59,10 +59,7 @@ use relativelylight::auth::api_key::{ApiKeys, KeyError};
 use relativelylight::auth::lockout::Lockout;
 use relativelylight::auth::{self, Auth, GroupReadWrite, Identity, UserReadWrite};
 use relativelylight::authz::Operation;
-use relativelylight::crud::engine::Engine;
-use relativelylight::crud::seaorm::{Crud, MetaModel};
-use relativelylight::crud::fmt::esc_str;
-use relativelylight::crud::ui::{Admin, Outcome, ViewState, CSS};
+use relativelylight::crud::{Engine, Crud, MetaModel, esc_str, Admin, Outcome, ViewState, CSS};
 use relativelylight::middleware::{resolve_real_ip, RealIp, TrustProxy};
 use relativelylight::observe::{ErrorEvent, ErrorObserver, WriteEvent, WriteObserver};
 use sea_orm::IdenStatic; // `post::Column::Title.as_str()` — a column name the compiler checks
@@ -310,7 +307,7 @@ fn clip(s: &str, n: usize) -> String {
 
 // ─────────────────────────── the CRUD panel being audited ───────────────────────────
 
-/// Two handlers, as every `crud::ui` surface has: this one renders.
+/// Two handlers, as every `crud` surface has: this one renders.
 async fn panel_show(
     State(app): State<AppState>,
     Path(entity): Path<String>,

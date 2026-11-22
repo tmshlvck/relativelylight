@@ -1,4 +1,4 @@
-//! `relativelylight::crud::ui` — the admin UI, rendered on the server as plain HTML.
+//! The admin UI (re-exported at `relativelylight::crud`), rendered on the server as plain HTML.
 //!
 //! Three components, one implementation:
 //!
@@ -20,7 +20,7 @@
 //! own error pages. Writes post back to that same URL, and the library does the work:
 //!
 //! ```ignore
-//! use relativelylight::crud::ui::{Admin, Outcome, ViewState};
+//! use relativelylight::crud::{Admin, Outcome, ViewState};
 //!
 //! fn panel(engine: &Engine) -> Admin<'_> {          // one definition, used by both handlers
 //!     Admin::new(engine).title("Admin").entity("post").entity("tag")
@@ -76,12 +76,12 @@ pub(crate) use write::{apply, authorize, csrf_token, Surface, Writes};
 
 
 /// The stylesheet the components need beyond Bootstrap 5 (mostly `<dialog>`).
-/// Inline it once in your shell: `<style>{{ relativelylight::crud::ui::CSS }}</style>`.
+/// Inline it once in your shell: `<style>{{ relativelylight::crud::CSS }}</style>`.
 pub const CSS: &str = include_str!("../../../assets/rl.css");
 
 /// The components' script: it makes the dialogs real modals (Esc closes them) and drives the relation
 /// picker. Include it once per page with a table or a form, as
-/// `<script>{{ relativelylight::crud::ui::JS }}</script>` or served from a file of your own (a strict
+/// `<script>{{ relativelylight::crud::JS }}</script>` or served from a file of your own (a strict
 /// CSP). Everything works without it, only plainer: a dialog is a page section, and a large
 /// relation shows its selection and saves it unchanged but can't be edited.
 pub const JS: &str = include_str!("../../../assets/rl.js");

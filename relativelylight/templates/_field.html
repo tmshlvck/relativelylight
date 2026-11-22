@@ -1,6 +1,6 @@
 {#- One form field `f` (a `widgets::FieldV`): its label, the input a Rust `match` chose for it (see
     `ui::widgets`), its error and its help. Included by `_fields.html` — every form the crate renders —
-    and by `field.html`, the one-field fragment an app's own form embeds (`crud::ui::RelationField`),
+    and by `field.html`, the one-field fragment an app's own form embeds (`crud::RelationField`),
     so a field looks and posts the same wherever it appears. -#}
 <div class="mb-3">
   <label class="form-label" for="f-{{ f.name }}">{{ f.label }}{% if f.required %} <span class="text-danger" title="Required">*</span>{% endif %}</label>
@@ -54,7 +54,7 @@
   {%- when Widget::Picked with { chosen, many, src, note } %}
   {#- Too many target rows to list. The selection is shown, not edited here: the hidden inputs post it
       exactly as a `<select>` would, so a save without scripting keeps it unchanged. The button
-      (hidden until `crud::ui::JS` runs) opens the picker at `src`, and only its OK rewrites the
+      (hidden until `crud::JS` runs) opens the picker at `src`, and only its OK rewrites the
       badges and the inputs. With "+" (`data-rl-new`), the "New" button is in the picker's dialog,
       and the row it creates joins the dialog's working selection. -#}
   <div class="rl-picked d-flex gap-2 align-items-start" data-rl-src="{{ src }}"

@@ -200,10 +200,10 @@ pub async fn remove_all(db: &DatabaseConnection, user_id: i32) -> Result<u64, Db
 /// ```ignore
 /// crud.register(auth::passkey::meta_model(), Arc::new(GroupReadWrite::new(&auth, ["admin"])));
 /// ```
-pub fn meta_model() -> crate::crud::seaorm::MetaModel<entity::Entity> {
+pub fn meta_model() -> crate::crud::MetaModel<entity::Entity> {
     use entity::Column as C;
     use sea_orm::IdenStatic;
-    let mut m = crate::crud::seaorm::MetaModel::new(entity::Entity);
+    let mut m = crate::crud::MetaModel::new(entity::Entity);
     m.label_column(C::Name.as_str());
     m.field(C::Credential.as_str()).hidden = true;
     for (col, label) in [

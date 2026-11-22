@@ -3,8 +3,7 @@
 //! term names, the row's own label and each relation's labels — and against nothing it hides.
 
 use crate::authz::Open;
-use crate::crud::engine::{Engine, ListQuery};
-use crate::crud::seaorm::{Crud, MetaModel};
+use crate::crud::{Engine, ListQuery, Crud, MetaModel};
 use sea_orm::{ConnectionTrait, Database};
 use serde_json::Value;
 
@@ -213,7 +212,7 @@ async fn an_instant_matches_when_the_term_names_its_period() {
 
 #[tokio::test]
 async fn the_table_reads_the_period_in_the_viewers_zone() {
-    use crate::crud::ui::{Table, ViewState};
+    use crate::crud::{Table, ViewState};
     let e = engine(|_| {}).await;
     let mut tokyo = http::HeaderMap::new();
     tokyo.insert(http::header::COOKIE, "rl_tz=Asia%2FTokyo".parse().unwrap());

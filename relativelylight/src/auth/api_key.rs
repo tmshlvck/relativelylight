@@ -286,10 +286,10 @@ pub fn table_create_statement(backend: DbBackend) -> TableCreateStatement {
 /// ```ignore
 /// crud.register(auth::api_key::meta_model(), Arc::new(GroupReadWrite::new(&auth, ["admin"])));
 /// ```
-pub fn meta_model() -> crate::crud::seaorm::MetaModel<entity::Entity> {
+pub fn meta_model() -> crate::crud::MetaModel<entity::Entity> {
     use entity::Column as C;
     use sea_orm::IdenStatic;
-    let mut m = crate::crud::seaorm::MetaModel::new(entity::Entity);
+    let mut m = crate::crud::MetaModel::new(entity::Entity);
     m.label_column(C::Name.as_str());
     m.field(C::HashedKey.as_str()).hidden = true;
     m.field(C::UserId.as_str()).read_only = true;

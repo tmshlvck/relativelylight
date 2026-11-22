@@ -4,7 +4,7 @@
 //! or a factory returning `impl Fn(i64) -> Result<(), String>`), not `serde_json::Value` closures.
 //! That makes the *same* check callable from a hand-written endpoint (which already holds a `&str` /
 //! `i64`) and from the auto-CRUD write path: the latter goes through the thin adapters in
-//! [`field`](crate::validate::field), which lift a typed predicate into a [`crud::Validator`](crate::crud::seaorm::Validator).
+//! [`field`](crate::validate::field), which lift a typed predicate into a [`crud::Validator`](crate::crud::Validator).
 //!
 //! The core (addresses, ranges, lengths, enums, hostnames, hex, uuid, url, email) is **std-only** and
 //! always compiled, as are `regex_match` and `base64`/`base64_url` (over crates already in the tree).
@@ -508,7 +508,7 @@ fn is_patterned(password: &str) -> bool {
 /// `user.field("password_hash").validate_str(validate::password(policy))`.
 ///
 /// The order of the crud pipeline is **coerce → validate → transform**, so this sees the *plaintext*
-/// the form submitted, before [`MetaField::password`](crate::crud::seaorm::MetaField::password)'s
+/// the form submitted, before [`MetaField::password`](crate::crud::MetaField::password)'s
 /// `on_write` hashes it — no engine change needed.
 ///
 /// **Wrap it in [`optional`] if blank has a meaning on that column**, which it does for
@@ -693,13 +693,13 @@ pub mod normalize {
 // ============================== crud adapters ==============================
 
 /// Adapters that lift a typed predicate/normalizer into the `serde_json::Value`-shaped hooks the CRUD
-/// engine expects ([`Validator`](crate::crud::seaorm::Validator) /
-/// [`WriteTransform`](crate::crud::seaorm::WriteTransform)).
+/// engine expects ([`Validator`](crate::crud::Validator) /
+/// [`WriteTransform`](crate::crud::WriteTransform)).
 ///
-/// Most callers should prefer the [`MetaField::validate_str`](crate::crud::seaorm::MetaField::validate_str)
-/// / [`validate_int`](crate::crud::seaorm::MetaField::validate_int) builder sugar, which wraps these.
+/// Most callers should prefer the [`MetaField::validate_str`](crate::crud::MetaField::validate_str)
+/// / [`validate_int`](crate::crud::MetaField::validate_int) builder sugar, which wraps these.
 pub mod field {
-    use crate::crud::seaorm::{Validator, WriteTransform};
+    use crate::crud::{Validator, WriteTransform};
     use serde_json::Value;
 
     /// Lift a `&str` predicate into a field [`Validator`]. A `null` value passes (nullability is the

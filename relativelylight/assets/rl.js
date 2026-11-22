@@ -1,5 +1,5 @@
 /* relativelylight — the relation picker's script, the one script the components ship (see
-   crud::ui::JS). Without it a large relation still shows its selection and saves it unchanged; this
+   crud::JS). Without it a large relation still shows its selection and saves it unchanged; this
    adds the way to change it, and (with Crud::picker_create) the "+" that creates a missing row.
 
    A dialog holds an iframe of the Picker page, in one of two kinds:

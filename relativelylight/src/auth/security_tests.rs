@@ -2628,8 +2628,7 @@ async fn a_locked_key_ignores_further_failures_and_an_expired_one_starts_over() 
 /// back, so a reader of the panel could spell out another user's TOTP secret a few characters at a time.
 #[tokio::test]
 async fn the_accounts_panel_never_searches_filters_or_sorts_by_a_secret() {
-    use crate::crud::seaorm::Crud;
-    use crate::crud::ui::{Table, ViewState};
+    use crate::crud::{Crud, Table, ViewState};
     let fx = Fx::new().await;
     fx.user("alice").await;
     fx.user("bob").await;
@@ -2670,7 +2669,7 @@ async fn the_accounts_panel_never_searches_filters_or_sorts_by_a_secret() {
     assert_eq!(listed("sort=username:desc").await, ["bob", "alice"]);
     assert_eq!(listed("sort=totp_secret").await, ["alice", "bob"], "the secret is not a sort key");
     // The engine refuses a search naming a hidden column outright.
-    let q = crate::crud::engine::ListQuery { search: vec![(Some("totp_secret".into()), "ZZ".into())], ..Default::default() };
+    let q = crate::crud::ListQuery { search: vec![(Some("totp_secret".into()), "ZZ".into())], ..Default::default() };
     assert!(e.list("auth_user", &q, false).await.is_err());
 }
 
@@ -4520,8 +4519,7 @@ async fn a_maximum_age_makes_an_old_password_due() {
 /// credentials page's, which also signs the account out); the secrets never leave in a read.
 #[tokio::test]
 async fn the_accounts_panel_sets_a_first_password_and_no_later_one() {
-    use crate::crud::seaorm::Crud;
-    use crate::crud::Error;
+    use crate::crud::{Crud, Error};
     use serde_json::json;
     let fx = Fx::new().await;
     let mut crud = Crud::new(fx.db.clone());

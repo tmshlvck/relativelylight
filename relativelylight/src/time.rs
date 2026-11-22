@@ -185,7 +185,7 @@ impl Tz {
 }
 
 /// The timezone picker's script, and the first visit's default: **inline it once in every page's
-/// shell**, as `crud::ui::JS`, or the picker does nothing (`docs/TIME.md`).
+/// shell**, as `crud::JS`, or the picker does nothing (`docs/TIME.md`).
 ///
 /// With no [`COOKIE`] yet, it sets the browser's own zone and reloads once, so a first visit renders
 /// in local time from the second page on. A [`picker`] then sets the cookie from what is chosen and

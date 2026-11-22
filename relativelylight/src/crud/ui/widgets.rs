@@ -4,7 +4,7 @@
 
 use super::state::ViewState;
 use crate::authz::Operation;
-use crate::crud::engine::{Cardinality, Column, Engine, FieldDisplay, ListQuery, LogicalType, Result};
+use crate::crud::{Cardinality, Column, Engine, FieldDisplay, ListQuery, LogicalType, Result};
 use crate::time::Tz;
 use http::HeaderMap;
 use serde_json::Value;
@@ -42,7 +42,7 @@ pub(crate) enum Widget {
     Multi { options: Vec<Opt> },
     /// A relation whose target is too large to list: the selection, read-only, posted back by one
     /// hidden input per id — and, when the app serves a [`Picker`](super::Picker), a button opening
-    /// it in a dialog at `src`. `crud::ui::JS` does the editing; without it the selection still
+    /// it in a dialog at `src`. `crud::JS` does the editing; without it the selection still
     /// saves unchanged. `note` says why there is no list (empty when there's nothing to say).
     Picked { chosen: Vec<Opt>, many: bool, src: String, note: String },
 }
@@ -193,7 +193,7 @@ async fn within(
                     let q = ListQuery { pk_in: set.to_vec(), all: true, ..Default::default() };
                     match engine.list(target, &q, true).await {
                         Ok(page) => page.data,
-                        Err(crate::crud::engine::Error::BadRequest(_)) => Vec::new(),
+                        Err(crate::crud::Error::BadRequest(_)) => Vec::new(),
                         Err(e) => return Err(e),
                     }
                 }
@@ -306,7 +306,7 @@ pub(crate) async fn relation(
 ) -> Result<Widget> {
     let threshold = engine.picker_threshold(threshold);
     let listable = rel.permits(engine, target, Operation::List).await;
-    let as_options = |page: &crate::crud::engine::Page| -> Vec<Opt> {
+    let as_options = |page: &crate::crud::Page| -> Vec<Opt> {
         page.data
             .iter()
             .map(|it| {
@@ -412,7 +412,7 @@ async fn chosen_options(
         Ok(page) => page.data,
         // An id that can't be a key of the target (text for an integer key): the write check
         // reports it beside the field; here it just shows as typed.
-        Err(crate::crud::engine::Error::BadRequest(_)) => Vec::new(),
+        Err(crate::crud::Error::BadRequest(_)) => Vec::new(),
         Err(e) => return Err(e),
     };
     Ok(ids
