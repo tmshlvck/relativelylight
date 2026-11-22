@@ -2329,6 +2329,37 @@ async fn break_glass_reopens_a_locked_out_admin_but_refuses_sso_accounts() {
 }
 
 #[tokio::test]
+async fn break_glass_clears_the_recovery_codes_and_the_replay_guard() {
+    // Break-glass discards the second factor, so it must discard the ways past it too: a recovery code
+    // surviving it would open the next enrolment, and a stale `totp_last_step` would refuse its codes.
+    let fx = Fx::new().await;
+    let id = fx.user("alice").await;
+    let mut cookie = fx.cookie(&fx.session_for("alice").await);
+    let (_secret, codes) = enrol_with_codes(&fx, "alice", &mut cookie).await;
+    let recover = |code: String| {
+        let fx = &fx;
+        async move {
+            let res = fx.post("/login", &form(&[("username", "alice"), ("password", PW)]), None).await;
+            res.assert_redirect("/login/totp");
+            let pending = res.session_token(fx.auth.session_cookie_name()).unwrap();
+            fx.post("/login/totp", &form(&[("recovery_code", &code)]), Some(&fx.cookie(&pending))).await
+        }
+    };
+    // Control: before break-glass a code gets in.
+    recover(codes[0].clone()).await.assert_redirect("/profile");
+    assert!(fx.row("alice").await.totp_last_step.is_some(), "enrolment spent its step");
+
+    reset_admin_access(&fx.db, "admin", "alice", PW).await.unwrap();
+    let row = fx.row("alice").await;
+    assert!(!row.has_totp() && row.totp_last_step.is_none(), "secret and replay guard cleared");
+    assert_eq!(recovery::remaining(&fx.db, id).await, 0, "the codes are gone");
+    // Re-enrolled (an authenticator of whoever holds the account now), an old code opens nothing.
+    fx.enable_totp("alice").await;
+    let res = recover(codes[1].clone()).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED, "an old code must not survive break-glass");
+}
+
+#[tokio::test]
 async fn break_glass_creates_the_admin_when_there_is_none() {
     // A fresh database: the flag has to bootstrap the account, not just reset it.
     let fx = Fx::new().await;

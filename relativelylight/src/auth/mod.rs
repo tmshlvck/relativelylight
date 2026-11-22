@@ -594,7 +594,8 @@ pub async fn make_admin(
 /// ```
 ///
 /// Creates the user if missing, then makes sure they can actually get back in: sets the password,
-/// sets `is_active = true`, **clears TOTP 2FA** (both the active and the pending secret), and ensures
+/// sets `is_active = true`, **clears TOTP 2FA** (both secrets, the replay guard and the recovery codes,
+/// as a user's own disable does), and ensures
 /// admin-group membership. So it is destructive by design — an enrolled authenticator is discarded and
 /// the admin must re-enrol from `/profile`. **Run it from a CLI flag an operator invokes, never on
 /// every start**; the boot-time seeder is [`make_admin`].
@@ -621,9 +622,7 @@ pub async fn reset_admin_access(
             am.password_hash = Set(hash_password(password));
             am.must_change_password = Set(false);
             am.is_active = Set(true);
-            am.totp_secret = Set(None);
-            am.totp_pending = Set(None);
-            am.update(db).await?;
+            write_without_totp(db, am).await?;
         }
         None => create_user(db, username, password).await?,
     }
@@ -3076,13 +3075,19 @@ async fn signed_in(inner: &Inner, headers: &HeaderMap) -> Option<(Identity, user
 /// Returns the row as it now stands, to render from (the update is best-effort, so on a failed write
 /// that is the row as it was).
 async fn clear_totp(inner: &Inner, user: user::Model) -> user::Model {
-    let mut am: user::ActiveModel = user.clone().into();
+    write_without_totp(&inner.db, user.clone().into()).await.unwrap_or(user)
+}
+
+/// Write `am` with the TOTP columns cleared, then delete the account's recovery codes: what
+/// [`clear_totp`] does, in the same write as whatever else `am` changes (break-glass's password and
+/// `is_active`).
+async fn write_without_totp(db: &DatabaseConnection, mut am: user::ActiveModel) -> Result<user::Model, DbErr> {
     am.totp_secret = Set(None);
     am.totp_pending = Set(None);
     am.totp_last_step = Set(None);
-    let user = am.update(&inner.db).await.unwrap_or(user);
-    let _ = recovery::clear(&inner.db, user.id).await;
-    user
+    let user = am.update(db).await?;
+    recovery::clear(db, user.id).await?;
+    Ok(user)
 }
 
 /// Render the 2FA enrolment page (QR + otpauth URL + verify form) for a pending secret. `user` is the
