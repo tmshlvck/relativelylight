@@ -364,7 +364,9 @@ fn is_urlencoded_form(headers: &HeaderMap) -> bool {
 fn form_field(body: &[u8], name: &str) -> Option<String> {
     let body = std::str::from_utf8(body).ok()?;
     for pair in body.split('&') {
-        let (k, v) = pair.split_once('=')?;
+        // A bare key (`flag`, a checkbox some clients send without `=`) is a key with an empty value,
+        // not the end of the body: the token may still follow it.
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
         if crate::urlform::decode(k) == name {
             return Some(crate::urlform::decode(v));
         }
@@ -468,6 +470,8 @@ mod tests {
         assert_eq!(form_field(b"_csrf=abc", FIELD).as_deref(), Some("abc"));
         assert_eq!(form_field(b"a=1&b=2", FIELD), None, "absent field");
         assert_eq!(form_field(b"", FIELD), None);
+        assert_eq!(form_field(b"flag&_csrf=abc", FIELD).as_deref(), Some("abc"), "after a bare key");
+        assert_eq!(form_field(b"_csrf&x=1", FIELD).as_deref(), Some(""), "a bare `_csrf` is empty");
         // Percent- and plus-decoding, on both sides of the pair.
         assert_eq!(form_field(b"%5Fcsrf=x", "_csrf").as_deref(), Some("x"), "encoded name");
         assert_eq!(crate::urlform::decode("a+b%20c"), "a b c");
@@ -493,6 +497,31 @@ mod tests {
             h
         }));
         assert!(!is_urlencoded_form(&HeaderMap::new()), "no content-type is not a form");
+    }
+
+    #[tokio::test]
+    async fn enforce_finds_the_field_after_a_bare_key() {
+        use tower::ServiceExt;
+        let csrf = Csrf::new();
+        let (token, _) = csrf.issue();
+        let app = axum::Router::new()
+            .route("/", axum::routing::post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(csrf, enforce));
+        let post = |body: String| {
+            http::Request::builder()
+                .method("POST")
+                .uri("/")
+                .header(http::header::COOKIE, format!("rl_csrf={token}"))
+                .header(http::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        };
+        let ok = app.clone().oneshot(post(format!("flag&_csrf={token}"))).await.unwrap();
+        assert_eq!(ok.status(), http::StatusCode::OK, "the token after a bare key is found");
+        let bad = app.clone().oneshot(post(format!("flag&_csrf={}", random_token()))).await.unwrap();
+        assert_eq!(bad.status(), http::StatusCode::FORBIDDEN, "a wrong token is still refused");
+        let none = app.oneshot(post("flag&_csrf".into())).await.unwrap();
+        assert_eq!(none.status(), http::StatusCode::FORBIDDEN, "a bare `_csrf` presents nothing");
     }
 
     #[test]
