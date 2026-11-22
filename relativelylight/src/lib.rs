@@ -53,11 +53,15 @@ mod urlform;
 /// HTML escaping for fragments built without a template, and `crud::esc`.
 mod html;
 
-/// Whether `path` is a path on this site (`/…`), safe to redirect to: not `//host` or `/\host`, which a
-/// browser reads as another origin. The SSO confirmation's `back`.
-#[cfg(feature = "sso")]
-pub(crate) fn is_local_path(path: &str) -> bool {
-    path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\")
+/// `bytes` as lowercase hex: tokens, and the SHA-256 digests the crate stores and compares.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(char::from(DIGITS[usize::from(b >> 4)]));
+        out.push(char::from(DIGITS[usize::from(b & 0xf)]));
+    }
+    out
 }
 
 /// A strict reader for a buffered `multipart/form-data` body (the CSV import; the token in [`csrf`]).

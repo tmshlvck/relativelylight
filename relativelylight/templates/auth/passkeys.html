@@ -37,7 +37,7 @@ nothing to type and nothing a fake site can capture.
     <input class="form-control form-control-sm" id="rl-pk-name" name="name" maxlength="128"
            placeholder="laptop, phone, YubiKey">
   </div>
-  {{- m::reauth_quiet("rl-pk-add", reauth, "Confirm it's you: a passkey is a new way into this account.") }}
+  {{- m::reauth("rl-pk-add", reauth, "Confirm it's you: a passkey is a new way into this account.", true) }}
   <input type="hidden" name="register_challenge" value="{{ reg.challenge }}">
   <input type="hidden" name="register_response" value="">
   <script type="application/json" data-rl-passkey-register>{{ reg.options|safe }}</script>

@@ -72,12 +72,9 @@ impl Passkeys {
     ///
     /// If `origin` is not a URL. It is configuration, so a bad one is a startup error.
     pub fn new(rp_id: impl Into<String>, origin: &str) -> Self {
-        let origin = Url::parse(origin).unwrap_or_else(|e| {
-            panic!("relativelylight: passkey origin {origin:?} is not a URL: {e}")
-        });
         Self {
             rp_id: rp_id.into(),
-            origins: vec![origin],
+            origins: vec![parse_origin(origin)],
             rp_name: None,
             require: Class::Synced,
             second_factor: false,
@@ -97,10 +94,7 @@ impl Passkeys {
     ///
     /// If `origin` is not a URL.
     pub fn origin(mut self, origin: &str) -> Self {
-        let url = Url::parse(origin).unwrap_or_else(|e| {
-            panic!("relativelylight: passkey origin {origin:?} is not a URL: {e}")
-        });
-        self.origins.push(url);
+        self.origins.push(parse_origin(origin));
         self
     }
 
@@ -132,6 +126,12 @@ impl Passkeys {
             .push((pem.to_vec(), aaguid, description.to_string()));
         self
     }
+}
+
+/// A configured origin, or the startup panic [`Passkeys::new`] / [`Passkeys::origin`] document.
+fn parse_origin(origin: &str) -> Url {
+    Url::parse(origin)
+        .unwrap_or_else(|e| panic!("relativelylight: passkey origin {origin:?} is not a URL: {e}"))
 }
 
 /// The configuration, built: what `Inner` holds.
@@ -205,9 +205,8 @@ impl Auth {
     ///
     /// On a configuration that can't work: [`Class::Attested`] with no CA, an unusable origin. Call it
     /// before the `Auth` is cloned, like the other builders.
-    pub fn passkeys(mut self, cfg: Passkeys) -> Self {
-        Arc::get_mut(&mut self.inner).unwrap().passkeys = Some(Arc::new(Runtime::build(cfg)));
-        self
+    pub fn passkeys(self, cfg: Passkeys) -> Self {
+        self.with(|i| i.passkeys = Some(Arc::new(Runtime::build(cfg))))
     }
 }
 
@@ -291,7 +290,7 @@ async fn put(
     user_id: Option<i32>,
     state: &impl Serialize,
 ) -> Result<String, DbErr> {
-    let id = super::new_token();
+    let id = crate::csrf::random_token();
     challenge::ActiveModel {
         id: Set(id.clone()),
         purpose: Set(purpose.as_str().into()),
@@ -343,6 +342,11 @@ fn ask(challenge: String, options: &impl Serialize) -> PasskeyAsk {
         challenge,
         options: pages::script_json(&json),
     }
+}
+
+/// The account's WebAuthn user handle, once it has one.
+fn handle_of(user: &user::Model) -> Option<Uuid> {
+    user.passkey_handle.as_deref().and_then(|h| Uuid::parse_str(h).ok())
 }
 
 /// A passkey row's credential, parsed.
@@ -480,12 +484,10 @@ impl Runtime {
         inner: &Inner,
         user: &user::Model,
     ) -> Result<PasskeyAsk, String> {
-        let failed = |_| "Could not start adding a passkey.".to_string();
-        let handle = user
-            .passkey_handle
-            .as_deref()
-            .and_then(|h| Uuid::parse_str(h).ok())
-            .unwrap_or_else(Uuid::new_v4);
+        fn failed<E>(_: E) -> String {
+            "Could not start adding a passkey.".into()
+        }
+        let handle = handle_of(user).unwrap_or_else(Uuid::new_v4);
         let exclude: Vec<_> = passkey::list(&inner.db, user.id)
             .await
             .map_err(failed)?
@@ -506,14 +508,14 @@ impl Runtime {
                         cas.clone(),
                         None,
                     )
-                    .map_err(|_| "Could not start adding a passkey.".to_string())?;
+                    .map_err(failed)?;
                 (ccr, RegState::Attested(st))
             }
             _ => {
                 let (ccr, st) = self
                     .wa
                     .start_passkey_registration(handle, name, name, Some(exclude))
-                    .map_err(|_| "Could not start adding a passkey.".to_string())?;
+                    .map_err(failed)?;
                 (ccr, RegState::Plain(st))
             }
         };
@@ -542,19 +544,17 @@ impl Runtime {
         name: &str,
     ) -> Result<entity::Model, String> {
         let refused = "The passkey could not be added. Try again.";
+        let too_long = || Err("Adding the passkey took too long. Reload the page and try again.".into());
         let Some(Registration { handle, state }) =
             take::<Registration>(inner, challenge_id, Purpose::Register, Some(user.id)).await
         else {
-            return Err("Adding the passkey took too long. Reload the page and try again.".into());
+            return too_long();
         };
         // The account's handle is the one the challenge was made with, or none yet — then it becomes
         // this one. Anything else is a challenge from before another passkey was added.
-        let ours = user
-            .passkey_handle
-            .as_deref()
-            .and_then(|h| Uuid::parse_str(h).ok());
+        let ours = handle_of(user);
         if ours.is_some_and(|h| h != handle) {
-            return Err("Adding the passkey took too long. Reload the page and try again.".into());
+            return too_long();
         }
         let Ok(reg) = serde_json::from_str::<RegisterPublicKeyCredential>(response) else {
             return Err(refused.into());
@@ -661,11 +661,7 @@ impl Runtime {
             .ok_or(LoginFail::Invalid)?;
         // The user handle is optional in an answer; when present it must be this account's.
         if let Some(h) = &cred.response.user_handle {
-            let ours = account
-                .passkey_handle
-                .as_deref()
-                .and_then(|h| Uuid::parse_str(h).ok());
-            if ours.map(|u| u.as_bytes().to_vec()) != Some(h.as_slice().to_vec()) {
+            if handle_of(&account).map(|u| u.as_bytes().to_vec()) != Some(h.as_slice().to_vec()) {
                 return Err(LoginFail::Invalid);
             }
         }
@@ -720,7 +716,7 @@ impl Runtime {
         let view = pages::PasskeysCard {
             rows: &rows,
             zone: &zone,
-            has_password: !user.password_hash.is_empty(),
+            has_password: user.has_password_hash(),
             requirement: requirement_label(self.require),
             reauth,
             register: register.as_ref(),
@@ -807,17 +803,27 @@ fn wants_json(headers: &HeaderMap) -> bool {
         .is_some_and(|v| v.contains("application/json"))
 }
 
-/// The login page again, with a message and a status.
-fn login_again(
+/// What both passkey sign-in posts start with, in this order: the CSRF check, passkeys being on (else
+/// `404`), and the address not being locked out — so a locked address can't write challenge rows or
+/// spend checks. `Err` is the response to send instead.
+async fn login_opening(
     inner: &Inner,
     req: &Parts,
+    client_ip: std::net::IpAddr,
     jar: CookieJar,
-    status: StatusCode,
-    msg: &str,
-) -> Response {
-    let (token, jar) = super::csrf_token(inner, &req.headers, jar);
-    let form = pages::login_form_html(Some(msg), &token, true);
-    (status, jar, Html((inner.login_shell)(&form, req))).into_response()
+    form_csrf: Option<&str>,
+) -> Result<(Arc<Runtime>, CookieJar), Response> {
+    if !inner.csrf().verify(&req.headers, form_csrf) {
+        return Err(super::csrf_rejected(inner, req));
+    }
+    let Some(rt) = runtime(inner) else {
+        return Err(StatusCode::NOT_FOUND.into_response());
+    };
+    if let Some(retry) = inner.ips.locked(Some(client_ip)).await {
+        let (jar, page) = super::login_page(inner, req, jar, Some(&super::lockout_message(retry)));
+        return Err(super::too_many_attempts(retry, jar, page));
+    }
+    Ok((rt, jar))
 }
 
 /// `POST /login/passkey` — the user asked to sign in with a passkey: a fresh challenge, and the page
@@ -829,30 +835,18 @@ pub(super) async fn login_begin(
     jar: CookieJar,
     Form(form): Form<CsrfForm>,
 ) -> Response {
-    if !inner.csrf().verify(&req.headers, form.csrf.as_deref()) {
-        return super::csrf_rejected(&inner, &req);
-    }
-    let Some(rt) = runtime(&inner) else {
-        return StatusCode::NOT_FOUND.into_response();
+    let (rt, jar) = match login_opening(&inner, &req, client_ip, jar, form.csrf.as_deref()).await {
+        Ok(v) => v,
+        Err(res) => return res,
     };
-    if let Some(retry) = inner.ips.locked(Some(client_ip)).await {
-        let (token, jar) = super::csrf_token(&inner, &req.headers, jar);
-        let form = pages::login_form_html(Some(&super::lockout_message(retry)), &token, true);
-        return super::too_many_attempts(retry, jar, Html((inner.login_shell)(&form, &req)));
-    }
     let ask = match rt.begin_login(&inner).await {
         Ok(a) => a,
         Err(e) => {
             inner
                 .report("auth-login", "passkey challenge", &e, client_ip)
                 .await;
-            return login_again(
-                &inner,
-                &req,
-                jar,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not start a passkey sign-in.",
-            );
+            let page = super::login_page(&inner, &req, jar, Some("Could not start a passkey sign-in."));
+            return (StatusCode::INTERNAL_SERVER_ERROR, page).into_response();
         }
     };
     // The script on the login page asks for JSON so the prompt opens on the same click: the challenge
@@ -874,7 +868,7 @@ pub(super) async fn login_begin(
     }
     let (token, jar) = super::csrf_token(&inner, &req.headers, jar);
     let page = pages::passkey_ceremony_html(&pages::Ceremony {
-        cancel: &inner.login_path,
+        cancel: super::LOGIN_PATH,
         ask: &ask,
         csrf: &token,
     });
@@ -891,79 +885,49 @@ pub(super) async fn login_finish(
     jar: CookieJar,
     Form(form): Form<CeremonyForm>,
 ) -> Response {
-    if !inner.csrf().verify(&req.headers, form.csrf.as_deref()) {
-        return super::csrf_rejected(&inner, &req);
-    }
-    let Some(rt) = runtime(&inner) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    if let Some(retry) = inner.ips.locked(Some(client_ip)).await {
-        let (token, jar) = super::csrf_token(&inner, &req.headers, jar);
-        let form = pages::login_form_html(Some(&super::lockout_message(retry)), &token, true);
-        return super::too_many_attempts(retry, jar, Html((inner.login_shell)(&form, &req)));
-    }
-    let (account, row) = match rt
-        .finish_login(&inner, &form.passkey_challenge, &form.passkey_response)
-        .await
-    {
+    let (rt, jar) = match login_opening(&inner, &req, client_ip, jar, form.csrf.as_deref()).await {
         Ok(v) => v,
+        Err(res) => return res,
+    };
+    const NOT_IN: &str = "That passkey didn't sign you in.";
+    let refused = match rt.finish_login(&inner, &form.passkey_challenge, &form.passkey_response).await {
+        Ok(v) => Ok(v),
         Err(LoginFail::Invalid) => {
             inner.ips.record_failure(Some(client_ip)).await;
-            let msg = "That passkey didn't sign you in.";
-            return login_again(&inner, &req, jar, StatusCode::UNAUTHORIZED, msg);
+            Err((StatusCode::UNAUTHORIZED, NOT_IN.to_string()))
         }
         Err(LoginFail::Expired) => {
-            let msg = "The sign-in took too long. Try again.";
-            return login_again(&inner, &req, jar, StatusCode::BAD_REQUEST, msg);
+            Err((StatusCode::BAD_REQUEST, "The sign-in took too long. Try again.".to_string()))
         }
-        Err(LoginFail::Policy) => {
-            return login_again(
-                &inner,
-                &req,
-                jar,
-                StatusCode::FORBIDDEN,
-                &policy_message(rt.require()),
-            );
-        }
+        Err(LoginFail::Policy) => Err((StatusCode::FORBIDDEN, policy_message(rt.require()))),
         Err(LoginFail::Internal(e)) => {
-            inner
-                .report("auth-login", "passkey sign-in", &e, client_ip)
-                .await;
-            let msg = "That passkey didn't sign you in.";
-            return login_again(&inner, &req, jar, StatusCode::UNAUTHORIZED, msg);
+            inner.report("auth-login", "passkey sign-in", &e, client_ip).await;
+            Err((StatusCode::UNAUTHORIZED, NOT_IN.to_string()))
+        }
+    };
+    let (account, row) = match refused {
+        Ok(v) => v,
+        Err((status, msg)) => {
+            return (status, super::login_page(&inner, &req, jar, Some(&msg))).into_response()
         }
     };
     let needs_totp = account.has_totp();
     let method = session::Method::Passkey;
-    let token = match super::create_session_class(
-        &inner,
-        account.id,
-        needs_totp,
-        method,
-        Some(row.class()),
-    )
-    .await
-    {
+    let class = Some(row.class());
+    let token = match super::create_session(&inner, account.id, needs_totp, method, class).await {
         Ok(t) => t,
         Err(e) => {
-            inner
-                .report("auth-login", "session create", &e, client_ip)
-                .await;
-            let msg = "That passkey didn't sign you in.";
-            return login_again(&inner, &req, jar, StatusCode::INTERNAL_SERVER_ERROR, msg);
+            inner.report("auth-login", "session create", &e, client_ip).await;
+            let page = super::login_page(&inner, &req, jar, Some(NOT_IN));
+            return (StatusCode::INTERNAL_SERVER_ERROR, page).into_response();
         }
     };
-    let (_, csrf_cookie) = inner.csrf().issue();
-    let jar = jar
-        .add(super::session_cookie(&inner, token))
-        .add(csrf_cookie);
+    let (jar, _) = super::with_session(&inner, jar, token);
     if needs_totp {
         return (jar, Redirect::to("/login/totp")).into_response();
     }
-    super::complete_login(&inner, &account, session::Method::Passkey, None, &req.headers, client_ip).await;
-    let to = inner
-        .landing(&account, session::Method::Passkey, Some(row.class()))
-        .to_string();
+    super::complete_login(&inner, &account, method, None, &req.headers, client_ip).await;
+    let to = inner.landing(&account, method, class).to_string();
     (jar, Redirect::to(&to)).into_response()
 }
 
@@ -984,7 +948,7 @@ pub(super) async fn second_factor_finish(
         return StatusCode::NOT_FOUND.into_response();
     };
     let Some((pending, account)) = super::pending_totp_user(&inner, headers).await else {
-        return Redirect::to(&inner.login_path).into_response();
+        return Redirect::to(super::LOGIN_PATH).into_response();
     };
     // Only after a password, and only where passkeys are a second factor.
     if !rt.second_factor() || pending.method() != Some(session::Method::Password) {
@@ -1029,10 +993,7 @@ pub(super) async fn second_factor_finish(
     };
     super::complete_login(&inner, &account, method, None, headers, client_ip).await;
     inner.usernames.clear(&account.username).await;
-    let (_, csrf_cookie) = inner.csrf().issue();
-    let jar = jar
-        .add(super::session_cookie(&inner, token))
-        .add(csrf_cookie);
+    let (jar, _) = super::with_session(&inner, jar, token);
     (jar, Redirect::to(&to)).into_response()
 }
 
@@ -1046,52 +1007,41 @@ pub(super) async fn add(
     RealIp(client_ip): RealIp,
     jar: CookieJar,
     Form(form): Form<AddForm>,
-) -> Response {
+) -> Result<Response, Response> {
     let Some(rt) = runtime(&inner) else {
-        return StatusCode::NOT_FOUND.into_response();
+        return Err(StatusCode::NOT_FOUND.into_response());
     };
-    let (who, user, csrf) = match super::self_post(&inner, &req, form.csrf.as_deref()).await {
-        Ok(v) => v,
-        Err(res) => return res,
-    };
-    if user.is_sso() {
-        return Redirect::to(&inner.profile_path).into_response(); // SSO: the IdP's factors
+    let mut cx = super::self_post(&inner, &req, form.csrf.as_deref()).await?;
+    if cx.user.is_sso() {
+        return Ok(Redirect::to(super::PROFILE_PATH).into_response()); // SSO: the IdP's factors
     }
-    let refuse = |status: StatusCode, msg: String| {
-        let (inner, who, user, csrf, req) = (&inner, &who, &user, &csrf, &req);
-        async move { super::profile_reply(inner, (who, user, csrf, req), status, Err(&msg)).await }
-    };
-    if let Err(msg) = inner.reauth(&user, &who, &form.reauth).await {
-        return refuse(StatusCode::FORBIDDEN, msg).await;
+    if let Err(msg) = inner.reauth(&cx.user, &cx.who, &form.reauth).await {
+        return Err(cx.reply(StatusCode::FORBIDDEN, Err(&msg)).await);
     }
     if form.register_response.trim().is_empty() {
         // The page's script fills the answer in. None means no script ran: JavaScript is off, or the
         // browser holds an older copy of the script than this page needs.
         let msg = "The browser sent no passkey. Reload the page and try again; adding a passkey \
-                   needs JavaScript."
-            .to_string();
-        return refuse(StatusCode::BAD_REQUEST, msg).await;
+                   needs JavaScript.";
+        return Err(cx.reply(StatusCode::BAD_REQUEST, Err(msg)).await);
     }
     let name = match form.name.trim() {
         "" => "passkey".to_string(),
         _ => match super::api_key::clean_name(&form.name) {
             Ok(n) => n,
-            Err(msg) => return refuse(StatusCode::BAD_REQUEST, msg.to_string()).await,
+            Err(msg) => return Err(cx.reply(StatusCode::BAD_REQUEST, Err(msg)).await),
         },
     };
     let (challenge, answer) = (&form.register_challenge, &form.register_response);
-    let row = match rt
-        .finish_registration(&inner, &user, challenge, answer, &name)
-        .await
-    {
+    let row = match rt.finish_registration(&inner, &cx.user, challenge, answer, &name).await {
         Ok(row) => row,
-        Err(msg) => return refuse(StatusCode::BAD_REQUEST, msg).await,
+        Err(msg) => return Err(cx.reply(StatusCode::BAD_REQUEST, Err(&msg)).await),
     };
     inner
         .notify_event(super::Event {
             source: "auth-profile",
             op: crate::authz::Operation::Create,
-            actor: &who.username,
+            actor: &cx.who.username,
             entity: "auth_passkey",
             key: Some(row.id.to_string()),
             before: None,
@@ -1102,13 +1052,14 @@ pub(super) async fn add(
         .await;
     // The session just proved the passkey: it steps up (§5m), so a restricted session becomes usable.
     let factor = super::Factor::Passkey(row.class());
-    let (jar, csrf) = super::step_up(&inner, &req.headers, jar, csrf, factor).await;
-    let who = super::refreshed(&inner, &req, &jar, who).await;
-    let user = super::target_user(&inner, &who.id).await.unwrap_or(user);
+    let (jar, csrf) = super::step_up(&inner, &req.headers, jar, cx.csrf.clone(), factor).await;
+    cx.csrf = csrf;
+    cx.who = super::refreshed(&inner, &req, &jar, cx.who).await;
+    if let Some(user) = super::target_user(&inner, &cx.who.id).await {
+        cx.user = user;
+    }
     let msg = format!("Passkey “{}” added.", row.name);
-    let page =
-        super::profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::OK, Ok(&msg)).await;
-    (jar, page).into_response()
+    Ok((jar, cx.reply(StatusCode::OK, Ok(&msg)).await).into_response())
 }
 
 /// `POST /profile/passkeys/{id}/remove` — the caller removes one of their own passkeys. Not
@@ -1120,14 +1071,12 @@ pub(super) async fn remove(
     RealIp(client_ip): RealIp,
     Path(id): Path<String>,
     Form(form): Form<CsrfForm>,
-) -> Response {
-    let (who, user, csrf) = match super::self_post(&inner, &req, form.csrf.as_deref()).await {
-        Ok(v) => v,
-        Err(res) => return res,
-    };
+) -> Result<Response, Response> {
+    let cx = super::self_post(&inner, &req, form.csrf.as_deref()).await?;
+    let user_id = cx.user.id;
     let row = match id.parse::<i32>() {
         Ok(id) => entity::Entity::find_by_id(id)
-            .filter(entity::Column::UserId.eq(user.id))
+            .filter(entity::Column::UserId.eq(user_id))
             .one(&inner.db)
             .await
             .ok()
@@ -1135,27 +1084,15 @@ pub(super) async fn remove(
         Err(_) => None,
     };
     let Some(row) = row else {
-        return super::profile_reply(
-            &inner,
-            (&who, &user, &csrf, &req),
-            StatusCode::NOT_FOUND,
-            Err("No such passkey."),
-        )
-        .await;
+        return Err(cx.reply(StatusCode::NOT_FOUND, Err("No such passkey.")).await);
     };
-    if user.password_hash.is_empty() && passkey::count(&inner.db, user.id).await <= 1 {
+    if !cx.user.has_password_hash() && passkey::count(&inner.db, user_id).await <= 1 {
         let msg = "This is your only way to sign in. Set a password first, or add another passkey.";
-        return super::profile_reply(
-            &inner,
-            (&who, &user, &csrf, &req),
-            StatusCode::CONFLICT,
-            Err(msg),
-        )
-        .await;
+        return Err(cx.reply(StatusCode::CONFLICT, Err(msg)).await);
     }
     let gone = entity::Entity::delete_many()
         .filter(entity::Column::Id.eq(row.id))
-        .filter(entity::Column::UserId.eq(user.id))
+        .filter(entity::Column::UserId.eq(user_id))
         .exec(&inner.db)
         .await
         .map(|r| r.rows_affected)
@@ -1165,7 +1102,7 @@ pub(super) async fn remove(
             .notify_event(super::Event {
                 source: "auth-profile",
                 op: crate::authz::Operation::Delete,
-                actor: &who.username,
+                actor: &cx.who.username,
                 entity: "auth_passkey",
                 key: Some(row.id.to_string()),
                 before: Some(describe(&row)),
@@ -1176,7 +1113,7 @@ pub(super) async fn remove(
             .await;
     }
     let msg = format!("Passkey “{}” removed.", row.name);
-    super::profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::OK, Ok(&msg)).await
+    Ok(cx.reply(StatusCode::OK, Ok(&msg)).await)
 }
 
 /// `POST /profile/password/remove` — an account with a passkey drops its password, re-authenticated. Its
@@ -1187,76 +1124,48 @@ pub(super) async fn password_remove(
     RealIp(client_ip): RealIp,
     jar: CookieJar,
     Form(form): Form<AddForm>,
-) -> Response {
+) -> Result<Response, Response> {
     if runtime(&inner).is_none() {
-        return StatusCode::NOT_FOUND.into_response();
+        return Err(StatusCode::NOT_FOUND.into_response());
     }
-    let (who, user, csrf) = match super::self_post(&inner, &req, form.csrf.as_deref()).await {
-        Ok(v) => v,
-        Err(res) => return res,
-    };
-    if user.password_hash.is_empty() || user.is_sso() {
-        return Redirect::to(&inner.profile_path).into_response();
+    let mut cx = super::self_post(&inner, &req, form.csrf.as_deref()).await?;
+    if !cx.user.password_is_factor() {
+        return Ok(Redirect::to(super::PROFILE_PATH).into_response());
     }
-    if passkey::count(&inner.db, user.id).await == 0 {
+    if passkey::count(&inner.db, cx.user.id).await == 0 {
         let msg = "Add a passkey first: without a password it is your way to sign in.";
-        return super::profile_reply(
-            &inner,
-            (&who, &user, &csrf, &req),
-            StatusCode::CONFLICT,
-            Err(msg),
-        )
-        .await;
+        return Err(cx.reply(StatusCode::CONFLICT, Err(msg)).await);
     }
-    if let Err(msg) = inner.reauth(&user, &who, &form.reauth).await {
-        return super::profile_reply(
-            &inner,
-            (&who, &user, &csrf, &req),
-            StatusCode::FORBIDDEN,
-            Err(&msg),
-        )
-        .await;
+    if let Err(msg) = inner.reauth(&cx.user, &cx.who, &form.reauth).await {
+        return Err(cx.reply(StatusCode::FORBIDDEN, Err(&msg)).await);
     }
-    let mut am: user::ActiveModel = user.clone().into();
+    let mut am: user::ActiveModel = cx.user.clone().into();
     am.password_hash = Set(String::new());
     am.must_change_password = Set(false);
-    let user = match am.update(&inner.db).await {
-        Ok(u) => u,
+    match am.update(&inner.db).await {
+        Ok(u) => cx.user = u,
         Err(e) => {
-            inner
-                .report("auth-profile", "password removal", &e, client_ip)
-                .await;
-            let (status, msg) = (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not remove the password.",
-            );
-            return super::profile_reply(&inner, (&who, &user, &csrf, &req), status, Err(msg))
-                .await;
+            inner.report("auth-profile", "password removal", &e, client_ip).await;
+            let msg = "Could not remove the password.";
+            return Err(cx.reply(StatusCode::INTERNAL_SERVER_ERROR, Err(msg)).await);
         }
-    };
+    }
     let method = super::current_session(&inner, &req.headers)
         .await
         .and_then(|s| s.method())
         .unwrap_or(session::Method::Passkey);
-    let (jar, csrf) = match super::resession(&inner, user.id, method).await {
+    let jar = match super::resession(&inner, cx.user.id, method).await {
         Some(token) => {
-            let (csrf, csrf_cookie) = inner.csrf().issue();
-            (
-                jar.add(super::session_cookie(&inner, token))
-                    .add(csrf_cookie),
-                csrf,
-            )
+            let (jar, csrf) = super::with_session(&inner, jar, token);
+            cx.csrf = csrf;
+            jar
         }
-        None => (jar, csrf),
+        None => jar,
     };
     let event = serde_json::json!({ "password_removed": true, "sessions_revoked": true });
-    inner.notify_own(&who, event, &req.headers, client_ip).await;
+    inner.notify_own(&cx.who, event, &req.headers, client_ip).await;
     let msg = "Your password is removed: you sign in with a passkey. Other sessions have been signed out.";
-    (
-        jar,
-        super::profile_reply(&inner, (&who, &user, &csrf, &req), StatusCode::OK, Ok(msg)).await,
-    )
-        .into_response()
+    Ok((jar, cx.reply(StatusCode::OK, Ok(msg)).await).into_response())
 }
 
 /// `GET /auth/passkey.js` — the one script passkeys need, as a file so a strict CSP can allow it.

@@ -135,32 +135,7 @@ pub(crate) fn content_disposition(filename: &str, inline: bool) -> String {
     if safe.is_ascii() {
         format!("{kind}; filename=\"{ascii}\"")
     } else {
-        format!("{kind}; filename=\"{ascii}\"; filename*=UTF-8''{}", percent_encode(&safe))
+        let encoded = crate::urlform::encode_component(&safe);
+        format!("{kind}; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
     }
-}
-
-/// RFC 5987 `ext-value` encoding: attr-char stays, everything else is percent-escaped.
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'!'
-            | b'#'
-            | b'$'
-            | b'&'
-            | b'+'
-            | b'-'
-            | b'.'
-            | b'^'
-            | b'_'
-            | b'`'
-            | b'|'
-            | b'~' => out.push(*b as char),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }

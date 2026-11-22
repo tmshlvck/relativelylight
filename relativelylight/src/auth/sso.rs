@@ -39,7 +39,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::auth::{session, session_cookie, user, Auth};
+use crate::auth::{session, user, Auth};
 
 const TXN_COOKIE: &str = "rl_sso_txn"; // short-lived cookie carrying the in-flight login transaction
 
@@ -254,20 +254,10 @@ impl Sso {
     pub(crate) fn find_provider(&self, key: &str) -> Option<&SsoProvider> {
         self.providers.iter().find(|p| p.key == key)
     }
-
-    /// The groups a login should have: the union of the global username-pattern matches and the
-    /// provider's claim-table matches over `claim_values` (the provider's groups claim, empty if none).
-    pub(crate) fn resolve_groups(
-        &self,
-        provider: &SsoProvider,
-        username: &str,
-        claim_values: &[String],
-    ) -> BTreeSet<String> {
-        resolve_groups(&self.username_rules, &provider.claim_rules, username, claim_values)
-    }
 }
 
-/// Pure group resolution: union of (username-pattern matches) and (claim-value matches).
+/// The groups a login should have: the union of the global username-pattern matches and the provider's
+/// claim-table matches over `claim_values` (the provider's groups claim, empty if none).
 pub(crate) fn resolve_groups(
     username_rules: &[(Regex, Vec<String>)],
     claim_rules: &HashMap<String, Vec<String>>,
@@ -403,7 +393,7 @@ async fn reauth(
 ) -> Response {
     let inner = &sso.auth.inner;
     let Some((who, user)) = super::signed_in(inner, &headers).await else {
-        return Redirect::to(&inner.login_path).into_response();
+        return Redirect::to(super::LOGIN_PATH).into_response();
     };
     let Some(p) = sso.find_provider(&provider) else {
         return (StatusCode::NOT_FOUND, "unknown SSO provider").into_response();
@@ -412,15 +402,15 @@ async fn reauth(
         return (StatusCode::FORBIDDEN, "this account doesn't sign in through that provider").into_response();
     }
     let Some(super::SessionRef(token)) = &who.session else {
-        return Redirect::to(&inner.login_path).into_response();
+        return Redirect::to(super::LOGIN_PATH).into_response();
     };
     let back = headers
         .get(axum::http::header::REFERER)
         .and_then(|v| v.to_str().ok())
         .and_then(|r| r.parse::<axum::http::Uri>().ok())
         .and_then(|u| u.path_and_query().map(|pq| pq.as_str().to_string()))
-        .filter(|b| crate::is_local_path(b))
-        .unwrap_or_else(|| inner.profile_path.clone());
+        .filter(|b| is_local_path(b))
+        .unwrap_or_else(|| super::PROFILE_PATH.to_string());
     let txn = ReauthTxn { session: super::sha256_hex(token), back };
     authorize(&sso, p, jar, Some(txn)).await
 }
@@ -477,34 +467,60 @@ async fn callback(
     jar: CookieJar,
     Query(q): Query<CallbackQuery>,
 ) -> Response {
-    // Built first and returned on **every** exit: whatever happened, this transaction is finished, and a
+    // Every exit removes the transaction cookie: whatever happened, this transaction is finished, and a
     // rejected one left in place would otherwise sit in the browser for the rest of its ten minutes.
-    let clear = jar.clone().remove(Cookie::build(TXN_COOKIE).path("/").build());
+    let txn = read_txn(&jar);
+    let jar = jar.remove(Cookie::build(TXN_COOKIE).path("/").build());
+    match finish(&sso, &provider, client_ip, &headers, q, txn).await {
+        Ok(Continue { session, to, message }) => {
+            // The CSRF token rotates with a new session, as at every other sign-in.
+            let jar = match session {
+                Some(token) => super::with_session(&sso.auth.inner, jar, token).0,
+                None => jar,
+            };
+            continue_to(jar, &to, &message)
+        }
+        Err((status, msg)) => (status, jar, msg).into_response(),
+    }
+}
 
+/// Where a callback that got through goes on to ([`continue_to`]), and the session it signed in, if any.
+struct Continue {
+    session: Option<String>,
+    to: String,
+    message: String,
+}
+
+/// The callback's work, for [`callback`]: `Err` is a refusal, `(status, message)`.
+async fn finish(
+    sso: &Sso,
+    provider: &str,
+    client_ip: std::net::IpAddr,
+    headers: &HeaderMap,
+    q: CallbackQuery,
+    txn: Option<Txn>,
+) -> Result<Continue, (StatusCode, String)> {
+    let refuse = |status: StatusCode, msg: &str| Err((status, msg.to_string()));
     if let Some(err) = q.error {
-        return (StatusCode::BAD_REQUEST, clear, format!("SSO error from provider: {err}")).into_response();
+        return Err((StatusCode::BAD_REQUEST, format!("SSO error from provider: {err}")));
     }
     let (Some(code), Some(state)) = (q.code, q.state) else {
-        return (StatusCode::BAD_REQUEST, clear, "missing code/state").into_response();
+        return refuse(StatusCode::BAD_REQUEST, "missing code/state");
     };
-    let Some(txn) = read_txn(&sso, &jar) else {
-        return (StatusCode::BAD_REQUEST, clear, "no or invalid SSO transaction").into_response();
+    let Some(txn) = txn else {
+        return refuse(StatusCode::BAD_REQUEST, "no or invalid SSO transaction");
     };
     // CSRF: the returned state must match what we issued, for the same provider.
     if txn.provider != provider || txn.csrf != state {
-        return (StatusCode::BAD_REQUEST, clear, "SSO state mismatch").into_response();
+        return refuse(StatusCode::BAD_REQUEST, "SSO state mismatch");
     }
-    let Some(p) = sso.find_provider(&provider) else {
-        return (StatusCode::NOT_FOUND, clear, "unknown SSO provider").into_response();
+    let Some(p) = sso.find_provider(provider) else {
+        return refuse(StatusCode::NOT_FOUND, "unknown SSO provider");
     };
 
-    let (meta, redirect, http) = match discover(&sso, p).await {
-        Ok(x) => x,
-        Err(e) => {
-            return (StatusCode::BAD_GATEWAY, clear, format!("SSO provider unavailable: {e}"))
-                .into_response()
-        }
-    };
+    let (meta, redirect, http) = discover(sso, p)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("SSO provider unavailable: {e}")))?;
     let client = CoreClient::from_provider_metadata(
         meta,
         ClientId::new(p.client_id.clone()),
@@ -512,42 +528,31 @@ async fn callback(
     )
     .set_redirect_uri(redirect);
     // Exchange the authorization code (PKCE) for tokens.
-    let token = match client.exchange_code(AuthorizationCode::new(code)) {
-        Ok(r) => match r.set_pkce_verifier(PkceCodeVerifier::new(txn.pkce)).request_async(&http).await {
-            Ok(t) => t,
-            Err(e) => {
-                return (StatusCode::BAD_GATEWAY, clear, format!("token exchange failed: {e}"))
-                    .into_response()
-            }
-        },
-        Err(e) => {
-            return (StatusCode::BAD_GATEWAY, clear, format!("token request: {e}")).into_response()
-        }
-    };
+    let token = client
+        .exchange_code(AuthorizationCode::new(code))
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("token request: {e}")))?
+        .set_pkce_verifier(PkceCodeVerifier::new(txn.pkce))
+        .request_async(&http)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("token exchange failed: {e}")))?;
     let Some(id_token) = token.id_token() else {
-        return (StatusCode::BAD_GATEWAY, clear, "provider returned no ID token").into_response();
+        return refuse(StatusCode::BAD_GATEWAY, "provider returned no ID token");
     };
     // SECURITY: verify signature, issuer, audience, expiry, and the nonce we bound.
     let verifier = client.id_token_verifier();
     if let Err(e) = id_token.claims(&verifier, &Nonce::new(txn.nonce)) {
-        return (StatusCode::BAD_GATEWAY, clear, format!("ID token verification failed: {e}"))
-            .into_response();
+        return Err((StatusCode::BAD_GATEWAY, format!("ID token verification failed: {e}")));
     }
     // The token is verified; read the (already-authenticated) payload for the configured claims.
     let Some(payload) = id_token_payload(id_token) else {
-        return (StatusCode::BAD_GATEWAY, clear, "could not read ID token claims").into_response();
+        return refuse(StatusCode::BAD_GATEWAY, "could not read ID token claims");
     };
     let Some(username) = payload.get(&p.username_claim).and_then(|v| v.as_str()) else {
-        return (
-            StatusCode::BAD_GATEWAY,
-            clear,
-            format!("ID token has no '{}' claim", p.username_claim),
-        )
-            .into_response();
+        return Err((StatusCode::BAD_GATEWAY, format!("ID token has no '{}' claim", p.username_claim)));
     };
     // A confirmation (§5h) ends here, before anything that registers, regroups or signs in.
     if let Some(rt) = txn.reauth {
-        return confirm(&sso, p, username, &payload, rt, clear).await;
+        return confirm(sso, p, username, &payload, rt).await;
     }
     let claim_values = p
         .groups_claim
@@ -557,28 +562,26 @@ async fn callback(
         .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>())
         .unwrap_or_default();
 
-    let db = &sso.auth.inner.db;
-    let user = match resolve_user(db, p, username).await {
-        Ok(u) => u,
-        Err((code, msg)) => return (code, clear, msg).into_response(),
-    };
-    let desired = sso.resolve_groups(p, username, &claim_values);
+    let inner = &sso.auth.inner;
+    let db = &inner.db;
+    let user = resolve_user(db, p, username).await?;
+    let desired = resolve_groups(&sso.username_rules, &p.claim_rules, username, &claim_values);
     reconcile_groups(db, &user.username, user.id, &desired).await;
     // An SSO account may have this site's TOTP too (§5m, `Auth::sso_level`): then the provider's
     // callback is the first step, and the session is half-authenticated until the code.
-    let inner = &sso.auth.inner;
     let needs_totp = user.has_totp();
     let method = super::session::Method::Sso;
-    let Ok(token) = super::create_session(inner, user.id, needs_totp, method).await else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, clear, "session error").into_response();
+    let Ok(token) = super::create_session(inner, user.id, needs_totp, method, None).await else {
+        return refuse(StatusCode::INTERNAL_SERVER_ERROR, "session error");
     };
-    let jar = clear.add(session_cookie(inner, token));
-    if needs_totp {
-        return continue_to(jar, "/login/totp", "Signed in. One more step.");
-    }
-    super::complete_login(inner, &user, method, None, &headers, client_ip).await;
-    let to = inner.landing(&user, method, None).to_string();
-    continue_to(jar, &to, "Signed in.")
+    let (to, message) = match needs_totp {
+        true => ("/login/totp".to_string(), "Signed in. One more step."),
+        false => {
+            super::complete_login(inner, &user, method, None, headers, client_ip).await;
+            (inner.landing(&user, method, None).to_string(), "Signed in.")
+        }
+    };
+    Ok(Continue { session: Some(token), to, message: message.into() })
 }
 
 /// Leave the callback for `to`, a path of this site, by a page that navigates itself: the provider sent
@@ -603,14 +606,12 @@ async fn confirm(
     username: &str,
     payload: &serde_json::Value,
     rt: ReauthTxn,
-    clear: CookieJar,
-) -> Response {
+) -> Result<Continue, (StatusCode, String)> {
     let inner = &sso.auth.inner;
-    let refuse = |msg: String| (StatusCode::FORBIDDEN, clear.clone(), msg).into_response();
-    let account = match find_user_ci(&inner.db, username).await {
-        Ok(Some(u)) if u.is_active && u.sso_key() == Some(p.key.as_str()) => u,
-        Ok(_) => return refuse("That sign-in isn't an account of this site. Nothing was confirmed.".into()),
-        Err((code, msg)) => return (code, clear, msg).into_response(),
+    let refuse = |msg: String| Err((StatusCode::FORBIDDEN, msg));
+    let account = match find_user_ci(&inner.db, username).await? {
+        Some(u) if u.is_active && u.sso_key() == Some(p.key.as_str()) => u,
+        _ => return refuse("That sign-in isn't an account of this site. Nothing was confirmed.".into()),
     };
     let sessions = session::Entity::find()
         .filter(session::Column::UserId.eq(account.id))
@@ -644,10 +645,10 @@ async fn confirm(
         }
     }
     if inner.record_sso_confirmation(&asked.id).await.is_err() {
-        return (StatusCode::INTERNAL_SERVER_ERROR, clear, "could not record the confirmation").into_response();
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "could not record the confirmation".into()));
     }
-    let back = if crate::is_local_path(&rt.back) { rt.back } else { inner.profile_path.clone() };
-    continue_to(clear, &back, &format!("Confirmed with {}.", p.label))
+    let to = if is_local_path(&rt.back) { rt.back } else { super::PROFILE_PATH.to_string() };
+    Ok(Continue { session: None, to, message: format!("Confirmed with {}.", p.label) })
 }
 
 /// Find the SSO user for `username`, honoring the provider binding and auto-registration policy.
@@ -779,10 +780,16 @@ fn txn_cookie(sso: &Sso, txn: &Txn) -> Cookie<'static> {
         .build()
 }
 
-fn read_txn(_sso: &Sso, jar: &CookieJar) -> Option<Txn> {
+fn read_txn(jar: &CookieJar) -> Option<Txn> {
     let raw = jar.get(TXN_COOKIE)?.value().to_string();
     let bytes = URL_SAFE_NO_PAD.decode(raw).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+/// Whether `path` is a path on this site (`/…`), safe to redirect to: not `//host` or `/\host`, which a
+/// browser reads as another origin. The confirmation's `back`.
+fn is_local_path(path: &str) -> bool {
+    path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\")
 }
 
 #[cfg(test)]

@@ -156,16 +156,7 @@ pub(super) fn totp_setup_html(
 #[derive(Template)]
 #[template(path = "auth/profile.html")]
 struct Profile<'a> {
-    sso: Option<&'a str>,
-    has_password: bool,
-    reauth: &'a ReauthView,
-    totp_on: bool,
-    recovery_left: Option<u64>,
-    notices: &'a Notices,
-    /// The passkeys card, when passkeys are on, pre-rendered.
-    passkeys: Option<&'a str>,
-    /// The cards after the library's own: API keys, then the app's (`profile_extra`), pre-rendered.
-    more: &'a str,
+    v: &'a ProfileView<'a>,
     error: Option<&'a str>,
     success: Option<&'a str>,
     csrf: &'a str,
@@ -188,7 +179,9 @@ pub(super) struct ProfileView<'a> {
     pub totp_on: bool,
     pub recovery_left: Option<u64>,
     pub notices: &'a Notices,
+    /// The passkeys card, when passkeys are on, pre-rendered.
     pub passkeys: Option<&'a str>,
+    /// The cards after the library's own: API keys, then the app's (`profile_extra`), pre-rendered.
     pub more: &'a str,
 }
 
@@ -200,30 +193,13 @@ pub(super) fn change_form_html(
     success: Option<&str>,
     csrf: &str,
 ) -> String {
-    render(Profile {
-        sso: v.sso,
-        has_password: v.has_password,
-        reauth: v.reauth,
-        totp_on: v.totp_on,
-        recovery_left: v.recovery_left,
-        notices: v.notices,
-        passkeys: v.passkeys,
-        more: v.more,
-        error,
-        success,
-        csrf,
-    })
+    render(Profile { v, error, success, csrf })
 }
 
 #[derive(Template)]
 #[template(path = "auth/reset.html")]
 struct Reset<'a> {
-    id: &'a str,
-    sso: Option<&'a str>,
-    username: &'a str,
-    totp_on: bool,
-    has_password: bool,
-    passkeys: u64,
+    t: &'a Target<'a>,
     /// The **manager's** factors — they confirm with their own, never the target's.
     reauth: &'a ReauthView,
     error: Option<&'a str>,
@@ -231,8 +207,6 @@ struct Reset<'a> {
     csrf: &'a str,
 }
 
-/// A manager's view of another account: set its password without the current one, and disable its
-/// 2FA (a manager can't set one up for someone else).
 /// What a manager's page shows about the account being managed.
 pub(super) struct Target<'a> {
     pub id: &'a str,
@@ -244,6 +218,8 @@ pub(super) struct Target<'a> {
     pub passkeys: u64,
 }
 
+/// A manager's view of another account: set its password without the current one, and disable its
+/// 2FA (a manager can't set one up for someone else).
 pub(super) fn reset_form_html(
     t: &Target<'_>,
     reauth: &ReauthView,
@@ -251,18 +227,7 @@ pub(super) fn reset_form_html(
     success: Option<&str>,
     csrf: &str,
 ) -> String {
-    render(Reset {
-        id: t.id,
-        sso: t.sso,
-        username: t.username,
-        totp_on: t.totp_on,
-        has_password: t.has_password,
-        passkeys: t.passkeys,
-        reauth,
-        error,
-        success,
-        csrf,
-    })
+    render(Reset { t, reauth, error, success, csrf })
 }
 
 #[derive(Template)]

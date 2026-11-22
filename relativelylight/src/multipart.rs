@@ -72,16 +72,19 @@ pub(crate) fn field(body: &[u8], boundary: &str, name: &str) -> Result<Option<St
 }
 
 fn scan<'a>(body: &'a [u8], boundary: &str) -> Result<Vec<Raw<'a>>, String> {
-    let delim = format!("--{boundary}").into_bytes();
+    // A part ends at the CRLF *before* the next delimiter — that CRLF belongs to the delimiter, not to
+    // the content, which matters for a file whose last byte is a newline.
+    let next = format!("\r\n--{boundary}").into_bytes();
+    let delim = &next[2..];
     let mut out: Vec<Raw<'a>> = Vec::new();
 
     // Skip the preamble: everything up to the first delimiter is ignorable by the spec.
-    let mut at = find(body, &delim).ok_or("multipart body has no boundary")? + delim.len();
+    let mut at = find(body, delim).ok_or("multipart body has no boundary")? + delim.len();
     loop {
         match body.get(at..at + 2) {
             Some(b"--") => return Ok(out), // closing delimiter: done
             Some(b"\r\n") => at += 2,
-            // A final boundary with nothing after it (some clients omit the trailing CRLF).
+            // The body stops right after a delimiter, with neither `--` nor a CRLF: truncated.
             None => return Err("multipart body ends mid-boundary".into()),
             Some(_) => return Err("unexpected bytes after a multipart boundary".into()),
         }
@@ -100,15 +103,10 @@ fn scan<'a>(body: &'a [u8], boundary: &str) -> Result<Vec<Raw<'a>>, String> {
             }
         }
 
-        // The part ends at the CRLF *before* the next delimiter — that CRLF belongs to the
-        // delimiter, not to the content, which matters for a file whose last byte is a newline.
-        let mut next = format!("\r\n--{boundary}").into_bytes();
         let content = body.get(content_at..).ok_or("truncated multipart part")?;
         let end = find(content, &next).ok_or("a multipart part is not terminated")?;
         out.push(Raw { name, filename, body: &content[..end] });
-
-        next.clear();
-        at = content_at + end + 2 + delim.len();
+        at = content_at + end + next.len();
     }
 }
 

@@ -71,7 +71,7 @@ impl Model {
     /// Whether this account should choose a new password, and why: `None` for an account with no
     /// password (SSO, passkey-only). `max_age_days` is `Auth::password_max_age_days` (`0` = no limit).
     pub fn password_change(&self, max_age_days: u32, now: i64) -> Option<PasswordChange> {
-        if self.password_hash.is_empty() || self.is_sso() {
+        if !self.password_is_factor() {
             return None;
         }
         if self.must_change_password {
@@ -80,6 +80,18 @@ impl Model {
         let since = self.password_changed_at.unwrap_or(self.created_at);
         (max_age_days > 0 && now - since > i64::from(max_age_days) * 86_400)
             .then_some(PasswordChange::Expired)
+    }
+
+    /// Whether the row holds a password hash at all. An SSO account may have one left over, which signs
+    /// nobody in: whether it counts is [`password_is_factor`](Model::password_is_factor).
+    pub fn has_password_hash(&self) -> bool {
+        !self.password_hash.is_empty()
+    }
+
+    /// Whether the account's password is a way in: it has one, and isn't an SSO account (whose password
+    /// login is refused).
+    pub fn password_is_factor(&self) -> bool {
+        self.has_password_hash() && !self.is_sso()
     }
 
     /// The provider key this account signs in through, or `None` for a local (password) account.
@@ -133,15 +145,15 @@ impl Related<super::group::Entity> for Entity {
     }
 }
 
-// Maintain the UTC lifecycle timestamps: stamp created_at on insert, updated_at on every save.
-#[async_trait::async_trait]
-/// The row hook: lifecycle stamps, and the password's.
+/// The row hook: the UTC lifecycle stamps (`created_at` on insert, `updated_at` on every save), and the
+/// password's.
 ///
 /// **Any write that sets `password_hash` stamps `password_changed_at`, and flags the account
 /// (`must_change_password`) unless the writer set that column itself.** So a password written by
 /// anyone but its owner — an administrator's panel edit, an app's own form, a manager's reset —
 /// asks the owner to choose their own, without each of those paths having to remember. The owner's
 /// own change and the programmatic helpers (`create_user`, `set_password`, …) clear it explicitly.
+#[async_trait::async_trait]
 impl ActiveModelBehavior for ActiveModel {
     async fn before_save<C>(mut self, _db: &C, insert: bool) -> Result<Self, DbErr>
     where

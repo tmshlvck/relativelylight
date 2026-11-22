@@ -1,12 +1,12 @@
 {%- import "auth/_macros.html" as m -%}
 {#- A manager's page about someone else's account (AUTH.md §5): the same grid of cards as the profile.
     Every action confirms with the **manager's** factors, never the target's. #}
-<h1 class="h4 mb-1">Manage {{ username }}</h1>
+<h1 class="h4 mb-1">Manage {{ t.username }}</h1>
 <p class="text-muted small mb-3">Each change here asks you to confirm it's you: it acts on someone else's
 account.</p>
 {{ m::alert(error, success) }}
 {%- call m::cards_start() %}{% endcall %}
-{%- if let Some(provider) = sso %}
+{%- if let Some(provider) = t.sso %}
 {%- call m::card_start("Sign-in") %}{% endcall %}
 <p class="small mb-0">This account signs in through <strong>{{ provider }}</strong> (single sign-on).
 Its password is managed by the identity provider, and its group memberships come from the SSO
@@ -16,26 +16,19 @@ mapping, reconciled at each login.</p>
 {%- call m::card_start("Reset password") %}{% endcall %}
 <p class="text-muted small">Set a new password without knowing the current one; the owner is asked to
 choose their own at their next sign-in.
-{%- if !has_password %} The account has no password now: it signs in with a passkey.{% endif %}</p>
-<form method="post" action="/profile/{{ id }}">
+{%- if !t.has_password %} The account has no password now: it signs in with a passkey.{% endif %}</p>
+<form method="post" action="/profile/{{ t.id }}">
   {{ m::csrf(csrf) }}
-  <div class="mb-2">
-    <label class="form-label small" for="rl-new">New password</label>
-    <input class="form-control form-control-sm" id="rl-new" name="new_password" type="password" autocomplete="new-password">
-  </div>
-  <div class="mb-3">
-    <label class="form-label small" for="rl-confirm">Confirm new password</label>
-    <input class="form-control form-control-sm" id="rl-confirm" name="confirm_password" type="password" autocomplete="new-password">
-  </div>
+  {%- call m::new_password_fields() %}{% endcall %}
   {{- m::reauth("rl-mgr-pw", reauth, "Confirm it's you: this sets a password without knowing the old one, so it's the most valuable thing a stolen session of yours could reach.") }}
   <button class="btn btn-primary btn-sm" type="submit">Reset password</button>
 </form>
 {%- call m::card_end() %}{% endcall %}
 {%- endif %}
 {%- call m::card_start("Two-factor authentication") %}{% endcall %}
-{%- if totp_on %}
-<p class="text-muted small mb-2">On. Disabling it lets {{ username }} sign in without it until they set it up again.</p>
-<form method="post" action="/profile/{{ id }}/totp/disable">
+{%- if t.totp_on %}
+<p class="text-muted small mb-2">On. Disabling it lets {{ t.username }} sign in without it until they set it up again.</p>
+<form method="post" action="/profile/{{ t.id }}/totp/disable">
   {{ m::csrf(csrf) }}
   {{- m::reauth("rl-mgr-2fa", reauth, "Confirm it's you before removing someone else's second factor.") }}
   <button class="btn btn-outline-danger btn-sm" type="submit">Disable 2FA</button>
@@ -44,11 +37,11 @@ choose their own at their next sign-in.
 <p class="text-muted small mb-0">Off.</p>
 {%- endif %}
 {%- call m::card_end() %}{% endcall %}
-{%- if passkeys > 0 %}
+{%- if t.passkeys > 0 %}
 {%- call m::card_start("Passkeys") %}{% endcall %}
-<p class="text-muted small mb-2">{{ username }} has {{ passkeys }} passkey{% if passkeys != 1 %}s{% endif %}.
-{%- if !has_password %} Without a password, removing them leaves the account no way in until you set one.{% endif %}</p>
-<form method="post" action="/profile/{{ id }}/passkeys/remove">
+<p class="text-muted small mb-2">{{ t.username }} has {{ t.passkeys }} passkey{% if t.passkeys != 1 %}s{% endif %}.
+{%- if !t.has_password %} Without a password, removing them leaves the account no way in until you set one.{% endif %}</p>
+<form method="post" action="/profile/{{ t.id }}/passkeys/remove">
   {{ m::csrf(csrf) }}
   {{- m::reauth("rl-mgr-pk", reauth, "Confirm it's you before removing someone else's passkeys.") }}
   <button class="btn btn-outline-danger btn-sm" type="submit">Remove all passkeys</button>

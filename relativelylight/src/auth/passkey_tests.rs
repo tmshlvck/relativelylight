@@ -136,7 +136,7 @@ impl Fx {
 
     async fn cookie_for(&self, name: &str) -> String {
         let id = self.row(name).await.id;
-        let token = create_session(&self.auth.inner, id, false, session::Method::Password)
+        let token = create_session(&self.auth.inner, id, false, session::Method::Password, None)
             .await
             .unwrap();
         format!("{}={token}", self.auth.session_cookie_name())

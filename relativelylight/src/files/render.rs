@@ -277,16 +277,7 @@ fn badge(name: &str) -> String {
 /// Percent-encode a file name for one URL path segment: everything but the RFC 3986 unreserved
 /// characters is escaped, so `/`, `?`, `#` and `%` in a name can't change which route a link hits.
 pub fn url_segment(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char)
-            }
-            b => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+    crate::urlform::encode_component(s)
 }
 
 /// The upload form — a plain `<form enctype="multipart/form-data">`.
@@ -397,7 +388,7 @@ impl UploadForm {
         let csrf = self
             .csrf_token
             .as_ref()
-            .map(|t| format!("<input type=\"hidden\" name=\"_csrf\" value=\"{}\">", esc(t)))
+            .map(|t| crate::csrf::Csrf::hidden_input(t))
             .unwrap_or_default();
         if self.photo {
             // A label styled as the button opens the hidden input; `visually-hidden` rather than

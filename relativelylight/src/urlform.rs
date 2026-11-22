@@ -31,27 +31,47 @@ pub(crate) fn decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Encode one component. Everything outside the unreserved set is escaped — including `[`/`]`, which
-/// `filter[name]` keys contain, and `~`, which is unreserved but cheap to escape anyway.
-///
-/// Used by the UI (building links) and by `time` (the zone cookie); a build with neither has no
-/// caller for it, hence the gate rather than an `allow(dead_code)` that would hide a real one.
+/// Encode one form component. Everything outside the unreserved set is escaped — including `[`/`]`,
+/// which `filter[name]` keys contain, and `~`, which is unreserved but cheap to escape anyway — and a
+/// space is `+`. Used by the UI (building links) and by `time` (the zone cookie).
 pub(crate) fn encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for b in s.as_bytes() {
+    for &b in s.as_bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(*b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(char::from(b)),
             b' ' => out.push('+'),
-            b => out.push_str(&format!("%{b:02X}")),
+            b => escape(&mut out, b),
         }
     }
     out
 }
 
-/// A URL template with `{id}` filled in, the id encoded for a path segment or a query value (a space
-/// as `%20`, which both read the same). The UI's (a View link, a relation link).
+/// Percent-encode one URI component (RFC 3986): the unreserved characters (`~` included) stay, and
+/// everything else is escaped, a space as `%20`. Good for a path segment, a query value, and an RFC 5987
+/// `filename*`; `/`, `?`, `#` and `%` in the input can't change which route a link hits.
+pub(crate) fn encode_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(char::from(b)),
+            b => escape(&mut out, b),
+        }
+    }
+    out
+}
+
+/// `%XX`, uppercase, for one byte.
+fn escape(out: &mut String, b: u8) {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    out.push('%');
+    out.push(char::from(DIGITS[usize::from(b >> 4)]));
+    out.push(char::from(DIGITS[usize::from(b & 0xf)]));
+}
+
+/// A URL template with `{id}` filled in, the id encoded for a path segment or a query value
+/// ([`encode_component`]). The UI's (a View link, a relation link).
 pub(crate) fn fill_id(template: &str, id: &str) -> String {
-    template.replace("{id}", &encode(id).replace('+', "%20"))
+    template.replace("{id}", &encode_component(id))
 }
 
 /// Split a query string or form body into decoded `(key, value)` pairs, in order.
@@ -89,6 +109,14 @@ mod tests {
         for raw in ["a b", "a+b", "100%", "sort=x&y", "filter[zone]", "ünïcode", "<script>"] {
             assert_eq!(decode(&encode(raw)), raw, "{raw}");
         }
+    }
+
+    #[test]
+    fn a_component_keeps_only_the_unreserved_characters() {
+        assert_eq!(encode_component("a b/../c?d#e%~"), "a%20b%2F..%2Fc%3Fd%23e%25~");
+        assert_eq!(encode_component("Übersicht"), "%C3%9Cbersicht");
+        assert_eq!(fill_id("/item/{id}?x={id}", "a b"), "/item/a%20b?x=a%20b");
+        assert_eq!(encode("a b~"), "a+b%7E", "a form component is another thing");
     }
 
     #[test]

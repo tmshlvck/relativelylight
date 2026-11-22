@@ -51,8 +51,8 @@ pub(crate) fn verify_step(secret_b32: &str, code: &str) -> Option<i64> {
         .find(|&step| crate::csrf::ct_eq(totp.generate(step as u64 * STEP).to_string().as_bytes(), code.as_bytes()))
 }
 
-/// Whether `code` is valid for `secret_b32` right now, ignoring the step (used where there is no
-/// account to record a step against — the enrolment check re-reads it via [`verify_step`]).
+/// Whether `code` is valid for `secret_b32` right now, ignoring the step — for the tests; the
+/// handlers all use [`verify_step`], which the replay guard needs.
 #[cfg(test)]
 pub(crate) fn verify(secret_b32: &str, code: &str) -> bool {
     verify_step(secret_b32, code).is_some()
