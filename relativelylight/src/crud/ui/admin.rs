@@ -101,7 +101,7 @@ impl<'a> Admin<'a> {
         self
     }
 
-    /// Append every registered entity, in registration order, with default `Table` config.
+    /// Append every registered entity, in alphabetical order of slug, with default `Table` config.
     pub fn entities(mut self) -> Self {
         for slug in self.engine.tables() {
             self.items.push(AdminItem::Entity(Table::new(self.engine, slug)));
