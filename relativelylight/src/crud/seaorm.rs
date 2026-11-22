@@ -374,9 +374,6 @@ impl SeaRegistry {
     fn by_table(&self, table: &str) -> Option<Arc<dyn SeaRow>> {
         self.rows.read().unwrap().get(table).and_then(Weak::upgrade)
     }
-    fn slug_for(&self, table: &str) -> Option<String> {
-        self.by_table(table).map(|r| r.slug().to_string())
-    }
 }
 
 /// Build a `{id, label}` relation link from a raw target row. Just identity + label — no URL.
@@ -1405,45 +1402,24 @@ where
         self.model.meta.clone()
     }
     fn columns(&self) -> Vec<Column> {
-        // Map each relation's target table → the target's slug (the engine wants slugs, not tables).
-        self.model
-            .columns()
-            .into_iter()
-            .map(|c| match c {
-                Column::Relation {
-                    name,
-                    target,
-                    cardinality,
-                    fk_column,
-                    read_only,
-                    label,
-                    description,
-                    links,
-                    create,
-                    picker_threshold,
-                    ..
-                } => Column::Relation {
-                    // Sortable exactly when the cell's label can be turned into an `ORDER BY`: one
-                    // target row per row (so there is a single label to order on), reached through a
-                    // column of *this* table (so it can be joined), and a target that knows which of
-                    // its columns the label comes from.
-                    sortable: cardinality == Cardinality::ToOne
-                        && fk_column.is_some()
-                        && self.registry.by_table(&target).and_then(|t| t.label()).is_some(),
-                    target: self.registry.slug_for(&target).unwrap_or(target),
-                    name,
-                    cardinality,
-                    fk_column,
-                    read_only,
-                    label,
-                    description,
-                    links,
-                    create,
-                    picker_threshold,
-                },
-                other => other,
-            })
-            .collect()
+        let mut cols = self.model.columns();
+        for c in &mut cols {
+            if let Column::Relation { target, cardinality, fk_column, sortable, .. } = c {
+                let t = self.registry.by_table(target);
+                // Sortable exactly when the cell's label can be turned into an `ORDER BY`: one
+                // target row per row (so there is a single label to order on), reached through a
+                // column of *this* table (so it can be joined), and a target that knows which of
+                // its columns the label comes from.
+                *sortable = *cardinality == Cardinality::ToOne
+                    && fk_column.is_some()
+                    && t.as_ref().and_then(|t| t.label()).is_some();
+                // The engine wants the target's slug, not its table.
+                if let Some(t) = t {
+                    *target = t.slug().to_string();
+                }
+            }
+        }
+        cols
     }
 
     async fn list(&self, q: &ListQuery, terse: bool) -> Result<Page> {
