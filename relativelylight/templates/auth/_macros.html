@@ -14,29 +14,34 @@
     password, a fresh code when it has 2FA, and its passkey when it has one. Only the factors the
     account has are offered; an account with none (SSO) gets nothing to fill in. `prefix` keeps the
     input ids unique when two render on one page. The passkey button sits next to the form's own
-    submit button, the same size. -#}
-{%- macro reauth(prefix, r, hint) %}
+    submit button, the same size.
+    `quiet` is for a form whose own button runs the passkey ceremony (adding a passkey): the passkey's
+    challenge is carried, but no button of its own — the script answers it on that button's click,
+    and only when nothing was typed. -#}
+{%- macro reauth(prefix, r, hint, quiet = false) %}
   {%- if r.has_password || r.totp_on || r.passkey.is_some() || r.sso.is_some() %}
-  <p class="text-muted small mb-2">{{ hint }}</p>
+  <p class="text-muted small mb-2">{{ hint }}{% if quiet && r.passkey.is_some() %} Leave it empty to confirm with your passkey.{% endif %}</p>
   {%- call sso_confirm(r) %}{% endcall %}
   {%- call typed(prefix, r) %}{% endcall %}
   {%- if let Some(p) = r.passkey %}
   {%- call passkey_data(p) %}{% endcall %}
+  {%- if !quiet %}
   <button class="btn btn-outline-primary btn-sm me-2" type="button" data-rl-passkey="get">Confirm with your passkey</button>
+  {%- endif %}
   {%- endif %}
   {%- endif %}
 {%- endmacro -%}
 
-{#- The same block where the form's own button runs the passkey ceremony (adding a passkey): the
-    passkey's challenge is carried, but the script answers it on that button's click, and only when
-    nothing was typed. -#}
-{%- macro reauth_quiet(prefix, r, hint) %}
-  {%- if r.has_password || r.totp_on || r.passkey.is_some() || r.sso.is_some() %}
-  <p class="text-muted small mb-2">{{ hint }}{% if r.passkey.is_some() %} Leave it empty to confirm with your passkey.{% endif %}</p>
-  {%- call sso_confirm(r) %}{% endcall %}
-  {%- call typed(prefix, r) %}{% endcall %}
-  {%- if let Some(p) = r.passkey %}{% call passkey_data(p) %}{% endcall %}{% endif %}
-  {%- endif %}
+{#- A new password and its confirmation. -#}
+{%- macro new_password_fields() %}
+  <div class="mb-2">
+    <label class="form-label small" for="rl-new">New password</label>
+    <input class="form-control form-control-sm" id="rl-new" name="new_password" type="password" autocomplete="new-password">
+  </div>
+  <div class="mb-3">
+    <label class="form-label small" for="rl-confirm">Confirm new password</label>
+    <input class="form-control form-control-sm" id="rl-confirm" name="confirm_password" type="password" autocomplete="new-password">
+  </div>
 {%- endmacro -%}
 
 {#- An SSO account's confirmation at its provider (§5h): a link there and back to this page, which
